@@ -296,7 +296,8 @@ export class SonioxStreamingSTT extends EventEmitter {
         });
 
         this.ws.on('close', (code: number, reason: Buffer) => {
-            // Do not force isActive=false; let write() trigger reconnect if isActive is still true
+            // Null out the ws reference immediately to prevent stale reuse
+            this.ws = null;
             this.isConnecting = false;
             this.configSent = false;
             this.clearKeepAlive();
@@ -305,6 +306,9 @@ export class SonioxStreamingSTT extends EventEmitter {
             // Auto-reconnect on unexpected close
             if (this.shouldReconnect && code !== 1000) {
                 this.scheduleReconnect();
+            } else {
+                // If not reconnecting, mark session as truly inactive
+                this.isActive = false;
             }
         });
     }

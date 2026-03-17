@@ -299,7 +299,7 @@ export class WindowHelper {
 
   // Helper to get whichever window should be treated as "Main" for IPC
   public getMainWindow(): BrowserWindow | null {
-    if (this.overlayWindow && this.overlayWindow.isVisible()) {
+    if (this.currentWindowMode === 'overlay' && this.overlayWindow) {
       return this.overlayWindow;
     }
     return this.launcherWindow;

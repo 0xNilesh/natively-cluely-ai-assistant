@@ -1,5 +1,8 @@
 import { EventEmitter } from 'events';
 import WebSocket from 'ws';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 
 const ELEVENLABS_WS_URL = 'wss://api.elevenlabs.io/v1/speech-to-text/realtime';
 
@@ -16,10 +19,27 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
     private buffer: Buffer[] = [];
     private isConnecting = false;
     private isSessionReady = false;
+    
+    private debugWriteStream: fs.WriteStream | null = null;
+    
+    // Chunk buffering properties (250ms @ 16k = 4000 samples)
+    private pcmAccumulator: Int16Array[] = [];
+    private pcmAccumulatorLen = 0;
+    private readonly SEND_THRESHOLD_SAMPLES = 4000;
+    
+    private debugMessageCount = 0;
 
-    constructor(apiKey: string) {
-        super();
+    constructor(apiKey: string) {        super();
         this.apiKey = apiKey;
+        
+        // Open a debug file to log exactly what we send to ElevenLabs
+        try {
+            const debugPath = path.join(os.homedir(), 'elevenlabs_debug.raw');
+            this.debugWriteStream = fs.createWriteStream(debugPath);
+            console.log(`[ElevenLabsStreaming] Audio debug stream opened at: ${debugPath}`);
+        } catch (e) {
+            console.error('[ElevenLabsStreaming] Failed to open debug stream:', e);
+        }
     }
 
     public setSampleRate(rate: number): void {
@@ -38,7 +58,8 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
     public setCredentials(_path: string): void {}
 
     public start(): void {
-        if (this.isActive || this.ws) return;
+        if (this.isActive && this.ws) return;  // Guard: only block if truly active with live ws
+        if (this.isConnecting) return;          // Already in the middle of a connect
         this.shouldReconnect = true;
         this.reconnectAttempts = 0;
         this.connect();
@@ -59,6 +80,12 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
         this.isConnecting = false;
         this.isSessionReady = false;
         this.buffer = [];
+        this.pcmAccumulator = [];
+        this.pcmAccumulatorLen = 0;
+        if (this.debugWriteStream) {
+            this.debugWriteStream.end();
+            this.debugWriteStream = null;
+        }
         console.log('[ElevenLabsStreaming] Stopped');
     }
 
@@ -82,26 +109,56 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
         }
 
         try {
-            // Downsample from inputSampleRate (e.g. 48000) to 16000Hz
-            // Input is 32-bit float PCM (F32), output needs to be 16-bit PCM (S16)
-            const inputF32 = new Float32Array(chunk.buffer, chunk.byteOffset, chunk.byteLength / 4);
-            const downsampleFactor = this.inputSampleRate / this.targetSampleRate;
-            const outputLength = Math.floor(inputF32.length / downsampleFactor);
-            const outputS16 = new Int16Array(outputLength);
+            // The input buffer from the native module is ALREADY 16-bit PCM (Int16LE).
+            // Do NOT read it as Float32.
+            const inputS16 = new Int16Array(chunk.buffer, chunk.byteOffset, chunk.byteLength / 2);
+            
+            let outputS16: Int16Array;
 
-            for (let i = 0; i < outputLength; i++) {
-                // Simple decimation (take every Nth sample)
-                const sample = inputF32[Math.floor(i * downsampleFactor)];
-                // Convert F32 [-1,1] to S16 [-32768, 32767]
-                outputS16[i] = Math.max(-32768, Math.min(32767, sample * 32767));
+            if (this.inputSampleRate === this.targetSampleRate) {
+                // No downsampling needed
+                outputS16 = inputS16;
+            } else {
+                // Downsample from inputSampleRate (e.g. 48000) to 16000Hz
+                const downsampleFactor = this.inputSampleRate / this.targetSampleRate;
+                const outputLength = Math.floor(inputS16.length / downsampleFactor);
+                outputS16 = new Int16Array(outputLength);
+
+                for (let i = 0; i < outputLength; i++) {
+                    // Simple decimation (take every Nth sample)
+                    outputS16[i] = inputS16[Math.floor(i * downsampleFactor)];
+                }
             }
 
-            const base64 = Buffer.from(outputS16.buffer).toString('base64');
-            // ElevenLabs Scribe v2 requires fields message_type and audio_base_64
-            this.ws.send(JSON.stringify({
-                message_type: 'input_audio_chunk',
-                audio_base_64: base64,
-            }));
+            // Write to debug file
+            if (this.debugWriteStream) {
+                this.debugWriteStream.write(Buffer.from(outputS16.buffer));
+            }
+
+            // Accumulate
+            this.pcmAccumulator.push(outputS16);
+            this.pcmAccumulatorLen += outputS16.length;
+
+            if (this.pcmAccumulatorLen >= this.SEND_THRESHOLD_SAMPLES) {
+                // Combine
+                const combined = new Int16Array(this.pcmAccumulatorLen);
+                let offset = 0;
+                for (const arr of this.pcmAccumulator) {
+                    combined.set(arr, offset);
+                    offset += arr.length;
+                }
+
+                // Reset
+                this.pcmAccumulator = [];
+                this.pcmAccumulatorLen = 0;
+
+                const base64 = Buffer.from(combined.buffer).toString('base64');
+                // ElevenLabs Scribe v2 requires fields message_type and audio_base_64
+                this.ws.send(JSON.stringify({
+                    message_type: 'input_audio_chunk',
+                    audio_base_64: base64,
+                }));
+            }
         } catch (err) {
             console.warn('[ElevenLabsStreaming] write failed:', err);
         }
@@ -135,9 +192,18 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
 
         this.ws.on('message', (data: WebSocket.RawData) => {
             try {
-                const msg = JSON.parse(data.toString());
+                const rawStr = data.toString();
+                if (this.debugMessageCount < 10) {
+                    console.log(`[ElevenLabsStreaming] RAW[${this.debugMessageCount}]:`, rawStr);
+                    this.debugMessageCount++;
+                }
 
-                switch (msg.message_type) {
+                const msg = JSON.parse(rawStr);
+
+                // Note: The websocket API might use "type" or "message_type"
+                const msgType = msg.type || msg.message_type;
+
+                switch (msgType) {
                     case 'session_started':
                         console.log('[ElevenLabsStreaming] Session started:', msg.config);
                         this.isSessionReady = true;
@@ -187,7 +253,7 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
                             console.error('[ElevenLabsStreaming] Server error:', msg.error);
                             this.emit('error', msg.error);
                         } else {
-                            console.log('[ElevenLabsStreaming] Received message:', msg.message_type);
+                            console.log('[ElevenLabsStreaming] Received message:', msgType, Object.keys(msg));
                         }
                 }
             } catch (err) {
@@ -196,12 +262,16 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
         });
 
         this.ws.on('close', (code, reason) => {
-            // Do not force isActive=false; let write() trigger reconnect if isActive is still true
+            // Null out the ws reference immediately to prevent stale reuse
+            this.ws = null;
             this.isConnecting = false;
             this.isSessionReady = false;
             console.log(`[ElevenLabsStreaming] Closed: code=${code} reason=${reason}`);
             if (this.shouldReconnect && code !== 1000) {
                 this.scheduleReconnect();
+            } else {
+                // If not reconnecting, mark session as truly inactive
+                this.isActive = false;
             }
         });
 

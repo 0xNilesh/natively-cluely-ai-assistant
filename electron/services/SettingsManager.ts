@@ -48,6 +48,7 @@ export class SettingsManager {
                     // Minimal validation to ensure it's an object before assigning
                     if (typeof parsed === 'object' && parsed !== null) {
                         this.settings = parsed;
+                        console.log('[SettingsManager] Settings loaded successfully:', JSON.stringify(this.settings));
                     } else {
                         throw new Error('Settings JSON is not a valid object');
                     }

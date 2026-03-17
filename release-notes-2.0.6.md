@@ -6,14 +6,15 @@ Version 2.0.6 introduces critical stealth mode enhancements, an upgraded model r
 
 - **Multimodal Groq Support**: Integrated `meta-llama/llama-4-scout-17b-16e-instruct` into the ecosystem for screenshot analysis capability.
 - **Model Roster Update**: Updated baseline architecture natively to default to `gpt-5.4-chat`, `gemini-3.1`, and `claude-sonnet-4-6`.
-- **Token Limits**: Massively increased Groq vision max completion tokens from 1024 to 28672 up to its Llama 4 limit to properly support full code generation.
+- **Token Limits**: Increased Groq max completion tokens to 8192 (the API maximum for context windows) to better support full code generation while preventing `BadRequestError`.
 - **Model Rotation Engine**: Fortified the 3-tier fallback mechanisms and auto-upgrade logic for Gemini, Claude, GPT, and Groq models.
+- **OpenAI Streaming STT**: Implemented a brand new low-latency WebSocket integration via the OpenAI Realtime API. Uses a 3-tier priority rotation (`gpt-4o-transcribe` → `gpt-4o-mini-transcribe` → `whisper-1` REST) with server-side VAD, noise reduction, and uninterrupted audio buffering.
 
 ## Improvements
 
 - **SEO & Documentation**: Optimized `README.md` for search engines with hidden targeted keywords.
 - **Code Quality**: Performed a senior-level code review across modified files to address potential race conditions, edge cases, and empty references.
-- **STT Providers**: Refactored Google, Deepgram, Soniox, and ElevenLabs streaming implementations with lazy connection and automatic reconnection logic. Added smart audio buffering to ensure no data is lost during stream initialization or network jitter.
+- **STT Providers Architecture**: Refactored Google, Deepgram, Soniox, and ElevenLabs streaming implementations. Specifically engineered the OpenAI module with custom ring-buffers, a 10s dark-drop timeout, a 5s zombie-session timeout, and 250ms audio chunk limiters to eradicate API rate-limits.
 - **Stealth Boot Refactor**: Centralized platform disguise and dock icon management into `AppState` for consistent stealth behavior across reboots.
 
 ## Fixes
@@ -30,6 +31,7 @@ Version 2.0.6 introduces critical stealth mode enhancements, an upgraded model r
 - **Windows Icon Pathing**: Rewrote the `icon` constructor option mapping to dynamically resolve `natively.icns` for `darwin`, `icon.ico` for `win32`, and `icon.png` for Linux.
 - **Cross-Platform Disguise**: Verified mapping `Terminal` to `Command Prompt` on Windows and isolating `CFBundleName` safely to macOS environments.
 - **SQLite-Vec Per-Dimension Table Fix (v8 Migration)**: Fixed a critical silent data-corruption bug by provisioning three per-dimension table pairs (`vec_chunks_768`, `1536`, `3072`) and updating the VectorStore write path and native search payloads.
+- **Permanent Hide & State Clear Trap**: Repaired a critical IPC routing flaw in `WindowHelper.this.getMainWindow()` where hiding the session UI dynamically misrouted all subsequent `Cmd+B` / "Toggle Visibility" commands to the background Launcher. This invisible interface trap caused users to repeatedly Force Quit the application via macOS dock. The forceful ungraceful exits during background syncing rounds led to truncated (wiped out) JSON files, erasing STT API keys and Disguise Settings. Atomic writes (implemented prior) prevent corruption during sudden exits, and this IPC fix completely solves the actual interface disappearance bug.
 
 ## Technical
 

@@ -78,13 +78,14 @@ import { RestSTT } from "./audio/RestSTT"
 import { DeepgramStreamingSTT } from "./audio/DeepgramStreamingSTT"
 import { SonioxStreamingSTT } from "./audio/SonioxStreamingSTT"
 import { ElevenLabsStreamingSTT } from "./audio/ElevenLabsStreamingSTT"
+import { OpenAIStreamingSTT } from "./audio/OpenAIStreamingSTT"
 import { ThemeManager } from "./ThemeManager"
 import { RAGManager } from "./rag/RAGManager"
 import { DatabaseManager } from "./db/DatabaseManager"
 import { warmupIntentClassifier } from "./llm"
 
 /** Unified type for all STT providers with optional extended capabilities */
-type STTProvider = (GoogleSTT | RestSTT | DeepgramStreamingSTT | SonioxStreamingSTT | ElevenLabsStreamingSTT) & {
+type STTProvider = (GoogleSTT | RestSTT | DeepgramStreamingSTT | SonioxStreamingSTT | ElevenLabsStreamingSTT | OpenAIStreamingSTT) & {
   finalize?: () => void;
   setAudioChannelCount?: (count: number) => void;
   notifySpeechEnded?: () => void;
@@ -120,7 +121,7 @@ export class AppState {
   private knowledgeOrchestrator: any = null
   private tray: Tray | null = null
   private updateAvailable: boolean = false
-  private disguiseMode: 'terminal' | 'settings' | 'activity' | 'none' = 'terminal'
+  private disguiseMode: 'terminal' | 'settings' | 'activity' | 'none' = 'none'
 
   // View management
   private view: "queue" | "solutions" = "queue"
@@ -161,8 +162,9 @@ export class AppState {
   constructor() {
     // 1. Load boot-critical settings first (used by WindowHelpers)
     const settingsManager = SettingsManager.getInstance();
-    this.isUndetectable = settingsManager.get('isUndetectable') || false;
-    this.disguiseMode = settingsManager.get('disguiseMode') || 'terminal';
+    this.isUndetectable = settingsManager.get('isUndetectable') ?? false;
+    this.disguiseMode = settingsManager.get('disguiseMode') ?? 'none';
+    console.log(`[AppState] Initialized with isUndetectable=${this.isUndetectable}, disguiseMode=${this.disguiseMode}`);
 
     // 2. Initialize Helpers with loaded state
     this.windowHelper = new WindowHelper(this)
@@ -575,7 +577,17 @@ export class AppState {
         console.warn(`[Main] No API key for ElevenLabs STT, falling back to GoogleSTT`);
         stt = new GoogleSTT();
       }
-    } else if (sttProvider === 'groq' || sttProvider === 'openai' || sttProvider === 'azure' || sttProvider === 'ibmwatson') {
+    } else if (sttProvider === 'openai') {
+      // OpenAI: WebSocket Realtime (gpt-4o-transcribe → gpt-4o-mini-transcribe) with whisper-1 REST fallback
+      const apiKey = CredentialsManager.getInstance().getOpenAiSttApiKey();
+      if (apiKey) {
+        console.log(`[Main] Using OpenAIStreamingSTT (WebSocket+REST fallback) for ${speaker}`);
+        stt = new OpenAIStreamingSTT(apiKey);
+      } else {
+        console.warn(`[Main] No API key for OpenAI STT, falling back to GoogleSTT`);
+        stt = new GoogleSTT();
+      }
+    } else if (sttProvider === 'groq' || sttProvider === 'azure' || sttProvider === 'ibmwatson') {
       let apiKey: string | undefined;
       let region: string | undefined;
       let modelOverride: string | undefined;
@@ -583,8 +595,6 @@ export class AppState {
       if (sttProvider === 'groq') {
         apiKey = CredentialsManager.getInstance().getGroqSttApiKey();
         modelOverride = CredentialsManager.getInstance().getGroqSttModel();
-      } else if (sttProvider === 'openai') {
-        apiKey = CredentialsManager.getInstance().getOpenAiSttApiKey();
       } else if (sttProvider === 'azure') {
         apiKey = CredentialsManager.getInstance().getAzureApiKey();
         region = CredentialsManager.getInstance().getAzureRegion();
@@ -943,7 +953,7 @@ export class AppState {
         // Notify UI so user knows microphone/audio failed to start
         this.broadcast('meeting-audio-error', (err as Error).message || 'Audio pipeline failed to start');
       }
-    }, 100); // 100ms to ensure setWindowMode IPC resolves first
+    }, 0); // Defer to next event loop tick — ensures IPC response reaches renderer before audio init
   }
 
   public async endMeeting(): Promise<void> {
@@ -1270,7 +1280,16 @@ export class AppState {
       "Extra screenshots: ",
       this.screenshotHelper.getExtraScreenshotQueue().length
     )
-    this.windowHelper.toggleMainWindow()
+    
+    // Send toggle-expand to the currently active window mode's window.
+    // If we use getMainWindow(), it might return the launcher window when the overlay is hidden,
+    // causing the IPC event to go to the wrong React tree and silently fail.
+    const mode = this.windowHelper.getCurrentWindowMode();
+    const targetWindow = mode === 'overlay' ? this.windowHelper.getOverlayWindow() : this.windowHelper.getLauncherWindow();
+
+    if (targetWindow && !targetWindow.isDestroyed()) {
+      targetWindow.webContents.send('toggle-expand');
+    }
   }
 
   public setWindowDimensions(width: number, height: number): void {
@@ -1397,7 +1416,7 @@ export class AppState {
     trayIcon.setTemplateImage(iconToUse.endsWith('Template.png'));
 
     this.tray = new Tray(trayIcon)
-    this.tray.setToolTip('Natively - Press Cmd+Shift+Space to show') // This tooltip might also need update if we change global shortcut, but global shortcut is removed.
+    this.tray.setToolTip('Natively') // This tooltip might also need update if we change global shortcut, but global shortcut is removed.
     this.updateTrayMenu();
 
     // Double-click to show window
@@ -1415,7 +1434,7 @@ export class AppState {
     console.log('[Main] updateTrayMenu called. Screenshot Accelerator:', screenshotAccel);
 
     // Update tooltip for verification
-    this.tray.setToolTip(`Natively (${screenshotAccel}) - Press Cmd+Shift+Space to show`);
+    this.tray.setToolTip('Natively');
 
     // Helper to format accelerator for display (e.g. CommandOrControl+H -> Cmd+H)
     const formatAccel = (accel: string) => {
@@ -1882,8 +1901,15 @@ async function initializeApp() {
         app.dock.show();
       }
     }
+    
+    // If no window exists, create it
     if (appState.getMainWindow() === null) {
       appState.createWindow()
+    } else {
+      // If the window exists but is hidden, clicking the dock icon should restore it
+      if (!appState.isVisible()) {
+        appState.toggleMainWindow();
+      }
     }
   })
 

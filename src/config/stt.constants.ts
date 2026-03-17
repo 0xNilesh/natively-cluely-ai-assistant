@@ -80,7 +80,7 @@ export const STT_PROVIDERS: Record<SttProviderId, SttProviderConfig> = {
     elevenlabs: {
         id: 'elevenlabs',
         name: 'ElevenLabs Scribe',
-        description: 'High-quality STT via ElevenLabs Scribe API',
+        description: 'Scribe v2 Realtime API',
         endpoint: 'https://api.elevenlabs.io/v1/speech-to-text',
         model: 'scribe_v2',
         uploadType: 'multipart',

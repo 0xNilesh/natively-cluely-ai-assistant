@@ -180,9 +180,9 @@ export class KeybindManager {
                         label: 'Toggle Visibility',
                         accelerator: toggleAccelerator,
                         click: () => {
-                            if (this.windowHelper) {
-                                this.windowHelper.toggleMainWindow();
-                            }
+                            // Require AppState dynamically to avoid circular dependencies
+                            const { AppState } = require('../main');
+                            AppState.getInstance().toggleMainWindow();
                         }
                     },
                     { type: 'separator' },

@@ -998,7 +998,7 @@ ANSWER DIRECTLY:`;
       model: GROQ_MODEL,
       messages: [{ role: "user", content: fullMessage }],
       temperature: 0.4,
-      max_tokens: 32768,
+      max_tokens: 8192,
       stream: false
     });
 
@@ -1832,7 +1832,7 @@ ANSWER DIRECTLY:`;
       messages: [{ role: "user", content: fullMessage }],
       stream: true,
       temperature: 0.4,
-      max_tokens: 32768,
+      max_tokens: 8192,
     });
 
     for await (const chunk of stream) {
@@ -1868,7 +1868,7 @@ ANSWER DIRECTLY:`;
       model: "meta-llama/llama-4-scout-17b-16e-instruct",
       messages,
       stream: true,
-      max_tokens: 28672,
+      max_tokens: 8192,
       temperature: 1,
       top_p: 1,
       stop: null
@@ -2609,7 +2609,7 @@ ANSWER DIRECTLY:`;
               { role: "user", content: `Context:\n${context}` }
             ],
             temperature: 0.3,
-            max_tokens: 32768,
+            max_tokens: 8192,
             stream: false
           }),
           45000,

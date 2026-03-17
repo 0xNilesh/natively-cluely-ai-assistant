@@ -427,10 +427,20 @@ export class CredentialsManager {
 
                 const encrypted = fs.readFileSync(CREDENTIALS_PATH);
                 const decrypted = safeStorage.decryptString(encrypted);
-                this.credentials = JSON.parse(decrypted);
-                console.log('[CredentialsManager] Loaded encrypted credentials');
+                try {
+                    const parsed = JSON.parse(decrypted);
+                    if (typeof parsed === 'object' && parsed !== null) {
+                        this.credentials = parsed;
+                        console.log('[CredentialsManager] Loaded encrypted credentials');
+                    } else {
+                        throw new Error('Decrypted credentials is not a valid object');
+                    }
+                } catch (parseError) {
+                    console.error('[CredentialsManager] Failed to parse decrypted credentials — file may be corrupted. Starting fresh:', parseError);
+                    this.credentials = {};
+                }
 
-                // Fix #6: Clean up any leftover plaintext fallback file to eliminate the data leak
+                // Clean up any leftover plaintext fallback file to eliminate the data leak
                 const plaintextPath = CREDENTIALS_PATH + '.json';
                 if (fs.existsSync(plaintextPath)) {
                     try {
@@ -447,8 +457,18 @@ export class CredentialsManager {
             const plaintextPath = CREDENTIALS_PATH + '.json';
             if (fs.existsSync(plaintextPath)) {
                 const data = fs.readFileSync(plaintextPath, 'utf-8');
-                this.credentials = JSON.parse(data);
-                console.log('[CredentialsManager] Loaded plaintext credentials');
+                try {
+                    const parsed = JSON.parse(data);
+                    if (typeof parsed === 'object' && parsed !== null) {
+                        this.credentials = parsed;
+                        console.log('[CredentialsManager] Loaded plaintext credentials');
+                    } else {
+                        throw new Error('Plaintext credentials is not a valid object');
+                    }
+                } catch (parseError) {
+                    console.error('[CredentialsManager] Failed to parse plaintext credentials — file may be corrupted. Starting fresh:', parseError);
+                    this.credentials = {};
+                }
                 return;
             }
 
