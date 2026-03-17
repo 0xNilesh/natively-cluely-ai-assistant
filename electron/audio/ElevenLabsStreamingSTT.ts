@@ -3,6 +3,7 @@ import WebSocket from 'ws';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { RECOGNITION_LANGUAGES } from '../config/languages';
 
 const ELEVENLABS_WS_URL = 'wss://api.elevenlabs.io/v1/speech-to-text/realtime';
 
@@ -19,6 +20,7 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
     private buffer: Buffer[] = [];
     private isConnecting = false;
     private isSessionReady = false;
+    private languageCode = 'en'; // Default to English
     
     private debugWriteStream: fs.WriteStream | null = null;
     
@@ -29,16 +31,19 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
     
     private debugMessageCount = 0;
 
-    constructor(apiKey: string) {        super();
+    constructor(apiKey: string) {
+        super();
         this.apiKey = apiKey;
         
-        // Open a debug file to log exactly what we send to ElevenLabs
-        try {
-            const debugPath = path.join(os.homedir(), 'elevenlabs_debug.raw');
-            this.debugWriteStream = fs.createWriteStream(debugPath);
-            console.log(`[ElevenLabsStreaming] Audio debug stream opened at: ${debugPath}`);
-        } catch (e) {
-            console.error('[ElevenLabsStreaming] Failed to open debug stream:', e);
+        // Open a debug file only in development to avoid disk fill-up in production
+        if (process.env.NODE_ENV === 'development') {
+            try {
+                const debugPath = path.join(os.homedir(), 'elevenlabs_debug.raw');
+                this.debugWriteStream = fs.createWriteStream(debugPath);
+                console.log(`[ElevenLabsStreaming] Audio debug stream opened at: ${debugPath}`);
+            } catch (e) {
+                console.error('[ElevenLabsStreaming] Failed to open debug stream:', e);
+            }
         }
     }
 
@@ -51,15 +56,30 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
     /** No-op - channel count is expected to be mono by ElevenLabs Scribe */
     public setAudioChannelCount(_count: number): void {}
 
-    /** Recognition language (currently default/auto internally in Scribe v2) */
-    public setRecognitionLanguage(_key: string): void {}
+    /** Recognition language - maps Natively key to ISO-639-1 for ElevenLabs */
+    public setRecognitionLanguage(key: string): void {
+        const config = RECOGNITION_LANGUAGES[key];
+        if (config) {
+            const newCode = config.iso639;
+            if (this.languageCode !== newCode) {
+                console.log(`[ElevenLabsStreaming] Language changed: ${this.languageCode} -> ${newCode}`);
+                this.languageCode = newCode;
+                
+                if (this.isActive) {
+                    console.log('[ElevenLabsStreaming] Restarting session to apply new language...');
+                    this.stop();
+                    this.start();
+                }
+            }
+        }
+    }
 
     /** No-op - credentials passed via API key */
     public setCredentials(_path: string): void {}
 
     public start(): void {
-        if (this.isActive && this.ws) return;  // Guard: only block if truly active with live ws
-        if (this.isConnecting) return;          // Already in the middle of a connect
+        if (this.isActive) return;     // Already active
+        if (this.isConnecting) return; // Already mid-connect (prevents double-connect race)
         this.shouldReconnect = true;
         this.reconnectAttempts = 0;
         this.connect();
@@ -99,7 +119,10 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
 
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.isSessionReady) {
             this.buffer.push(chunk);
-            if (this.buffer.length > 500) this.buffer.shift(); // Cap buffer size
+            if (this.buffer.length > 500) {
+                this.buffer.shift(); // Cap buffer size
+                console.warn('[ElevenLabsStreaming] Buffer full — oldest audio chunk dropped.');
+            }
 
             if (!this.isConnecting && this.shouldReconnect && !this.reconnectTimer) {
                 console.log('[ElevenLabsStreaming] WS not ready. Lazy connecting on new audio...');
@@ -107,6 +130,9 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
             }
             return;
         }
+
+        // Snapshot ws reference before async operations to guard against concurrent close
+        const ws = this.ws;
 
         try {
             // The input buffer from the native module is ALREADY 16-bit PCM (Int16LE).
@@ -132,7 +158,8 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
 
             // Write to debug file
             if (this.debugWriteStream) {
-                this.debugWriteStream.write(Buffer.from(outputS16.buffer));
+                // Use full slice args to avoid copying the whole backing ArrayBuffer
+                this.debugWriteStream.write(Buffer.from(outputS16.buffer, outputS16.byteOffset, outputS16.byteLength));
             }
 
             // Accumulate
@@ -152,12 +179,15 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
                 this.pcmAccumulator = [];
                 this.pcmAccumulatorLen = 0;
 
-                const base64 = Buffer.from(combined.buffer).toString('base64');
+                const base64 = Buffer.from(combined.buffer, combined.byteOffset, combined.byteLength).toString('base64');
                 // ElevenLabs Scribe v2 requires fields message_type and audio_base_64
-                this.ws.send(JSON.stringify({
-                    message_type: 'input_audio_chunk',
-                    audio_base_64: base64,
-                }));
+                // Use the snapshot captured earlier to avoid null-dereference from concurrent close
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        message_type: 'input_audio_chunk',
+                        audio_base_64: base64,
+                    }));
+                }
             }
         } catch (err) {
             console.warn('[ElevenLabsStreaming] write failed:', err);
@@ -171,8 +201,15 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
         
         console.log(`[ElevenLabsStreaming] Connecting... key=${this.apiKey?.slice(0, 8)}...`);
 
-        // raw WebSocket URL with parameters - always request 16000 for Scribe v2
-        const url = `${ELEVENLABS_WS_URL}?model_id=scribe_v2_realtime&include_timestamps=true&sample_rate=${this.targetSampleRate}`;
+        // raw WebSocket URL with parameters
+        let url = `${ELEVENLABS_WS_URL}?model_id=scribe_v2_realtime&include_timestamps=true&sample_rate=${this.targetSampleRate}`;
+        
+        // Add language hints for SOTA accuracy
+        if (this.languageCode) {
+            url += `&language_code=${this.languageCode}&include_language_detection=true`;
+        }
+        
+        console.log(`[ElevenLabsStreaming] Connecting with URL: ${url.replace(this.apiKey, '***')}`);
 
         this.ws = new WebSocket(url, {
             headers: {
