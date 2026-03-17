@@ -204,7 +204,7 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
         // raw WebSocket URL with parameters
         let url = `${ELEVENLABS_WS_URL}?model_id=scribe_v2_realtime&include_timestamps=true&sample_rate=${this.targetSampleRate}`;
         
-        // Add language hints for SOTA accuracy
+        // Add language hints to prevent regional language hallucinations
         if (this.languageCode) {
             url += `&language_code=${this.languageCode}&include_language_detection=true`;
         }
