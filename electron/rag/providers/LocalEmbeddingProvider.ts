@@ -12,10 +12,11 @@ export class LocalEmbeddingProvider implements IEmbeddingProvider {
   private modelPath: string;
 
   constructor() {
-    // Point to the bundled model inside the app's resources
-    // This path is baked in at build time via electron-builder extraResources
+    // Point to the bundled model inside the app's resources.
+    // In dev: __dirname = dist-electron/electron/rag/providers → need 4 levels up to project root.
+    // In prod: app.isPackaged = true → use process.resourcesPath (electron-builder extraResources).
     this.modelPath = path.join(
-      app.isPackaged ? process.resourcesPath : path.join(__dirname, '../../resources'),
+      app.isPackaged ? process.resourcesPath : path.join(__dirname, '../../../../resources'),
       'models'
     );
   }
@@ -42,8 +43,12 @@ export class LocalEmbeddingProvider implements IEmbeddingProvider {
     }
 
     this.loadingPromise = (async () => {
-      // Dynamic import because @xenova/transformers is ESM-only
-      const { pipeline, env } = await import('@xenova/transformers');
+      // Use new Function() to force a true ESM dynamic import at runtime.
+      // TypeScript with module:commonjs rewrites `await import(...)` to
+      // `Promise.resolve().then(() => require(...))`, which fails for ESM-only
+      // packages like @xenova/transformers. The new Function() trick is opaque
+      // to the TypeScript compiler so it is left as a real import() call.
+      const { pipeline, env } = await (new Function('return import("@xenova/transformers")')()) as typeof import('@xenova/transformers');
 
       // Tell transformers.js to use the local path, never download in production
       env.allowRemoteModels = false;

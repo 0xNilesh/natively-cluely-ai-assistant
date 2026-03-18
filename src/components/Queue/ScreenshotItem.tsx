@@ -41,7 +41,7 @@ const ScreenshotItem: React.FC<ScreenshotItemProps> = ({
             className={`w-full h-full object-cover transition-transform duration-300 ${
               isLoading
                 ? "opacity-50"
-                : "cursor-pointer group-hover:scale-105 group-hover:brightness-75"
+                : "group-hover:scale-105 group-hover:brightness-75"
             }`}
           />
         </div>

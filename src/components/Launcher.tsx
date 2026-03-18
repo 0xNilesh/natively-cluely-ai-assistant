@@ -337,7 +337,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                         className={`
                             transition-all duration-300 p-1 flex items-center justify-center mt-1 ml-2
                             ${selectedMeeting
-                                ? 'text-text-secondary hover:text-text-primary hover:drop-shadow-[0_0_8px_rgba(255,255,255,0.5)] cursor-pointer'
+                                ? 'text-text-secondary hover:text-text-primary hover:drop-shadow-[0_0_8px_rgba(255,255,255,0.5)]'
                                 : 'text-text-tertiary opacity-50 cursor-default'}
                         `}
                     >
@@ -351,7 +351,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                         className={`
                             transition-all duration-300 p-1 flex items-center justify-center mt-1
                             ${forwardMeeting
-                                ? 'text-text-secondary hover:text-text-primary hover:drop-shadow-[0_0_8px_rgba(255,255,255,0.5)] cursor-pointer'
+                                ? 'text-text-secondary hover:text-text-primary hover:drop-shadow-[0_0_8px_rgba(255,255,255,0.5)]'
                                 : 'text-text-tertiary opacity-0 cursor-default'}
                         `}
                     >
@@ -479,7 +479,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                                                     {isDetectable ? "Detectable" : "Undetectable"}
                                                 </span>
                                                 <div
-                                                    className={`w-8 h-4 rounded-full relative cursor-pointer transition-colors ${!isDetectable ? 'bg-blue-500' : 'bg-zinc-700'}`}
+                                                    className={`w-8 h-4 rounded-full relative transition-colors ${!isDetectable ? 'bg-blue-500' : 'bg-zinc-700'}`}
                                                     onClick={toggleDetectable}
                                                 >
                                                     <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${!isDetectable ? 'left-[18px]' : 'left-0.5'}`} />
@@ -703,7 +703,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                                                         <motion.div
                                                             key={m.id}
                                                             layoutId={`meeting-${m.id}`}
-                                                            className="group relative flex items-center justify-between px-3 py-2 rounded-lg bg-transparent hover:bg-bg-elevated transition-colors cursor-pointer"
+                                                            className="group relative flex items-center justify-between px-3 py-2 rounded-lg bg-transparent hover:bg-bg-elevated transition-colors"
                                                             onClick={() => handleOpenMeeting(m)}
                                                         >
                                                             <div className={`font-medium text-[14px] max-w-[60%] truncate ${m.title === 'Processing...' ? 'text-blue-400 italic animate-pulse' : 'text-text-primary'}`}>

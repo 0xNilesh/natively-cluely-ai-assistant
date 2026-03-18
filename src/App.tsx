@@ -73,6 +73,13 @@ const App: React.FC = () => {
   const [settingsInitialTab, setSettingsInitialTab] = useState('general');
   const [showPremiumModal, setShowPremiumModal] = useState(false);
   const [isPremiumActive, setIsPremiumActive] = useState(false);
+
+  // Overlay opacity — only meaningful when isOverlayWindow, but stored centrally
+  // so it can be initialized once from localStorage and updated via IPC.
+  const [overlayOpacity, setOverlayOpacity] = useState<number>(() => {
+    const stored = localStorage.getItem('natively_overlay_opacity');
+    return stored ? parseFloat(stored) : 0.65;
+  });
   
   // Profile state for ad targeting
   const [hasProfile, setHasProfile] = useState(false);
@@ -148,6 +155,17 @@ const App: React.FC = () => {
       if (removeWarning) removeWarning();
     }
   }, []);
+
+  // Listen for overlay opacity changes — scoped to overlay window only
+  useEffect(() => {
+    if (!isOverlayWindow) return;
+    const removeOpacityListener = window.electronAPI?.onOverlayOpacityChanged?.((opacity) => {
+      setOverlayOpacity(opacity);
+    });
+    return () => {
+      if (removeOpacityListener) removeOpacityListener();
+    };
+  }, [isOverlayWindow]);
 
   // Handlers
   const handleReindex = async () => {
@@ -257,9 +275,11 @@ const App: React.FC = () => {
         <div className="w-full relative bg-transparent">
           <QueryClientProvider client={queryClient}>
             <ToastProvider>
-              <NativelyInterface
-                onEndMeeting={handleEndMeeting}
-              />
+              <div style={{ opacity: overlayOpacity, transition: 'opacity 75ms ease' }}>
+                <NativelyInterface
+                  onEndMeeting={handleEndMeeting}
+                />
+              </div>
               <ToastViewport />
             </ToastProvider>
           </QueryClientProvider>
@@ -296,17 +316,19 @@ const App: React.FC = () => {
           >
             <QueryClientProvider client={queryClient}>
               <ToastProvider>
-                <Launcher
-                  onStartMeeting={handleStartMeeting}
-                  onOpenSettings={(tab = 'general') => {
-                    setSettingsInitialTab(tab);
-                    setIsSettingsOpen(true);
-                  }}
-                  onPageChange={setIsLauncherMainView}
-                  ollamaPullStatus={ollamaPullStatus}
-                  ollamaPullPercent={ollamaPullPercent}
-                  ollamaPullMessage={ollamaPullMessage}
-                />
+                <div id="launcher-container" className="h-full w-full relative">
+                  <Launcher
+                    onStartMeeting={handleStartMeeting}
+                    onOpenSettings={(tab = 'general') => {
+                      setSettingsInitialTab(tab);
+                      setIsSettingsOpen(true);
+                    }}
+                    onPageChange={setIsLauncherMainView}
+                    ollamaPullStatus={ollamaPullStatus}
+                    ollamaPullPercent={ollamaPullPercent}
+                    ollamaPullMessage={ollamaPullMessage}
+                  />
+                </div>
                 <SettingsOverlay
                   isOpen={isSettingsOpen}
                   onClose={() => {

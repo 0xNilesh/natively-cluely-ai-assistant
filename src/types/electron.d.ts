@@ -267,6 +267,10 @@ export interface ElectronAPI {
   licenseCheckPremium: () => Promise<boolean>
   licenseDeactivate: () => Promise<void>
   licenseGetHardwareId: () => Promise<string>
+
+  // Overlay Opacity (Stealth Mode)
+  setOverlayOpacity: (opacity: number) => Promise<void>
+  onOverlayOpacityChanged: (callback: (opacity: number) => void) => () => void
 }
 
 declare global {

@@ -233,6 +233,10 @@ interface ElectronAPI {
   // Google Search API
   setGoogleSearchApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>;
   setGoogleSearchCseId: (cseId: string) => Promise<{ success: boolean; error?: string }>;
+
+  // Overlay Opacity (Stealth Mode)
+  setOverlayOpacity: (opacity: number) => Promise<void>;
+  onOverlayOpacityChanged: (callback: (opacity: number) => void) => () => void;
 }
 
 export const PROCESSING_EVENTS = {
@@ -898,4 +902,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
   licenseCheckPremium: () => ipcRenderer.invoke('license:check-premium'),
   licenseDeactivate: () => ipcRenderer.invoke('license:deactivate'),
   licenseGetHardwareId: () => ipcRenderer.invoke('license:get-hardware-id'),
+
+  // Overlay Opacity (Stealth Mode)
+  setOverlayOpacity: (opacity: number) => ipcRenderer.invoke('set-overlay-opacity', opacity),
+  onOverlayOpacityChanged: (callback: (opacity: number) => void) => {
+    const subscription = (_: any, opacity: number) => callback(opacity)
+    ipcRenderer.on('overlay-opacity-changed', subscription)
+    return () => {
+      ipcRenderer.removeListener('overlay-opacity-changed', subscription)
+    }
+  },
 } as ElectronAPI)

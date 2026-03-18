@@ -375,6 +375,60 @@ export class DatabaseManager {
             this.db.pragma('user_version = 9');
         }
 
+        // Version 9 → 10: Add UNIQUE constraint on embedding_queue(meeting_id, chunk_id).
+        // This enables INSERT OR IGNORE in EmbeddingPipeline.queueMeeting() to silently
+        // skip duplicate rows when queueMeeting() is called more than once for the same meeting.
+        // SQLite doesn't support ADD CONSTRAINT on existing tables, so we recreate the table
+        // using the standard rename-create-copy-drop pattern.
+        if (version < 10) {
+            console.log('[DatabaseManager] Applying migration v9 → v10: Add UNIQUE constraint to embedding_queue');
+            try {
+                // Wrap all steps in an explicit better-sqlite3 transaction for atomicity.
+                // If any step throws, the entire migration is rolled back cleanly —
+                // preventing the dangerous half-renamed table state that a bare exec() chain would leave.
+                const migrate = this.db.transaction(() => {
+                    // Step 1: Rename the existing table to a temp name
+                    this.db!.exec('ALTER TABLE embedding_queue RENAME TO embedding_queue_old;');
+
+                    // Step 2: Recreate with the UNIQUE(meeting_id, chunk_id) constraint
+                    this.db!.exec(`
+                        CREATE TABLE embedding_queue (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            meeting_id TEXT NOT NULL,
+                            chunk_id INTEGER,
+                            status TEXT DEFAULT 'pending',
+                            retry_count INTEGER DEFAULT 0,
+                            error_message TEXT,
+                            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                            processed_at TEXT,
+                            UNIQUE(meeting_id, chunk_id)
+                        );
+                    `);
+
+                    // Step 3: Copy rows; INSERT OR IGNORE silently drops any pre-existing duplicates
+                    this.db!.exec(`
+                        INSERT OR IGNORE INTO embedding_queue
+                            (id, meeting_id, chunk_id, status, retry_count, error_message, created_at, processed_at)
+                        SELECT id, meeting_id, chunk_id, status, retry_count, error_message, created_at, processed_at
+                        FROM embedding_queue_old;
+                    `);
+
+                    // Step 4: Drop the backup
+                    this.db!.exec('DROP TABLE embedding_queue_old;');
+                });
+                migrate();
+                console.log('[DatabaseManager] v10 migration: embedding_queue UNIQUE constraint added ✓');
+            } catch (e) {
+                console.error('[DatabaseManager] v10 migration failed — table structure unchanged:', e);
+                // user_version still advances. We do NOT retry — a failed rename leaves
+                // embedding_queue_old behind; retrying would cause "table already exists".
+                // In the failure case, INSERT OR IGNORE in queueMeeting() will still work
+                // for natural uniqueness (same meeting queued twice picks up existing rows),
+                // just without DB-enforced deduplication.
+            }
+            this.db.pragma('user_version = 10');
+        }
+
         console.log('[DatabaseManager] Migrations completed.');
     }
 

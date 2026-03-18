@@ -296,7 +296,7 @@ const TopSearchPill: React.FC<TopSearchPillProps> = ({
                                         text-[13px] text-text-primary
                                         placeholder-text-tertiary dark:placeholder-[#7C7C7E]
                                         focus:outline-none
-                                        ${state === 'idle' ? 'cursor-pointer' : 'cursor-text'}
+                                        ${state === 'idle' ? 'cursor-default' : 'cursor-text'}
                                     `}
                                         placeholder="Search or ask anything..."
                                     />

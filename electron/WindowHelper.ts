@@ -143,9 +143,9 @@ export class WindowHelper {
       trafficLightPosition: { x: 14, y: 14 },
       vibrancy: 'under-window',
       visualEffectState: 'followWindow',
-      transparent: false, // DEBUG: Disable transparency
+      transparent: true,
       hasShadow: true,
-      backgroundColor: "#000000", // Fixed: Black background to match startup sequence
+      backgroundColor: "#00000000",
       focusable: true,
       resizable: true,
       movable: true,

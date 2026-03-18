@@ -279,7 +279,7 @@ const QueueCommands: React.FC<QueueCommandsProps> = ({
 
         {/* Sign Out Button - Moved to end */}
         <button
-          className="text-red-500/70 hover:text-red-500/90 transition-colors hover:cursor-pointer"
+          className="text-red-500/70 hover:text-red-500/90 transition-colors"
           title="Sign Out"
           onClick={() => window.electronAPI.quitApp()}
         >

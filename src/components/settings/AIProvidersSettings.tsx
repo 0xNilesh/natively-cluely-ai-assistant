@@ -479,7 +479,7 @@ export const AIProvidersSettings: React.FC = () => {
                             // @ts-ignore
                             await window.electronAPI?.setGroqFastTextMode(newState);
                         }}
-                        className={`w-10 h-6 rounded-full p-1 transition-colors ${!hasStoredKey.groq ? 'cursor-not-allowed bg-bg-input border border-border-subtle' : fastResponseMode ? 'bg-orange-500 cursor-pointer' : 'bg-bg-input border border-border-subtle cursor-pointer'}`}
+                        className={`w-10 h-6 rounded-full p-1 transition-colors ${!hasStoredKey.groq ? 'cursor-not-allowed bg-bg-input border border-border-subtle' : fastResponseMode ? 'bg-orange-500' : 'bg-bg-input border border-border-subtle'}`}
                     >
                         <div className={`w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${fastResponseMode ? 'translate-x-4' : 'translate-x-0'}`} />
                     </div>

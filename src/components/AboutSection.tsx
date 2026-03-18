@@ -255,7 +255,7 @@ export const AboutSection: React.FC<AboutSectionProps> = () => {
                         <a
                             href="https://github.com/evinjohnn/natively-cluely-ai-assistant"
                             onClick={(e) => handleOpenLink(e, "https://github.com/evinjohnn/natively-cluely-ai-assistant")}
-                            className="bg-bg-item-surface border border-border-subtle rounded-xl p-5 transition-all group flex items-center gap-4 cursor-pointer h-full hover:bg-white/10"
+                            className="bg-bg-item-surface border border-border-subtle rounded-xl p-5 transition-all group flex items-center gap-4 h-full hover:bg-white/10"
                         >
                             <div className="w-10 h-10 rounded-lg bg-yellow-500/10 flex items-center justify-center text-yellow-500 shrink-0 group-hover:scale-110 transition-transform">
                                 <Star size={20} className="transition-all group-hover:fill-current" />
@@ -269,7 +269,7 @@ export const AboutSection: React.FC<AboutSectionProps> = () => {
                         <a
                             href="https://github.com/evinjohnn/natively-cluely-ai-assistant/issues"
                             onClick={(e) => handleOpenLink(e, "https://github.com/evinjohnn/natively-cluely-ai-assistant/issues")}
-                            className="bg-bg-item-surface border border-border-subtle rounded-xl p-5 transition-all group flex items-center gap-4 cursor-pointer h-full hover:bg-white/10"
+                            className="bg-bg-item-surface border border-border-subtle rounded-xl p-5 transition-all group flex items-center gap-4 h-full hover:bg-white/10"
                         >
                             <div className="w-10 h-10 rounded-lg bg-red-500/10 flex items-center justify-center text-red-500 shrink-0 group-hover:scale-110 transition-transform">
                                 <Bug size={20} />

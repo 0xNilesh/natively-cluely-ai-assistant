@@ -260,7 +260,7 @@ const SettingsPopup = () => {
                 <div className="h-px bg-white/[0.04] my-0.5 mx-2" />
 
                 {/* Show/Hide Natively */}
-                <div className="flex items-center justify-between px-3 py-2 hover:bg-white/5 rounded-lg transition-colors duration-200 group cursor-pointer interaction-base interaction-press">
+                <div className="flex items-center justify-between px-3 py-2 hover:bg-white/5 rounded-lg transition-colors duration-200 group interaction-base interaction-press">
                     <div className="flex items-center gap-3">
                         <MessageSquare className="w-3.5 h-3.5 text-slate-500 group-hover:text-slate-300 transition-colors" />
                         <span className="text-[12px] text-slate-400 group-hover:text-slate-200 transition-colors">Show/Hide</span>
@@ -276,7 +276,7 @@ const SettingsPopup = () => {
                 </div>
 
                 {/* Screenshot */}
-                <div className="flex items-center justify-between px-3 py-2 hover:bg-white/5 rounded-lg transition-colors duration-200 group cursor-pointer interaction-base interaction-press">
+                <div className="flex items-center justify-between px-3 py-2 hover:bg-white/5 rounded-lg transition-colors duration-200 group interaction-base interaction-press">
                     <div className="flex items-center gap-3">
                         <Camera className="w-3.5 h-3.5 text-slate-500 group-hover:text-slate-300 transition-colors" />
                         <span className="text-[12px] text-slate-400 group-hover:text-slate-200 transition-colors">Screenshot</span>
@@ -297,7 +297,7 @@ const SettingsPopup = () => {
                 <div
                     // @ts-ignore
                     onClick={() => window.electronAPI.openExternal('https://buymeacoffee.com/evinjohnn')}
-                    className="flex items-center justify-between px-3 py-2 hover:bg-pink-500/10 rounded-lg transition-colors duration-200 group cursor-pointer interaction-base interaction-press"
+                    className="flex items-center justify-between px-3 py-2 hover:bg-pink-500/10 rounded-lg transition-colors duration-200 group interaction-base interaction-press"
                 >
                     <div className="flex items-center gap-3">
                         <Heart className="w-3.5 h-3.5 text-pink-400 group-hover:fill-pink-400 transition-all duration-300" />

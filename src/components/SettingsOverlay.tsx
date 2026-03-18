@@ -4,8 +4,8 @@ import {
     X, Mic, Speaker, Monitor, Keyboard, User, LifeBuoy, LogOut, Upload,
     ArrowUp, ArrowDown, ArrowLeft, ArrowRight,
     Camera, RotateCcw, Eye, Layout, MessageSquare, Crop,
-    ChevronDown, Check, BadgeCheck, Power, Palette, Calendar, Ghost, Sun, Moon, RefreshCw, Info, Globe, FlaskConical, Terminal, Settings, Activity, ExternalLink, Trash2,
-    Sparkles, Pencil, Briefcase, Building2, Search, MapPin, CheckCircle
+    ChevronDown, ChevronUp, Check, BadgeCheck, Power, Palette, Calendar, Ghost, Sun, Moon, RefreshCw, Info, Globe, FlaskConical, Terminal, Settings, Activity, ExternalLink, Trash2,
+    Sparkles, Pencil, Briefcase, Building2, Search, MapPin, CheckCircle, HelpCircle, Zap, SlidersHorizontal
 } from 'lucide-react';
 import { analytics } from '../lib/analytics/analytics.service';
 import { AboutSection } from './AboutSection';
@@ -14,6 +14,106 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useShortcuts } from '../hooks/useShortcuts';
 import { KeyRecorder } from './ui/KeyRecorder';
 import { ProfileVisualizer, PremiumUpgradeModal } from '../premium';
+import icon from './icon.png';
+
+// ---------------------------------------------------------------------------
+// MockupNativelyInterface — fake in-meeting widget for the opacity preview
+// ---------------------------------------------------------------------------
+const MockupNativelyInterface = ({ opacity }: { opacity: number }) => (
+    <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none select-none bg-transparent">
+        {/* NativelyInterface Widget — opacity controlled by the slider */}
+        <div
+            id="mockup-natively-interface"
+            style={{ opacity, transition: 'opacity 75ms ease' }}
+            className="flex flex-col items-center pointer-events-none -mt-56"
+        >
+            {/* TopPill Replica */}
+            <div className="flex justify-center mb-2 select-none z-50">
+                <div className="flex items-center gap-2 rounded-full bg-[#1E1E1E]/80 backdrop-blur-md border border-white/10 shadow-lg shadow-black/20 pl-1.5 pr-1.5 py-1.5">
+                    <div className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center overflow-hidden">
+                        <img
+                            src={icon}
+                            alt="Natively"
+                            className="w-[24px] h-[24px] object-contain opacity-90 scale-105"
+                            draggable="false"
+                        />
+                    </div>
+                    <div className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-white/5 text-[12px] font-medium text-slate-200 border border-white/0">
+                        <ChevronUp className="w-3.5 h-3.5 opacity-70" />
+                        <span className="opacity-80 tracking-wide">Hide</span>
+                    </div>
+                    <div className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center text-white">
+                        <div className="w-3.5 h-3.5 rounded-[3px] bg-red-400 opacity-80" />
+                    </div>
+                </div>
+            </div>
+
+            {/* Main Interface Window Replica */}
+            <div className="relative w-[600px] max-w-full bg-[#1E1E1E]/95 backdrop-blur-2xl border border-white/10 shadow-2xl shadow-black/40 rounded-[24px] overflow-hidden flex flex-col pt-2 pb-3">
+                
+                {/* Rolling Transcript Bar */}
+                <div className="w-full flex justify-center py-2 px-4 border-b border-white/5 bg-[#1E1E1E]/50 mb-1">
+                    <p className="text-[13px] text-white/90 truncate max-w-[90%] font-medium">
+                        <span className="text-blue-400 mr-2 font-semibold">Interviewer</span>
+                        <span className="opacity-80">So how would you optimize the current algorithm?</span>
+                    </p>
+                </div>
+
+                {/* Chat History Mock */}
+                <div className="flex-1 overflow-y-auto px-4 py-2 space-y-3">
+                    <div className="flex justify-start">
+                        <div className="max-w-[85%] px-4 py-3 text-[14px] leading-relaxed text-slate-200 font-normal">
+                            <span className="font-semibold text-emerald-400 block mb-1">Suggestion</span>
+                            A good approach would be to use a hash map to cache the intermediate results, which brings the time complexity down from O(n²) to O(n).
+                        </div>
+                    </div>
+                </div>
+
+                {/* Quick Actions */}
+                <div className="flex flex-nowrap justify-center items-center gap-1.5 px-4 pb-3 pt-3">
+                    <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium text-slate-400 bg-white/5 border border-white/0 shrink-0">
+                        <Pencil className="w-3 h-3 opacity-70" /> What to answer?
+                    </div>
+                    <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium text-slate-400 bg-white/5 border border-white/0 shrink-0">
+                        <MessageSquare className="w-3 h-3 opacity-70" /> Shorten
+                    </div>
+                    <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium text-slate-400 bg-white/5 border border-white/0 shrink-0">
+                        <RefreshCw className="w-3 h-3 opacity-70" /> Recap
+                    </div>
+                    <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium text-slate-400 bg-white/5 border border-white/0 shrink-0">
+                        <HelpCircle className="w-3 h-3 opacity-70" /> Follow Up Question
+                    </div>
+                    <div className="flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium bg-white/5 text-slate-400 min-w-[74px] shrink-0">
+                        <Zap className="w-3 h-3 opacity-70" /> Answer
+                    </div>
+                </div>
+
+                {/* Input Area */}
+                <div className="px-3">
+                    <div className="relative group">
+                        <div className="w-full bg-[#1E1E1E] border border-white/5 rounded-xl pl-3 pr-10 py-2.5 h-[38px] flex items-center">
+                            <span className="text-[13px] text-slate-500">Ask anything on screen or conversation</span>
+                        </div>
+                    </div>
+
+                    {/* Bottom Row */}
+                    <div className="flex items-center justify-between mt-3 px-0.5">
+                        <div className="flex items-center gap-1.5">
+                            <div className="flex items-center gap-2 px-3 py-1.5 border border-white/10 rounded-lg text-xs font-medium w-[140px] bg-black/20 text-white/70">
+                                <span className="truncate min-w-0 flex-1">Gemini 3 Flash</span>
+                                <ChevronDown size={14} className="shrink-0" />
+                            </div>
+                            <div className="w-px h-3 bg-white/10 mx-1" />
+                            <div className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-500 bg-white/5">
+                                <SlidersHorizontal className="w-3.5 h-3.5" />
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+);
 
 interface CustomSelectProps {
     label: string;
@@ -337,6 +437,140 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     const [aiResponseLanguage, setAiResponseLanguage] = useState('English');
     const [availableAiLanguages, setAvailableAiLanguages] = useState<any[]>([]);
 
+    // Overlay Opacity state
+    const [overlayOpacity, setOverlayOpacity] = useState<number>(() => {
+        const stored = localStorage.getItem('natively_overlay_opacity');
+        if (!stored) return 0.65;
+        const parsed = parseFloat(stored);
+        return !isNaN(parsed) && parsed >= 0.15 && parsed <= 1.0 ? parsed : 0.65;
+    });
+
+    // Live preview state — true while the user is holding down the slider
+    const [isPreviewingOpacity, setIsPreviewingOpacity] = useState(false);
+
+    // Ref to hold the latest opacity value without triggering renders during drag
+    const latestOpacityRef = React.useRef(overlayOpacity);
+
+    const handleOpacityChange = (val: number) => {
+        // DOM-direct updates for 0-lag 60fps drag (bypasses React reconciliation)
+        const percentText = `${Math.round(val * 100)}%`;
+        document.querySelectorAll('.opacity-percent-label').forEach(el => el.textContent = percentText);
+        const mockWrapper = document.getElementById('mockup-natively-interface');
+        if (mockWrapper) mockWrapper.style.opacity = String(val);
+        latestOpacityRef.current = val;
+        
+        // Broadcast IPC in real-time so actual meeting overlay tracks slider instantly
+        // (safe to do at 60fps, does not trigger React renders)
+        window.electronAPI?.setOverlayOpacity?.(val);
+    };
+
+    // Bug fix #3: keep latestOpacityRef in sync when overlayOpacity changes outside of a drag
+    // (e.g. on first mount, or if another part of code updates it)
+    useEffect(() => {
+        latestOpacityRef.current = overlayOpacity;
+    }, [overlayOpacity]);
+
+    // Bug fix #3 (close-during-drag): if the overlay closes while the user is still dragging,
+    // restore all DOM state so nothing is left in a broken state.
+    useEffect(() => {
+        if (!isOpen && isPreviewingOpacity) {
+            stopPreviewingOpacity();
+        }
+    }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    const startPreviewingOpacity = () => {
+        // Bug fix #5: guard against rapid repeated calls (double pointerDown / touch events)
+        if (isPreviewingOpacity) return;
+
+        // Direct DOM mutation for sub-millisecond instant hide (bypassing slow React tree diffs)
+        document.body.classList.add('disable-transitions');
+        
+        const backdrop = document.getElementById('settings-backdrop');
+        const wrapper = document.getElementById('settings-panel-wrapper');
+        const panel = document.getElementById('settings-panel');
+        const card = document.getElementById('opacity-slider-card');
+        const mockup = document.getElementById('settings-mockup-wrapper');
+        const launcher = document.getElementById('launcher-container');
+
+        if (backdrop) {
+            backdrop.style.backgroundColor = 'transparent';
+            backdrop.style.backdropFilter = 'none';
+            backdrop.style.transition = 'none';
+        }
+        if (wrapper) {
+            wrapper.style.backgroundColor = 'transparent';
+            wrapper.style.border = 'none';
+            wrapper.style.boxShadow = 'none';
+        }
+        if (panel) {
+            panel.style.visibility = 'hidden';
+        }
+        if (launcher) {
+            launcher.style.visibility = 'hidden';
+        }
+        
+        if (card) {
+            card.style.visibility = 'visible';
+            card.style.position = 'relative';
+            card.style.zIndex = '9999';
+        }
+        if (mockup) {
+            mockup.style.opacity = '1';
+        }
+
+        setIsPreviewingOpacity(true);
+    };
+
+    const stopPreviewingOpacity = () => {
+        // Direct DOM restoration
+        document.body.classList.remove('disable-transitions');
+        const backdrop = document.getElementById('settings-backdrop');
+        const wrapper = document.getElementById('settings-panel-wrapper');
+        const panel = document.getElementById('settings-panel');
+        const card = document.getElementById('opacity-slider-card');
+        const mockup = document.getElementById('settings-mockup-wrapper');
+        const launcher = document.getElementById('launcher-container');
+
+        if (backdrop) {
+            backdrop.style.backgroundColor = '';
+            backdrop.style.backdropFilter = '';
+            backdrop.style.transition = '';
+        }
+        if (wrapper) {
+            wrapper.style.backgroundColor = '';
+            wrapper.style.border = '';
+            wrapper.style.boxShadow = '';
+        }
+        if (panel) {
+            panel.style.visibility = '';
+        }
+        if (launcher) {
+            launcher.style.visibility = '';
+        }
+
+        if (card) {
+            card.style.visibility = '';
+            card.style.position = '';
+            card.style.zIndex = '';
+        }
+        if (mockup) {
+            // Bug fix #4: restore mockup to hidden (opacity 0) rather than leaving it visible
+            mockup.style.opacity = '0';
+        }
+
+        setIsPreviewingOpacity(false);
+        // Sync final dragged value back to React state (persists to localStorage + IPC via useEffect)
+        setOverlayOpacity(latestOpacityRef.current);
+    };
+
+    useEffect(() => {
+        const timeoutId = setTimeout(() => {
+            localStorage.setItem('natively_overlay_opacity', String(overlayOpacity));
+            window.electronAPI?.setOverlayOpacity?.(overlayOpacity);
+        }, 150);
+        return () => clearTimeout(timeoutId);
+    }, [overlayOpacity]);
+
     useEffect(() => {
         const loadLanguages = async () => {
             if (window.electronAPI?.getRecognitionLanguages) {
@@ -657,6 +891,24 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
         }
     };
 
+    const handleRemoveGoogleSearchKey = async (type: 'apikey' | 'cseid') => {
+        if (!confirm(`Are you sure you want to remove the Google Search ${type === 'apikey' ? 'API Key' : 'CSE ID'}?`)) return;
+
+        try {
+            if (type === 'apikey') {
+                await window.electronAPI?.setGoogleSearchApiKey?.('');
+                setGoogleSearchApiKey('');
+                setHasStoredGoogleSearchKey(false);
+            } else {
+                await window.electronAPI?.setGoogleSearchCseId?.('');
+                setGoogleSearchCseId('');
+                setHasStoredGoogleSearchCseId(false);
+            }
+        } catch (e) {
+            console.error(`Failed to remove Google Search ${type}:`, e);
+        }
+    };
+
     const handleTestSttConnection = async () => {
         if (sttProvider === 'google') return;
         const keyMap: Record<string, string> = {
@@ -931,9 +1183,11 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                     animate={{ opacity: 1 }}
                     exit={{ opacity: 0 }}
                     transition={{ duration: 0.2 }}
-                    className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-8"
+                    id="settings-backdrop"
+                    className={`fixed inset-0 z-50 flex items-center justify-center p-8 transition-colors duration-150 ${isPreviewingOpacity ? 'bg-transparent backdrop-blur-none' : 'bg-black/60 backdrop-blur-sm'}`}
                 >
                     <motion.div
+                        id="settings-panel-wrapper"
                         initial={{ scale: 0.94, opacity: 0, y: 20 }}
                         animate={{ scale: 1, opacity: 1, y: 0 }}
                         exit={{ scale: 0.94, opacity: 0, y: 20 }}
@@ -943,8 +1197,13 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                             damping: 32,
                             mass: 1
                         }}
-                        className="bg-bg-elevated w-full max-w-4xl h-[80vh] rounded-2xl border border-border-subtle shadow-2xl flex overflow-hidden"
+                        className="bg-bg-elevated w-full max-w-4xl h-[80vh] rounded-2xl border border-border-subtle shadow-2xl overflow-hidden relative"
                     >
+                        <div 
+                            id="settings-panel" 
+                            className="flex w-full h-full"
+                            style={{ visibility: isPreviewingOpacity ? 'hidden' : 'visible' }}
+                        >
                         {/* Sidebar */}
                         <div className="w-64 bg-bg-sidebar flex flex-col border-r border-border-subtle">
                             <div className="p-6">
@@ -1056,7 +1315,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                     // Analytics: Undetectable Mode Toggle
                                                     analytics.trackModeSelected(newState ? 'undetectable' : 'overlay');
                                                 }}
-                                                className={`w-11 h-6 rounded-full relative cursor-pointer transition-colors ${isUndetectable ? 'bg-accent-primary' : 'bg-bg-toggle-switch border border-border-muted'}`}
+                                                className={`w-11 h-6 rounded-full relative transition-colors ${isUndetectable ? 'bg-accent-primary' : 'bg-bg-toggle-switch border border-border-muted'}`}
                                             >
                                                 <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white transition-transform ${isUndetectable ? 'translate-x-5' : 'translate-x-0'}`} />
                                             </div>
@@ -1084,7 +1343,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                             setOpenOnLogin(newState);
                                                             window.electronAPI?.setOpenAtLogin(newState);
                                                         }}
-                                                        className={`w-11 h-6 rounded-full relative cursor-pointer transition-colors ${openOnLogin ? 'bg-accent-primary' : 'bg-bg-toggle-switch border border-border-muted'}`}
+                                                        className={`w-11 h-6 rounded-full relative transition-colors ${openOnLogin ? 'bg-accent-primary' : 'bg-bg-toggle-switch border border-border-muted'}`}
                                                     >
                                                         <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white transition-transform ${openOnLogin ? 'translate-x-5' : 'translate-x-0'}`} />
                                                     </div>
@@ -1108,7 +1367,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                             localStorage.setItem('natively_interviewer_transcript', String(newState));
                                                             window.dispatchEvent(new Event('storage'));
                                                         }}
-                                                        className={`w-11 h-6 rounded-full relative cursor-pointer transition-colors ${showTranscript ? 'bg-accent-primary' : 'bg-bg-toggle-switch border border-border-muted'}`}
+                                                        className={`w-11 h-6 rounded-full relative transition-colors ${showTranscript ? 'bg-accent-primary' : 'bg-bg-toggle-switch border border-border-muted'}`}
                                                     >
                                                         <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white transition-transform ${showTranscript ? 'translate-x-5' : 'translate-x-0'}`} />
                                                     </div>
@@ -1275,6 +1534,50 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                     </button>
                                                 </div>
 
+                                                {/* ------------------------------------------------------------------ */}
+                                                {/* Interface Opacity (Stealth Mode)                                   */}
+                                                {/* ------------------------------------------------------------------ */}
+                                                <div
+                                                    id="opacity-slider-card"
+                                                    style={isPreviewingOpacity ? { visibility: 'visible', position: 'relative', zIndex: 9999 } : {}}
+                                                    className="bg-bg-item-surface rounded-xl p-5 border border-border-subtle mt-4"
+                                                >
+                                                    <div className="flex items-center justify-between mb-3">
+                                                        <label className="flex items-center gap-2 text-xs font-medium text-text-secondary uppercase tracking-wide">
+                                                            <Eye size={13} className="text-text-secondary" />
+                                                            Interface Opacity
+                                                        </label>
+                                                        <span className="opacity-percent-label text-xs font-semibold text-text-primary tabular-nums">
+                                                            {Math.round(overlayOpacity * 100)}%
+                                                        </span>
+                                                    </div>
+
+                                                    <input
+                                                        type="range"
+                                                        min={0.35}
+                                                        max={1.0}
+                                                        step={0.01}
+                                                        defaultValue={overlayOpacity}
+                                                        onChange={(e) => handleOpacityChange(parseFloat(e.target.value))}
+                                                        onPointerDown={startPreviewingOpacity}
+                                                        onPointerUp={stopPreviewingOpacity}
+                                                        onPointerCancel={stopPreviewingOpacity}
+                                                        onPointerLeave={stopPreviewingOpacity}
+                                                        className="w-full h-1.5 rounded-full appearance-none bg-bg-input accent-accent-primary cursor-pointer"
+                                                        style={{ WebkitAppearance: 'none' } as React.CSSProperties}
+                                                    />
+
+                                                    <div className="flex justify-between mt-1.5">
+                                                        <span className="text-[10px] text-text-tertiary">More Stealth</span>
+                                                        <span className="text-[10px] text-text-tertiary">Fully Visible</span>
+                                                    </div>
+
+                                                    <p className="text-xs text-text-tertiary mt-2">
+                                                        Controls the visibility of the in-meeting overlay.{' '}
+                                                        <span className="text-text-secondary">Hold the slider to preview.</span>
+                                                    </p>
+                                                </div>
+
                                             </div>
                                         </div>
 
@@ -1415,7 +1718,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                                         console.error('Failed to toggle profile mode:', e);
                                                                     }
                                                                 }}
-                                                                className={`w-9 h-5 rounded-full relative transition-colors ${(!profileStatus.hasProfile || !isPremium) ? 'opacity-40 cursor-not-allowed bg-bg-toggle-switch' : profileStatus.profileMode ? 'bg-accent-primary cursor-pointer' : 'bg-bg-toggle-switch border border-border-muted cursor-pointer'}`}
+                                                                className={`w-9 h-5 rounded-full relative transition-colors ${(!profileStatus.hasProfile || !isPremium) ? 'opacity-40 cursor-not-allowed bg-bg-toggle-switch' : profileStatus.profileMode ? 'bg-accent-primary' : 'bg-bg-toggle-switch border border-border-muted'}`}
                                                             >
                                                                 <div className={`absolute top-1 left-1 w-3 h-3 rounded-full bg-white transition-transform ${profileStatus.profileMode && isPremium ? 'translate-x-4' : 'translate-x-0'}`} />
                                                             </div>
@@ -1655,7 +1958,18 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
 
                                                 <div className="space-y-3">
                                                     <div>
-                                                        <label className="text-[10px] font-semibold text-text-secondary uppercase tracking-wide mb-1.5 block">API Key</label>
+                                                        <div className="flex justify-between items-center mb-1.5">
+                                                            <label className="text-[10px] font-semibold text-text-secondary uppercase tracking-wide block">API Key</label>
+                                                            {hasStoredGoogleSearchKey && (
+                                                                <button
+                                                                    onClick={() => handleRemoveGoogleSearchKey('apikey')}
+                                                                    className="text-[10px] flex items-center gap-1 text-red-400 hover:text-red-300 transition-colors bg-red-500/10 hover:bg-red-500/20 px-1.5 py-0.5 rounded"
+                                                                    title="Remove API Key"
+                                                                >
+                                                                    <Trash2 size={10} strokeWidth={2} /> Remove
+                                                                </button>
+                                                            )}
+                                                        </div>
                                                         <input
                                                             type="password"
                                                             value={googleSearchApiKey}
@@ -1665,7 +1979,18 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                         />
                                                     </div>
                                                     <div>
-                                                        <label className="text-[10px] font-semibold text-text-secondary uppercase tracking-wide mb-1.5 block">Custom Search Engine ID</label>
+                                                        <div className="flex justify-between items-center mb-1.5">
+                                                            <label className="text-[10px] font-semibold text-text-secondary uppercase tracking-wide block">Custom Search Engine ID</label>
+                                                            {hasStoredGoogleSearchCseId && (
+                                                                <button
+                                                                    onClick={() => handleRemoveGoogleSearchKey('cseid')}
+                                                                    className="text-[10px] flex items-center gap-1 text-red-400 hover:text-red-300 transition-colors bg-red-500/10 hover:bg-red-500/20 px-1.5 py-0.5 rounded"
+                                                                    title="Remove CSE ID"
+                                                                >
+                                                                    <Trash2 size={10} strokeWidth={2} /> Remove
+                                                                </button>
+                                                            )}
+                                                        </div>
                                                         <input
                                                             type="text"
                                                             value={googleSearchCseId}
@@ -1705,7 +2030,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                 <div className="mt-3 flex items-start gap-2 px-3 py-2.5 bg-bg-input/50 rounded-lg">
                                                     <Info size={12} className="text-text-tertiary shrink-0 mt-0.5" />
                                                     <p className="text-[10px] text-text-tertiary leading-relaxed">
-                                                        If not provided, LLM general knowledge is used for company research, which may be outdated. Get your API key from the <span className="text-emerald-500/80 hover:text-emerald-400 cursor-pointer underline underline-offset-2" onClick={() => window.electronAPI?.openExternal?.('https://console.cloud.google.com/apis/credentials')}>Google Cloud Console</span> and create a Custom Search Engine at <span className="text-emerald-500/80 hover:text-emerald-400 cursor-pointer underline underline-offset-2" onClick={() => window.electronAPI?.openExternal?.('https://cse.google.com/cse/create/new')}>cse.google.com</span>.
+                                                        If not provided, LLM general knowledge is used for company research, which may be outdated. Get your API key from the <span className="text-emerald-500/80 hover:text-emerald-400 underline underline-offset-2" onClick={() => window.electronAPI?.openExternal?.('https://console.cloud.google.com/apis/credentials')}>Google Cloud Console</span> and create a Custom Search Engine at <span className="text-emerald-500/80 hover:text-emerald-400 underline underline-offset-2" onClick={() => window.electronAPI?.openExternal?.('https://cse.google.com/cse/create/new')}>cse.google.com</span>.
                                                     </p>
                                                 </div>
                                             </div>
@@ -2365,7 +2690,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                             setUseExperimentalSck(newState);
                                                             window.localStorage.setItem('useExperimentalSckBackend', newState ? 'true' : 'false');
                                                         }}
-                                                        className={`w-11 h-6 rounded-full relative cursor-pointer transition-colors shrink-0 ${useExperimentalSck ? 'bg-amber-500' : 'bg-bg-toggle-switch border border-border-muted'}`}
+                                                        className={`w-11 h-6 rounded-full relative transition-colors shrink-0 ${useExperimentalSck ? 'bg-amber-500' : 'bg-bg-toggle-switch border border-border-muted'}`}
                                                     >
                                                         <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white transition-transform ${useExperimentalSck ? 'translate-x-5' : 'translate-x-0'}`} />
                                                     </div>
@@ -2462,6 +2787,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                 <AboutSection />
                             )}
                         </div>
+                    </div>
                     </motion.div>
                 </motion.div>
             )
@@ -2481,6 +2807,21 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                     setProfileStatus(prev => ({ ...prev, profileMode: false }));
                 }}
             />
+
+            {/* ------------------------------------------------------------------ */}
+            {/* Live Preview — mockup sits below the z-50 modal                    */}
+            {/* ------------------------------------------------------------------ */}
+            {/* ------------------------------------------------------------------ */}
+            {/* Live Preview — mockup sits below the z-50 modal                    */}
+            {/* ALWAYS MOUNTED to prevent React AnimatePresence lag spikes         */}
+            {/* ------------------------------------------------------------------ */}
+            <div
+                id="settings-mockup-wrapper"
+                className="fixed inset-0 z-[49] pointer-events-none transition-opacity duration-150"
+                style={{ opacity: isPreviewingOpacity ? 1 : 0 }}
+            >
+                <MockupNativelyInterface opacity={overlayOpacity} />
+            </div>
         </AnimatePresence >
     );
 };

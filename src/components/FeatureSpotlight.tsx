@@ -268,7 +268,6 @@ export const FeatureSpotlight: React.FC = () => {
                                             hover:brightness-105
                                             active:scale-[0.98]
                                             overflow-hidden
-                                            cursor-pointer
                                             ${isSupport
                                                 ? 'mt-2 translate-y-5 px-6 py-2 text-[13px] font-medium text-[#1C1C1E]'
                                                 : 'px-10 py-2.5 text-[13px] font-medium text-[#F5F7FA]'

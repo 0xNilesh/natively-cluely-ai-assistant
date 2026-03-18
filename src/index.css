@@ -223,10 +223,7 @@ a {
   cursor: default;
 }
 
-/* Override cursor for clickable items */
-button:hover,
-[role="button"]:hover,
-a:hover,
+/* Explicit cursor class when pointer is explicitly needed */
 .cursor-pointer {
   cursor: pointer;
 }
@@ -257,4 +254,9 @@ a:hover,
 
 .animate-shine {
   animation: shine 2s infinite;
+}
+
+/* Force instant transitions globally during previews */
+.disable-transitions, .disable-transitions * {
+  transition: none !important;
 }

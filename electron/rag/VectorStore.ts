@@ -599,6 +599,54 @@ export class VectorStore {
     }
 
 
+    /**
+     * Clear embeddings for a single meeting without deleting chunks.
+     * Used when falling back to a different provider mid-stream — the chunks
+     * are kept but their embedding BLOBs, vec0 rows, and provider metadata
+     * are wiped so the new provider can embed them cleanly.
+     */
+    clearEmbeddingsForMeeting(meetingId: string): void {
+        // Wipe embedding blobs from chunks and summaries
+        this.db.prepare('UPDATE chunks SET embedding = NULL WHERE meeting_id = ?').run(meetingId);
+        this.db.prepare('UPDATE chunk_summaries SET embedding = NULL WHERE meeting_id = ?').run(meetingId);
+
+        // Reset provider metadata so it gets re-assigned by the fallback provider
+        this.db.prepare(
+            'UPDATE meetings SET embedding_provider = NULL, embedding_dimensions = NULL WHERE id = ?'
+        ).run(meetingId);
+
+        // Delete rows from all per-dimension vec0 tables
+        if (this.useNativeVec) {
+            try {
+                const cIds = this.db.prepare('SELECT id FROM chunks WHERE meeting_id = ?').all(meetingId) as any[];
+                if (cIds.length > 0) {
+                    const placeholders = cIds.map(() => '?').join(',');
+                    const idList = cIds.map(r => r.id);
+                    for (const dim of DatabaseManager.KNOWN_DIMS) {
+                        try {
+                            this.db.prepare(
+                                `DELETE FROM vec_chunks_${dim} WHERE chunk_id IN (${placeholders})`
+                            ).run(...idList);
+                        } catch (_) { /* dim table may not exist */ }
+                    }
+                }
+
+                const sRow = this.db.prepare('SELECT id FROM chunk_summaries WHERE meeting_id = ?').get(meetingId) as any;
+                if (sRow) {
+                    for (const dim of DatabaseManager.KNOWN_DIMS) {
+                        try {
+                            this.db.prepare(`DELETE FROM vec_summaries_${dim} WHERE summary_id = ?`).run(sRow.id);
+                        } catch (_) { /* dim table may not exist */ }
+                    }
+                }
+            } catch (e) {
+                console.warn('[VectorStore] clearEmbeddingsForMeeting: error deleting from vec0 tables:', e);
+            }
+        }
+
+        console.log(`[VectorStore] Cleared embeddings for meeting ${meetingId} (chunks preserved for re-embedding)`);
+    }
+
     // ============================================
     // Private Helpers
     // ============================================

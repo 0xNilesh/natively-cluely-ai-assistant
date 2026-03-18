@@ -114,7 +114,7 @@ export class ErrorBoundary extends Component<Props, State> {
                             display: 'flex', alignItems: 'center', gap: '6px',
                             padding: '8px 14px', borderRadius: '8px', border: 'none',
                             background: '#222', color: '#ccc', fontSize: '12px',
-                            cursor: 'pointer', fontWeight: 500
+                            cursor: 'default', fontWeight: 500
                         }}
                     >
                         <RefreshCw size={13} />
@@ -126,7 +126,7 @@ export class ErrorBoundary extends Component<Props, State> {
                             display: 'flex', alignItems: 'center', gap: '6px',
                             padding: '8px 14px', borderRadius: '8px', border: 'none',
                             background: '#ff4444', color: '#fff', fontSize: '12px',
-                            cursor: 'pointer', fontWeight: 500
+                            cursor: 'default', fontWeight: 500
                         }}
                     >
                         <RefreshCw size={13} />
