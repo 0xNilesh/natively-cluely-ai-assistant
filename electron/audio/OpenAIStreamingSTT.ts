@@ -37,8 +37,9 @@ const RECONNECT_MAX_MS  = 30_000;
 /** Keep-alive ping interval (ms) — prevents idle disconnects */
 const KEEPALIVE_INTERVAL_MS = 20_000;
 
-/** Rolling audio ring-buffer: max ~30 seconds at 24kHz mono 16-bit (WS path) */
-const MAX_RING_BUFFER_BYTES = 24_000 * 2 * 30; // 1 440 000 bytes
+/** Rolling audio ring-buffer: sized for worst-case raw INPUT audio (48kHz stereo 16-bit × 30s).
+ *  The ring buffer stores PRE-RESAMPLED chunks from write(), not the 24kHz WS output. */
+const MAX_RING_BUFFER_BYTES = 48_000 * 2 * 2 * 30; // 5 760 000 bytes (48kHz stereo × 16-bit × 30s)
 
 /** REST safety-net flush interval when in REST fallback mode */
 const REST_SAFETY_NET_MS = 10_000;
@@ -168,6 +169,24 @@ export class OpenAIStreamingSTT extends EventEmitter {
         console.log('[OpenAIStreaming] Stopping...');
         this.isActive        = false;
         this.shouldReconnect = false;
+
+        // Flush any remaining buffered audio to the WS before closing so we
+        // don't silently drop up to ~250ms of speech at the end of a session.
+        if (this.mode === 'ws' && this.ws?.readyState === WebSocket.OPEN &&
+            this.isSessionReady && this.pcmAccumulatorLen > 0) {
+            const combined = new Int16Array(this.pcmAccumulatorLen);
+            let offset = 0;
+            for (const arr of this.pcmAccumulator) {
+                combined.set(arr, offset);
+                offset += arr.length;
+            }
+            try {
+                this.ws.send(JSON.stringify({
+                    type:  'input_audio_buffer.append',
+                    audio: Buffer.from(combined.buffer).toString('base64'),
+                }));
+            } catch { /* ignore — we're closing anyway */ }
+        }
 
         this._clearTimers();
         this._closeWs(false);
@@ -622,7 +641,7 @@ export class OpenAIStreamingSTT extends EventEmitter {
 
         // Downsample to 16kHz mono before creating WAV (input may be 48kHz)
         const pcm16k = this._resamplePcm16(rawPcm, REST_SAMPLE_RATE);
-        const wavBuffer = this._addWavHeader(pcm16k);
+        const wavBuffer = this._addWavHeader(pcm16k, REST_SAMPLE_RATE);
         this.restIsUploading = true;
 
         try {
@@ -734,7 +753,9 @@ export class OpenAIStreamingSTT extends EventEmitter {
         return Math.sqrt(sum / count) < SILENCE_RMS_THRESHOLD;
     }
 
-    private _addWavHeader(samples: Buffer): Buffer {
+    /** Build a WAV file header for mono 16-bit PCM at the given sample rate.
+     *  The caller is responsible for passing the correct rate that matches `samples`. */
+    private _addWavHeader(samples: Buffer, sampleRate: number): Buffer {
         const buf = Buffer.alloc(44 + samples.length);
         buf.write('RIFF', 0);
         buf.writeUInt32LE(36 + samples.length, 4);
@@ -743,8 +764,8 @@ export class OpenAIStreamingSTT extends EventEmitter {
         buf.writeUInt32LE(16, 16);
         buf.writeUInt16LE(1, 20);                                                                   // PCM
         buf.writeUInt16LE(NUM_CHANNELS, 22);
-        buf.writeUInt32LE(REST_SAMPLE_RATE, 24);
-        buf.writeUInt32LE(REST_SAMPLE_RATE * NUM_CHANNELS * (BITS_PER_SAMPLE / 8), 28);
+        buf.writeUInt32LE(sampleRate, 24);
+        buf.writeUInt32LE(sampleRate * NUM_CHANNELS * (BITS_PER_SAMPLE / 8), 28);
         buf.writeUInt16LE(NUM_CHANNELS * (BITS_PER_SAMPLE / 8), 32);
         buf.writeUInt16LE(BITS_PER_SAMPLE, 34);
         buf.write('data', 36);
