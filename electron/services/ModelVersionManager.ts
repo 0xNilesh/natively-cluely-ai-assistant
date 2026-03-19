@@ -85,7 +85,7 @@ interface PersistedState {
 
 /** Hardcoded baseline models for vision Tier 1 (initial pinned stable) */
 const BASELINE_MODELS: Record<ModelFamily, string> = {
-  [ModelFamily.OPENAI]: 'gpt-5.4-chat',
+  [ModelFamily.OPENAI]: 'gpt-5.4',
   [ModelFamily.GEMINI_FLASH]: 'gemini-3.1-flash-lite-preview',
   [ModelFamily.GEMINI_PRO]: 'gemini-3.1-pro-preview',
   [ModelFamily.CLAUDE]: 'claude-sonnet-4-6',
@@ -94,7 +94,7 @@ const BASELINE_MODELS: Record<ModelFamily, string> = {
 
 /** Hardcoded baseline models for text Tier 1 */
 const TEXT_BASELINE_MODELS: Record<TextModelFamily, string> = {
-  [TextModelFamily.OPENAI]: 'gpt-5.4-chat',
+  [TextModelFamily.OPENAI]: 'gpt-5.4',
   [TextModelFamily.GEMINI_FLASH]: 'gemini-3.1-flash-lite-preview',
   [TextModelFamily.GEMINI_PRO]: 'gemini-3.1-pro-preview',
   [TextModelFamily.CLAUDE]: 'claude-sonnet-4-6',
@@ -134,7 +134,7 @@ const EVENT_DISCOVERY_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
  * Extract a semantic version from a model identifier string.
  *
  * Handles diverse and irregular naming conventions:
- *   "gpt-5.4-chat-latest"                     → { major:5, minor:4, patch:0 }
+ *   "gpt-5.4"                                  → { major:5, minor:4, patch:0 }
  *   "gpt-5.4"                                  → { major:5, minor:4, patch:0 }
  *   "gemini-3.1-flash-lite-preview"            → { major:3, minor:1, patch:0 }
  *   "gemini-3.1-pro-preview"                   → { major:3, minor:1, patch:0 }

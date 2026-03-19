@@ -258,11 +258,6 @@ export interface ElectronAPI {
   setGoogleSearchApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
   setGoogleSearchCseId: (cseId: string) => Promise<{ success: boolean; error?: string }>
 
-  // Cropper API
-  cropperConfirmed: (bounds: Electron.Rectangle) => void
-  cropperCancelled: () => void
-  onResetCropper: (callback: (data: { hudPosition: { x: number; y: number } }) => void) => () => void
-
   // Dynamic Model Discovery
   fetchProviderModels: (provider: 'gemini' | 'groq' | 'openai' | 'claude', apiKey: string) => Promise<{ success: boolean; models?: {id: string, label: string}[]; error?: string }>
   setProviderPreferredModel: (provider: 'gemini' | 'groq' | 'openai' | 'claude', modelId: string) => Promise<void>
@@ -274,8 +269,13 @@ export interface ElectronAPI {
   licenseGetHardwareId: () => Promise<string>
 
   // Overlay Opacity (Stealth Mode)
-  setOverlayOpacity: (opacity: number) => Promise<void>
-  onOverlayOpacityChanged: (callback: (opacity: number) => void) => () => void
+  setOverlayOpacity: (opacity: number) => Promise<void>;
+  onOverlayOpacityChanged: (callback: (opacity: number) => void) => () => void;
+
+  // Cropper API
+  cropperConfirmed: (bounds: { x: number; y: number; width: number; height: number }) => void;
+  cropperCancelled: () => void;
+  onResetCropper: (callback: (data: { hudPosition: { x: number; y: number } }) => void) => () => void;
 }
 
 declare global {

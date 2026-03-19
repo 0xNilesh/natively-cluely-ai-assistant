@@ -1563,7 +1563,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                         onPointerUp={stopPreviewingOpacity}
                                                         onPointerCancel={stopPreviewingOpacity}
                                                         onPointerLeave={stopPreviewingOpacity}
-                                                        className="w-full h-1.5 rounded-full appearance-none bg-bg-input accent-accent-primary cursor-pointer"
+                                                        className="w-full h-1.5 rounded-full appearance-none bg-bg-input accent-accent-primary"
                                                         style={{ WebkitAppearance: 'none' } as React.CSSProperties}
                                                     />
 

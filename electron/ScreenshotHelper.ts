@@ -4,73 +4,55 @@ import path from "node:path"
 import fs from "node:fs"
 import { app, desktopCapturer, screen } from "electron"
 import { v4 as uuidv4 } from "uuid"
-import screenshot from "screenshot-desktop"
 import util from "util"
 import sharp from "sharp"
 
 /**
- * Finds which display contains the given point (x, y).
- * Accounts for multi-monitor setups where coordinates can be negative
- * or offset from the primary display.
- */
-function getDisplayContainingPoint(x: number, y: number): Electron.Display | null {
-    const displays = screen.getAllDisplays();
-    
-    for (const display of displays) {
-        const { x: dx, y: dy, width, height } = display.bounds;
-        if (x >= dx && x < dx + width && y >= dy && y < dy + height) {
-            return display;
-        }
-    }
-    
-    // Fallback to primary if no display found
-    return screen.getPrimaryDisplay();
-}
-
-/**
  * Finds the display that best contains the given rectangle.
  * Used to determine which monitor to capture for a selection area.
+ * Falls back to primary display if no match is found.
  */
 function getDisplayContainingRect(rect: Electron.Rectangle): Electron.Display {
-    const displays = screen.getAllDisplays();
-    
-    // Find display that contains the center point
-    const centerX = rect.x + rect.width / 2;
-    const centerY = rect.y + rect.height / 2;
-    
-    for (const display of displays) {
-        const { x: dx, y: dy, width, height } = display.bounds;
-        if (centerX >= dx && centerX < dx + width && centerY >= dy && centerY < dy + height) {
-            return display;
-        }
+  const displays = screen.getAllDisplays();
+  
+  // Find display that contains the center point
+  const centerX = rect.x + rect.width / 2;
+  const centerY = rect.y + rect.height / 2;
+  
+  for (const display of displays) {
+    const { x: dx, y: dy, width, height } = display.bounds;
+    if (centerX >= dx && centerX < dx + width && centerY >= dy && centerY < dy + height) {
+      return display;
     }
+  }
+  
+  // Check if any part of the rect is on this display
+  for (const display of displays) {
+    const { x: dx, y: dy, width, height } = display.bounds;
+    const displayRight = dx + width;
+    const displayBottom = dy + height;
+    const rectRight = rect.x + rect.width;
+    const rectBottom = rect.y + rect.height;
     
-    // Check if any part of the rect is on this display
-    for (const display of displays) {
-        const { x: dx, y: dy, width, height } = display.bounds;
-        const displayRight = dx + width;
-        const displayBottom = dy + height;
-        const rectRight = rect.x + rect.width;
-        const rectBottom = rect.y + rect.height;
-        
-        // Check for overlap
-        if (rect.x < displayRight && rectRight > dx && rect.y < displayBottom && rectBottom > dy) {
-            return display;
-        }
+    // Check for overlap
+    if (rect.x < displayRight && rectRight > dx && rect.y < displayBottom && rectBottom > dy) {
+      return display;
     }
-    
-    return screen.getPrimaryDisplay();
+  }
+  
+  return screen.getPrimaryDisplay();
 }
+
 
 /**
  * Represents a portion of the selection that lies on a specific display.
  */
 interface DisplayCapture {
-    display: Electron.Display;
-    /** The intersection of selection with this display (in screen coordinates) */
-    intersection: Electron.Rectangle;
-    /** Buffer containing the cropped image data */
-    imageBuffer: Buffer;
+  display: Electron.Display;
+  /** The intersection of selection with this display (in screen coordinates) */
+  intersection: Electron.Rectangle;
+  /** Buffer containing the cropped image data */
+  imageBuffer: Buffer;
 }
 
 /**
@@ -78,186 +60,186 @@ interface DisplayCapture {
  * Returns an array of display captures with their intersection rectangles.
  */
 async function getDisplaysIntersectingSelection(
-    selection: Electron.Rectangle
+  selection: Electron.Rectangle
 ): Promise<DisplayCapture[]> {
-    const displays = screen.getAllDisplays();
-    const selectionRight = selection.x + selection.width;
-    const selectionBottom = selection.y + selection.height;
+  const displays = screen.getAllDisplays();
+  const selectionRight = selection.x + selection.width;
+  const selectionBottom = selection.y + selection.height;
+  
+  // Get all screen sources for desktopCapturer
+  let sources: Electron.DesktopCapturerSource[];
+  
+  // Determine appropriate thumbnail size - use largest display
+  let maxWidth = 0;
+  let maxHeight = 0;
+  for (const display of displays) {
+    const { width, height } = display.bounds;
+    const scaledWidth = Math.round(width * display.scaleFactor);
+    const scaledHeight = Math.round(height * display.scaleFactor);
+    maxWidth = Math.max(maxWidth, scaledWidth);
+    maxHeight = Math.max(maxHeight, scaledHeight);
+  }
+  
+  try {
+    sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width: maxWidth, height: maxHeight }
+    });
+  } catch (error) {
+    console.error('[ScreenshotHelper] Failed to get desktop sources:', error);
+    throw error;
+  }
+  
+  console.log(`[ScreenshotHelper] Found ${sources.length} screen sources for ${displays.length} displays`);
+  
+  // Build a map of source by display_id for reliable matching
+  // On Windows, source.display_id is a string representation of the display id
+  const sourceByDisplayId = new Map<string, Electron.DesktopCapturerSource>();
+  for (const src of sources) {
+    if ('display_id' in src && src.display_id) {
+      sourceByDisplayId.set(src.display_id, src);
+      console.log(`[ScreenshotHelper] Registered source: ${src.name} with display_id: ${src.display_id}`);
+    }
+  }
+  
+  const captures: DisplayCapture[] = [];
+  
+  // For each display, check if selection intersects with it
+  for (const display of displays) {
+    const { x: dx, y: dy, width: dWidth, height: dHeight } = display.bounds;
+    const displayRight = dx + dWidth;
+    const displayBottom = dy + dHeight;
     
-    // Get all screen sources for desktopCapturer
-    let sources: Electron.DesktopCapturerSource[];
+    // Check if selection intersects with this display
+    const intersectsX = selection.x < displayRight && selectionRight > dx;
+    const intersectsY = selection.y < displayBottom && selectionBottom > dy;
     
-    // Determine appropriate thumbnail size - use largest display
-    let maxWidth = 0;
-    let maxHeight = 0;
-    for (const display of displays) {
-        const { width, height } = display.bounds;
-        const scaledWidth = Math.round(width * display.scaleFactor);
-        const scaledHeight = Math.round(height * display.scaleFactor);
-        maxWidth = Math.max(maxWidth, scaledWidth);
-        maxHeight = Math.max(maxHeight, scaledHeight);
+    if (!intersectsX || !intersectsY) {
+      continue;
     }
     
-    try {
-        sources = await desktopCapturer.getSources({
-            types: ['screen'],
-            thumbnailSize: { width: maxWidth, height: maxHeight }
-        });
-    } catch (error) {
-        console.error('[ScreenshotHelper] Failed to get desktop sources:', error);
-        throw error;
+    // Calculate intersection
+    const intersection: Electron.Rectangle = {
+      x: Math.max(selection.x, dx),
+      y: Math.max(selection.y, dy),
+      width: Math.min(selectionRight, displayRight) - Math.max(selection.x, dx),
+      height: Math.min(selectionBottom, displayBottom) - Math.max(selection.y, dy)
+    };
+    
+    console.log(`[ScreenshotHelper] Selection intersects with display ${display.id}:`, intersection);
+    
+    const scaleFactor = display.scaleFactor;
+    
+    // Find the corresponding source using the pre-built map
+    const displayIdStr = display.id.toString();
+    let source = sourceByDisplayId.get(displayIdStr);
+    
+    // Fallback: index-based matching (less reliable)
+    if (!source) {
+      console.warn(`[ScreenshotHelper] display_id ${displayIdStr} not found in sources, using index-based fallback`);
+      const displayIndex = displays.findIndex(d => d.id === display.id);
+      if (displayIndex === -1) {
+        console.error(`[ScreenshotHelper] CRITICAL: Display ${display.id} not found in displays array. Available displays:`, displays.map(d => d.id));
+      } else if (displayIndex >= sources.length) {
+        console.warn(`[ScreenshotHelper] Index ${displayIndex} out of bounds for sources (${sources.length} sources). Using first source.`);
+      } else {
+        console.log(`[ScreenshotHelper] Fallback: matched display[${displayIndex}] to sources[${displayIndex}] = ${sources[displayIndex]?.name || 'unknown'}`);
+      }
+      source = sources[displayIndex] || sources[0];
     }
     
-    console.log(`[ScreenshotHelper] Found ${sources.length} screen sources for ${displays.length} displays`);
-    
-    // Build a map of source by display_id for reliable matching
-    // On Windows, source.display_id is a string representation of the display id
-    const sourceByDisplayId = new Map<string, Electron.DesktopCapturerSource>();
-    for (const src of sources) {
-        if ('display_id' in src && src.display_id) {
-            sourceByDisplayId.set(src.display_id, src);
-            console.log(`[ScreenshotHelper] Registered source: ${src.name} with display_id: ${src.display_id}`);
-        }
+    if (!source) {
+      source = sources[0];
     }
     
-    const captures: DisplayCapture[] = [];
+    console.log(`[ScreenshotHelper] Final source for display ${display.id}: ${source.name}`);
     
-    // For each display, check if selection intersects with it
-    for (const display of displays) {
-        const { x: dx, y: dy, width: dWidth, height: dHeight } = display.bounds;
-        const displayRight = dx + dWidth;
-        const displayBottom = dy + dHeight;
-        
-        // Check if selection intersects with this display
-        const intersectsX = selection.x < displayRight && selectionRight > dx;
-        const intersectsY = selection.y < displayBottom && selectionBottom > dy;
-        
-        if (!intersectsX || !intersectsY) {
-            continue;
-        }
-        
-        // Calculate intersection
-        const intersection: Electron.Rectangle = {
-            x: Math.max(selection.x, dx),
-            y: Math.max(selection.y, dy),
-            width: Math.min(selectionRight, displayRight) - Math.max(selection.x, dx),
-            height: Math.min(selectionBottom, displayBottom) - Math.max(selection.y, dy)
-        };
-        
-        console.log(`[ScreenshotHelper] Selection intersects with display ${display.id}:`, intersection);
-        
-        const scaleFactor = display.scaleFactor;
-        
-        // Find the corresponding source using the pre-built map
-        const displayIdStr = display.id.toString();
-        let source = sourceByDisplayId.get(displayIdStr);
-        
-        // Fallback: index-based matching (less reliable)
-        if (!source) {
-            console.warn(`[ScreenshotHelper] display_id ${displayIdStr} not found in sources, using index-based fallback`);
-            const displayIndex = displays.findIndex(d => d.id === display.id);
-            if (displayIndex === -1) {
-                console.error(`[ScreenshotHelper] CRITICAL: Display ${display.id} not found in displays array. Available displays:`, displays.map(d => d.id));
-            } else if (displayIndex >= sources.length) {
-                console.warn(`[ScreenshotHelper] Index ${displayIndex} out of bounds for sources (${sources.length} sources). Using first source.`);
-            } else {
-                console.log(`[ScreenshotHelper] Fallback: matched display[${displayIndex}] to sources[${displayIndex}] = ${sources[displayIndex]?.name || 'unknown'}`);
-            }
-            source = sources[displayIndex] || sources[0];
-        }
-        
-        if (!source) {
-            source = sources[0];
-        }
-        
-        console.log(`[ScreenshotHelper] Final source for display ${display.id}: ${source.name}`);
-        
-        // Get source thumbnail info
-        const sourceSize = source.thumbnail.getSize();
-        console.log(`[ScreenshotHelper] Source thumbnail size: ${sourceSize.width}x${sourceSize.height}, display bounds: ${display.bounds.width}x${display.bounds.height}`);
-        
-        // CRITICAL: desktopCapturer returns thumbnail in DISPLAY'S NATIVE resolution
-        // NOT scaled to a common size. Different displays may have different resolutions.
-        // 
-        // We need to normalize crop coordinates to the thumbnail's coordinate system.
-        // The ratio sourceSize / display.bounds gives us the scaling factor.
-        
-        // Calculate the ratio between thumbnail and display bounds
-        // This accounts for any difference in how desktopCapturer captures each display
-        let thumbnailToBoundsRatioX = display.bounds.width > 0 ? sourceSize.width / display.bounds.width : 1;
-        let thumbnailToBoundsRatioY = display.bounds.height > 0 ? sourceSize.height / display.bounds.height : 1;
-        
-        // Guard against Infinity values (e.g., if sourceSize >> bounds due to DPI mismatch)
-        const MAX_RATIO = 10;
-        if (!isFinite(thumbnailToBoundsRatioX)) {
-            console.warn(`[ScreenshotHelper] thumbnailToBoundsRatioX is ${thumbnailToBoundsRatioX}, clamping to ${MAX_RATIO}`);
-            thumbnailToBoundsRatioX = MAX_RATIO;
-        }
-        if (!isFinite(thumbnailToBoundsRatioY)) {
-            console.warn(`[ScreenshotHelper] thumbnailToBoundsRatioY is ${thumbnailToBoundsRatioY}, clamping to ${MAX_RATIO}`);
-            thumbnailToBoundsRatioY = MAX_RATIO;
-        }
-        
-        console.log(`[ScreenshotHelper] Thumbnail to bounds ratio: ${thumbnailToBoundsRatioX}x${thumbnailToBoundsRatioY}`);
-        
-        // Intersection coordinates are in screen coordinates (physical pixels)
-        // We need to convert them to thumbnail coordinates
-        const cropX = Math.round((intersection.x - display.bounds.x) * thumbnailToBoundsRatioX);
-        const cropY = Math.round((intersection.y - display.bounds.y) * thumbnailToBoundsRatioY);
-        const cropWidth = Math.round(intersection.width * thumbnailToBoundsRatioX);
-        const cropHeight = Math.round(intersection.height * thumbnailToBoundsRatioY);
-        
-        console.log(`[ScreenshotHelper] Crop params: x=${cropX}, y=${cropY}, w=${cropWidth}, h=${cropHeight}`);
-        
-        // Ensure crop is within image bounds
-        const clampedX = Math.max(0, Math.min(cropX, sourceSize.width));
-        const clampedY = Math.max(0, Math.min(cropY, sourceSize.height));
-        const clampedWidth = Math.max(0, Math.min(cropWidth, sourceSize.width - clampedX));
-        const clampedHeight = Math.max(0, Math.min(cropHeight, sourceSize.height - clampedY));
-        
-        const cropped = source.thumbnail.crop({
-            x: clampedX,
-            y: clampedY,
-            width: clampedWidth,
-            height: clampedHeight
-        });
-        
-        captures.push({
-            display,
-            intersection,
-            imageBuffer: cropped.toPNG()
-        });
+    // Get source thumbnail info
+    const sourceSize = source.thumbnail.getSize();
+    console.log(`[ScreenshotHelper] Source thumbnail size: ${sourceSize.width}x${sourceSize.height}, display bounds: ${display.bounds.width}x${display.bounds.height}`);
+    
+    // CRITICAL: desktopCapturer returns thumbnail in DISPLAY'S NATIVE resolution
+    // NOT scaled to a common size. Different displays may have different resolutions.
+    // 
+    // We need to normalize crop coordinates to the thumbnail's coordinate system.
+    // The ratio sourceSize / display.bounds gives us the scaling factor.
+    
+    // Calculate the ratio between thumbnail and display bounds
+    // This accounts for any difference in how desktopCapturer captures each display
+    let thumbnailToBoundsRatioX = display.bounds.width > 0 ? sourceSize.width / display.bounds.width : 1;
+    let thumbnailToBoundsRatioY = display.bounds.height > 0 ? sourceSize.height / display.bounds.height : 1;
+    
+    // Guard against Infinity values (e.g., if sourceSize >> bounds due to DPI mismatch)
+    const MAX_RATIO = 10;
+    if (!isFinite(thumbnailToBoundsRatioX)) {
+      console.warn(`[ScreenshotHelper] thumbnailToBoundsRatioX is ${thumbnailToBoundsRatioX}, clamping to ${MAX_RATIO}`);
+      thumbnailToBoundsRatioX = MAX_RATIO;
+    }
+    if (!isFinite(thumbnailToBoundsRatioY)) {
+      console.warn(`[ScreenshotHelper] thumbnailToBoundsRatioY is ${thumbnailToBoundsRatioY}, clamping to ${MAX_RATIO}`);
+      thumbnailToBoundsRatioY = MAX_RATIO;
     }
     
-    return captures;
+    console.log(`[ScreenshotHelper] Thumbnail to bounds ratio: ${thumbnailToBoundsRatioX}x${thumbnailToBoundsRatioY}`);
+    
+    // Intersection coordinates are in screen coordinates (physical pixels)
+    // We need to convert them to thumbnail coordinates
+    const cropX = Math.round((intersection.x - display.bounds.x) * thumbnailToBoundsRatioX);
+    const cropY = Math.round((intersection.y - display.bounds.y) * thumbnailToBoundsRatioY);
+    const cropWidth = Math.round(intersection.width * thumbnailToBoundsRatioX);
+    const cropHeight = Math.round(intersection.height * thumbnailToBoundsRatioY);
+    
+    console.log(`[ScreenshotHelper] Crop params: x=${cropX}, y=${cropY}, w=${cropWidth}, h=${cropHeight}`);
+    
+    // Ensure crop is within image bounds
+    const clampedX = Math.max(0, Math.min(cropX, sourceSize.width));
+    const clampedY = Math.max(0, Math.min(cropY, sourceSize.height));
+    const clampedWidth = Math.max(0, Math.min(cropWidth, sourceSize.width - clampedX));
+    const clampedHeight = Math.max(0, Math.min(cropHeight, sourceSize.height - clampedY));
+    
+    const cropped = source.thumbnail.crop({
+      x: clampedX,
+      y: clampedY,
+      width: clampedWidth,
+      height: clampedHeight
+    });
+    
+    captures.push({
+      display,
+      intersection,
+      imageBuffer: cropped.toPNG()
+    });
+  }
+  
+  return captures;
 }
 
 /**
  * Checks if the selection spans multiple displays.
  */
 function isMultiDisplaySelection(selection: Electron.Rectangle): boolean {
-    const displays = screen.getAllDisplays();
+  const displays = screen.getAllDisplays();
+  
+  if (displays.length < 2) {
+    return false;
+  }
+  
+  let displaysHit = 0;
+  
+  for (const display of displays) {
+    const { x: dx, y: dy, width: dWidth, height: dHeight } = display.bounds;
+    const displayRight = dx + dWidth;
+    const displayBottom = dy + dHeight;
     
-    if (displays.length < 2) {
-        return false;
+    const intersectsX = selection.x < displayRight && (selection.x + selection.width) > dx;
+    const intersectsY = selection.y < displayBottom && (selection.y + selection.height) > dy;
+    
+    if (intersectsX && intersectsY) {
+      displaysHit++;
     }
-    
-    let displaysHit = 0;
-    
-    for (const display of displays) {
-        const { x: dx, y: dy, width: dWidth, height: dHeight } = display.bounds;
-        const displayRight = dx + dWidth;
-        const displayBottom = dy + dHeight;
-        
-        const intersectsX = selection.x < displayRight && (selection.x + selection.width) > dx;
-        const intersectsY = selection.y < displayBottom && (selection.y + selection.height) > dy;
-        
-        if (intersectsX && intersectsY) {
-            displaysHit++;
-        }
-    }
-    
-    return displaysHit > 1;
+  }
+  
+  return displaysHit > 1;
 }
 
 /**
@@ -265,97 +247,97 @@ function isMultiDisplaySelection(selection: Electron.Rectangle): boolean {
  * Handles different DPI scales by normalizing all captures to the same physical pixel scale.
  */
 async function stitchImages(captures: DisplayCapture[], selection: Electron.Rectangle): Promise<Buffer> {
-    if (captures.length === 0) {
-        throw new Error('No captures to stitch');
-    }
-    
-    if (captures.length === 1) {
-        // Single display - no stitching needed
-        return captures[0].imageBuffer;
-    }
-    
-    console.log(`[ScreenshotHelper] Stitching ${captures.length} display captures`);
-    console.log(`[ScreenshotHelper] Selection bounds: x=${selection.x}, y=${selection.y}, width=${selection.width}, height=${selection.height}`);
-    
-    // Memory consideration: All capture buffers are held in memory until stitchImages completes.
-    // For 4K monitors, this could mean ~33MB per capture × number of captures.
-    // Example: 4 monitors × 4K × RGBA = ~132MB peak memory usage during stitching.
-    // Future optimization: Process captures one at a time to reduce peak memory.
-    
-    // Log each capture's details
-    for (let i = 0; i < captures.length; i++) {
-        const cap = captures[i];
-        console.log(`[ScreenshotHelper] Capture ${i}: display=${cap.display.id}, displayBounds=(${cap.display.bounds.x}, ${cap.display.bounds.y}, ${cap.display.bounds.width}x${cap.display.bounds.height})`);
-        console.log(`[ScreenshotHelper] Capture ${i}: intersection=(${cap.intersection.x}, ${cap.intersection.y}, ${cap.intersection.width}x${cap.intersection.height})`);
-    }
-    
-    // Output dimensions in physical pixels (same as selection)
-    const outputWidth = Math.round(selection.width);
-    const outputHeight = Math.round(selection.height);
-    
-    console.log(`[ScreenshotHelper] Output dimensions: ${outputWidth}x${outputHeight}`);
-    
-    // Process each capture: resize to fit the output scale
-    const composites: sharp.OverlayOptions[] = [];
-    
-    try {
-        for (const capture of captures) {
-            // Calculate where this capture goes in output coordinates (physical pixels)
-            const outputOffsetX = Math.round(capture.intersection.x - selection.x);
-            const outputOffsetY = Math.round(capture.intersection.y - selection.y);
-            
-            // Calculate the target size for this capture in output coordinates
-            const targetWidth = Math.round(capture.intersection.width);
-            const targetHeight = Math.round(capture.intersection.height);
-            
-            // Get current image dimensions
-            const metadata = await sharp(capture.imageBuffer).metadata();
-            const srcWidth = metadata.width || 1;
-            const srcHeight = metadata.height || 1;
-            
-            console.log(`[ScreenshotHelper] Capture at (${outputOffsetX}, ${outputOffsetY}), source: ${srcWidth}x${srcHeight}, target: ${targetWidth}x${targetHeight}`);
-            
-            // Resize the capture to target dimensions to normalize DPI scales
-            const resizedBuffer = await sharp(capture.imageBuffer)
-                .resize(targetWidth, targetHeight, { fit: 'fill' })
-                .png()
-                .toBuffer();
-            
-            composites.push({
-                input: resizedBuffer,
-                left: outputOffsetX,
-                top: outputOffsetY
-            });
-            
-            console.log(`[ScreenshotHelper] Resized capture to ${targetWidth}x${targetHeight}`);
-        }
-    } catch (error) {
-        console.error('[ScreenshotHelper] Error processing capture buffers:', error);
-        throw new Error(`Failed to process screenshot buffers: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-    
-    // Create a transparent canvas of the output size and composite all images
-    let stitched: Buffer;
-    try {
-        stitched = await sharp({
-            create: {
-                width: outputWidth,
-                height: outputHeight,
-                channels: 4,
-                background: { r: 0, g: 0, b: 0, alpha: 0 }
-            }
-        })
-        .composite(composites)
+  if (captures.length === 0) {
+    throw new Error('No captures to stitch');
+  }
+  
+  if (captures.length === 1) {
+    // Single display - no stitching needed
+    return captures[0].imageBuffer;
+  }
+  
+  console.log(`[ScreenshotHelper] Stitching ${captures.length} display captures`);
+  console.log(`[ScreenshotHelper] Selection bounds: x=${selection.x}, y=${selection.y}, width=${selection.width}, height=${selection.height}`);
+  
+  // Memory consideration: All capture buffers are held in memory until stitchImages completes.
+  // For 4K monitors, this could mean ~33MB per capture × number of captures.
+  // Example: 4 monitors × 4K × RGBA = ~132MB peak memory usage during stitching.
+  // Future optimization: Process captures one at a time to reduce peak memory.
+  
+  // Log each capture's details
+  for (let i = 0; i < captures.length; i++) {
+    const cap = captures[i];
+    console.log(`[ScreenshotHelper] Capture ${i}: display=${cap.display.id}, displayBounds=(${cap.display.bounds.x}, ${cap.display.bounds.y}, ${cap.display.bounds.width}x${cap.display.bounds.height})`);
+    console.log(`[ScreenshotHelper] Capture ${i}: intersection=(${cap.intersection.x}, ${cap.intersection.y}, ${cap.intersection.width}x${cap.intersection.height})`);
+  }
+  
+  // Output dimensions in physical pixels (same as selection)
+  const outputWidth = Math.round(selection.width);
+  const outputHeight = Math.round(selection.height);
+  
+  console.log(`[ScreenshotHelper] Output dimensions: ${outputWidth}x${outputHeight}`);
+  
+  // Process each capture: resize to fit the output scale
+  const composites: sharp.OverlayOptions[] = [];
+  
+  try {
+    for (const capture of captures) {
+      // Calculate where this capture goes in output coordinates (physical pixels)
+      const outputOffsetX = Math.round(capture.intersection.x - selection.x);
+      const outputOffsetY = Math.round(capture.intersection.y - selection.y);
+      
+      // Calculate the target size for this capture in output coordinates
+      const targetWidth = Math.round(capture.intersection.width);
+      const targetHeight = Math.round(capture.intersection.height);
+      
+      // Get current image dimensions
+      const metadata = await sharp(capture.imageBuffer).metadata();
+      const srcWidth = metadata.width || 1;
+      const srcHeight = metadata.height || 1;
+      
+      console.log(`[ScreenshotHelper] Capture at (${outputOffsetX}, ${outputOffsetY}), source: ${srcWidth}x${srcHeight}, target: ${targetWidth}x${targetHeight}`);
+      
+      // Resize the capture to target dimensions to normalize DPI scales
+      const resizedBuffer = await sharp(capture.imageBuffer)
+        .resize(targetWidth, targetHeight, { fit: 'fill' })
         .png()
         .toBuffer();
-    } catch (error) {
-        console.error('[ScreenshotHelper] Error creating stitched image:', error);
-        throw new Error(`Failed to create stitched screenshot: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      
+      composites.push({
+        input: resizedBuffer,
+        left: outputOffsetX,
+        top: outputOffsetY
+      });
+      
+      console.log(`[ScreenshotHelper] Resized capture to ${targetWidth}x${targetHeight}`);
     }
-    
-    console.log(`[ScreenshotHelper] Stitched image created: ${outputWidth}x${outputHeight}`);
-    
-    return stitched;
+  } catch (error) {
+    console.error('[ScreenshotHelper] Error processing capture buffers:', error);
+    throw new Error(`Failed to process screenshot buffers: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+  
+  // Create a transparent canvas of the output size and composite all images
+  let stitched: Buffer;
+  try {
+    stitched = await sharp({
+      create: {
+        width: outputWidth,
+        height: outputHeight,
+        channels: 4,
+        background: { r: 0, g: 0, b: 0, alpha: 0 }
+      }
+    })
+    .composite(composites)
+    .png()
+    .toBuffer();
+  } catch (error) {
+    console.error('[ScreenshotHelper] Error creating stitched image:', error);
+    throw new Error(`Failed to create stitched screenshot: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+  
+  console.log(`[ScreenshotHelper] Stitched image created: ${outputWidth}x${outputHeight}`);
+  
+  return stitched;
 }
 
 export class ScreenshotHelper {
@@ -553,6 +535,7 @@ export class ScreenshotHelper {
       await new Promise(resolve => setTimeout(resolve, 50))
 
       let screenshotPath = ""
+
       const exec = util.promisify(require('child_process').exec)
 
       if (this.view === "queue") {
@@ -660,6 +643,20 @@ export class ScreenshotHelper {
       }
 
       console.log(`[ScreenshotHelper] Selective screenshot successful: ${screenshotPath}`);
+
+      // Add to queue so it appears in getScreenshots() and respects the cap
+      this.screenshotQueue.push(screenshotPath);
+      if (this.screenshotQueue.length > this.MAX_SCREENSHOTS) {
+        const removedPath = this.screenshotQueue.shift();
+        if (removedPath) {
+          try {
+            await fs.promises.unlink(removedPath);
+          } catch {
+            // best-effort cleanup
+          }
+        }
+      }
+
       return screenshotPath
     } catch (error) {
       console.error('[ScreenshotHelper] Failed to take selective screenshot:', error);

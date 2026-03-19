@@ -164,12 +164,9 @@ export class CropperWindowHelper {
         const width = Math.round(bounds.width);
         const height = Math.round(bounds.height);
 
-        // Check for negative coordinates
-        if (x < 0 || y < 0) {
-            console.warn('[CropperWindowHelper] Invalid bounds: negative coordinates', { x, y });
-            return false;
-        }
-
+        // Check for negative coordinates RELATIVE TO THE COMBINED VIEWPORT.
+        // Coords can be negative if a monitor is positioned to the left/above the primary.
+        // We check against combinedBounds below (out-of-bounds check), not against 0.
         // Check for zero or negative dimensions
         if (width <= 0 || height <= 0) {
             console.warn('[CropperWindowHelper] Invalid bounds: zero or negative dimensions', { width, height });
@@ -339,6 +336,8 @@ export class CropperWindowHelper {
                 this.cropperWindow.webContents.send('reset-cropper', { hudPosition });
                 this.applyOpacityShield();
             } else {
+                // Window doesn't exist yet — createWindow will call applyOpacityShield
+                // via ready-to-show once the URL finishes loading.
                 this.createWindow(true);
             }
         });
@@ -507,7 +506,9 @@ export class CropperWindowHelper {
 
     private hideOrClose(): void {
         if (this.cropperWindow && !this.cropperWindow.isDestroyed() && !this.isDisposed) {
+            // Reset opacity before hiding so it's back to 0 on next show (Windows shield sequence)
             if (process.platform === 'win32') {
+                this.cropperWindow.setOpacity(0);
                 this.cropperWindow.hide();
             } else {
                 this.cropperWindow.close();
@@ -566,8 +567,14 @@ export class CropperWindowHelper {
         this.cropperWindow = null;
         console.log('[CropperWindowHelper] Window closed');
 
-        // Reject any pending selection
-        this.rejectCurrentSelection(new Error('CropperWindowHelper has been disposed'));
+        // Reject any pending selection — bypass the isWaitingForSelection guard
+        // since dispose() is a forced cleanup path that can happen at any time.
+        if (this.resolvePromise) {
+            this.resolvePromise(null);
+            this.resolvePromise = null;
+            this.isWaitingForSelection = false;
+            console.log('[CropperWindowHelper] Pending selection rejected due to disposal');
+        }
         console.log('[CropperWindowHelper] Disposal complete');
     }
 }

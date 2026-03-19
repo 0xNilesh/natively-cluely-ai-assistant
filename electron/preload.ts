@@ -276,7 +276,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   onScreenshotTaken: (
     callback: (data: { path: string; preview: string }) => void
   ) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: { path: string; preview: string }) =>
+    const subscription = (_: any, data: { path: string; preview: string }) =>
       callback(data)
     ipcRenderer.on("screenshot-taken", subscription)
     return () => {
@@ -286,7 +286,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   onScreenshotAttached: (
     callback: (data: { path: string; preview: string }) => void
   ) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: { path: string; preview: string }) =>
+    const subscription = (_: any, data: { path: string; preview: string }) =>
       callback(data)
     ipcRenderer.on("screenshot-attached", subscription)
     return () => {
@@ -294,7 +294,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     }
   },
   onSolutionsReady: (callback: (solutions: string) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, solutions: string) => callback(solutions)
+    const subscription = (_: any, solutions: string) => callback(solutions)
     ipcRenderer.on("solutions-ready", subscription)
     return () => {
       ipcRenderer.removeListener("solutions-ready", subscription)
@@ -323,21 +323,21 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
 
   onDebugSuccess: (callback: (data: any) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: any) => callback(data)
+    const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("debug-success", subscription)
     return () => {
       ipcRenderer.removeListener("debug-success", subscription)
     }
   },
   onDebugError: (callback: (error: string) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, error: string) => callback(error)
+    const subscription = (_: any, error: string) => callback(error)
     ipcRenderer.on(PROCESSING_EVENTS.DEBUG_ERROR, subscription)
     return () => {
       ipcRenderer.removeListener(PROCESSING_EVENTS.DEBUG_ERROR, subscription)
     }
   },
   onSolutionError: (callback: (error: string) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, error: string) => callback(error)
+    const subscription = (_: any, error: string) => callback(error)
     ipcRenderer.on(PROCESSING_EVENTS.INITIAL_SOLUTION_ERROR, subscription)
     return () => {
       ipcRenderer.removeListener(
@@ -355,7 +355,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
 
   onProblemExtracted: (callback: (data: any) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: any) => callback(data)
+    const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on(PROCESSING_EVENTS.PROBLEM_EXTRACTED, subscription)
     return () => {
       ipcRenderer.removeListener(
@@ -365,7 +365,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     }
   },
   onSolutionSuccess: (callback: (data: any) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: any) => callback(data)
+    const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on(PROCESSING_EVENTS.SOLUTION_SUCCESS, subscription)
     return () => {
       ipcRenderer.removeListener(
@@ -400,7 +400,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   setDisguise: (mode: 'terminal' | 'settings' | 'activity' | 'none') => ipcRenderer.invoke("set-disguise", mode),
   getDisguise: () => ipcRenderer.invoke("get-disguise"),
   onDisguiseChanged: (callback: (mode: 'terminal' | 'settings' | 'activity' | 'none') => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, mode: any) => callback(mode)
+    const subscription = (_: any, mode: any) => callback(mode)
     ipcRenderer.on('disguise-changed', subscription)
     return () => {
       ipcRenderer.removeListener('disguise-changed', subscription)
@@ -408,7 +408,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
 
   onSettingsVisibilityChange: (callback: (isVisible: boolean) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, isVisible: boolean) => callback(isVisible)
+    const subscription = (_: any, isVisible: boolean) => callback(isVisible)
     ipcRenderer.on("settings-visibility-changed", subscription)
     return () => {
       ipcRenderer.removeListener("settings-visibility-changed", subscription)
@@ -454,14 +454,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   // Native Audio Service Events
   onNativeAudioTranscript: (callback: (transcript: { speaker: string; text: string; final: boolean }) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: any) => callback(data)
+    const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("native-audio-transcript", subscription)
     return () => {
       ipcRenderer.removeListener("native-audio-transcript", subscription)
     }
   },
   onNativeAudioSuggestion: (callback: (suggestion: { context: string; lastQuestion: string; confidence: number }) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: any) => callback(data)
+    const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("native-audio-suggestion", subscription)
     return () => {
       ipcRenderer.removeListener("native-audio-suggestion", subscription)
@@ -482,7 +482,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     }
   },
   onSuggestionGenerated: (callback: (data: { question: string; suggestion: string; confidence: number }) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: any) => callback(data)
+    const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("suggestion-generated", subscription)
     return () => {
       ipcRenderer.removeListener("suggestion-generated", subscription)
@@ -496,7 +496,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     }
   },
   onSuggestionError: (callback: (error: { error: string }) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: any) => callback(data)
+    const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("suggestion-error", subscription)
     return () => {
       ipcRenderer.removeListener("suggestion-error", subscription)
@@ -547,63 +547,63 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   // Intelligence Mode Events
   onIntelligenceAssistUpdate: (callback: (data: { insight: string }) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: any) => callback(data)
+    const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("intelligence-assist-update", subscription)
     return () => {
       ipcRenderer.removeListener("intelligence-assist-update", subscription)
     }
   },
   onIntelligenceSuggestedAnswerToken: (callback: (data: { token: string; question: string; confidence: number }) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: any) => callback(data)
+    const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("intelligence-suggested-answer-token", subscription)
     return () => {
       ipcRenderer.removeListener("intelligence-suggested-answer-token", subscription)
     }
   },
   onIntelligenceSuggestedAnswer: (callback: (data: { answer: string; question: string; confidence: number }) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: any) => callback(data)
+    const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("intelligence-suggested-answer", subscription)
     return () => {
       ipcRenderer.removeListener("intelligence-suggested-answer", subscription)
     }
   },
   onIntelligenceRefinedAnswerToken: (callback: (data: { token: string; intent: string }) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: any) => callback(data)
+    const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("intelligence-refined-answer-token", subscription)
     return () => {
       ipcRenderer.removeListener("intelligence-refined-answer-token", subscription)
     }
   },
   onIntelligenceRefinedAnswer: (callback: (data: { answer: string; intent: string }) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: any) => callback(data)
+    const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("intelligence-refined-answer", subscription)
     return () => {
       ipcRenderer.removeListener("intelligence-refined-answer", subscription)
     }
   },
   onIntelligenceRecapToken: (callback: (data: { token: string }) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: any) => callback(data)
+    const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("intelligence-recap-token", subscription)
     return () => {
       ipcRenderer.removeListener("intelligence-recap-token", subscription)
     }
   },
   onIntelligenceRecap: (callback: (data: { summary: string }) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: any) => callback(data)
+    const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("intelligence-recap", subscription)
     return () => {
       ipcRenderer.removeListener("intelligence-recap", subscription)
     }
   },
   onIntelligenceFollowUpQuestionsToken: (callback: (data: { token: string }) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: any) => callback(data)
+    const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("intelligence-follow-up-questions-token", subscription)
     return () => {
       ipcRenderer.removeListener("intelligence-follow-up-questions-token", subscription)
     }
   },
   onIntelligenceFollowUpQuestionsUpdate: (callback: (data: { questions: string }) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: any) => callback(data)
+    const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("intelligence-follow-up-questions-update", subscription)
     return () => {
       ipcRenderer.removeListener("intelligence-follow-up-questions-update", subscription)
@@ -617,21 +617,21 @@ contextBridge.exposeInMainWorld("electronAPI", {
     }
   },
   onIntelligenceManualResult: (callback: (data: { answer: string; question: string }) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: any) => callback(data)
+    const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("intelligence-manual-result", subscription)
     return () => {
       ipcRenderer.removeListener("intelligence-manual-result", subscription)
     }
   },
   onIntelligenceModeChanged: (callback: (data: { mode: string }) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: any) => callback(data)
+    const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("intelligence-mode-changed", subscription)
     return () => {
       ipcRenderer.removeListener("intelligence-mode-changed", subscription)
     }
   },
   onIntelligenceError: (callback: (data: { error: string; mode: string }) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: any) => callback(data)
+    const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("intelligence-error", subscription)
     return () => {
       ipcRenderer.removeListener("intelligence-error", subscription)
@@ -650,7 +650,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   streamGeminiChat: (message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean }) => ipcRenderer.invoke("gemini-chat-stream", message, imagePaths, context, options),
 
   onGeminiStreamToken: (callback: (token: string) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, token: string) => callback(token)
+    const subscription = (_: any, token: string) => callback(token)
     ipcRenderer.on("gemini-stream-token", subscription)
     return () => {
       ipcRenderer.removeListener("gemini-stream-token", subscription)
@@ -666,7 +666,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
 
   onGeminiStreamError: (callback: (error: string) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, error: string) => callback(error)
+    const subscription = (_: any, error: string) => callback(error)
     ipcRenderer.on("gemini-stream-error", subscription)
     return () => {
       ipcRenderer.removeListener("gemini-stream-error", subscription)
@@ -705,7 +705,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   startAudioTest: (deviceId?: string) => ipcRenderer.invoke('start-audio-test', deviceId),
   stopAudioTest: () => ipcRenderer.invoke('stop-audio-test'),
   onAudioTestLevel: (callback: (level: number) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, level: number) => callback(level)
+    const subscription = (_: any, level: number) => callback(level)
     ipcRenderer.on('audio-test-level', subscription)
     return () => {
       ipcRenderer.removeListener('audio-test-level', subscription)
@@ -718,7 +718,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
 
   onUndetectableChanged: (callback: (state: boolean) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, state: boolean) => callback(state)
+    const subscription = (_: any, state: boolean) => callback(state)
     ipcRenderer.on('undetectable-changed', subscription)
     return () => {
       ipcRenderer.removeListener('undetectable-changed', subscription)
@@ -726,7 +726,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
 
   onGroqFastTextChanged: (callback: (enabled: boolean) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, enabled: boolean) => callback(enabled)
+    const subscription = (_: any, enabled: boolean) => callback(enabled)
     ipcRenderer.on('groq-fast-text-changed', subscription)
     return () => {
       ipcRenderer.removeListener('groq-fast-text-changed', subscription)
@@ -734,7 +734,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
 
   onModelChanged: (callback: (modelId: string) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, modelId: string) => callback(modelId)
+    const subscription = (_: any, modelId: string) => callback(modelId)
     ipcRenderer.on('model-changed', subscription)
     return () => {
       ipcRenderer.removeListener('model-changed', subscription)
@@ -742,7 +742,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
 
   onOllamaPullProgress: (callback: (data: { status: string; percent: number }) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: any) => callback(data)
+    const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on('ollama:pull-progress', subscription)
     return () => {
       ipcRenderer.removeListener('ollama:pull-progress', subscription)
@@ -761,7 +761,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getThemeMode: () => ipcRenderer.invoke('theme:get-mode'),
   setThemeMode: (mode: 'system' | 'light' | 'dark') => ipcRenderer.invoke('theme:set-mode', mode),
   onThemeChanged: (callback: (data: { mode: 'system' | 'light' | 'dark', resolved: 'light' | 'dark' }) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: any) => callback(data)
+    const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on('theme:changed', subscription)
     return () => {
       ipcRenderer.removeListener('theme:changed', subscription)
@@ -777,14 +777,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   // Auto-Update
   onUpdateAvailable: (callback: (info: any) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, info: any) => callback(info)
+    const subscription = (_: any, info: any) => callback(info)
     ipcRenderer.on("update-available", subscription)
     return () => {
       ipcRenderer.removeListener("update-available", subscription)
     }
   },
   onUpdateDownloaded: (callback: (info: any) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, info: any) => callback(info)
+    const subscription = (_: any, info: any) => callback(info)
     ipcRenderer.on("update-downloaded", subscription)
     return () => {
       ipcRenderer.removeListener("update-downloaded", subscription)
@@ -798,21 +798,21 @@ contextBridge.exposeInMainWorld("electronAPI", {
     }
   },
   onUpdateNotAvailable: (callback: (info: any) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, info: any) => callback(info)
+    const subscription = (_: any, info: any) => callback(info)
     ipcRenderer.on("update-not-available", subscription)
     return () => {
       ipcRenderer.removeListener("update-not-available", subscription)
     }
   },
   onUpdateError: (callback: (err: string) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, err: string) => callback(err)
+    const subscription = (_: any, err: string) => callback(err)
     ipcRenderer.on("update-error", subscription)
     return () => {
       ipcRenderer.removeListener("update-error", subscription)
     }
   },
   onDownloadProgress: (callback: (progressObj: any) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, progressObj: any) => callback(progressObj)
+    const subscription = (_: any, progressObj: any) => callback(progressObj)
     ipcRenderer.on("download-progress", subscription)
     return () => {
       ipcRenderer.removeListener("download-progress", subscription)
@@ -833,7 +833,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   ragRetryEmbeddings: () => ipcRenderer.invoke('rag:retry-embeddings'),
   
   onIncompatibleProviderWarning: (callback: (data: { count: number, oldProvider: string, newProvider: string }) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: any) => callback(data)
+    const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on('embedding:incompatible-provider-warning', subscription)
     return () => {
       ipcRenderer.removeListener('embedding:incompatible-provider-warning', subscription)
@@ -842,21 +842,21 @@ contextBridge.exposeInMainWorld("electronAPI", {
   reindexIncompatibleMeetings: () => ipcRenderer.invoke('rag:reindex-incompatible-meetings'),
 
   onRAGStreamChunk: (callback: (data: { meetingId?: string; global?: boolean; chunk: string }) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: any) => callback(data)
+    const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on('rag:stream-chunk', subscription)
     return () => {
       ipcRenderer.removeListener('rag:stream-chunk', subscription)
     }
   },
   onRAGStreamComplete: (callback: (data: { meetingId?: string; global?: boolean }) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: any) => callback(data)
+    const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on('rag:stream-complete', subscription)
     return () => {
       ipcRenderer.removeListener('rag:stream-complete', subscription)
     }
   },
   onRAGStreamError: (callback: (data: { meetingId?: string; global?: boolean; error: string }) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: any) => callback(data)
+    const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on('rag:stream-error', subscription)
     return () => {
       ipcRenderer.removeListener('rag:stream-error', subscription)
@@ -868,7 +868,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   setKeybind: (id: string, accelerator: string) => ipcRenderer.invoke('keybinds:set', id, accelerator),
   resetKeybinds: () => ipcRenderer.invoke('keybinds:reset'),
   onKeybindsUpdate: (callback: (keybinds: Array<any>) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, keybinds: any) => callback(keybinds)
+    const subscription = (_: any, keybinds: any) => callback(keybinds)
     ipcRenderer.on('keybinds:update', subscription)
     return () => {
       ipcRenderer.removeListener('keybinds:update', subscription)
@@ -898,17 +898,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
   setGoogleSearchApiKey: (apiKey: string) => ipcRenderer.invoke('set-google-search-api-key', apiKey),
   setGoogleSearchCseId: (cseId: string) => ipcRenderer.invoke('set-google-search-cse-id', cseId),
 
-  // Cropper API
-  cropperConfirmed: (bounds: Electron.Rectangle) => ipcRenderer.send('cropper-confirmed', bounds),
-  cropperCancelled: () => ipcRenderer.send('cropper-cancelled'),
-  onResetCropper: (callback: (data: { hudPosition: { x: number; y: number } }) => void) => {
-    const subscription = (_: Electron.IpcRendererEvent, data: { hudPosition: { x: number; y: number } }) => callback(data)
-    ipcRenderer.on('reset-cropper', subscription)
-    return () => {
-      ipcRenderer.removeListener('reset-cropper', subscription)
-    }
-  },
-
   // Dynamic Model Discovery
   fetchProviderModels: (provider: 'gemini' | 'groq' | 'openai' | 'claude', apiKey: string) => ipcRenderer.invoke('fetch-provider-models', provider, apiKey),
   setProviderPreferredModel: (provider: 'gemini' | 'groq' | 'openai' | 'claude', modelId: string) => ipcRenderer.invoke('set-provider-preferred-model', provider, modelId),
@@ -926,6 +915,17 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on('overlay-opacity-changed', subscription)
     return () => {
       ipcRenderer.removeListener('overlay-opacity-changed', subscription)
+    }
+  },
+
+  // Cropper API
+  cropperConfirmed: (bounds: Electron.Rectangle) => ipcRenderer.send('cropper-confirmed', bounds),
+  cropperCancelled: () => ipcRenderer.send('cropper-cancelled'),
+  onResetCropper: (callback: (data: { hudPosition: { x: number; y: number } }) => void) => {
+    const subscription = (_: Electron.IpcRendererEvent, data: { hudPosition: { x: number; y: number } }) => callback(data)
+    ipcRenderer.on('reset-cropper', subscription)
+    return () => {
+      ipcRenderer.removeListener('reset-cropper', subscription)
     }
   },
 } as ElectronAPI)

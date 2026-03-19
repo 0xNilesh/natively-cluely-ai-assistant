@@ -220,7 +220,7 @@ textarea,
 [role="button"],
 a {
   -webkit-app-region: no-drag;
-  cursor: default;
+  cursor: default !important;
 }
 
 /* Explicit cursor class when pointer is explicitly needed */

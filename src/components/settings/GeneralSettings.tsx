@@ -105,7 +105,7 @@ export const GeneralSettings: React.FC<GeneralSettingsProps> = () => {
                             <select
                                 value={recognitionLanguage}
                                 onChange={(e) => handleLanguageChange(e.target.value)}
-                                className="appearance-none bg-bg-input border border-border-subtle rounded-lg pl-5 pr-10 py-2.5 text-xs text-text-primary focus:outline-none focus:border-accent-primary transition-colors cursor-pointer"
+                                className="appearance-none bg-bg-input border border-border-subtle rounded-lg pl-5 pr-10 py-2.5 text-xs text-text-primary focus:outline-none focus:border-accent-primary transition-colors"
                             >
                                 {Object.entries(availableLanguages).map(([key, lang]) => (
                                     <option key={key} value={key}>
@@ -125,7 +125,7 @@ export const GeneralSettings: React.FC<GeneralSettingsProps> = () => {
                             <select
                                 value={aiResponseLanguage}
                                 onChange={(e) => handleAiLanguageChange(e.target.value)}
-                                className="appearance-none bg-bg-input border border-border-subtle rounded-lg pl-5 pr-10 py-2.5 text-xs text-text-primary focus:outline-none focus:border-accent-primary transition-colors cursor-pointer"
+                                className="appearance-none bg-bg-input border border-border-subtle rounded-lg pl-5 pr-10 py-2.5 text-xs text-text-primary focus:outline-none focus:border-accent-primary transition-colors"
                             >
                                 {availableAiLanguages.map((lang) => (
                                     <option key={lang.code} value={lang.code}>
