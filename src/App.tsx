@@ -29,9 +29,19 @@ const App: React.FC = () => {
   const isLauncherWindow = new URLSearchParams(window.location.search).get('window') === 'launcher';
   const isOverlayWindow = new URLSearchParams(window.location.search).get('window') === 'overlay';
   const isModelSelectorWindow = new URLSearchParams(window.location.search).get('window') === 'model-selector';
+  const isCropperWindow = new URLSearchParams(window.location.search).get('window') === 'cropper';
 
   // Default to launcher if not specified (dev mode safety)
-  const isDefault = !isSettingsWindow && !isOverlayWindow && !isModelSelectorWindow;
+  const isDefault = !isSettingsWindow && !isOverlayWindow && !isModelSelectorWindow && !isCropperWindow;
+
+  if (isCropperWindow) {
+    const Cropper = React.lazy(() => import('./components/Cropper'));
+    return (
+      <React.Suspense fallback={<div className="w-screen h-screen bg-transparent" />}>
+        <Cropper />
+      </React.Suspense>
+    );
+  }
 
   // Initialize Analytics
   useEffect(() => {

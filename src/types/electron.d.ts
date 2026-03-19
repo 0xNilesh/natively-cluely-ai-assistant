@@ -258,6 +258,11 @@ export interface ElectronAPI {
   setGoogleSearchApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
   setGoogleSearchCseId: (cseId: string) => Promise<{ success: boolean; error?: string }>
 
+  // Cropper API
+  cropperConfirmed: (bounds: Electron.Rectangle) => void
+  cropperCancelled: () => void
+  onResetCropper: (callback: (data: { hudPosition: { x: number; y: number } }) => void) => () => void
+
   // Dynamic Model Discovery
   fetchProviderModels: (provider: 'gemini' | 'groq' | 'openai' | 'claude', apiKey: string) => Promise<{ success: boolean; models?: {id: string, label: string}[]; error?: string }>
   setProviderPreferredModel: (provider: 'gemini' | 'groq' | 'openai' | 'claude', modelId: string) => Promise<void>
