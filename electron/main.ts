@@ -66,6 +66,7 @@ import { initializeIpcHandlers } from "./ipcHandlers"
 import { WindowHelper } from "./WindowHelper"
 import { SettingsWindowHelper } from "./SettingsWindowHelper"
 import { ModelSelectorWindowHelper } from "./ModelSelectorWindowHelper"
+import { CropperWindowHelper } from "./CropperWindowHelper"
 import { ScreenshotHelper } from "./ScreenshotHelper"
 import { KeybindManager } from "./services/KeybindManager"
 import { ProcessingHelper } from "./ProcessingHelper"
@@ -112,6 +113,7 @@ export class AppState {
   private windowHelper: WindowHelper
   public settingsWindowHelper: SettingsWindowHelper
   public modelSelectorWindowHelper: ModelSelectorWindowHelper
+  public cropperWindowHelper: CropperWindowHelper
   private screenshotHelper: ScreenshotHelper
   public processingHelper: ProcessingHelper
 
@@ -170,6 +172,7 @@ export class AppState {
     this.windowHelper = new WindowHelper(this)
     this.settingsWindowHelper = new SettingsWindowHelper()
     this.modelSelectorWindowHelper = new ModelSelectorWindowHelper()
+    this.cropperWindowHelper = new CropperWindowHelper()
 
     // 3. Initialize other helpers
     this.screenshotHelper = new ScreenshotHelper(this.view)
@@ -178,6 +181,11 @@ export class AppState {
     this.windowHelper.setContentProtection(this.isUndetectable);
     this.settingsWindowHelper.setContentProtection(this.isUndetectable);
     this.modelSelectorWindowHelper.setContentProtection(this.isUndetectable);
+    this.cropperWindowHelper.setContentProtection(this.isUndetectable);
+
+    if (process.platform === 'win32') {
+      this.cropperWindowHelper.preload();
+    }
 
     // Initialize KeybindManager
     const keybindManager = KeybindManager.getInstance();
@@ -1331,18 +1339,56 @@ export class AppState {
 
     const wasOverlayVisible = this.windowHelper.getOverlayWindow()?.isVisible() ?? false
 
-    const screenshotPath = await this.screenshotHelper.takeSelectiveScreenshot(
-      () => this.hideMainWindow(),
-      () => {
+    // 1. Hide the app windows first so they don't block selection
+    this.hideMainWindow()
+    // Small delay to ensure windows are fully hidden from the screen buffer
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    let captureArea: Electron.Rectangle | undefined;
+
+    try {
+      if (process.platform === 'win32') {
+        // Use custom cropper for Windows to ensure it's undetectable in screen share
+        captureArea = await this.cropperWindowHelper.showCropper();
+        
+        // Handle cancellation (ESC or invalid selection)
+        if (!captureArea) {
+          // Restore window state before throwing
+          if (wasOverlayVisible) {
+            this.windowHelper.switchToOverlay();
+          } else {
+            this.showMainWindow();
+          }
+          throw new Error("Selection cancelled");
+        }
+      }
+
+      const screenshotPath = await this.screenshotHelper.takeSelectiveScreenshot(
+        () => {}, // Already hidden above
+        () => {
+          if (wasOverlayVisible) {
+            this.windowHelper.switchToOverlay()
+          } else {
+            this.showMainWindow()
+          }
+        },
+        captureArea
+      )
+
+      return screenshotPath
+    } catch (error) {
+      // If selection is cancelled or fails, restore the window state
+      // Check if we already restored (for win32 cancellation case)
+      const isSelectionCancelled = error instanceof Error && error.message === "Selection cancelled";
+      if (!isSelectionCancelled || process.platform !== 'win32') {
         if (wasOverlayVisible) {
           this.windowHelper.switchToOverlay()
         } else {
           this.showMainWindow()
         }
       }
-    )
-
-    return screenshotPath
+      throw error;
+    }
   }
 
   public async getImagePreview(filepath: string): Promise<string> {
@@ -1528,6 +1574,7 @@ export class AppState {
     this.windowHelper.setContentProtection(state)
     this.settingsWindowHelper.setContentProtection(state)
     this.modelSelectorWindowHelper.setContentProtection(state)
+    this.cropperWindowHelper.setContentProtection(state)
 
     // Persist state via SettingsManager
     SettingsManager.getInstance().set('isUndetectable', state);
@@ -1921,8 +1968,15 @@ async function initializeApp() {
   })
 
   // Scrub API keys from memory on quit to minimize exposure window
-  app.on("before-quit", () => {
+  app.on("before-quit", (event) => {
     console.log("App is quitting, cleaning up resources...");
+
+    // Dispose CropperWindowHelper to clean up IPC listeners and prevent memory leaks
+    // This is critical to prevent resource leaks and ensure proper cleanup
+    if (appState?.cropperWindowHelper) {
+      appState.cropperWindowHelper.dispose();
+    }
+
     // Kill Ollama if we started it
     OllamaManager.getInstance().stop();
 
