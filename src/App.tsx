@@ -11,6 +11,7 @@ import { AnimatePresence, motion } from "framer-motion"
 import UpdateBanner from "./components/UpdateBanner"
 import { SupportToaster } from "./components/SupportToaster"
 import { AlertCircle } from "lucide-react"
+import { clampOverlayOpacity, OVERLAY_OPACITY_DEFAULT } from "./lib/overlayAppearance"
 import {
   JDAwarenessToaster,
   ProfileFeatureToaster,
@@ -88,7 +89,9 @@ const App: React.FC = () => {
   // so it can be initialized once from localStorage and updated via IPC.
   const [overlayOpacity, setOverlayOpacity] = useState<number>(() => {
     const stored = localStorage.getItem('natively_overlay_opacity');
-    return stored ? parseFloat(stored) : 0.65;
+    if (!stored) return OVERLAY_OPACITY_DEFAULT;
+    const parsed = parseFloat(stored);
+    return Number.isFinite(parsed) ? clampOverlayOpacity(parsed) : OVERLAY_OPACITY_DEFAULT;
   });
   
   // Profile state for ad targeting
@@ -285,9 +288,15 @@ const App: React.FC = () => {
         <div className="w-full relative bg-transparent">
           <QueryClientProvider client={queryClient}>
             <ToastProvider>
-              <div style={{ opacity: overlayOpacity, transition: 'opacity 75ms ease' }}>
+              <div
+                style={{
+                  ['--overlay-opacity' as '--overlay-opacity']: String(overlayOpacity),
+                  transition: 'background-color 75ms ease, border-color 75ms ease, box-shadow 75ms ease'
+                } as React.CSSProperties}
+              >
                 <NativelyInterface
                   onEndMeeting={handleEndMeeting}
+                  overlayOpacity={overlayOpacity}
                 />
               </div>
               <ToastViewport />

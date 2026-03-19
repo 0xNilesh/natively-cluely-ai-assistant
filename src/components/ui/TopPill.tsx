@@ -1,16 +1,19 @@
 import { ChevronUp, ChevronDown } from "lucide-react";
 import icon from "../icon.png";
+import type { OverlayAppearance } from "../../lib/overlayAppearance";
 
 interface TopPillProps {
     expanded: boolean;
     onToggle: () => void;
     onQuit: () => void;
+    appearance: OverlayAppearance;
 }
 
 export default function TopPill({
     expanded,
     onToggle,
     onQuit,
+    appearance,
 }: TopPillProps) {
     return (
         <div className="flex justify-center mt-2 select-none z-50">
@@ -19,31 +22,30 @@ export default function TopPill({
           draggable-area
           flex items-center gap-2
           rounded-full
-          bg-[#1E1E1E]/80
+          overlay-pill-surface
           backdrop-blur-md
-          border border-white/10
-          shadow-lg shadow-black/20
           pl-1.5 pr-1.5 py-1.5
           transition-all duration-300 ease-sculpted
-          hover:bg-[#1E1E1E]/90 hover:border-white/15 hover:shadow-xl
         "
+                style={appearance.pillStyle}
             >
                 {/* LOGO BUTTON */}
                 <button
-                    className="
+                    className={`
             w-8 h-8
             rounded-full
-            bg-white/5
+            overlay-icon-surface
+            overlay-icon-surface-hover
             flex items-center justify-center
             relative overflow-hidden
             interaction-base interaction-press
-            hover:bg-white/5
-          "
+          `}
+                    style={appearance.iconStyle}
                 >
                     <img
                         src={icon}
                         alt="Natively"
-                        className="w-[24px] h-[24px] object-contain opacity-90 scale-105"
+                        className="w-[24px] h-[24px] object-contain opacity-95 scale-105 force-black-icon"
                         draggable="false"
                         onDragStart={(e) => e.preventDefault()}
                     />
@@ -52,19 +54,20 @@ export default function TopPill({
                 {/* CENTER SEGMENT */}
                 <button
                     onClick={onToggle}
-                    className="
+                    className={`
             flex items-center gap-2
             group
             px-4 py-1.5
             rounded-full
-            bg-white/5
+            backdrop-blur-md
+            overlay-chip-surface
+            overlay-text-interactive
             text-[12px]
             font-medium
-            text-slate-200
-            border border-white/0
+            border
             interaction-base interaction-hover interaction-press
-            hover:bg-white/10 hover:border-white/5 hover:text-white
-          "
+          `}
+                    style={appearance.chipStyle}
                 >
                     <span className="opacity-70 group-hover:opacity-100 transition-opacity duration-200">
                         {expanded ? (
@@ -79,15 +82,16 @@ export default function TopPill({
                 {/* STOP / QUIT BUTTON */}
                 <button
                     onClick={onQuit}
-                    className="
+                    className={`
             w-8 h-8
             rounded-full
-            bg-white/5
+            overlay-icon-surface
+            overlay-text-primary
             flex items-center justify-center
-            text-white
             interaction-base interaction-press
             hover:bg-red-500/10 hover:text-red-400
-          "
+          `}
+                    style={appearance.iconStyle}
                 >
                     <div className="w-3.5 h-3.5 rounded-[3px] bg-current opacity-80" />
                 </button>
