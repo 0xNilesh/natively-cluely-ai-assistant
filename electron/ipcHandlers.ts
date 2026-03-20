@@ -45,6 +45,40 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
+  // --- Auto-Update IPC Handlers ---
+  safeHandle("check-for-updates", async () => {
+    try {
+      console.log("[IPC] Manual update check requested");
+      await appState.checkForUpdates();
+      return { success: true };
+    } catch (err: any) {
+      console.error("[IPC] check-for-updates failed:", err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  safeHandle("download-update", async () => {
+    try {
+      console.log("[IPC] Download update requested");
+      appState.downloadUpdate();
+      return { success: true };
+    } catch (err: any) {
+      console.error("[IPC] download-update failed:", err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  safeHandle("quit-and-install-update", async () => {
+    try {
+      console.log("[IPC] Quit and install update requested");
+      await appState.quitAndInstallUpdate();
+      return { success: true };
+    } catch (err: any) {
+      console.error("[IPC] quit-and-install-update failed:", err);
+      return { success: false, error: err.message };
+    }
+  });
+
   safeHandle("license:activate", async (event, key: string) => {
     try {
       const { LicenseManager } = require('../premium/electron/services/LicenseManager');

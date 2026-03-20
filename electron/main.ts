@@ -550,11 +550,25 @@ export class AppState {
   }
 
   public async checkForUpdates(): Promise<void> {
-    await autoUpdater.checkForUpdatesAndNotify()
+    console.log('[AutoUpdater] Manual check for updates requested')
+    try {
+      await autoUpdater.checkForUpdatesAndNotify()
+    } catch (err: any) {
+      console.error('[AutoUpdater] checkForUpdates failed:', err)
+    }
   }
 
   public downloadUpdate(): void {
-    autoUpdater.downloadUpdate()
+    console.log('[AutoUpdater] Starting download...')
+    try {
+      autoUpdater.downloadUpdate().catch(err => {
+        console.error('[AutoUpdater] downloadUpdate failed:', err)
+        this.broadcast('update-error', err.message || 'Download failed')
+      })
+    } catch (err: any) {
+      console.error('[AutoUpdater] downloadUpdate exception:', err)
+      this.broadcast('update-error', err.message || 'Download failed')
+    }
   }
 
   // New Property for System Audio & Microphone
