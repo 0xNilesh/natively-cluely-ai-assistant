@@ -221,6 +221,19 @@ export class AppState {
               preview
             });
           }
+        } else if (actionId === 'general:capture-and-process') {
+          // Single-trigger: capture current screen then immediately request AI analysis
+          const screenshotPath = await this.takeScreenshot();
+          const preview = await this.getImagePreview(screenshotPath);
+          // Ensure the window is visible so the user can see the response
+          this.showMainWindow();
+          const mainWindow = this.getMainWindow();
+          if (mainWindow) {
+            mainWindow.webContents.send("capture-and-process", {
+              path: screenshotPath,
+              preview
+            });
+          }
         }
       } catch (e: any) {
         if (e.message !== "Selection cancelled") {

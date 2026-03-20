@@ -17,6 +17,9 @@ interface ElectronAPI {
   onScreenshotAttached: (
     callback: (data: { path: string; preview: string }) => void
   ) => () => void
+  onCaptureAndProcess: (
+    callback: (data: { path: string; preview: string }) => void
+  ) => () => void
   onSolutionsReady: (callback: (solutions: string) => void) => () => void
   onResetView: (callback: () => void) => () => void
   onSolutionStart: (callback: () => void) => () => void
@@ -230,9 +233,8 @@ interface ElectronAPI {
   profileResearchCompany: (companyName: string) => Promise<{ success: boolean; dossier?: any; error?: string }>;
   profileGenerateNegotiation: () => Promise<{ success: boolean; dossier?: any; profileData?: any; error?: string }>;
 
-  // Google Search API
-  setGoogleSearchApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>;
-  setGoogleSearchCseId: (cseId: string) => Promise<{ success: boolean; error?: string }>;
+  // Tavily Search API
+  setTavilyApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>;
 
   // Overlay Opacity (Stealth Mode)
   setOverlayOpacity: (opacity: number) => Promise<void>;
@@ -291,6 +293,16 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on("screenshot-attached", subscription)
     return () => {
       ipcRenderer.removeListener("screenshot-attached", subscription)
+    }
+  },
+  onCaptureAndProcess: (
+    callback: (data: { path: string; preview: string }) => void
+  ) => {
+    const subscription = (_: any, data: { path: string; preview: string }) =>
+      callback(data)
+    ipcRenderer.on("capture-and-process", subscription)
+    return () => {
+      ipcRenderer.removeListener("capture-and-process", subscription)
     }
   },
   onSolutionsReady: (callback: (solutions: string) => void) => {
@@ -894,9 +906,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   profileResearchCompany: (companyName: string) => ipcRenderer.invoke('profile:research-company', companyName),
   profileGenerateNegotiation: () => ipcRenderer.invoke('profile:generate-negotiation'),
 
-  // Google Search API
-  setGoogleSearchApiKey: (apiKey: string) => ipcRenderer.invoke('set-google-search-api-key', apiKey),
-  setGoogleSearchCseId: (cseId: string) => ipcRenderer.invoke('set-google-search-cse-id', cseId),
+  // Tavily Search API
+  setTavilyApiKey: (apiKey: string) => ipcRenderer.invoke('set-tavily-api-key', apiKey),
 
   // Dynamic Model Discovery
   fetchProviderModels: (provider: 'gemini' | 'groq' | 'openai' | 'claude', apiKey: string) => ipcRenderer.invoke('fetch-provider-models', provider, apiKey),

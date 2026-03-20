@@ -784,8 +784,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         hasIbmWatsonKey: hasKey(creds.ibmWatsonApiKey),
         ibmWatsonRegion: creds.ibmWatsonRegion || 'us-south',
         hasSonioxKey: hasKey(creds.sonioxApiKey),
-        hasGoogleSearchKey: hasKey(creds.googleSearchApiKey),
-        hasGoogleSearchCseId: hasKey(creds.googleSearchCseId),
+        hasTavilyKey: hasKey(creds.tavilyApiKey),
         // Dynamic Model Discovery - preferred models
         geminiPreferredModel: creds.geminiPreferredModel || undefined,
         groqPreferredModel: creds.groqPreferredModel || undefined,
@@ -793,7 +792,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         claudePreferredModel: creds.claudePreferredModel || undefined,
       };
     } catch (error: any) {
-      return { hasGeminiKey: false, hasGroqKey: false, hasOpenaiKey: false, hasClaudeKey: false, googleServiceAccountPath: null, sttProvider: 'google', groqSttModel: 'whisper-large-v3-turbo', hasSttGroqKey: false, hasSttOpenaiKey: false, hasDeepgramKey: false, hasElevenLabsKey: false, hasAzureKey: false, azureRegion: 'eastus', hasIbmWatsonKey: false, ibmWatsonRegion: 'us-south', hasSonioxKey: false, hasGoogleSearchKey: false, hasGoogleSearchCseId: false };
+      return { hasGeminiKey: false, hasGroqKey: false, hasOpenaiKey: false, hasClaudeKey: false, googleServiceAccountPath: null, sttProvider: 'google', groqSttModel: 'whisper-large-v3-turbo', hasSttGroqKey: false, hasSttOpenaiKey: false, hasDeepgramKey: false, hasElevenLabsKey: false, hasAzureKey: false, azureRegion: 'eastus', hasIbmWatsonKey: false, ibmWatsonRegion: 'us-south', hasSonioxKey: false, hasTavilyKey: false };
     }
   });
 
@@ -1185,7 +1184,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         });
       } else if (provider === 'openai') {
         response = await axios.post('https://api.openai.com/v1/chat/completions', {
-          model: "gpt-5.3-chat-latest",
+          model: "gpt-4o-mini",
           messages: [{ role: "user", content: "Hello" }]
         }, {
           headers: { Authorization: `Bearer ${apiKey}` },
@@ -2041,14 +2040,13 @@ export function initializeIpcHandlers(appState: AppState): void {
       }
       const engine = orchestrator.getCompanyResearchEngine();
 
-      // Wire Google Custom Search provider if keys are configured
+      // Wire Tavily Search provider if key is configured
       const { CredentialsManager } = require('./services/CredentialsManager');
       const cm = CredentialsManager.getInstance();
-      const googleSearchKey = cm.getGoogleSearchApiKey();
-      const googleSearchCseId = cm.getGoogleSearchCseId();
-      if (googleSearchKey && googleSearchCseId) {
-        const { GoogleCustomSearchProvider } = require('../premium/electron/knowledge/GoogleCustomSearchProvider');
-        engine.setSearchProvider(new GoogleCustomSearchProvider(googleSearchKey, googleSearchCseId));
+      const tavilyApiKey = cm.getTavilyApiKey();
+      if (tavilyApiKey) {
+        const { TavilySearchProvider } = require('../premium/electron/knowledge/TavilySearchProvider');
+        engine.setSearchProvider(new TavilySearchProvider(tavilyApiKey));
       }
 
       // Build full JD context so the dossier is tailored to the exact role
@@ -2112,23 +2110,16 @@ export function initializeIpcHandlers(appState: AppState): void {
   });
 
   // ==========================================
-  // Google Search API Credentials
+  // Tavily Search API Credentials
   // ==========================================
 
-  safeHandle("set-google-search-api-key", async (_, apiKey: string) => {
+  safeHandle("set-tavily-api-key", async (_, apiKey: string) => {
     try {
+      if (apiKey && !apiKey.startsWith('tvly-')) {
+        return { success: false, error: 'Invalid Tavily API key. Keys must start with "tvly-".' };
+      }
       const { CredentialsManager } = require('./services/CredentialsManager');
-      CredentialsManager.getInstance().setGoogleSearchApiKey(apiKey);
-      return { success: true };
-    } catch (error: any) {
-      return { success: false, error: error.message };
-    }
-  });
-
-  safeHandle("set-google-search-cse-id", async (_, cseId: string) => {
-    try {
-      const { CredentialsManager } = require('./services/CredentialsManager');
-      CredentialsManager.getInstance().setGoogleSearchCseId(cseId);
+      CredentialsManager.getInstance().setTavilyApiKey(apiKey);
       return { success: true };
     } catch (error: any) {
       return { success: false, error: error.message };

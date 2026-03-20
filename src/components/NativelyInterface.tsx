@@ -636,6 +636,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
             cleanups.push(window.electronAPI.onScreenshotAttached(handleScreenshotAttach));
         }
 
+
         return () => cleanups.forEach(fn => fn());
     }, [isExpanded]);
 
@@ -1496,6 +1497,26 @@ Provide only the answer, nothing else.`;
         window.addEventListener('keydown', handleGeneralKeyDown);
         return () => window.removeEventListener('keydown', handleGeneralKeyDown);
     }, [isShortcutPressed]);
+
+    // Global "Capture & Process" shortcut handler (issue #90)
+    // Registered separately so it always has the latest handlersRef via stable ref access.
+    // Main process takes the screenshot and sends "capture-and-process" with path+preview;
+    // we attach the screenshot to context and immediately trigger AI analysis.
+    useEffect(() => {
+        if (!window.electronAPI.onCaptureAndProcess) return;
+        const unsubscribe = window.electronAPI.onCaptureAndProcess((data) => {
+            setIsExpanded(true);
+            setAttachedContext(prev => {
+                if (prev.some(s => s.path === data.path)) return prev;
+                return [...prev, data].slice(-5);
+            });
+            // Wait one tick for React to flush the state update before triggering analysis
+            setTimeout(() => {
+                handlersRef.current.handleWhatToSay();
+            }, 0);
+        });
+        return unsubscribe;
+    }, []);
 
     return (
         <div ref={contentRef} className="flex flex-col items-center w-fit mx-auto h-fit min-h-0 bg-transparent p-0 rounded-[24px] font-sans gap-2 overlay-text-primary">

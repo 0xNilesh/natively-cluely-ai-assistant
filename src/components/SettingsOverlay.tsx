@@ -5,7 +5,8 @@ import {
     ArrowUp, ArrowDown, ArrowLeft, ArrowRight,
     Camera, RotateCcw, Eye, Layout, MessageSquare, Crop,
     ChevronDown, ChevronUp, Check, BadgeCheck, Power, Palette, Calendar, Ghost, Sun, Moon, RefreshCw, Info, Globe, FlaskConical, Terminal, Settings, Activity, ExternalLink, Trash2,
-    Sparkles, Pencil, Briefcase, Building2, Search, MapPin, CheckCircle, HelpCircle, Zap, SlidersHorizontal
+    Sparkles, Pencil, Briefcase, Building2, Search, MapPin, CheckCircle, HelpCircle, Zap, SlidersHorizontal,
+    Star, AlertCircle, Gift
 } from 'lucide-react';
 import { analytics } from '../lib/analytics/analytics.service';
 import { AboutSection } from './AboutSection';
@@ -22,6 +23,29 @@ import {
 import { KeyRecorder } from './ui/KeyRecorder';
 import { ProfileVisualizer, PremiumUpgradeModal } from '../premium';
 import icon from './icon.png';
+
+// ---------------------------------------------------------------------------
+// StarRating — renders filled/empty stars for culture ratings
+// ---------------------------------------------------------------------------
+const StarRating = ({ value, size = 11 }: { value: number; size?: number }) => {
+    const clamped = Math.min(5, Math.max(0, value ?? 0));
+    // Round to nearest 0.5 so 3.7→3.5 stars, 3.8→4 stars, 4.75→5 stars
+    const rounded = Math.round(clamped * 2) / 2;
+    const full = Math.floor(rounded);
+    const half = rounded - full === 0.5;
+    const empty = 5 - full - (half ? 1 : 0);
+    return (
+        <span className="flex items-center gap-0.5">
+            {Array.from({ length: full }).map((_, i) => (
+                <Star key={`f${i}`} size={size} className="text-yellow-400 fill-yellow-400" />
+            ))}
+            {half && <Star size={size} className="text-yellow-400 fill-yellow-400/40" />}
+            {Array.from({ length: empty }).map((_, i) => (
+                <Star key={`e${i}`} size={size} className="text-text-tertiary/25 fill-transparent" />
+            ))}
+        </span>
+    );
+};
 
 // ---------------------------------------------------------------------------
 // MockupNativelyInterface — fake in-meeting widget for the opacity preview
@@ -281,7 +305,7 @@ const ProviderSelect: React.FC<ProviderSelectProps> = ({ value, options, onChang
                         </div>
                     </div>
                 ) : <span className="text-text-secondary px-2 text-sm">Select Provider</span>}
-                <div className={`w-8 h-8 rounded-full flex items-center justify-center text-text-tertiary transition-transform duration-300 group-hover:bg-bg-surface ${isOpen ? 'rotate-180 bg-bg-surface text-text-primary' : ''}`}>
+                <div className={`w-8 h-8 rounded-full flex items-center justify-center text-text-tertiary transition-transform duration-300 group-hover:bg-bg-input ${isOpen ? 'rotate-180 bg-bg-input text-text-primary' : ''}`}>
                     <ChevronDown size={14} strokeWidth={2.5} />
                 </div>
             </button>
@@ -381,11 +405,10 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     const [jdError, setJdError] = useState('');
     const [companyResearching, setCompanyResearching] = useState(false);
     const [companyDossier, setCompanyDossier] = useState<any>(null);
-    const [googleSearchApiKey, setGoogleSearchApiKey] = useState('');
-    const [googleSearchCseId, setGoogleSearchCseId] = useState('');
-    const [hasStoredGoogleSearchKey, setHasStoredGoogleSearchKey] = useState(false);
-    const [hasStoredGoogleSearchCseId, setHasStoredGoogleSearchCseId] = useState(false);
-    const [googleSearchSaving, setGoogleSearchSaving] = useState(false);
+    const [tavilyApiKey, setTavilyApiKey] = useState('');
+    const [hasStoredTavilyKey, setHasStoredTavilyKey] = useState(false);
+    const [tavilySaving, setTavilySaving] = useState(false);
+    const [tavilyError, setTavilyError] = useState('');
 
     // Close dropdown when clicking outside
     // Sync with global state changes
@@ -772,8 +795,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                     if (creds.azureRegion) setSttAzureRegion(creds.azureRegion);
                     setHasStoredIbmWatsonKey(creds.hasIbmWatsonKey);
                     setHasStoredSonioxKey(creds.hasSonioxKey || false);
-                    setHasStoredGoogleSearchKey(creds.hasGoogleSearchKey || false);
-                    setHasStoredGoogleSearchCseId(creds.hasGoogleSearchCseId || false);
+                    setHasStoredTavilyKey(creds.hasTavilyKey || false);
                 }
             } catch (e) {
                 console.error('Failed to load STT settings:', e);
@@ -908,21 +930,15 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
         }
     };
 
-    const handleRemoveGoogleSearchKey = async (type: 'apikey' | 'cseid') => {
-        if (!confirm(`Are you sure you want to remove the Google Search ${type === 'apikey' ? 'API Key' : 'CSE ID'}?`)) return;
+    const handleRemoveTavilyKey = async () => {
+        if (!confirm('Are you sure you want to remove the Tavily API Key?')) return;
 
         try {
-            if (type === 'apikey') {
-                await window.electronAPI?.setGoogleSearchApiKey?.('');
-                setGoogleSearchApiKey('');
-                setHasStoredGoogleSearchKey(false);
-            } else {
-                await window.electronAPI?.setGoogleSearchCseId?.('');
-                setGoogleSearchCseId('');
-                setHasStoredGoogleSearchCseId(false);
-            }
+            await window.electronAPI?.setTavilyApiKey?.('');
+            setTavilyApiKey('');
+            setHasStoredTavilyKey(false);
         } catch (e) {
-            console.error(`Failed to remove Google Search ${type}:`, e);
+            console.error('Failed to remove Tavily API key:', e);
         }
     };
 
@@ -1962,8 +1978,8 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                     </div>
                                                     <div>
                                                         <div className="flex items-center gap-2">
-                                                            <h4 className="text-sm font-bold text-text-primary">Google Search API</h4>
-                                                            {hasStoredGoogleSearchKey && hasStoredGoogleSearchCseId && (
+                                                            <h4 className="text-sm font-bold text-text-primary">Tavily Search API</h4>
+                                                            {hasStoredTavilyKey && (
                                                                 <span className="text-[9px] font-bold text-emerald-500 px-1.5 py-0.5 bg-emerald-500/10 rounded-full border border-emerald-500/20 uppercase tracking-wide">Connected</span>
                                                             )}
                                                         </div>
@@ -1977,9 +1993,9 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                     <div>
                                                         <div className="flex justify-between items-center mb-1.5">
                                                             <label className="text-[10px] font-semibold text-text-secondary uppercase tracking-wide block">API Key</label>
-                                                            {hasStoredGoogleSearchKey && (
+                                                            {hasStoredTavilyKey && (
                                                                 <button
-                                                                    onClick={() => handleRemoveGoogleSearchKey('apikey')}
+                                                                    onClick={handleRemoveTavilyKey}
                                                                     className="text-[10px] flex items-center gap-1 text-red-400 hover:text-red-300 transition-colors bg-red-500/10 hover:bg-red-500/20 px-1.5 py-0.5 rounded"
                                                                     title="Remove API Key"
                                                                 >
@@ -1989,65 +2005,45 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                         </div>
                                                         <input
                                                             type="password"
-                                                            value={googleSearchApiKey}
-                                                            onChange={(e) => setGoogleSearchApiKey(e.target.value)}
-                                                            placeholder={hasStoredGoogleSearchKey ? '••••••••••••' : 'Enter Google API key'}
+                                                            value={tavilyApiKey}
+                                                            onChange={(e) => { setTavilyApiKey(e.target.value); setTavilyError(''); }}
+                                                            placeholder={hasStoredTavilyKey ? '••••••••••••' : 'Enter Tavily API key (tvly-...)'}
                                                             className="w-full bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-xs text-text-primary placeholder-text-tertiary focus:outline-none focus:border-accent-primary/50 focus:ring-1 focus:ring-accent-primary/20 transition-all"
                                                         />
                                                     </div>
-                                                    <div>
-                                                        <div className="flex justify-between items-center mb-1.5">
-                                                            <label className="text-[10px] font-semibold text-text-secondary uppercase tracking-wide block">Custom Search Engine ID</label>
-                                                            {hasStoredGoogleSearchCseId && (
-                                                                <button
-                                                                    onClick={() => handleRemoveGoogleSearchKey('cseid')}
-                                                                    className="text-[10px] flex items-center gap-1 text-red-400 hover:text-red-300 transition-colors bg-red-500/10 hover:bg-red-500/20 px-1.5 py-0.5 rounded"
-                                                                    title="Remove CSE ID"
-                                                                >
-                                                                    <Trash2 size={10} strokeWidth={2} /> Remove
-                                                                </button>
-                                                            )}
-                                                        </div>
-                                                        <input
-                                                            type="text"
-                                                            value={googleSearchCseId}
-                                                            onChange={(e) => setGoogleSearchCseId(e.target.value)}
-                                                            placeholder={hasStoredGoogleSearchCseId ? '••••••••••••' : 'Enter CSE ID (cx)'}
-                                                            className="w-full bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-xs text-text-primary placeholder-text-tertiary focus:outline-none focus:border-accent-primary/50 focus:ring-1 focus:ring-accent-primary/20 transition-all"
-                                                        />
-                                                    </div>
+                                                    {tavilyError && (
+                                                        <p className="text-[10px] text-red-400 px-1">{tavilyError}</p>
+                                                    )}
                                                     <button
                                                         onClick={async () => {
-                                                            if (!googleSearchApiKey.trim() && !googleSearchCseId.trim()) return;
-                                                            setGoogleSearchSaving(true);
+                                                            if (!tavilyApiKey.trim()) return;
+                                                            setTavilyError('');
+                                                            setTavilySaving(true);
                                                             try {
-                                                                if (googleSearchApiKey.trim()) {
-                                                                    await window.electronAPI?.setGoogleSearchApiKey?.(googleSearchApiKey.trim());
-                                                                    setHasStoredGoogleSearchKey(true);
-                                                                    setGoogleSearchApiKey('');
+                                                                const result = await window.electronAPI?.setTavilyApiKey?.(tavilyApiKey.trim());
+                                                                if (result && !result.success) {
+                                                                    setTavilyError(result.error ?? 'Failed to save API key.');
+                                                                } else {
+                                                                    setHasStoredTavilyKey(true);
+                                                                    setTavilyApiKey('');
                                                                 }
-                                                                if (googleSearchCseId.trim()) {
-                                                                    await window.electronAPI?.setGoogleSearchCseId?.(googleSearchCseId.trim());
-                                                                    setHasStoredGoogleSearchCseId(true);
-                                                                    setGoogleSearchCseId('');
-                                                                }
-                                                            } catch (e) {
-                                                                console.error('Failed to save Google Search keys:', e);
+                                                            } catch (e: any) {
+                                                                setTavilyError(e?.message ?? 'Unexpected error saving API key.');
                                                             } finally {
-                                                                setGoogleSearchSaving(false);
+                                                                setTavilySaving(false);
                                                             }
                                                         }}
-                                                        disabled={googleSearchSaving || (!googleSearchApiKey.trim() && !googleSearchCseId.trim())}
-                                                        className={`w-full px-4 py-2 rounded-lg text-xs font-medium transition-all ${googleSearchSaving ? 'bg-bg-input text-text-tertiary cursor-wait' : (!googleSearchApiKey.trim() && !googleSearchCseId.trim()) ? 'bg-bg-input text-text-tertiary cursor-not-allowed' : 'bg-emerald-600 text-white hover:bg-emerald-500 shadow-sm'}`}
+                                                        disabled={tavilySaving || !tavilyApiKey.trim()}
+                                                        className={`w-full px-4 py-2 rounded-lg text-xs font-medium transition-all ${tavilySaving ? 'bg-bg-input text-text-tertiary cursor-wait' : !tavilyApiKey.trim() ? 'bg-bg-input text-text-tertiary cursor-not-allowed' : 'bg-emerald-600 text-white hover:bg-emerald-500 shadow-sm'}`}
                                                     >
-                                                        {googleSearchSaving ? 'Saving...' : 'Save Credentials'}
+                                                        {tavilySaving ? 'Saving...' : 'Save API Key'}
                                                     </button>
                                                 </div>
 
                                                 <div className="mt-3 flex items-start gap-2 px-3 py-2.5 bg-bg-input/50 rounded-lg">
                                                     <Info size={12} className="text-text-tertiary shrink-0 mt-0.5" />
                                                     <p className="text-[10px] text-text-tertiary leading-relaxed">
-                                                        If not provided, LLM general knowledge is used for company research, which may be outdated. Get your API key from the <span className="text-emerald-500/80 hover:text-emerald-400 underline underline-offset-2" onClick={() => window.electronAPI?.openExternal?.('https://console.cloud.google.com/apis/credentials')}>Google Cloud Console</span> and create a Custom Search Engine at <span className="text-emerald-500/80 hover:text-emerald-400 underline underline-offset-2" onClick={() => window.electronAPI?.openExternal?.('https://cse.google.com/cse/create/new')}>cse.google.com</span>.
+                                                        If not provided, LLM general knowledge is used for company research, which may be outdated. Get your free API key at <span className="text-emerald-500/80 hover:text-emerald-400 underline underline-offset-2 cursor-pointer" onClick={() => window.electronAPI?.openExternal?.('https://app.tavily.com/home')}>app.tavily.com</span>. Keys start with <code className="text-emerald-500/80">tvly-</code>.
                                                     </p>
                                                 </div>
                                             </div>
@@ -2098,6 +2094,8 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                 {/* Dossier Results */}
                                                 {companyDossier && (
                                                     <div className="space-y-4 border-t border-border-subtle pt-4 mt-2">
+
+                                                        {/* Hiring Strategy */}
                                                         {companyDossier.hiring_strategy && (
                                                             <div>
                                                                 <div className="text-[10px] font-bold text-text-primary uppercase tracking-wide mb-1">Hiring Strategy</div>
@@ -2105,13 +2103,27 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                             </div>
                                                         )}
 
+                                                        {/* Interview Focus + Difficulty badge */}
                                                         {companyDossier.interview_focus && (
                                                             <div>
-                                                                <div className="text-[10px] font-bold text-text-primary uppercase tracking-wide mb-1">Interview Focus</div>
+                                                                <div className="flex items-center gap-2 mb-1">
+                                                                    <div className="text-[10px] font-bold text-text-primary uppercase tracking-wide">Interview Focus</div>
+                                                                    {companyDossier.interview_difficulty && (
+                                                                        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${
+                                                                            companyDossier.interview_difficulty === 'easy' ? 'bg-green-500/10 text-green-500 border-green-500/20' :
+                                                                            companyDossier.interview_difficulty === 'medium' ? 'bg-yellow-500/10 text-yellow-500 border-yellow-500/20' :
+                                                                            companyDossier.interview_difficulty === 'hard' ? 'bg-orange-500/10 text-orange-400 border-orange-500/20' :
+                                                                            'bg-red-500/10 text-red-400 border-red-500/20'
+                                                                        }`}>
+                                                                            {companyDossier.interview_difficulty.replace('_', ' ').toUpperCase()}
+                                                                        </span>
+                                                                    )}
+                                                                </div>
                                                                 <p className="text-xs text-text-secondary leading-relaxed bg-bg-input p-3 rounded-lg">{companyDossier.interview_focus}</p>
                                                             </div>
                                                         )}
 
+                                                        {/* Salary Estimates */}
                                                         {companyDossier.salary_estimates?.length > 0 && (
                                                             <div>
                                                                 <div className="text-[10px] font-bold text-text-primary uppercase tracking-wide mb-1">Salary Estimates</div>
@@ -2121,10 +2133,10 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                                             <span className="text-xs text-text-primary font-medium">{s.title} <span className="text-text-tertiary">({s.location})</span></span>
                                                                             <div className="flex items-center gap-2">
                                                                                 <span className="text-xs font-bold text-green-400">
-                                                                                    {s.currency} {s.min?.toLocaleString()} - {s.max?.toLocaleString()}
+                                                                                    {s.currency} {s.min?.toLocaleString()} – {s.max?.toLocaleString()}
                                                                                 </span>
                                                                                 <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${s.confidence === 'high' ? 'bg-green-500/10 text-green-500 border-green-500/20' : s.confidence === 'medium' ? 'bg-yellow-500/10 text-yellow-500 border-yellow-500/20' : 'bg-red-500/10 text-red-500 border-red-500/20'}`}>
-                                                                                    {s.confidence.toUpperCase()}
+                                                                                    {s.confidence?.toUpperCase()}
                                                                                 </span>
                                                                             </div>
                                                                         </div>
@@ -2133,6 +2145,143 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                             </div>
                                                         )}
 
+                                                        {/* Work Culture — 5-star ratings */}
+                                                        {companyDossier.culture_ratings && typeof companyDossier.culture_ratings === 'object' &&
+                                                          Object.values(companyDossier.culture_ratings).some(v => typeof v === 'number' && (v as number) > 0) && (
+                                                            <div>
+                                                                <div className="text-[10px] font-bold text-text-primary uppercase tracking-wide mb-2">Work Culture</div>
+                                                                <div className="bg-bg-input p-3 rounded-lg">
+                                                                    {/* Overall score hero */}
+                                                                    <div className="flex items-center justify-between mb-3 pb-3 border-b border-border-subtle">
+                                                                        <div>
+                                                                            <span className="text-2xl font-bold text-text-primary">{companyDossier.culture_ratings.overall.toFixed(1)}</span>
+                                                                            <span className="text-xs text-text-tertiary"> / 5</span>
+                                                                            {companyDossier.culture_ratings.review_count && (
+                                                                                <div className="text-[10px] text-text-tertiary mt-0.5">{companyDossier.culture_ratings.review_count}</div>
+                                                                            )}
+                                                                        </div>
+                                                                        <div className="text-right">
+                                                                            <StarRating value={companyDossier.culture_ratings.overall} size={14} />
+                                                                            {companyDossier.culture_ratings.data_sources?.length > 0 && (
+                                                                                <div className="flex gap-1 mt-1 justify-end">
+                                                                                    {companyDossier.culture_ratings.data_sources.map((src: string, i: number) => (
+                                                                                        <span key={i} className="text-[9px] text-text-tertiary bg-bg-input px-1.5 py-0.5 rounded">{src}</span>
+                                                                                    ))}
+                                                                                </div>
+                                                                            )}
+                                                                        </div>
+                                                                    </div>
+                                                                    {/* Sub-ratings grid */}
+                                                                    <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+                                                                        {[
+                                                                            { label: 'Work-Life Balance', key: 'work_life_balance' },
+                                                                            { label: 'Career Growth', key: 'career_growth' },
+                                                                            { label: 'Compensation', key: 'compensation' },
+                                                                            { label: 'Management', key: 'management' },
+                                                                            { label: 'Diversity & Inclusion', key: 'diversity' },
+                                                                        ].map(({ label, key }) => {
+                                                                            const raw = (companyDossier.culture_ratings as any)[key];
+                                                                            const val: number = typeof raw === 'number' ? raw : 0;
+                                                                            return val > 0 ? (
+                                                                                <div key={key} className="flex items-center justify-between gap-2">
+                                                                                    <span className="text-[10px] text-text-tertiary truncate">{label}</span>
+                                                                                    <div className="flex items-center gap-1 shrink-0">
+                                                                                        <StarRating value={val} size={9} />
+                                                                                        <span className="text-[10px] text-text-secondary font-medium">{val.toFixed(1)}</span>
+                                                                                    </div>
+                                                                                </div>
+                                                                            ) : null;
+                                                                        })}
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                        )}
+
+                                                        {/* Employee Reviews */}
+                                                        {companyDossier.employee_reviews?.length > 0 && (
+                                                            <div>
+                                                                <div className="text-[10px] font-bold text-text-primary uppercase tracking-wide mb-2">Employee Reviews</div>
+                                                                <div className="space-y-2">
+                                                                    {companyDossier.employee_reviews.map((r: any, i: number) => (
+                                                                        <div key={i} className="bg-bg-input p-3 rounded-lg">
+                                                                            <div className="flex items-start gap-2">
+                                                                                <span className={`mt-0.5 shrink-0 w-2 h-2 rounded-full ${r.sentiment === 'positive' ? 'bg-green-400' : r.sentiment === 'mixed' ? 'bg-yellow-400' : 'bg-red-400'}`} />
+                                                                                <p className="text-xs text-text-secondary leading-relaxed italic">"{r.quote}"</p>
+                                                                            </div>
+                                                                            <div className="flex items-center gap-2 mt-2 ml-4">
+                                                                                {r.role && <span className="text-[10px] text-text-tertiary">{r.role}</span>}
+                                                                                {r.role && r.source && <span className="text-text-tertiary/40 text-[10px]">·</span>}
+                                                                                {r.source && <span className="text-[10px] text-text-tertiary/70 bg-bg-input px-1.5 py-0.5 rounded">{r.source}</span>}
+                                                                            </div>
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            </div>
+                                                        )}
+
+                                                        {/* Critics — common complaints */}
+                                                        {companyDossier.critics?.length > 0 && (
+                                                            <div>
+                                                                <div className="flex items-center gap-1.5 mb-2">
+                                                                    <AlertCircle size={11} className="text-orange-400" />
+                                                                    <div className="text-[10px] font-bold text-text-primary uppercase tracking-wide">Common Complaints</div>
+                                                                </div>
+                                                                <div className="space-y-2">
+                                                                    {companyDossier.critics.map((c: any, i: number) => (
+                                                                        <div key={i} className="bg-bg-input p-3 rounded-lg">
+                                                                            <div className="flex items-center justify-between mb-1">
+                                                                                <span className="text-[10px] font-semibold text-orange-400/90">{c.category}</span>
+                                                                                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${
+                                                                                    c.frequency === 'widespread' ? 'bg-red-500/10 text-red-400 border-red-500/20' :
+                                                                                    c.frequency === 'frequently' ? 'bg-orange-500/10 text-orange-400 border-orange-500/20' :
+                                                                                    'bg-yellow-500/10 text-yellow-500 border-yellow-500/20'
+                                                                                }`}>
+                                                                                    {c.frequency?.toUpperCase()}
+                                                                                </span>
+                                                                            </div>
+                                                                            <p className="text-xs text-text-secondary leading-relaxed">{c.complaint}</p>
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            </div>
+                                                        )}
+
+                                                        {/* Benefits */}
+                                                        {companyDossier.benefits?.length > 0 && (
+                                                            <div>
+                                                                <div className="flex items-center gap-1.5 mb-2">
+                                                                    <Gift size={11} className="text-emerald-400" />
+                                                                    <div className="text-[10px] font-bold text-text-primary uppercase tracking-wide">Benefits & Perks</div>
+                                                                </div>
+                                                                <div className="flex flex-wrap gap-1.5">
+                                                                    {companyDossier.benefits.map((b: string, i: number) => (
+                                                                        <span key={i} className="text-[11px] text-emerald-400/90 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20">{b}</span>
+                                                                    ))}
+                                                                </div>
+                                                            </div>
+                                                        )}
+
+                                                        {/* Core Values */}
+                                                        {companyDossier.core_values?.length > 0 && (
+                                                            <div>
+                                                                <div className="text-[10px] font-bold text-text-primary uppercase tracking-wide mb-2">Core Values</div>
+                                                                <div className="flex flex-wrap gap-1.5">
+                                                                    {companyDossier.core_values.map((v: string, i: number) => (
+                                                                        <span key={i} className="text-[11px] text-purple-400/90 px-2.5 py-1 rounded-full bg-purple-500/10 border border-purple-500/20">{v}</span>
+                                                                    ))}
+                                                                </div>
+                                                            </div>
+                                                        )}
+
+                                                        {/* Recent News */}
+                                                        {companyDossier.recent_news && (
+                                                            <div>
+                                                                <div className="text-[10px] font-bold text-text-primary uppercase tracking-wide mb-1">Recent News</div>
+                                                                <p className="text-xs text-text-secondary leading-relaxed bg-bg-input p-3 rounded-lg">{companyDossier.recent_news}</p>
+                                                            </div>
+                                                        )}
+
+                                                        {/* Competitors */}
                                                         {companyDossier.competitors?.length > 0 && (
                                                             <div>
                                                                 <div className="text-[10px] font-bold text-text-primary uppercase tracking-wide mb-2">Competitors</div>
@@ -2146,6 +2295,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                             </div>
                                                         )}
 
+                                                        {/* Sources count */}
                                                         {companyDossier.sources?.length > 0 && (
                                                             <div className="text-[10px] text-text-tertiary mt-2">
                                                                 Sources: {companyDossier.sources.filter(Boolean).length} references

@@ -315,7 +315,10 @@ export class WindowHelper {
   }
 
   public hideMainWindow(): void {
-    // Hide BOTH
+    // Set opacity to 0 first so macOS window-hide animation is invisible to the user,
+    // preventing the screen flash and focus-loss jitter reported in issue #89.
+    this.launcherWindow?.setOpacity(0)
+    this.overlayWindow?.setOpacity(0)
     this.launcherWindow?.hide()
     this.overlayWindow?.hide()
     this.isWindowVisible = false
@@ -384,6 +387,8 @@ export class WindowHelper {
         }, 60);
       } else {
         this.overlayWindow.setContentProtection(this.contentProtection);
+        // Restore opacity in case it was zeroed by hideMainWindow's flash-prevention logic
+        this.overlayWindow.setOpacity(1);
         this.overlayWindow.show();
         this.overlayWindow.focus();
         this.overlayWindow.setAlwaysOnTop(true, "floating");
@@ -408,7 +413,7 @@ export class WindowHelper {
         this.launcherWindow.setOpacity(0);
         this.launcherWindow.show();
         this.launcherWindow.setContentProtection(true);
-        
+
         if (this.opacityTimeout) clearTimeout(this.opacityTimeout);
         this.opacityTimeout = setTimeout(() => {
           if (this.launcherWindow && !this.launcherWindow.isDestroyed()) {
@@ -418,6 +423,8 @@ export class WindowHelper {
         }, 60);
       } else {
         this.launcherWindow.setContentProtection(this.contentProtection);
+        // Restore opacity in case it was zeroed by hideMainWindow's flash-prevention logic
+        this.launcherWindow.setOpacity(1);
         this.launcherWindow.show();
         this.launcherWindow.focus();
       }

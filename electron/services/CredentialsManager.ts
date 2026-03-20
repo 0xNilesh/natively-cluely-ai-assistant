@@ -45,9 +45,8 @@ export interface StoredCredentials {
     sonioxApiKey?: string;
     sttLanguage?: string;
     aiResponseLanguage?: string;
-    // Google Custom Search
-    googleSearchApiKey?: string;
-    googleSearchCseId?: string;
+    // Tavily Search
+    tavilyApiKey?: string;
     // Dynamic Model Discovery – preferred models per provider
     geminiPreferredModel?: string;
     groqPreferredModel?: string;
@@ -151,12 +150,8 @@ export class CredentialsManager {
         return this.credentials.sonioxApiKey;
     }
 
-    public getGoogleSearchApiKey(): string | undefined {
-        return this.credentials.googleSearchApiKey;
-    }
-
-    public getGoogleSearchCseId(): string | undefined {
-        return this.credentials.googleSearchCseId;
+    public getTavilyApiKey(): string | undefined {
+        return this.credentials.tavilyApiKey;
     }
 
     public getSttLanguage(): string {
@@ -274,16 +269,11 @@ export class CredentialsManager {
         console.log('[CredentialsManager] Soniox API Key updated');
     }
 
-    public setGoogleSearchApiKey(key: string): void {
-        this.credentials.googleSearchApiKey = key;
+    public setTavilyApiKey(key: string): void {
+        // Store undefined (not empty string) when removing, so hasKey() checks stay consistent
+        this.credentials.tavilyApiKey = key.trim() || undefined;
         this.saveCredentials();
-        console.log('[CredentialsManager] Google Search API Key updated');
-    }
-
-    public setGoogleSearchCseId(cseId: string): void {
-        this.credentials.googleSearchCseId = cseId;
-        this.saveCredentials();
-        console.log('[CredentialsManager] Google Search CSE ID updated');
+        console.log('[CredentialsManager] Tavily API Key updated');
     }
 
     public setSttLanguage(language: string): void {

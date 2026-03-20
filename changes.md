@@ -1,0 +1,36 @@
+- [electron/WindowHelper.ts]: Set opacity to 0 before hiding windows to prevent macOS animation flash during screenshot capture (issue #89)
+- [electron/WindowHelper.ts]: Restore opacity to 1 in switchToOverlay/switchToLauncher non-Windows path after hide/show cycle
+- [electron/services/KeybindManager.ts]: Added new global keybind `general:capture-and-process` (Cmd+Shift+Enter) for single-trigger screenshot + AI analysis (issue #90)
+- [electron/main.ts]: Added handler for `general:capture-and-process` shortcut that takes screenshot, shows window, and sends `capture-and-process` IPC event
+- [electron/preload.ts]: Added `onCaptureAndProcess` type declaration and IPC listener implementation
+- [src/types/electron.d.ts]: Added `onCaptureAndProcess` to ElectronAPI interface
+- [src/components/NativelyInterface.tsx]: Added `onCaptureAndProcess` useEffect handler that attaches screenshot and triggers AI analysis
+- [electron/LLMHelper.ts]: Fixed `generateWithOpenai` to accept optional `modelId` param; uses `this.currentModelId` when it's an OpenAI model, else falls back to `OPENAI_MODEL` ("gpt-5.4") (issue #96)
+- [electron/LLMHelper.ts]: Fixed `generateWithClaude` to accept optional `modelId` param; uses `this.currentModelId` when it's a Claude model (issue #96)
+- [electron/LLMHelper.ts]: Fixed `streamWithOpenai`, `streamWithOpenaiMultimodal` to use `this.currentModelId` instead of hardcoded `OPENAI_MODEL` (issue #96)
+- [electron/LLMHelper.ts]: Fixed `streamWithClaude`, `streamWithClaudeMultimodal` to use `this.currentModelId` instead of hardcoded `CLAUDE_MODEL` (issue #96)
+- [electron/LLMHelper.ts]: Removed incorrect `gpt-4o → gpt-5.4` alias in setModel (issue #96)
+- [electron/LLMHelper.ts]: Fixed fallback provider chains to pass correct tier model IDs to generateWithOpenai/generateWithClaude (issue #96)
+- [electron/LLMHelper.ts]: Fixed vision fallback to pass tier model ID down to generateWithOpenai/generateWithClaude (issue #96)
+- [electron/LLMHelper.ts]: Added Gemini Flash as fallback in `generateContentStructured` so resume upload works even when Gemini Pro is unavailable (issue #97)
+- [electron/LLMHelper.ts]: Added Ollama as Priority 5 on-device fallback in `generateContentStructured` when all cloud providers fail (issue #97)
+- [electron/LLMHelper.ts]: Corrected `generateWithOpenai` fallback from `gpt-4o-mini` to `OPENAI_MODEL` ("gpt-5.4") — gpt-5.4 is valid per OpenAI API docs (issue #96)
+- [electron/LLMHelper.ts]: Added 3-rotation retry loop with exponential backoff to `generateContentStructured` — matches the pattern used in chatWithGemini (issue #97)
+- [electron/LLMHelper.ts]: Fixed streamWithOpenai, streamWithOpenaiMultimodal, streamWithClaude, streamWithClaudeMultimodal to accept optional modelId param with same resolution logic as generateWithOpenai/generateWithClaude — fallback chain calls now pass tier model IDs so a non-OpenAI currentModelId is never sent to the OpenAI API (issue #96)
+- [electron/ipcHandlers.ts]: Fixed OpenAI connection test model from `gpt-5.3-chat-latest` to `gpt-4o-mini` (issue #96)
+- [premium/electron/knowledge/TavilySearchProvider.ts]: New file — Tavily Search provider replacing Google CSE; uses @tavily/core SDK with advanced depth + raw_content for RAG, tracks session credits, surfaces 401/429/432/433/500 errors distinctly
+- [premium/electron/knowledge/GoogleCustomSearchProvider.ts]: Deleted — replaced by TavilySearchProvider
+- [electron/services/CredentialsManager.ts]: Replaced googleSearchApiKey/googleSearchCseId fields with tavilyApiKey; replaced get/setGoogleSearch* methods with get/setTavilyApiKey
+- [electron/ipcHandlers.ts]: Replaced set-google-search-api-key + set-google-search-cse-id IPC handlers with set-tavily-api-key (validates tvly- prefix); updated profile:research-company to wire TavilySearchProvider; updated get-stored-credentials to return hasTavilyKey
+- [electron/preload.ts]: Replaced setGoogleSearchApiKey/setGoogleSearchCseId with setTavilyApiKey in both contextBridge exposure and TypeScript interface
+- [src/types/electron.d.ts]: Updated getStoredCredentials return type (hasGoogleSearchKey/hasGoogleSearchCseId → hasTavilyKey); updated ElectronAPI interface for Tavily
+- [src/components/SettingsOverlay.tsx]: Replaced Google Search API UI (two-field API key + CSE ID) with single Tavily API key input; updated state, remove handler, and info link to app.tavily.com
+- [premium/electron/knowledge/TavilySearchProvider.ts]: Senior review fixes — moved credits tracking to instance variable (eliminates singleton state), removed unused module-level export, fixed response.requestId access (no longer uses `as any` cast), added statusCode to error status extraction, improved empty-results guard
+- [electron/services/CredentialsManager.ts]: Fixed setTavilyApiKey to store undefined (not empty string) on removal, keeping hasKey() checks consistent
+- [src/components/SettingsOverlay.tsx]: Added tavilyError state and UI error display so validation failures (invalid tvly- prefix) surface to the user; error clears on keystroke
+- [premium/electron/knowledge/types.ts]: Added CultureRatings, EmployeeReview, CriticInsight interfaces; extended CompanyDossier with culture_ratings, employee_reviews, critics, benefits, interview_difficulty fields
+- [premium/electron/knowledge/CompanyResearchEngine.ts]: Updated DOSSIER_SCHEMA with all new fields; replaced culture/values queries with targeted Glassdoor-reviews and employee-complaints queries; fixed salary prompt rule (LLM now uses training knowledge as fallback so array is never empty); added culture/review/critics/benefits prompt rules; increased snippet limit to 8; added normalization + empty-placeholder filtering for all new array fields
+- [src/components/SettingsOverlay.tsx]: Added Star, AlertCircle, TrendingUp, Gift imports; added StarRating component; expanded dossier UI with: interview difficulty badge, work culture 5-star grid (overall + 5 sub-dimensions), employee review cards with sentiment dots, critics/complaints section with frequency badges, benefits pills, core values pills, recent news (previously missing from UI)
+- [src/components/SettingsOverlay.tsx]: Senior review fixes — replaced flawed half-star threshold (>= 0.3 && < 0.8 caused 3.8 to display as 3 stars) with round-to-nearest-0.5 math; fixed culture section gate to use Object.values check so sub-ratings are shown even when overall=0; fixed two invalid Tailwind opacity classes (/8 → /10, /15 → /20); replaced undefined CSS var bg-bg-surface with bg-bg-input; removed unused TrendingUp import; added type guard for sub-rating values before .toFixed(1) call
+- [premium/electron/knowledge/CompanyResearchEngine.ts]: Senior review fixes — added culture_ratings null/non-object guard in both parse paths (summarizeWithLLM and generateLLMOnlyDossier); unified filter pattern to inline style in both paths for consistency
+- [premium/electron/knowledge/HybridSearchEngine.ts]: Final audit fix — updated formatDossierBlock() to include all new CompanyDossier fields (interview_difficulty, culture_ratings with sub-dimensions, employee_reviews, critics/complaints, benefits, core_values) so the LLM chat context is complete when answering culture/review/benefits questions

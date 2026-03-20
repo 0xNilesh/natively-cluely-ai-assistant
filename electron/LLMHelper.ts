@@ -217,7 +217,6 @@ export class LLMHelper {
     let targetModelId = modelId;
     if (modelId === 'gemini') targetModelId = GEMINI_FLASH_MODEL;
     if (modelId === 'gemini-pro') targetModelId = GEMINI_PRO_MODEL;
-    if (modelId === 'gpt-4o') targetModelId = OPENAI_MODEL;
     if (modelId === 'claude') targetModelId = CLAUDE_MODEL;
     if (modelId === 'llama') targetModelId = GROQ_MODEL;
 
@@ -823,7 +822,7 @@ ANSWER DIRECTLY:`;
       if (isMultimodal) {
         // MULTIMODAL PROVIDER ORDER: OpenAI -> Gemini Flash -> Claude -> Gemini Pro -> Groq -> Custom/Ollama
         if (this.openaiClient) {
-          providers.push({ name: `OpenAI (${textOpenAI})`, execute: () => this.generateWithOpenai(userContent, openaiSystemPrompt, imagePaths) });
+          providers.push({ name: `OpenAI (${textOpenAI})`, execute: () => this.generateWithOpenai(userContent, openaiSystemPrompt, imagePaths, textOpenAI) });
         }
         if (this.client) {
           providers.push({
@@ -832,7 +831,7 @@ ANSWER DIRECTLY:`;
           });
         }
         if (this.claudeClient) {
-          providers.push({ name: `Claude (${textClaude})`, execute: () => this.generateWithClaude(userContent, claudeSystemPrompt, imagePaths) });
+          providers.push({ name: `Claude (${textClaude})`, execute: () => this.generateWithClaude(userContent, claudeSystemPrompt, imagePaths, textClaude) });
         }
         if (this.client) {
           providers.push({
@@ -862,10 +861,10 @@ ANSWER DIRECTLY:`;
           });
         }
         if (this.openaiClient) {
-          providers.push({ name: `OpenAI (${textOpenAI})`, execute: () => this.generateWithOpenai(userContent, openaiSystemPrompt) });
+          providers.push({ name: `OpenAI (${textOpenAI})`, execute: () => this.generateWithOpenai(userContent, openaiSystemPrompt, undefined, textOpenAI) });
         }
         if (this.claudeClient) {
-          providers.push({ name: `Claude (${textClaude})`, execute: () => this.generateWithClaude(userContent, claudeSystemPrompt) });
+          providers.push({ name: `Claude (${textClaude})`, execute: () => this.generateWithClaude(userContent, claudeSystemPrompt, undefined, textClaude) });
         }
       }
 
@@ -938,7 +937,7 @@ ANSWER DIRECTLY:`;
       providers.push({ name: `Claude (${CLAUDE_MODEL})`, execute: () => this.generateWithClaude(message) });
     }
 
-    // Priority 3: Gemini Pro (Skip Flash, and don't mutate this.geminiModel to avoid race conditions)
+    // Priority 3: Gemini Pro (don't mutate this.geminiModel to avoid race conditions)
     if (this.client) {
       providers.push({
         name: `Gemini Pro (${GEMINI_PRO_MODEL})`,
@@ -960,6 +959,27 @@ ANSWER DIRECTLY:`;
           return response;
         }
       });
+
+      // Priority 3b: Gemini Flash fallback (if Pro model is unavailable or fails)
+      providers.push({
+        name: `Gemini Flash (${GEMINI_FLASH_MODEL})`,
+        execute: async () => {
+          const response = await this.withRetry(async () => {
+            // @ts-ignore
+            const res = await this.client!.models.generateContent({
+              model: GEMINI_FLASH_MODEL,
+              contents: [{ role: 'user', parts: [{ text: message }] }],
+              config: { maxOutputTokens: MAX_OUTPUT_TOKENS, temperature: 0.4 }
+            });
+            const candidate = res.candidates?.[0];
+            if (!candidate) return '';
+            if (res.text) return res.text;
+            const parts = candidate.content?.parts ?? [];
+            return (Array.isArray(parts) ? parts : [parts]).map((p: any) => p?.text ?? '').join('');
+          });
+          return response;
+        }
+      });
     }
 
     // Priority 4: Groq (Fallback despite JSON hallucination risks)
@@ -967,25 +987,42 @@ ANSWER DIRECTLY:`;
       providers.push({ name: `Groq (${GROQ_MODEL}) fallback`, execute: () => this.generateWithGroq(message) });
     }
 
+    // Priority 5: Ollama (on-device fallback — last resort, no cloud dependency)
+    if (this.useOllama && await this.checkOllamaAvailable()) {
+      providers.push({
+        name: `Ollama (${this.ollamaModel})`,
+        execute: () => this.callOllama(message)
+      });
+    }
+
     if (providers.length === 0) {
       throw new Error('No reasoning model available. Please configure an OpenAI, Claude, Gemini, or Groq API key.');
     }
 
-    for (const provider of providers) {
-      try {
-        console.log(`[LLMHelper] 🧠 Structured generation: trying ${provider.name}...`);
-        const result = await provider.execute();
-        if (result && result.trim().length > 0) {
-          console.log(`[LLMHelper] ✅ Structured generation succeeded with ${provider.name}`);
-          return result;
+    const MAX_ROTATIONS = 3;
+    for (let rotation = 0; rotation < MAX_ROTATIONS; rotation++) {
+      if (rotation > 0) {
+        const backoffMs = 1000 * rotation;
+        console.log(`[LLMHelper] 🔄 Structured generation rotation ${rotation + 1}/${MAX_ROTATIONS} after ${backoffMs}ms backoff...`);
+        await this.delay(backoffMs);
+      }
+
+      for (const provider of providers) {
+        try {
+          console.log(`[LLMHelper] 🧠 Structured generation: trying ${provider.name}...`);
+          const result = await provider.execute();
+          if (result && result.trim().length > 0) {
+            console.log(`[LLMHelper] ✅ Structured generation succeeded with ${provider.name}`);
+            return result;
+          }
+          console.warn(`[LLMHelper] ⚠️ ${provider.name} returned empty response`);
+        } catch (error: any) {
+          console.warn(`[LLMHelper] ⚠️ Structured generation: ${provider.name} failed: ${error.message}`);
         }
-        console.warn(`[LLMHelper] ⚠️ ${provider.name} returned empty response`);
-      } catch (error: any) {
-        console.warn(`[LLMHelper] ⚠️ Structured generation: ${provider.name} failed: ${error.message}`);
       }
     }
 
-    throw new Error('All reasoning models failed for structured generation');
+    throw new Error('All reasoning models failed for structured generation after 3 attempts');
   }
 
   private async generateWithGroq(fullMessage: string): Promise<string> {
@@ -1008,10 +1045,13 @@ ANSWER DIRECTLY:`;
   /**
    * Non-streaming OpenAI generation with proper system/user separation
    */
-  private async generateWithOpenai(userMessage: string, systemPrompt?: string, imagePaths?: string[]): Promise<string> {
+  private async generateWithOpenai(userMessage: string, systemPrompt?: string, imagePaths?: string[], modelId?: string): Promise<string> {
     if (!this.openaiClient) throw new Error("OpenAI client not initialized");
 
     await this.rateLimiters.openai.acquire();
+
+    // Use explicit override, then current model if it's OpenAI, else baseline constant
+    const model = modelId || (this.isOpenAiModel(this.currentModelId) ? this.currentModelId : OPENAI_MODEL);
 
     const messages: any[] = [];
     if (systemPrompt) {
@@ -1032,7 +1072,7 @@ ANSWER DIRECTLY:`;
     }
 
     const response = await this.openaiClient.chat.completions.create({
-      model: OPENAI_MODEL,
+      model,
       messages,
       max_completion_tokens: MAX_OUTPUT_TOKENS,
     });
@@ -1091,10 +1131,13 @@ ANSWER DIRECTLY:`;
   /**
    * Non-streaming Claude generation with proper system/user separation
    */
-  private async generateWithClaude(userMessage: string, systemPrompt?: string, imagePaths?: string[]): Promise<string> {
+  private async generateWithClaude(userMessage: string, systemPrompt?: string, imagePaths?: string[], modelId?: string): Promise<string> {
     if (!this.claudeClient) throw new Error("Claude client not initialized");
 
     await this.rateLimiters.claude.acquire();
+
+    // Use explicit override, then current model if it's Claude, else stable fallback
+    const model = modelId || (this.isClaudeModel(this.currentModelId) ? this.currentModelId : CLAUDE_MODEL);
 
     const content: any[] = [];
     if (imagePaths?.length) {
@@ -1115,7 +1158,7 @@ ANSWER DIRECTLY:`;
     content.push({ type: "text", text: userMessage });
 
     const response = await this.claudeClient.messages.create({
-      model: CLAUDE_MODEL,
+      model,
       max_tokens: CLAUDE_MAX_OUTPUT_TOKENS,
       ...(systemPrompt ? { system: systemPrompt } : {}),
       messages: [{ role: "user", content }],
@@ -1334,7 +1377,7 @@ ANSWER DIRECTLY:`;
           if (!this.openaiClient) return null;
           return {
             name: `OpenAI (${modelId})`,
-            execute: () => this.generateWithOpenai(userPrompt, systemPrompt, isMultimodal ? imagePaths : undefined)
+            execute: () => this.generateWithOpenai(userPrompt, systemPrompt, isMultimodal ? imagePaths : undefined, modelId)
           };
 
         case ModelFamily.GEMINI_FLASH:
@@ -1363,7 +1406,7 @@ ANSWER DIRECTLY:`;
           if (!this.claudeClient) return null;
           return {
             name: `Claude (${modelId})`,
-            execute: () => this.generateWithClaude(userPrompt, systemPrompt, isMultimodal ? imagePaths : undefined)
+            execute: () => this.generateWithClaude(userPrompt, systemPrompt, isMultimodal ? imagePaths : undefined, modelId)
           };
 
         case ModelFamily.GEMINI_PRO:
@@ -1606,13 +1649,13 @@ ANSWER DIRECTLY:`;
     if (isMultimodal) {
       // MULTIMODAL PROVIDER ORDER: OpenAI -> Gemini Flash -> Claude -> Gemini Pro -> Groq Scout 4
       if (this.openaiClient) {
-        providers.push({ name: `OpenAI (${textOpenAI})`, execute: () => this.streamWithOpenaiMultimodal(userContent, imagePaths!, openaiSystemPrompt) });
+        providers.push({ name: `OpenAI (${textOpenAI})`, execute: () => this.streamWithOpenaiMultimodal(userContent, imagePaths!, openaiSystemPrompt, textOpenAI) });
       }
       if (this.client) {
         providers.push({ name: `Gemini Flash (${textGeminiFlash})`, execute: () => this.streamWithGeminiModel(combinedMessages.gemini, textGeminiFlash, imagePaths) });
       }
       if (this.claudeClient) {
-        providers.push({ name: `Claude (${textClaude})`, execute: () => this.streamWithClaudeMultimodal(userContent, imagePaths!, claudeSystemPrompt) });
+        providers.push({ name: `Claude (${textClaude})`, execute: () => this.streamWithClaudeMultimodal(userContent, imagePaths!, claudeSystemPrompt, textClaude) });
       }
       if (this.client) {
         providers.push({ name: `Gemini Pro (${textGeminiPro})`, execute: () => this.streamWithGeminiModel(combinedMessages.gemini, textGeminiPro, imagePaths) });
@@ -1626,10 +1669,10 @@ ANSWER DIRECTLY:`;
         providers.push({ name: `Groq (${textGroq})`, execute: () => this.streamWithGroq(combinedMessages.groq) });
       }
       if (this.openaiClient) {
-        providers.push({ name: `OpenAI (${textOpenAI})`, execute: () => this.streamWithOpenai(userContent, openaiSystemPrompt) });
+        providers.push({ name: `OpenAI (${textOpenAI})`, execute: () => this.streamWithOpenai(userContent, openaiSystemPrompt, textOpenAI) });
       }
       if (this.claudeClient) {
-        providers.push({ name: `Claude (${textClaude})`, execute: () => this.streamWithClaude(userContent, claudeSystemPrompt) });
+        providers.push({ name: `Claude (${textClaude})`, execute: () => this.streamWithClaude(userContent, claudeSystemPrompt, textClaude) });
       }
       if (this.client) {
         providers.push({ name: `Gemini Flash (${textGeminiFlash})`, execute: () => this.streamWithGeminiModel(combinedMessages.gemini, textGeminiFlash) });
@@ -1885,8 +1928,11 @@ ANSWER DIRECTLY:`;
   /**
    * Stream response from OpenAI with proper system/user message separation
    */
-  private async * streamWithOpenai(userMessage: string, systemPrompt?: string): AsyncGenerator<string, void, unknown> {
+  private async * streamWithOpenai(userMessage: string, systemPrompt?: string, modelId?: string): AsyncGenerator<string, void, unknown> {
     if (!this.openaiClient) throw new Error("OpenAI client not initialized");
+
+    // Use explicit override, then currentModelId if it's an OpenAI model, else baseline constant
+    const model = modelId || (this.isOpenAiModel(this.currentModelId) ? this.currentModelId : OPENAI_MODEL);
 
     const messages: any[] = [];
     if (systemPrompt) {
@@ -1895,7 +1941,7 @@ ANSWER DIRECTLY:`;
     messages.push({ role: "user", content: userMessage });
 
     const stream = await this.openaiClient.chat.completions.create({
-      model: OPENAI_MODEL,
+      model,
       messages,
       stream: true,
       max_completion_tokens: MAX_OUTPUT_TOKENS,
@@ -1912,11 +1958,14 @@ ANSWER DIRECTLY:`;
   /**
    * Stream response from Claude with proper system/user message separation
    */
-  private async * streamWithClaude(userMessage: string, systemPrompt?: string): AsyncGenerator<string, void, unknown> {
+  private async * streamWithClaude(userMessage: string, systemPrompt?: string, modelId?: string): AsyncGenerator<string, void, unknown> {
     if (!this.claudeClient) throw new Error("Claude client not initialized");
 
+    // Use explicit override, then currentModelId if it's a Claude model, else baseline constant
+    const model = modelId || (this.isClaudeModel(this.currentModelId) ? this.currentModelId : CLAUDE_MODEL);
+
     const stream = await this.claudeClient.messages.stream({
-      model: CLAUDE_MODEL,
+      model,
       max_tokens: CLAUDE_MAX_OUTPUT_TOKENS,
       ...(systemPrompt ? { system: systemPrompt } : {}),
       messages: [{ role: "user", content: userMessage }],
@@ -1932,8 +1981,11 @@ ANSWER DIRECTLY:`;
   /**
    * Stream multimodal (image + text) response from OpenAI with system/user separation
    */
-  private async * streamWithOpenaiMultimodal(userMessage: string, imagePaths: string[], systemPrompt?: string): AsyncGenerator<string, void, unknown> {
+  private async * streamWithOpenaiMultimodal(userMessage: string, imagePaths: string[], systemPrompt?: string, modelId?: string): AsyncGenerator<string, void, unknown> {
     if (!this.openaiClient) throw new Error("OpenAI client not initialized");
+
+    // Use explicit override, then currentModelId if it's an OpenAI model, else baseline constant
+    const model = modelId || (this.isOpenAiModel(this.currentModelId) ? this.currentModelId : OPENAI_MODEL);
 
     const messages: any[] = [];
     if (systemPrompt) {
@@ -1950,7 +2002,7 @@ ANSWER DIRECTLY:`;
     messages.push({ role: "user", content: contentParts });
 
     const stream = await this.openaiClient.chat.completions.create({
-      model: OPENAI_MODEL,
+      model,
       messages,
       stream: true,
       max_completion_tokens: MAX_OUTPUT_TOKENS,
@@ -1967,8 +2019,11 @@ ANSWER DIRECTLY:`;
   /**
    * Stream multimodal (image + text) response from Claude with system/user separation
    */
-  private async * streamWithClaudeMultimodal(userMessage: string, imagePaths: string[], systemPrompt?: string): AsyncGenerator<string, void, unknown> {
+  private async * streamWithClaudeMultimodal(userMessage: string, imagePaths: string[], systemPrompt?: string, modelId?: string): AsyncGenerator<string, void, unknown> {
     if (!this.claudeClient) throw new Error("Claude client not initialized");
+
+    // Use explicit override, then currentModelId if it's a Claude model, else baseline constant
+    const model = modelId || (this.isClaudeModel(this.currentModelId) ? this.currentModelId : CLAUDE_MODEL);
 
     const imageContentParts: any[] = [];
     for (const p of imagePaths) {
@@ -1986,7 +2041,7 @@ ANSWER DIRECTLY:`;
     }
 
     const stream = await this.claudeClient.messages.stream({
-      model: CLAUDE_MODEL,
+      model,
       max_tokens: CLAUDE_MAX_OUTPUT_TOKENS,
       ...(systemPrompt ? { system: systemPrompt } : {}),
       messages: [{
