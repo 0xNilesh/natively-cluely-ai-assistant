@@ -398,6 +398,17 @@ export class AppState {
     autoUpdater.autoDownload = false
     autoUpdater.autoInstallOnAppQuit = false  // Manual install only via button
 
+    // Auto-detect update channel based on current version
+    const currentVersion = app.getVersion()
+    if (currentVersion.includes('alpha')) {
+      autoUpdater.channel = 'alpha'
+    } else if (currentVersion.includes('beta')) {
+      autoUpdater.channel = 'beta'
+    } else {
+      autoUpdater.channel = 'stable'
+    }
+    console.log(`[AutoUpdater] Channel: ${autoUpdater.channel}, Version: ${currentVersion}`)
+
     autoUpdater.on("checking-for-update", () => {
       console.log("[AutoUpdater] Checking for update...")
       this.broadcast("update-checking")
