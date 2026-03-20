@@ -231,7 +231,7 @@ interface ElectronAPI {
   profileUploadJD: (filePath: string) => Promise<{ success: boolean; error?: string }>;
   profileDeleteJD: () => Promise<{ success: boolean; error?: string }>;
   profileResearchCompany: (companyName: string) => Promise<{ success: boolean; dossier?: any; error?: string }>;
-  profileGenerateNegotiation: () => Promise<{ success: boolean; dossier?: any; profileData?: any; error?: string }>;
+  profileGenerateNegotiation: (force?: boolean) => Promise<{ success: boolean; script?: any; error?: string }>;
 
   // Tavily Search API
   setTavilyApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>;
@@ -904,7 +904,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   profileUploadJD: (filePath: string) => ipcRenderer.invoke('profile:upload-jd', filePath),
   profileDeleteJD: () => ipcRenderer.invoke('profile:delete-jd'),
   profileResearchCompany: (companyName: string) => ipcRenderer.invoke('profile:research-company', companyName),
-  profileGenerateNegotiation: () => ipcRenderer.invoke('profile:generate-negotiation'),
+  profileGenerateNegotiation: (force?: boolean) => ipcRenderer.invoke('profile:generate-negotiation', force),
 
   // Tavily Search API
   setTavilyApiKey: (apiKey: string) => ipcRenderer.invoke('set-tavily-api-key', apiKey),

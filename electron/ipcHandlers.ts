@@ -2084,7 +2084,7 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
-  safeHandle("profile:generate-negotiation", async () => {
+  safeHandle("profile:generate-negotiation", async (_, force: boolean = false) => {
     try {
       // Premium gate
       const { LicenseManager } = require('../premium/electron/services/LicenseManager');
@@ -2095,28 +2095,20 @@ export function initializeIpcHandlers(appState: AppState): void {
       if (!orchestrator) {
         return { success: false, error: 'Knowledge engine not initialized' };
       }
-      const profileData = orchestrator.getProfileData();
-      if (!profileData) {
-        return { success: false, error: 'No resume uploaded' };
-      }
-
-      // Get the active documents and dossier
       const status = orchestrator.getStatus();
       if (!status.hasResume) {
         return { success: false, error: 'No resume loaded' };
       }
 
-      // Use the research engine to get cached dossier if a JD is active
-      let dossier = null;
-      if (profileData.activeJD?.company) {
-        const engine = orchestrator.getCompanyResearchEngine();
-        dossier = engine.getCachedDossier(profileData.activeJD.company);
+      // Use cache unless force-regenerating
+      let script = force ? null : orchestrator.getNegotiationScript();
+      if (!script) {
+        script = await orchestrator.generateNegotiationScriptOnDemand();
       }
-
-      const { generateNegotiationScript } = require('../premium/electron/knowledge/NegotiationEngine');
-      // We need access to internal docs - use the orchestrator's methods
-      // For now, return the dossier data so the frontend can display it
-      return { success: true, dossier, profileData };
+      if (!script) {
+        return { success: false, error: 'Could not generate negotiation script. Ensure a resume and job description are uploaded.' };
+      }
+      return { success: true, script };
     } catch (error: any) {
       console.error('[IPC] profile:generate-negotiation error:', error);
       return { success: false, error: error.message };

@@ -373,7 +373,10 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
             // Proactively load profile data if starting on profile tab
             if (initialTab === 'profile') {
                 window.electronAPI?.profileGetStatus?.().then(setProfileStatus).catch(() => { });
-                window.electronAPI?.profileGetProfile?.().then(setProfileData).catch(() => { });
+                window.electronAPI?.profileGetProfile?.().then(data => {
+                    setProfileData(data);
+                    if (data?.negotiationScript) setNegotiationScript(data.negotiationScript);
+                }).catch(() => { });
             }
         }
     }, [isOpen, initialTab]);
@@ -410,6 +413,9 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     const [hasStoredTavilyKey, setHasStoredTavilyKey] = useState(false);
     const [tavilySaving, setTavilySaving] = useState(false);
     const [tavilyError, setTavilyError] = useState('');
+    const [negotiationScript, setNegotiationScript] = useState<any>(null);
+    const [negotiationGenerating, setNegotiationGenerating] = useState(false);
+    const [negotiationError, setNegotiationError] = useState('');
 
     // Close dropdown when clicking outside
     // Sync with global state changes
@@ -1304,7 +1310,10 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                             setActiveTab('profile');
                                             // Load profile status when switching to this tab
                                             window.electronAPI?.profileGetStatus?.().then(setProfileStatus).catch(() => { });
-                                            window.electronAPI?.profileGetProfile?.().then(setProfileData).catch(() => { });
+                                            window.electronAPI?.profileGetProfile?.().then(data => {
+                                                setProfileData(data);
+                                                if (data?.negotiationScript) setNegotiationScript(data.negotiationScript);
+                                            }).catch(() => { });
                                         }}
                                         className={`w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-3 ${activeTab === 'profile' ? 'bg-bg-item-active text-text-primary' : 'text-text-secondary hover:text-text-primary hover:bg-bg-item-active/50'}`}
                                     >
@@ -2335,6 +2344,200 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                     )}
                                     <ProfileVisualizer profileData={profileData} />
 
+                                    {/* Salary Negotiation Script */}
+                                    {profileData?.hasActiveJD && (
+                                        <div className="mt-6 animated fadeIn">
+                                            <div className="relative rounded-xl border border-border-subtle overflow-hidden bg-bg-item-surface">
+
+                                                <div className="p-5">
+                                                    {/* Header row */}
+                                                    <div className="flex items-center justify-between mb-5">
+                                                        <div className="flex items-center gap-3">
+                                                            <div className="relative">
+                                                                <div className="w-9 h-9 rounded-lg flex items-center justify-center" style={{ background: 'linear-gradient(135deg, rgba(16,185,129,0.15) 0%, rgba(6,182,212,0.1) 100%)', border: '1px solid rgba(16,185,129,0.25)' }}>
+                                                                    <Briefcase size={15} className="text-emerald-400" />
+                                                                </div>
+                                                                {negotiationScript && (
+                                                                    <div className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-emerald-500 border-2 border-bg-item-surface" />
+                                                                )}
+                                                            </div>
+                                                            <div>
+                                                                <h3 className="text-[13px] font-bold text-text-primary tracking-tight">Negotiation Script</h3>
+                                                                <p className="text-[10px] text-text-tertiary mt-0.5 tracking-wide uppercase">
+                                                                    {negotiationScript ? `Tailored for ${profileData?.activeJD?.company || 'this role'}` : 'AI-powered salary coaching'}
+                                                                </p>
+                                                            </div>
+                                                        </div>
+                                                        <div className="flex items-center gap-2">
+                                                            {negotiationScript && (
+                                                                <button
+                                                                    onClick={async () => {
+                                                                        setNegotiationGenerating(true);
+                                                                        setNegotiationError('');
+                                                                        try {
+                                                                            const result = await window.electronAPI?.profileGenerateNegotiation?.(true);
+                                                                            if (result?.success && result.script) {
+                                                                                setNegotiationScript(result.script);
+                                                                            } else {
+                                                                                setNegotiationError(result?.error || 'Failed to regenerate');
+                                                                            }
+                                                                        } catch { setNegotiationError('Generation failed'); }
+                                                                        finally { setNegotiationGenerating(false); }
+                                                                    }}
+                                                                    disabled={negotiationGenerating}
+                                                                    title="Regenerate script"
+                                                                    className="w-7 h-7 rounded-lg flex items-center justify-center text-text-tertiary hover:text-text-primary hover:bg-bg-input transition-all border border-border-subtle"
+                                                                >
+                                                                    <RefreshCw size={12} className={negotiationGenerating ? 'animate-spin' : ''} />
+                                                                </button>
+                                                            )}
+                                                            {!negotiationScript && (
+                                                                <button
+                                                                    onClick={async () => {
+                                                                        setNegotiationGenerating(true);
+                                                                        setNegotiationError('');
+                                                                        try {
+                                                                            const result = await window.electronAPI?.profileGenerateNegotiation?.(false);
+                                                                            if (result?.success && result.script) {
+                                                                                setNegotiationScript(result.script);
+                                                                            } else {
+                                                                                setNegotiationError(result?.error || 'Failed to generate');
+                                                                            }
+                                                                        } catch { setNegotiationError('Generation failed'); }
+                                                                        finally { setNegotiationGenerating(false); }
+                                                                    }}
+                                                                    disabled={negotiationGenerating}
+                                                                    className="px-4 py-1.5 rounded-full text-[11px] font-semibold transition-all flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-wait"
+                                                                    style={{ background: 'linear-gradient(135deg, rgba(16,185,129,0.2) 0%, rgba(6,182,212,0.15) 100%)', border: '1px solid rgba(16,185,129,0.3)', color: '#34d399' }}
+                                                                >
+                                                                    {negotiationGenerating ? <RefreshCw size={11} className="animate-spin" /> : <Sparkles size={11} />}
+                                                                    {negotiationGenerating ? 'Generating…' : 'Generate Script'}
+                                                                </button>
+                                                            )}
+                                                        </div>
+                                                    </div>
+
+                                                    {negotiationError && (
+                                                        <div className="flex items-center gap-2 mb-4 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20">
+                                                            <AlertCircle size={12} className="text-red-400 shrink-0" />
+                                                            <p className="text-[11px] text-red-400">{negotiationError}</p>
+                                                        </div>
+                                                    )}
+
+                                                    {/* Empty state */}
+                                                    {!negotiationScript && !negotiationGenerating && !negotiationError && (
+                                                        <div className="flex flex-col items-center justify-center py-8 gap-3">
+                                                            <div className="w-12 h-12 rounded-2xl flex items-center justify-center" style={{ background: 'linear-gradient(135deg, rgba(16,185,129,0.08) 0%, rgba(6,182,212,0.06) 100%)', border: '1px solid rgba(16,185,129,0.15)' }}>
+                                                                <Briefcase size={20} className="text-emerald-500/50" />
+                                                            </div>
+                                                            <div className="text-center">
+                                                                <p className="text-[12px] font-medium text-text-secondary">No script yet</p>
+                                                                <p className="text-[10px] text-text-tertiary mt-0.5">Generate a personalized opening, justification &amp; counter-offer</p>
+                                                            </div>
+                                                        </div>
+                                                    )}
+
+                                                    {/* Generating skeleton */}
+                                                    {negotiationGenerating && (
+                                                        <div className="space-y-3 py-2">
+                                                            {[40, 70, 55].map((w, i) => (
+                                                                <div key={i} className="h-3 rounded-full bg-bg-input animate-pulse" style={{ width: `${w}%`, animationDelay: `${i * 150}ms` }} />
+                                                            ))}
+                                                            <div className="h-12 rounded-lg bg-bg-input animate-pulse mt-2" style={{ animationDelay: '450ms' }} />
+                                                        </div>
+                                                    )}
+
+                                                    {negotiationScript && !negotiationGenerating && (
+                                                        <div className="space-y-3">
+                                                            {/* Salary Range Hero */}
+                                                            {negotiationScript.salary_range && (
+                                                                <div className="rounded-xl p-4 flex items-center justify-between" style={{ background: 'linear-gradient(135deg, rgba(16,185,129,0.08) 0%, rgba(6,182,212,0.06) 100%)', border: '1px solid rgba(16,185,129,0.18)' }}>
+                                                                    <div>
+                                                                        <div className="text-[9px] font-bold uppercase tracking-widest text-emerald-500/70 mb-1">Target Compensation</div>
+                                                                        <div className="text-xl font-bold tracking-tight" style={{ color: '#34d399' }}>
+                                                                            {negotiationScript.salary_range.currency} {negotiationScript.salary_range.min.toLocaleString()}
+                                                                            <span className="text-text-tertiary font-normal mx-2">–</span>
+                                                                            {negotiationScript.salary_range.max.toLocaleString()}
+                                                                        </div>
+                                                                        {negotiationScript.sources?.length > 0 && (
+                                                                            <div className="text-[9px] text-text-tertiary mt-1">{negotiationScript.sources.length} market source{negotiationScript.sources.length > 1 ? 's' : ''}</div>
+                                                                        )}
+                                                                    </div>
+                                                                    <span className={`text-[9px] font-bold px-2 py-1 rounded-full tracking-wide ${
+                                                                        negotiationScript.salary_range.confidence === 'high' ? 'text-emerald-400 bg-emerald-500/15 border border-emerald-500/25' :
+                                                                        negotiationScript.salary_range.confidence === 'medium' ? 'text-yellow-400 bg-yellow-500/15 border border-yellow-500/25' :
+                                                                        'text-text-tertiary bg-bg-input border border-border-subtle'
+                                                                    }`}>
+                                                                        {(negotiationScript.salary_range.confidence || 'low').toUpperCase()}
+                                                                    </span>
+                                                                </div>
+                                                            )}
+
+                                                            {/* Step cards */}
+                                                            {[
+                                                                {
+                                                                    step: '01',
+                                                                    label: 'Opening',
+                                                                    sublabel: 'When asked about salary expectations',
+                                                                    content: negotiationScript.opening_line,
+                                                                    accent: '#10b981',
+                                                                    accentBg: 'rgba(16,185,129,0.07)',
+                                                                    accentBorder: 'rgba(16,185,129,0.2)',
+                                                                    quote: true,
+                                                                },
+                                                                {
+                                                                    step: '02',
+                                                                    label: 'Justify Your Ask',
+                                                                    sublabel: 'Link your track record to the number',
+                                                                    content: negotiationScript.justification,
+                                                                    accent: '#60a5fa',
+                                                                    accentBg: 'rgba(96,165,250,0.07)',
+                                                                    accentBorder: 'rgba(96,165,250,0.2)',
+                                                                    quote: false,
+                                                                },
+                                                                {
+                                                                    step: '03',
+                                                                    label: 'Counter & Hold',
+                                                                    sublabel: 'If they come back lower',
+                                                                    content: negotiationScript.counter_offer_fallback,
+                                                                    accent: '#fb923c',
+                                                                    accentBg: 'rgba(251,146,60,0.07)',
+                                                                    accentBorder: 'rgba(251,146,60,0.2)',
+                                                                    quote: true,
+                                                                },
+                                                            ].filter(s => s.content).map((s) => (
+                                                                <div key={s.step} className="rounded-xl overflow-hidden" style={{ border: `1px solid ${s.accentBorder}`, background: s.accentBg }}>
+                                                                    <div className="flex items-center justify-between px-3.5 pt-3 pb-2">
+                                                                        <div className="flex items-center gap-2">
+                                                                            <span className="text-[10px] font-black tracking-widest" style={{ color: s.accent, opacity: 0.6 }}>STEP {s.step}</span>
+                                                                            <span className="text-[11px] font-bold text-text-primary">{s.label}</span>
+                                                                        </div>
+                                                                        <button
+                                                                            onClick={() => navigator.clipboard?.writeText(s.content)}
+                                                                            title="Copy to clipboard"
+                                                                            className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[9px] font-medium transition-all hover:bg-bg-input text-text-tertiary hover:text-text-secondary"
+                                                                        >
+                                                                            <Check size={9} />
+                                                                            Copy
+                                                                        </button>
+                                                                    </div>
+                                                                    <p className="text-[10px] text-text-tertiary px-3.5 pb-2 -mt-1 tracking-wide">{s.sublabel}</p>
+                                                                    <div className="mx-3.5 mb-3.5 relative">
+                                                                        {s.quote && (
+                                                                            <span className="absolute -top-1 -left-0.5 text-2xl leading-none font-serif select-none pointer-events-none" style={{ color: s.accent, opacity: 0.3 }}>"</span>
+                                                                        )}
+                                                                        <p className={`text-[12px] leading-relaxed text-text-primary ${s.quote ? 'pl-3 italic' : ''}`} style={{ fontStyle: s.quote ? 'italic' : 'normal' }}>
+                                                                            {s.content}
+                                                                        </p>
+                                                                    </div>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
 
                                 </div>
                             )}

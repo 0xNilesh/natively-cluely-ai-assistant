@@ -255,7 +255,7 @@ export interface ElectronAPI {
   profileUploadJD: (filePath: string) => Promise<{ success: boolean; error?: string }>
   profileDeleteJD: () => Promise<{ success: boolean; error?: string }>
   profileResearchCompany: (companyName: string) => Promise<{ success: boolean; dossier?: any; error?: string }>
-  profileGenerateNegotiation: () => Promise<{ success: boolean; dossier?: any; profileData?: any; error?: string }>
+  profileGenerateNegotiation: (force?: boolean) => Promise<{ success: boolean; script?: any; error?: string }>
 
   // Tavily Search API
   setTavilyApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
