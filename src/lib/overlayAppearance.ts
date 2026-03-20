@@ -21,7 +21,16 @@ const mix = (min: number, max: number, value: number) => min + ((max - min) * va
 
 export const OVERLAY_OPACITY_MIN = 0.35;
 export const OVERLAY_OPACITY_MAX = 1;
+/** @deprecated Use getDefaultOverlayOpacity() for theme-aware default. */
 export const OVERLAY_OPACITY_DEFAULT = 0.65;
+export const OVERLAY_OPACITY_DEFAULT_DARK = 0.80;
+export const OVERLAY_OPACITY_DEFAULT_LIGHT = 0.70;
+
+/** Returns the correct default opacity based on the currently active theme. */
+export const getDefaultOverlayOpacity = (): number =>
+    document.documentElement.getAttribute('data-theme') === 'light'
+        ? OVERLAY_OPACITY_DEFAULT_LIGHT
+        : OVERLAY_OPACITY_DEFAULT_DARK;
 
 export const clampOverlayOpacity = (opacity: number) => clamp(opacity, OVERLAY_OPACITY_MIN, OVERLAY_OPACITY_MAX);
 
@@ -52,10 +61,10 @@ export const getOverlayAppearance = (opacity: number, theme: OverlayTheme): Over
                 WebkitBackdropFilter: `blur(${scale(3, 11, blurStrength)}px) saturate(140%)`,
             },
             transcriptStyle: {
-                backgroundColor: `rgba(219, 234, 254, ${scale(0.2, 0.96, surfaceStrength)})`,
-                borderBottomColor: `rgba(30, 64, 175, ${scale(0.1, 0.2, surfaceStrength)})`,
-                backdropFilter: `blur(${scale(1.5, 4.5, blurStrength)}px)`,
-                WebkitBackdropFilter: `blur(${scale(1.5, 4.5, blurStrength)}px)`,
+                backgroundColor: 'transparent',
+                borderBottomColor: 'transparent',
+                backdropFilter: 'none',
+                WebkitBackdropFilter: 'none',
             },
             subtleStyle: {
                 backgroundColor: `rgba(245, 249, 255, ${scale(0.05, 0.92, surfaceStrength)})`,
@@ -106,10 +115,10 @@ export const getOverlayAppearance = (opacity: number, theme: OverlayTheme): Over
             WebkitBackdropFilter: `blur(${scale(4, 13, blurStrength)}px) saturate(136%)`,
         },
         transcriptStyle: {
-            backgroundColor: `rgba(17, 24, 39, ${scale(0.05, 0.9, surfaceStrength)})`,
-            borderBottomColor: `rgba(255, 255, 255, ${scale(0.05, 0.1, surfaceStrength)})`,
-            backdropFilter: `blur(${scale(2, 6, blurStrength)}px)`,
-            WebkitBackdropFilter: `blur(${scale(2, 6, blurStrength)}px)`,
+            backgroundColor: 'transparent',
+            borderBottomColor: 'transparent',
+            backdropFilter: 'none',
+            WebkitBackdropFilter: 'none',
         },
         subtleStyle: {
             backgroundColor: `rgba(40, 45, 56, ${scale(0.18, 0.92, surfaceStrength)})`,

@@ -1,8 +1,8 @@
-const { pipeline, env } = require('@xenova/transformers');
 const path = require('path');
 const fs = require('fs');
 
 async function downloadModels() {
+    const { pipeline, env } = await import('@xenova/transformers');
     const modelsDir = path.join(__dirname, '../resources/models');
     
     // Ensure the directory exists
@@ -31,5 +31,8 @@ async function downloadModels() {
     }
 }
 
-downloadModels();
+downloadModels().catch((e) => {
+    console.error('[download-models] Fatal error:', e);
+    process.exit(1);
+});
 

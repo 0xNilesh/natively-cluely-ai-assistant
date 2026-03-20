@@ -1223,8 +1223,6 @@ RULES:
 6. No meta-commentary, no headers, no "Let me explain…"
 7. Never reveal you are AI
 
-{TEMPORAL_CONTEXT}
-
 Output ONLY the spoken answer. Nothing else.`;
 
 /**

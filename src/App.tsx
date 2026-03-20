@@ -11,7 +11,7 @@ import { AnimatePresence, motion } from "framer-motion"
 import UpdateBanner from "./components/UpdateBanner"
 import { SupportToaster } from "./components/SupportToaster"
 import { AlertCircle } from "lucide-react"
-import { clampOverlayOpacity, OVERLAY_OPACITY_DEFAULT } from "./lib/overlayAppearance"
+import { clampOverlayOpacity, OVERLAY_OPACITY_DEFAULT, getDefaultOverlayOpacity } from "./lib/overlayAppearance"
 import {
   JDAwarenessToaster,
   ProfileFeatureToaster,
@@ -89,9 +89,10 @@ const App: React.FC = () => {
   // so it can be initialized once from localStorage and updated via IPC.
   const [overlayOpacity, setOverlayOpacity] = useState<number>(() => {
     const stored = localStorage.getItem('natively_overlay_opacity');
-    if (!stored) return OVERLAY_OPACITY_DEFAULT;
-    const parsed = parseFloat(stored);
-    return Number.isFinite(parsed) ? clampOverlayOpacity(parsed) : OVERLAY_OPACITY_DEFAULT;
+    const parsed = stored ? parseFloat(stored) : NaN;
+    // Treat missing value or the old default (0.65) as "not user-set"
+    const isUserSet = Number.isFinite(parsed) && parsed !== OVERLAY_OPACITY_DEFAULT;
+    return isUserSet ? clampOverlayOpacity(parsed) : getDefaultOverlayOpacity();
   });
   
   // Profile state for ad targeting
@@ -179,6 +180,18 @@ const App: React.FC = () => {
       if (removeOpacityListener) removeOpacityListener();
     };
   }, [isOverlayWindow]);
+
+  // When the theme switches and no user preference is stored, reset to theme-aware default
+  useEffect(() => {
+    if (!isOverlayWindow || !window.electronAPI?.onThemeChanged) return;
+    return window.electronAPI.onThemeChanged(() => {
+      const stored = localStorage.getItem('natively_overlay_opacity');
+      if (!stored) {
+        setOverlayOpacity(getDefaultOverlayOpacity());
+      }
+    });
+  }, [isOverlayWindow]);
+
 
   // Handlers
   const handleReindex = async () => {

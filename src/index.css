@@ -245,10 +245,8 @@ body {
 }
 
 .overlay-transcript-surface {
-  background: var(--overlay-transcript-bg);
-  border-bottom-color: var(--overlay-border-soft);
-  backdrop-filter: blur(var(--overlay-transcript-blur));
-  -webkit-backdrop-filter: blur(var(--overlay-transcript-blur));
+  background: transparent;
+  border-bottom-color: transparent;
 }
 
 .overlay-subtle-surface {

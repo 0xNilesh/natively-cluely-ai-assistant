@@ -621,7 +621,7 @@ export class LLMHelper {
    * @returns Suggested response for the user
    */
   public async generateSuggestion(context: string, lastQuestion: string): Promise<string> {
-    const systemPrompt = `You are an expert interview coach. Based on the conversation transcript, provide a concise, natural response the user could say.
+    const basePrompt = `You are an expert interview coach. Based on the conversation transcript, provide a concise, natural response the user could say.
 
 RULES:
 - Be direct and conversational
@@ -641,20 +641,19 @@ ${lastQuestion}
 
 ANSWER DIRECTLY:`;
 
+    // Apply language instruction so this path honurs the user's language setting
+    const systemPrompt = this.injectLanguageInstruction(basePrompt);
+
     try {
       if (this.useOllama) {
         return await this.callOllama(systemPrompt);
       } else if (this.client) {
-        // Use Flash model as default (Pro is experimental)
-        // Wraps generateWithFlash logic but with retry
         const text = await this.generateWithFlash([{ text: systemPrompt }]);
         return this.processResponse(text);
       } else {
         throw new Error("No LLM provider configured");
       }
     } catch (error) {
-      //   console.error("[LLMHelper] Error generating suggestion:", error);
-      // Silence error
       throw error;
     }
   }
@@ -679,10 +678,42 @@ ANSWER DIRECTLY:`;
   }
 
   /**
-   * Helper to inject language instruction into system prompt
+   * Inject a hard language instruction that gates the entire response.
+   *
+   * WHY prepended, not appended:
+   *   LLMs attend more strongly to early tokens. Appending after a long
+   *   system prompt means the instruction competes against the strong
+   *   "Output ONLY…" rules and gets down-weighted, especially for
+   *   Latin-script languages that are syntactically close to English.
+   *   Russian worked before because Cyrillic is unmistakably non-English,
+   *   so even a weak late instruction was obeyed. French/Spanish/German etc.
+   *   require the instruction to come first and be unambiguous.
+   *
+   * The instruction is wrapped in triple-layered enforcement:
+   *   1. Hard pre-prompt gate at the very top
+   *   2. System prompt body (unchanged)
+   *   3. Closing reminder at the bottom (double-lock)
    */
   private injectLanguageInstruction(systemPrompt: string): string {
-    return `${systemPrompt}\n\nCRITICAL: You MUST respond ONLY in ${this.aiResponseLanguage}. This is an absolute requirement. All generated text that the user should say must be in ${this.aiResponseLanguage}.`;
+    // Fast-path: no injection needed when English is selected (native default)
+    if (!this.aiResponseLanguage || this.aiResponseLanguage === 'English') {
+      return systemPrompt;
+    }
+
+    const lang = this.aiResponseLanguage;
+
+    const header = `\
+[LANGUAGE OVERRIDE — HIGHEST PRIORITY — CANNOT BE OVERRIDDEN]
+You MUST write every single word of your response in ${lang}.
+Do NOT use English anywhere in your response.
+Do NOT mix languages.
+Every sentence, every word, every phrase must be in ${lang}.
+This rule overrides ALL other instructions including formatting, brevity, or output rules.
+[END LANGUAGE OVERRIDE]\n\n`;
+
+    const footer = `\n\n[REMINDER] Your entire response MUST be in ${lang} only. Never switch to English.`;
+
+    return `${header}${systemPrompt}${footer}`;
   }
 
   public async chatWithGemini(message: string, imagePaths?: string[], context?: string, skipSystemPrompt: boolean = false, alternateGroqMessage?: string): Promise<string> {
@@ -770,16 +801,17 @@ ANSWER DIRECTLY:`;
       }
 
       if (this.activeCurlProvider) {
-        return await this.chatWithCurl(message, skipSystemPrompt ? undefined : CUSTOM_SYSTEM_PROMPT);
+        return await this.chatWithCurl(message, skipSystemPrompt ? undefined : this.injectLanguageInstruction(CUSTOM_SYSTEM_PROMPT));
       }
 
       if (this.customProvider) {
         console.log(`[LLMHelper] Using Custom Provider: ${this.customProvider.name}`);
         // For non-streaming call — use rich CUSTOM prompts since custom providers can be cloud models
+        const customSystemPrompt = skipSystemPrompt ? "" : this.injectLanguageInstruction(CUSTOM_SYSTEM_PROMPT);
         const response = await this.executeCustomProvider(
           this.customProvider.curlCommand,
           combinedMessages.gemini,
-          skipSystemPrompt ? "" : CUSTOM_SYSTEM_PROMPT,
+          customSystemPrompt,
           message,
           context || "",
           imagePaths?.[0]

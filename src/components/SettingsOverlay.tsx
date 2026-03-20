@@ -19,6 +19,7 @@ import {
     getOverlayAppearance,
     OVERLAY_OPACITY_DEFAULT,
     OVERLAY_OPACITY_MIN,
+    getDefaultOverlayOpacity,
 } from '../lib/overlayAppearance';
 import { KeyRecorder } from './ui/KeyRecorder';
 import { ProfileVisualizer, PremiumUpgradeModal } from '../premium';
@@ -476,10 +477,23 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     // Overlay Opacity state
     const [overlayOpacity, setOverlayOpacity] = useState<number>(() => {
         const stored = localStorage.getItem('natively_overlay_opacity');
-        if (!stored) return OVERLAY_OPACITY_DEFAULT;
-        const parsed = parseFloat(stored);
-        return Number.isFinite(parsed) ? clampOverlayOpacity(parsed) : OVERLAY_OPACITY_DEFAULT;
+        const parsed = stored ? parseFloat(stored) : NaN;
+        // Treat missing value or the old default (0.65) as "not user-set"
+        const isUserSet = Number.isFinite(parsed) && parsed !== OVERLAY_OPACITY_DEFAULT;
+        return isUserSet ? clampOverlayOpacity(parsed) : getDefaultOverlayOpacity();
     });
+
+    // When the theme changes and the user hasn't saved a custom value, reset to theme-aware default
+    const resolvedTheme = useResolvedTheme();
+    useEffect(() => {
+        const stored = localStorage.getItem('natively_overlay_opacity');
+        const parsed = stored ? parseFloat(stored) : NaN;
+        const isUserSet = Number.isFinite(parsed) && parsed !== OVERLAY_OPACITY_DEFAULT;
+        if (!isUserSet) {
+            setOverlayOpacity(getDefaultOverlayOpacity());
+        }
+    }, [resolvedTheme]);
+
 
     // Live preview state — true while the user is holding down the slider
     const [isPreviewingOpacity, setIsPreviewingOpacity] = useState(false);
@@ -705,9 +719,22 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
         }));
 
     const handleAiLanguageChange = async (key: string) => {
-        setAiResponseLanguage(key);
-        if (window.electronAPI?.setAiResponseLanguage) {
-            await window.electronAPI.setAiResponseLanguage(key);
+        if (!key) return;
+        const previous = aiResponseLanguage;
+        setAiResponseLanguage(key); // Optimistic update
+        try {
+            if (window.electronAPI?.setAiResponseLanguage) {
+                const result = await window.electronAPI.setAiResponseLanguage(key);
+                if (result && !result.success) {
+                    // Rollback on explicit failure
+                    setAiResponseLanguage(previous);
+                    console.error('[Settings] Failed to set AI response language:', result.error);
+                }
+            }
+        } catch (err) {
+            // Rollback on exception
+            setAiResponseLanguage(previous);
+            console.error('[Settings] Exception setting AI response language:', err);
         }
     };
 

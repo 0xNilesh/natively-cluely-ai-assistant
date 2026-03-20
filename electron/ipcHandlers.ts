@@ -98,9 +98,23 @@ export function initializeIpcHandlers(appState: AppState): void {
   });
 
   safeHandle("set-ai-response-language", async (_, language: string) => {
+    // Validate: must be a non-empty string
+    if (!language || typeof language !== 'string' || !language.trim()) {
+      console.warn('[IPC] set-ai-response-language: invalid or empty language received, ignoring.');
+      return { success: false, error: 'Invalid language value' };
+    }
+    const sanitizedLanguage = language.trim();
     const { CredentialsManager } = require('./services/CredentialsManager');
-    CredentialsManager.getInstance().setAiResponseLanguage(language);
-    appState.processingHelper?.getLLMHelper?.().setAiResponseLanguage?.(language);
+    // Persist to disk
+    CredentialsManager.getInstance().setAiResponseLanguage(sanitizedLanguage);
+    // Update live in-memory LLMHelper (same instance used by IntelligenceEngine)
+    const llmHelper = appState.processingHelper?.getLLMHelper?.();
+    if (llmHelper) {
+      llmHelper.setAiResponseLanguage(sanitizedLanguage);
+      console.log(`[IPC] AI response language updated to: ${sanitizedLanguage}`);
+    } else {
+      console.warn('[IPC] set-ai-response-language: processingHelper or LLMHelper not ready, language saved to disk only.');
+    }
     return { success: true };
   });
 
