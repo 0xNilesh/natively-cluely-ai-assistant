@@ -25,7 +25,7 @@ const UpdateBanner: React.FC = () => {
         // Listen for download progress
         const unsubProgress = window.electronAPI.onDownloadProgress((progressObj) => {
             // Ensure modal is visible if download starts
-            if (!isVisible) setIsVisible(true);
+            setIsVisible(true);
             setStatus('downloading');
             setDownloadProgress(progressObj.percent);
         });
@@ -53,7 +53,7 @@ const UpdateBanner: React.FC = () => {
             unsubDownloaded();
             unsubError();
         };
-    }, [isVisible]);
+    }, []);
 
     // Demo/Test mode: Press Cmd+I to trigger backend test-fetch
     useEffect(() => {
