@@ -124,7 +124,7 @@ Every star pushes Natively higher in GitHub search, helping developers and job s
 
 ## Demo
 
-<video src="assets/demo_compressed.mp4" controls autoplay loop muted></video>
+![Natively AI Assistant Demo - Real-time Interview Helper and Transcription](assets/natively-ai-meeting-assistant-demo.gif)
 
 This demo shows **a complete live meeting scenario**:
 
