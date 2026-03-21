@@ -1520,18 +1520,18 @@ export class AppState {
         click: () => {
           this.centerAndShowWindow()
         }
-      },
-      {
-        label: `Toggle Window (${displayToggle})`,
-        click: () => {
-          this.toggleMainWindow()
-        }
       }
     ];
 
-    // Only show screenshot option when a meeting is active (overlay is running)
+    // Only show overlay-related actions when a meeting is active
     if (this.isMeetingActive) {
       menuTemplate.push(
+        {
+          label: `Toggle Window (${displayToggle})`,
+          click: () => {
+            this.toggleMainWindow()
+          }
+        },
         { type: 'separator' },
         {
           label: `Take Screenshot (${displayScreenshot})`,
