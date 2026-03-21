@@ -409,13 +409,30 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                 </div>
             </header>
 
-            {/* Meeting Active Indicator */}
-            {isMeetingActive && (
-                <div className="shrink-0 flex items-center gap-2 px-4 py-2 bg-green-500/10 border-b border-green-500/20">
-                    <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                    <span className="text-xs font-medium text-green-400">Meeting in progress</span>
-                </div>
-            )}
+            {/* Meeting Active Indicator — floating pill */}
+            <AnimatePresence>
+                {isMeetingActive && (
+                    <motion.div
+                        initial={{ opacity: 0, y: 20, scale: 0.9 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: 20, scale: 0.9 }}
+                        transition={{ type: "spring", stiffness: 400, damping: 25 }}
+                        className="absolute bottom-6 left-1/2 -translate-x-1/2 z-[300] flex items-center gap-3 px-4 py-2.5 rounded-full bg-bg-elevated/80 backdrop-blur-xl border border-green-500/20 shadow-[0_4px_24px_rgba(0,0,0,0.4)]"
+                    >
+                        <div className="relative flex items-center justify-center">
+                            <div className="w-2.5 h-2.5 rounded-full bg-green-500" />
+                            <div className="absolute w-2.5 h-2.5 rounded-full bg-green-500 animate-ping opacity-75" />
+                        </div>
+                        <span className="text-[12px] font-medium text-green-400">Meeting in progress</span>
+                        <button
+                            onClick={() => window.electronAPI?.setWindowMode('overlay')}
+                            className="ml-1 px-3 py-1 rounded-full bg-green-500/15 hover:bg-green-500/25 text-[11px] font-semibold text-green-400 transition-colors"
+                        >
+                            Show Overlay
+                        </button>
+                    </motion.div>
+                )}
+            </AnimatePresence>
 
             <div className="relative flex-1 flex flex-col overflow-hidden">
                 {!isDetectable && (
