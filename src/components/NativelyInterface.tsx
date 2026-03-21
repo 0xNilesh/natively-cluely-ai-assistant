@@ -271,7 +271,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         }
 
         if (isExpanded) {
-            window.electronAPI.showWindow();
+            window.electronAPI.showOverlay();
         } else {
             // Collapse to minimal pill — resize instead of hiding the window entirely
             collapseTimeoutRef.current = setTimeout(() => {

@@ -152,8 +152,8 @@ interface ElectronAPI {
 
   // Database
   flushDatabase: () => Promise<{ success: boolean }>
-  showWindow: () => Promise<void>
-  hideWindow: () => Promise<void>
+  showOverlay: () => Promise<void>
+  hideOverlay: () => Promise<void>
   onToggleExpand: (callback: () => void) => () => void
   onEnsureExpanded: (callback: () => void) => () => void
   onMeetingStateChanged: (callback: (isActive: boolean) => void) => () => void
@@ -403,8 +403,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   analyzeImageFile: (path: string) => ipcRenderer.invoke("analyze-image-file", path),
   quitApp: () => ipcRenderer.invoke("quit-app"),
   toggleWindow: () => ipcRenderer.invoke("toggle-window"),
-  showWindow: () => ipcRenderer.invoke("show-window"),
-  hideWindow: () => ipcRenderer.invoke("hide-window"),
+  showOverlay: () => ipcRenderer.invoke("show-overlay"),
+  hideOverlay: () => ipcRenderer.invoke("hide-overlay"),
   onMeetingStateChanged: (callback: (isActive: boolean) => void) => {
     const subscription = (_event: any, isActive: boolean) => callback(isActive)
     ipcRenderer.on("meeting-state-changed", subscription)

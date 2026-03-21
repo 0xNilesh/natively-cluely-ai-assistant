@@ -222,7 +222,7 @@ export function initializeIpcHandlers(appState: AppState): void {
     appState.toggleMainWindow()
   })
 
-  safeHandle("show-window", async () => {
+  safeHandle("show-overlay", async () => {
     // Show overlay if meeting is active (called from overlay renderer)
     if (appState.getIsMeetingActive()) {
       appState.getWindowHelper().showOverlay();
@@ -231,7 +231,7 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   })
 
-  safeHandle("hide-window", async () => {
+  safeHandle("hide-overlay", async () => {
     // Hide overlay if meeting is active (called from overlay renderer)
     if (appState.getIsMeetingActive()) {
       appState.getWindowHelper().hideOverlay();
