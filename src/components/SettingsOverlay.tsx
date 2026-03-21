@@ -416,6 +416,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     const [negotiationScript, setNegotiationScript] = useState<any>(null);
     const [negotiationGenerating, setNegotiationGenerating] = useState(false);
     const [negotiationError, setNegotiationError] = useState('');
+    const [verboseLogging, setVerboseLogging] = useState(false);
 
     // Close dropdown when clicking outside
     // Sync with global state changes
@@ -426,6 +427,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
             // Fetch true initial state from main process
             window.electronAPI?.getUndetectable?.().then(setIsUndetectable).catch(() => { });
             window.electronAPI?.getDisguise?.().then(setDisguiseMode).catch(() => { });
+            window.electronAPI?.getVerboseLogging?.().then(setVerboseLogging).catch(() => { });
         }
     }, [isOpen]);
 
@@ -1015,11 +1017,6 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     const [calendarStatus, setCalendarStatus] = useState<{ connected: boolean; email?: string }>({ connected: false });
     const [isCalendarsLoading, setIsCalendarsLoading] = useState(false);
 
-    const audioContextRef = React.useRef<AudioContext | null>(null);
-    const analyserRef = React.useRef<AnalyserNode | null>(null);
-    const sourceRef = React.useRef<MediaStreamAudioSourceNode | null>(null);
-    const rafRef = React.useRef<number | null>(null);
-    const streamRef = React.useRef<MediaStream | null>(null);
 
     // Load stored credentials on mount
 
@@ -1132,112 +1129,30 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
         }
     }, [isOpen, selectedInput, selectedOutput]); // Re-run if isOpen changes, or if selected devices are cleared
 
-    // Effect for real-time audio level monitoring
+    // Use the native mic test path so device IDs stay consistent with the meeting runtime.
     useEffect(() => {
         if (isOpen && activeTab === 'audio') {
-            let mounted = true;
+            const unsubscribe = window.electronAPI?.onAudioTestLevel?.((level) => {
+                setMicLevel(Math.max(0, Math.min(100, level * 100)));
+            });
 
-            const startAudio = async () => {
-                try {
-                    // Cleanup previous audio context if it exists
-                    if (audioContextRef.current) {
-                        audioContextRef.current.close();
-                    }
-
-                    const stream = await navigator.mediaDevices.getUserMedia({
-                        audio: {
-                            deviceId: selectedInput ? { exact: selectedInput } : undefined
-                        }
-                    });
-
-                    streamRef.current = stream;
-
-                    if (!mounted) return;
-
-                    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-                    const analyser = audioContext.createAnalyser();
-                    const source = audioContext.createMediaStreamSource(stream);
-
-                    analyser.fftSize = 256;
-                    source.connect(analyser);
-
-                    audioContextRef.current = audioContext;
-                    analyserRef.current = analyser;
-                    sourceRef.current = source;
-
-                    const dataArray = new Uint8Array(analyser.frequencyBinCount);
-                    let smoothLevel = 0;
-
-                    const updateLevel = () => {
-                        if (!mounted || !analyserRef.current) return;
-                        // Use Time Domain Data for accurate volume (waveform) instead of frequency
-                        analyserRef.current.getByteTimeDomainData(dataArray);
-
-                        let sum = 0;
-                        for (let i = 0; i < dataArray.length; i++) {
-                            // Convert 0-255 to -1 to 1 range
-                            const value = (dataArray[i] - 128) / 128;
-                            sum += value * value;
-                        }
-
-                        // Calculate RMS
-                        const rms = Math.sqrt(sum / dataArray.length);
-
-                        // Convert to simpler 0-100 range with some boost
-                        // RMS is usually very small (0.01 - 0.5 for normal speech)
-                        // Logarithmic scaling feels more natural for volume
-                        const db = 20 * Math.log10(rms);
-                        // Approximate mapping: -60dB (silence) to 0dB (max) -> 0 to 100
-                        const targetLevel = Math.max(0, Math.min(100, (db + 60) * 2));
-
-                        // Apply smoothing
-                        if (targetLevel > smoothLevel) {
-                            smoothLevel = smoothLevel * 0.7 + targetLevel * 0.3; // Fast attack
-                        } else {
-                            smoothLevel = smoothLevel * 0.95 + targetLevel * 0.05; // Slow decay
-                        }
-
-                        setMicLevel(smoothLevel);
-
-                        rafRef.current = requestAnimationFrame(updateLevel);
-                    };
-
-                    updateLevel();
-                } catch (error) {
-                    console.error("Error accessing microphone:", error);
-                    setMicLevel(0); // Reset level on error
-                }
-            };
-
-            startAudio();
+            window.electronAPI?.startAudioTest(selectedInput || undefined).catch((error) => {
+                console.error("Error starting native microphone test:", error);
+                setMicLevel(0);
+            });
 
             return () => {
-                mounted = false;
-                if (rafRef.current) cancelAnimationFrame(rafRef.current);
-                if (sourceRef.current) sourceRef.current.disconnect();
-                if (audioContextRef.current) {
-                    audioContextRef.current.close();
-                    audioContextRef.current = null;
-                }
-                if (streamRef.current) {
-                    streamRef.current.getTracks().forEach(track => track.stop());
-                    streamRef.current = null;
-                }
-                setMicLevel(0); // Reset mic level on cleanup
+                unsubscribe?.();
+                window.electronAPI?.stopAudioTest?.().catch((error) => {
+                    console.error("Error stopping native microphone test:", error);
+                });
+                setMicLevel(0);
             };
         } else {
-            // Cleanup when closing tab or overlay or switching away from audio tab
-            if (rafRef.current) cancelAnimationFrame(rafRef.current);
-            if (sourceRef.current) sourceRef.current.disconnect(); // Disconnect source as well
-            if (audioContextRef.current) {
-                audioContextRef.current.close();
-                audioContextRef.current = null;
-            }
-            if (streamRef.current) {
-                streamRef.current.getTracks().forEach(track => track.stop());
-                streamRef.current = null;
-            }
             setMicLevel(0);
+            window.electronAPI?.stopAudioTest?.().catch((error) => {
+                console.error("Error stopping native microphone test:", error);
+            });
         }
     }, [isOpen, activeTab, selectedInput]);
 
@@ -1415,6 +1330,29 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                         className={`w-11 h-6 rounded-full relative transition-colors ${openOnLogin ? 'bg-accent-primary' : 'bg-bg-toggle-switch border border-border-muted'}`}
                                                     >
                                                         <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white transition-transform ${openOnLogin ? 'translate-x-5' : 'translate-x-0'}`} />
+                                                    </div>
+                                                </div>
+
+                                                {/* Debug Logging */}
+                                                <div className="flex items-center justify-between">
+                                                    <div className="flex items-center gap-4">
+                                                        <div className={`w-10 h-10 bg-bg-item-surface rounded-lg border flex items-center justify-center transition-colors ${verboseLogging ? 'border-amber-500/40 text-amber-400' : 'border-border-subtle text-text-tertiary'}`}>
+                                                            <Terminal size={20} />
+                                                        </div>
+                                                        <div>
+                                                            <h3 className="text-sm font-bold text-text-primary">Verbose debug logging</h3>
+                                                            <p className="text-xs text-text-secondary mt-0.5">Print detailed audio, STT, and pipeline diagnostics to the terminal</p>
+                                                        </div>
+                                                    </div>
+                                                    <div
+                                                        onClick={() => {
+                                                            const newState = !verboseLogging;
+                                                            setVerboseLogging(newState);
+                                                            window.electronAPI?.setVerboseLogging?.(newState);
+                                                        }}
+                                                        className={`w-11 h-6 rounded-full relative transition-colors ${verboseLogging ? 'bg-amber-500' : 'bg-bg-toggle-switch border border-border-muted'}`}
+                                                    >
+                                                        <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white transition-transform ${verboseLogging ? 'translate-x-5' : 'translate-x-0'}`} />
                                                     </div>
                                                 </div>
 
@@ -2096,9 +2034,12 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                             <Building2 size={20} />
                                                         </div>
                                                         <div>
-                                                            <h4 className="text-sm font-bold text-text-primary">
-                                                                Company Intel: <span className="text-purple-400">{profileData.activeJD.company}</span>
-                                                            </h4>
+                                                            <div className="flex items-center gap-2">
+                                                                <h4 className="text-sm font-bold text-text-primary">
+                                                                    Company Intel: <span className="text-purple-400">{profileData.activeJD.company}</span>
+                                                                </h4>
+                                                                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full tracking-widest uppercase bg-purple-500/15 text-purple-400 border border-purple-500/25">Beta</span>
+                                                            </div>
                                                             <p className="text-[11px] text-text-secondary mt-0.5">
                                                                 {companyDossier ? 'Research complete' : 'Run research to get hiring strategy, salaries & competitors'}
                                                             </p>
@@ -2337,6 +2278,14 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                                 Sources: {companyDossier.sources.filter(Boolean).length} references
                                                             </div>
                                                         )}
+
+                                                        {/* Beta disclaimer */}
+                                                        <div className="mt-4 flex items-start gap-2 px-3 py-2.5 rounded-lg bg-purple-500/5 border border-purple-500/15">
+                                                            <span className="text-purple-400/70 mt-px shrink-0">⚠</span>
+                                                            <p className="text-[10px] text-text-tertiary leading-relaxed">
+                                                                <span className="font-semibold text-purple-400/80">Beta feature.</span> Company research is AI-generated and may contain inaccuracies. Verify salary figures and hiring details independently before use.
+                                                            </p>
+                                                        </div>
                                                     </div>
                                                 )}
                                             </div>
@@ -2505,7 +2454,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                                     accentBorder: 'rgba(251,146,60,0.2)',
                                                                     quote: true,
                                                                 },
-                                                            ].filter(s => s.content).map((s) => (
+                                                            ].filter(s => s.content).map((s) => ({ ...s, content: s.content.replace(/^["'"']+|["'"']+$/g, '').trim() })).map((s) => (
                                                                 <div key={s.step} className="rounded-xl overflow-hidden" style={{ border: `1px solid ${s.accentBorder}`, background: s.accentBg }}>
                                                                     <div className="flex items-center justify-between px-3.5 pt-3 pb-2">
                                                                         <div className="flex items-center gap-2">
@@ -2522,11 +2471,8 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                                         </button>
                                                                     </div>
                                                                     <p className="text-[10px] text-text-tertiary px-3.5 pb-2 -mt-1 tracking-wide">{s.sublabel}</p>
-                                                                    <div className="mx-3.5 mb-3.5 relative">
-                                                                        {s.quote && (
-                                                                            <span className="absolute -top-1 -left-0.5 text-2xl leading-none font-serif select-none pointer-events-none" style={{ color: s.accent, opacity: 0.3 }}>"</span>
-                                                                        )}
-                                                                        <p className={`text-[12px] leading-relaxed text-text-primary ${s.quote ? 'pl-3 italic' : ''}`} style={{ fontStyle: s.quote ? 'italic' : 'normal' }}>
+                                                                    <div className="mx-3.5 mb-3.5">
+                                                                        <p className={`text-[12px] leading-relaxed text-text-primary ${s.quote ? 'pl-3 italic' : ''}`}>
                                                                             {s.content}
                                                                         </p>
                                                                     </div>

@@ -76,6 +76,7 @@ const formatTime = (dateStr: string) => {
 const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onPageChange, ollamaPullStatus = 'idle', ollamaPullPercent = 0, ollamaPullMessage = '' }) => {
     const [meetings, setMeetings] = useState<Meeting[]>([]);
     const [isDetectable, setIsDetectable] = useState(false);
+    const [isMeetingActive, setIsMeetingActive] = useState(false);
     const [selectedMeeting, setSelectedMeeting] = useState<Meeting | null>(null);
     const [upcomingEvents, setUpcomingEvents] = useState<any[]>([]);
     const [isPrepared, setIsPrepared] = useState(false);
@@ -83,20 +84,10 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
     const [isCalendarConnected, setIsCalendarConnected] = useState(false);
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [showNotification, setShowNotification] = useState(false);
-    const [isMeetingActive, setIsMeetingActive] = useState(false);
 
     // Global search state (for AI chat overlay)
     const [isGlobalChatOpen, setIsGlobalChatOpen] = useState(false);
     const [submittedGlobalQuery, setSubmittedGlobalQuery] = useState('');
-
-    // Listen for meeting state changes from main process
-    useEffect(() => {
-        if (!window.electronAPI?.onMeetingStateChanged) return;
-        const unsubscribe = window.electronAPI.onMeetingStateChanged((isActive) => {
-            setIsMeetingActive(isActive);
-        });
-        return () => unsubscribe();
-    }, []);
 
     const fetchMeetings = () => {
         if (window.electronAPI && window.electronAPI.getRecentMeetings) {
@@ -137,6 +128,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
     const { isShortcutPressed } = useShortcuts();
 
     useEffect(() => {
+        let mounted = true;
         console.log("Launcher mounted");
         // Seed demo data if needed (safe to call always)
         if (window.electronAPI && window.electronAPI.seedDemo) {
@@ -146,7 +138,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
         // Sync initial undetectable state
         if (window.electronAPI?.getUndetectable) {
             window.electronAPI.getUndetectable().then((undetectable) => {
-                setIsDetectable(!undetectable);
+                if (mounted) setIsDetectable(!undetectable);
             });
         }
 
@@ -160,6 +152,21 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
 
         fetchMeetings();
         fetchEvents();
+
+        // Sync initial meeting active state — guarded so unmounted component isn't written to
+        if (window.electronAPI?.getMeetingActive) {
+            window.electronAPI.getMeetingActive()
+                .then((active) => { if (mounted) setIsMeetingActive(active); })
+                .catch(() => {});
+        }
+
+        // Listen for meeting state changes (e.g. meeting started/ended from overlay)
+        let removeMeetingStateListener: (() => void) | undefined;
+        if (window.electronAPI?.onMeetingStateChanged) {
+            removeMeetingStateListener = window.electronAPI.onMeetingStateChanged(({ isActive }) => {
+                setIsMeetingActive(isActive);
+            });
+        }
 
         // Listen for background updates (e.g. after meeting processing finishes)
         const removeMeetingsListener = window.electronAPI.onMeetingsUpdated(() => {
@@ -180,8 +187,10 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
         window.addEventListener('keydown', handleKeyDown);
 
         return () => {
+            mounted = false;
             if (removeMeetingsListener) removeMeetingsListener();
             if (removeUndetectableListener) removeUndetectableListener();
+            if (removeMeetingStateListener) removeMeetingStateListener();
             clearInterval(interval);
             window.removeEventListener('keydown', handleKeyDown);
         };
@@ -533,55 +542,84 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                                             </AnimatePresence>
                                         </div>
 
-                                        {/* Start Natively CTA Pill — stateful */}
-                                        <button
+                                        {/* Unified CTA pill — same jelly shape, morphs between idle and active-meeting state */}
+                                        <motion.button
                                             onClick={() => {
                                                 if (isMeetingActive) {
-                                                    window.electronAPI?.setWindowMode('overlay');
+                                                    // inactive=true: overlay appears on top but doesn't activate
+                                                    // the Natively app or steal OS focus — preserves stealth.
+                                                    // setWindowMode (not showWindow) is required because
+                                                    // logo-click set currentWindowMode='launcher', so showWindow()
+                                                    // would re-show the launcher rather than switch to overlay.
+                                                    window.electronAPI?.setWindowMode?.('overlay', true);
+                                                    analytics.trackCommandExecuted('resume_meeting_from_launcher');
                                                 } else {
                                                     onStartMeeting();
                                                     analytics.trackCommandExecuted('start_natively_cta');
                                                 }
                                             }}
-                                            className={`
-                                    group relative overflow-hidden
-                                    ${isMeetingActive
-                                                ? 'bg-gradient-to-b from-emerald-400 via-emerald-500 to-green-600 shadow-[inset_0_1px_1px_rgba(255,255,255,0.5),inset_0_-1px_2px_rgba(0,0,0,0.1),0_2px_10px_rgba(34,197,94,0.4),0_0_0_1px_rgba(255,255,255,0.1)] hover:shadow-[inset_0_1px_2px_rgba(255,255,255,0.6),inset_0_-1px_3px_rgba(0,0,0,0.15),0_6px_16px_rgba(34,197,94,0.6),0_0_0_1px_rgba(255,255,255,0.2)]'
-                                                : 'bg-gradient-to-b from-sky-400 via-sky-500 to-blue-600 shadow-[inset_0_1px_1px_rgba(255,255,255,0.7),inset_0_-1px_2px_rgba(0,0,0,0.1),0_2px_10px_rgba(14,165,233,0.4),0_0_0_1px_rgba(255,255,255,0.15)] hover:shadow-[inset_0_1px_2px_rgba(255,255,255,0.8),inset_0_-1px_3px_rgba(0,0,0,0.15),0_6px_16px_rgba(14,165,233,0.6),0_0_0_1px_rgba(255,255,255,0.25)]'
-                                            }
-                                    text-white
-                                    px-6 py-3
-                                    rounded-full
-                                    font-celeb font-medium tracking-normal
-                                    hover:brightness-110
-                                    hover:scale-[1.01]
-                                    active:scale-[0.99]
-                                    transition-all duration-500 ease-out
-                                    flex items-center justify-center gap-3
-                                    backdrop-blur-xl shrink-0
-                                `}
+                                            whileHover={{ scale: 1.01, filter: 'brightness(1.1)' }}
+                                            whileTap={{ scale: 0.99 }}
+                                            transition={{ duration: 0.18, ease: 'easeOut' }}
+                                            className="group relative overflow-hidden text-white px-6 py-3 rounded-full font-celeb font-medium tracking-normal flex items-center justify-center gap-3 backdrop-blur-xl shrink-0"
+                                            style={{
+                                                boxShadow: isMeetingActive
+                                                    ? 'inset 0 1px 1px rgba(255,255,255,0.7), inset 0 -1px 2px rgba(0,0,0,0.1), 0 2px 10px rgba(16,185,129,0.45), 0 0 0 1px rgba(255,255,255,0.15)'
+                                                    : 'inset 0 1px 1px rgba(255,255,255,0.7), inset 0 -1px 2px rgba(0,0,0,0.1), 0 2px 10px rgba(14,165,233,0.4), 0 0 0 1px rgba(255,255,255,0.15)',
+                                                transition: 'box-shadow 0.5s ease-out',
+                                            }}
                                         >
-                                            {/* Top Highlight Band */}
-                                            <div className="absolute inset-x-3 top-0 h-[40%] bg-gradient-to-b from-white/40 to-transparent blur-[2px] rounded-b-lg opacity-80 pointer-events-none" />
+                                            {/* Blue gradient layer (idle) */}
+                                            <div
+                                                className="absolute inset-0 bg-gradient-to-b from-sky-400 via-sky-500 to-blue-600 transition-opacity duration-500 ease-out"
+                                                style={{ opacity: isMeetingActive ? 0 : 1 }}
+                                            />
+                                            {/* Green gradient layer (meeting active) */}
+                                            <div
+                                                className="absolute inset-0 bg-gradient-to-b from-emerald-400 via-emerald-500 to-green-600 transition-opacity duration-500 ease-out"
+                                                style={{ opacity: isMeetingActive ? 1 : 0 }}
+                                            />
 
-                                            {/* Internal "suspended light" glow */}
-                                            <div className="absolute inset-0 bg-gradient-to-tr from-transparent via-white/5 to-white/10 opacity-0 group-hover:opacity-100 transition-opacity duration-700 pointer-events-none" />
+                                            {/* Top highlight band — shared between both states */}
+                                            <div className="absolute inset-x-3 top-0 h-[40%] bg-gradient-to-b from-white/40 to-transparent blur-[2px] rounded-b-lg opacity-80 pointer-events-none z-10" />
+                                            {/* Internal suspended-light hover glow */}
+                                            <div className="absolute inset-0 bg-gradient-to-tr from-transparent via-white/5 to-white/10 opacity-0 group-hover:opacity-100 transition-opacity duration-700 pointer-events-none z-10" />
 
-                                            {isMeetingActive ? (
-                                                <>
-                                                    <div className="relative flex items-center justify-center">
-                                                        <div className="w-2 h-2 rounded-full bg-white" />
-                                                        <div className="absolute w-2 h-2 rounded-full bg-white animate-ping opacity-60" />
-                                                    </div>
-                                                    <span className="drop-shadow-[0_1px_1px_rgba(0,0,0,0.1)] text-[16px] leading-none">Meeting in progress</span>
-                                                </>
-                                            ) : (
-                                                <>
-                                                    <img src={icon} alt="Logo" className="w-[18px] h-[18px] object-contain brightness-0 invert drop-shadow-[0_1px_2px_rgba(0,0,0,0.1)] opacity-90" />
-                                                    <span className="drop-shadow-[0_1px_1px_rgba(0,0,0,0.1)] text-[20px] leading-none">Start Natively</span>
-                                                </>
-                                            )}
-                                        </button>
+                                            {/* Button content — crossfade between idle and meeting states */}
+                                            <div className="relative z-20 flex items-center gap-3">
+                                                <AnimatePresence mode="wait" initial={false}>
+                                                    {isMeetingActive ? (
+                                                        <motion.div
+                                                            key="meeting"
+                                                            initial={{ opacity: 0, y: 6 }}
+                                                            animate={{ opacity: 1, y: 0 }}
+                                                            exit={{ opacity: 0, y: -6 }}
+                                                            transition={{ duration: 0.22, ease: 'easeOut' }}
+                                                            className="flex items-center gap-3"
+                                                        >
+                                                            {/* Ping live-indicator dot */}
+                                                            <span className="relative flex h-[9px] w-[9px] shrink-0">
+                                                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-60" />
+                                                                <span className="relative inline-flex rounded-full h-[9px] w-[9px] bg-white" />
+                                                            </span>
+                                                            <span className="drop-shadow-[0_1px_1px_rgba(0,0,0,0.1)] text-[20px] leading-none">Meeting ongoing</span>
+                                                        </motion.div>
+                                                    ) : (
+                                                        <motion.div
+                                                            key="start"
+                                                            initial={{ opacity: 0, y: 6 }}
+                                                            animate={{ opacity: 1, y: 0 }}
+                                                            exit={{ opacity: 0, y: -6 }}
+                                                            transition={{ duration: 0.22, ease: 'easeOut' }}
+                                                            className="flex items-center gap-3"
+                                                        >
+                                                            <img src={icon} alt="Logo" className="w-[18px] h-[18px] object-contain brightness-0 invert drop-shadow-[0_1px_2px_rgba(0,0,0,0.1)] opacity-90" />
+                                                            <span className="drop-shadow-[0_1px_1px_rgba(0,0,0,0.1)] text-[20px] leading-none">Start Natively</span>
+                                                        </motion.div>
+                                                    )}
+                                                </AnimatePresence>
+                                            </div>
+                                        </motion.button>
                                     </div>
 
                                     {/* 2. Hero Section Cards */}

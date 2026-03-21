@@ -33,6 +33,7 @@ import { oneLight, vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/
 // import { ModelSelector } from './ui/ModelSelector'; // REMOVED
 import TopPill from './ui/TopPill';
 import RollingTranscript from './ui/RollingTranscript';
+import { NegotiationCoachingCard } from '../premium';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -52,6 +53,16 @@ interface Message {
     screenshotPreview?: string;
     isCode?: boolean;
     intent?: string;
+    isNegotiationCoaching?: boolean;
+    negotiationCoachingData?: {
+        tacticalNote: string;
+        exactScript: string;
+        showSilenceTimer: boolean;
+        phase: string;
+        theirOffer: number | null;
+        yourTarget: number | null;
+        currency: string;
+    };
 }
 
 interface NativelyInterfaceProps {
@@ -96,7 +107,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
     const [voiceInput, setVoiceInput] = useState('');  // Accumulated user voice input
     const voiceInputRef = useRef<string>('');  // Ref for capturing in async handlers
     const textInputRef = useRef<HTMLInputElement>(null); // Ref for input focus
-
+    const isStealthRef = useRef<boolean>(false); // Tracks if the next expansion should be stealthy
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const contentRef = useRef<HTMLDivElement>(null);
     const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -261,31 +272,16 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
     }, []);
 
     // Sync Window Visibility with Expanded State
-    const collapseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
     useEffect(() => {
-        // Cancel any pending collapse resize
-        if (collapseTimeoutRef.current) {
-            clearTimeout(collapseTimeoutRef.current);
-            collapseTimeoutRef.current = null;
-        }
-
         if (isExpanded) {
-            window.electronAPI.showOverlay();
+            window.electronAPI.showWindow(isStealthRef.current);
+            isStealthRef.current = false; // Reset back to default
         } else {
-            // Collapse to minimal pill — resize instead of hiding the window entirely
-            collapseTimeoutRef.current = setTimeout(() => {
-                window.electronAPI.updateContentDimensions({ width: 600, height: 48 });
-                collapseTimeoutRef.current = null;
-            }, 400);
+            // Slight delay to allow animation to clean up if needed, though immediate is safer for click-through
+            // Using setTimeout to ensure the render cycle completes first
+            // Increased to 400ms to allow "contract to bottom" exit animation to finish
+            setTimeout(() => window.electronAPI.hideWindow(), 400);
         }
-
-        return () => {
-            if (collapseTimeoutRef.current) {
-                clearTimeout(collapseTimeoutRef.current);
-                collapseTimeoutRef.current = null;
-            }
-        };
     }, [isExpanded]);
 
     // Keyboard shortcut to toggle expanded state (via Main Process)
@@ -297,10 +293,14 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         return () => unsubscribe();
     }, []);
 
-    // Ensure overlay is expanded when shown from launcher/tray
+    // Ensure overlay is expanded when requested by main process (e.g. after switching to overlay mode).
+    // IMPORTANT: set isStealthRef before setIsExpanded so that if isExpanded was false, the
+    // isExpanded effect fires showWindow(true) instead of showWindow(false). Without this,
+    // ensure-expanded on a collapsed overlay would trigger show()+focus(), breaking stealth.
     useEffect(() => {
         if (!window.electronAPI?.onEnsureExpanded) return;
         const unsubscribe = window.electronAPI.onEnsureExpanded(() => {
+            isStealthRef.current = true;
             setIsExpanded(true);
         });
         return () => unsubscribe();
@@ -805,13 +805,23 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
 
             setMessages(prev => {
                 const lastMsg = prev[prev.length - 1];
-                if (lastMsg && lastMsg.isStreaming) {
-                    const updated = [...prev];
-                    updated[prev.length - 1] = {
-                        ...lastMsg,
-                        isStreaming: false
-                    };
-                    return updated;
+                if (lastMsg && lastMsg.isStreaming && lastMsg.role === 'system') {
+                    // Detect negotiation coaching response
+                    try {
+                        const parsed = JSON.parse(lastMsg.text);
+                        if (parsed?.__negotiationCoaching) {
+                            const coaching = parsed.__negotiationCoaching;
+                            return [...prev.slice(0, -1), {
+                                ...lastMsg,
+                                isStreaming: false,
+                                isNegotiationCoaching: true,
+                                negotiationCoachingData: coaching,
+                                text: '',
+                            }];
+                        }
+                    } catch {}
+                    // Normal completion
+                    return [...prev.slice(0, -1), { ...lastMsg, isStreaming: false }];
                 }
                 return prev;
             });
@@ -869,6 +879,24 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
                 requestStartTimeRef.current = null;
                 setMessages(prev => {
                     const lastMsg = prev[prev.length - 1];
+                    if (lastMsg && lastMsg.isStreaming && lastMsg.role === 'system') {
+                        // Detect negotiation coaching response
+                        try {
+                            const parsed = JSON.parse(lastMsg.text);
+                            if (parsed?.__negotiationCoaching) {
+                                const coaching = parsed.__negotiationCoaching;
+                                return [...prev.slice(0, -1), {
+                                    ...lastMsg,
+                                    isStreaming: false,
+                                    isNegotiationCoaching: true,
+                                    negotiationCoachingData: coaching,
+                                    text: '',
+                                }];
+                            }
+                        } catch {}
+                        // Normal completion
+                        return [...prev.slice(0, -1), { ...lastMsg, isStreaming: false }];
+                    }
                     if (lastMsg && lastMsg.isStreaming) {
                         const updated = [...prev];
                         updated[prev.length - 1] = { ...lastMsg, isStreaming: false };
@@ -1101,6 +1129,23 @@ Provide only the answer, nothing else.`;
 
 
     const renderMessageText = (msg: Message) => {
+        // Negotiation coaching card takes priority
+        if (msg.isNegotiationCoaching && msg.negotiationCoachingData) {
+            return (
+                <NegotiationCoachingCard
+                    {...msg.negotiationCoachingData}
+                    phase={msg.negotiationCoachingData.phase as any}
+                    onSilenceTimerEnd={() => {
+                        setMessages(prev => prev.map(m =>
+                            m.id === msg.id
+                                ? { ...m, negotiationCoachingData: m.negotiationCoachingData ? { ...m.negotiationCoachingData, showSilenceTimer: false } : undefined }
+                                : m
+                        ));
+                    }}
+                />
+            );
+        }
+
         // Code-containing messages get special styling
         // We split by code blocks to keep the "Code Solution" UI intact for the code parts
         // But use ReactMarkdown for the text parts around it
@@ -1543,6 +1588,32 @@ Provide only the answer, nothing else.`;
         return unsubscribe;
     }, []);
 
+    // Stealth Global Shortcuts Handler
+    // Listens for shortcuts triggered when the app is in the background
+    useEffect(() => {
+        if (!window.electronAPI.onGlobalShortcut) return;
+        const unsubscribe = window.electronAPI.onGlobalShortcut(({ action }) => {
+            const handlers = handlersRef.current;
+            const generalHandlers = generalHandlersRef.current;
+
+            isStealthRef.current = true;
+
+            if (action === 'whatToAnswer') handlers.handleWhatToSay();
+            else if (action === 'shorten') handlers.handleFollowUp('shorten');
+            else if (action === 'followUp') handlers.handleFollowUpQuestions();
+            else if (action === 'recap') handlers.handleRecap();
+            else if (action === 'answer') handlers.handleAnswerNow();
+            else if (action === 'scrollUp') scrollContainerRef.current?.scrollBy({ top: -100, behavior: 'smooth' });
+            else if (action === 'scrollDown') scrollContainerRef.current?.scrollBy({ top: 100, behavior: 'smooth' });
+            else if (action === 'processScreenshots') generalHandlers.processScreenshots();
+            else if (action === 'resetCancel') generalHandlers.resetCancel();
+            
+            // Safety reset if it didn't trigger an expansion
+            setTimeout(() => { isStealthRef.current = false; }, 500);
+        });
+        return unsubscribe;
+    }, []);
+
     return (
         <div ref={contentRef} className="flex flex-col items-center w-fit mx-auto h-fit min-h-0 bg-transparent p-0 rounded-[24px] font-sans gap-2 overlay-text-primary">
 
@@ -1559,8 +1630,8 @@ Provide only the answer, nothing else.`;
                             expanded={isExpanded}
                             onToggle={() => setIsExpanded(!isExpanded)}
                             onQuit={() => onEndMeeting ? onEndMeeting() : window.electronAPI.quitApp()}
-                            onLogoClick={() => window.electronAPI?.setWindowMode('launcher')}
                             appearance={appearance}
+                            onLogoClick={() => window.electronAPI?.setWindowMode?.('launcher')}
                         />
                         <div
                             className={`relative w-[600px] max-w-full backdrop-blur-2xl border rounded-[24px] overflow-hidden flex flex-col draggable-area overlay-shell-surface ${overlayPanelClass}`}

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell } from "electron"
+import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, systemPreferences } from "electron"
 import path from "path"
 import fs from "fs"
 import { autoUpdater } from "electron-updater"
@@ -25,16 +25,33 @@ const originalLog = console.log;
 const originalWarn = console.warn;
 const originalError = console.error;
 
-const isDev = process.env.NODE_ENV === "development";
-
 function logToFile(msg: string) {
-  // Only log to file in development
-  if (!isDev) return;
-
   try {
-    require('fs').appendFileSync(logFile, new Date().toISOString() + ' ' + msg + '\n');
+    fs.appendFileSync(logFile, new Date().toISOString() + ' ' + msg + '\n');
   } catch (e) {
     // Ignore logging errors
+  }
+}
+
+async function ensureMacMicrophoneAccess(context: string): Promise<boolean> {
+  if (process.platform !== 'darwin') return true;
+
+  try {
+    const currentStatus = systemPreferences.getMediaAccessStatus('microphone');
+    console.log(`[Main] macOS microphone permission before ${context}: ${currentStatus}`);
+
+    if (currentStatus === 'granted') {
+      return true;
+    }
+
+    const granted = await systemPreferences.askForMediaAccess('microphone');
+    console.log(
+      `[Main] macOS microphone permission request during ${context}: ${granted ? 'granted' : 'denied'}`
+    );
+    return granted;
+  } catch (error) {
+    console.error(`[Main] Failed to check macOS microphone permission during ${context}:`, error);
+    return false;
   }
 }
 
@@ -104,6 +121,7 @@ try {
 
 import { CredentialsManager } from "./services/CredentialsManager"
 import { SettingsManager } from "./services/SettingsManager"
+import { setVerboseLoggingFlag } from "./verboseLog"
 import { ReleaseNotesManager } from "./update/ReleaseNotesManager"
 import { OllamaManager } from './services/OllamaManager'
 
@@ -139,9 +157,12 @@ export class AppState {
 
   private hasDebugged: boolean = false
   private isMeetingActive: boolean = false; // Guard for session state leaks
-  private _disguiseTimers: NodeJS.Timeout[] = []; // Track forceUpdate timeouts
-  private _ollamaBootstrapPromise: Promise<void> | null = null;
   private _isQuitting: boolean = false;
+  private _verboseLogging: boolean = false;
+  private _disguiseTimers: NodeJS.Timeout[] = []; // Track forceUpdate timeouts
+  private _dockDebounceTimer: NodeJS.Timeout | null = null; // Debounce dock state changes
+  private _dockReassertTimers: NodeJS.Timeout[] = []; // Re-assert dock-hidden state after show+focus
+  private _ollamaBootstrapPromise: Promise<void> | null = null;
 
 
   // Processing events
@@ -167,7 +188,9 @@ export class AppState {
     const settingsManager = SettingsManager.getInstance();
     this.isUndetectable = settingsManager.get('isUndetectable') ?? false;
     this.disguiseMode = settingsManager.get('disguiseMode') ?? 'none';
-    console.log(`[AppState] Initialized with isUndetectable=${this.isUndetectable}, disguiseMode=${this.disguiseMode}`);
+    this._verboseLogging = settingsManager.get('verboseLogging') ?? false;
+    setVerboseLoggingFlag(this._verboseLogging);
+    console.log(`[AppState] Initialized with isUndetectable=${this.isUndetectable}, disguiseMode=${this.disguiseMode}, verboseLogging=${this._verboseLogging}`);
 
     // 2. Initialize Helpers with loaded state
     this.windowHelper = new WindowHelper(this)
@@ -203,7 +226,6 @@ export class AppState {
           this.toggleMainWindow();
         } else if (actionId === 'general:take-screenshot') {
           const screenshotPath = await this.takeScreenshot();
-          if (!screenshotPath) return;
           const preview = await this.getImagePreview(screenshotPath);
           const mainWindow = this.getMainWindow();
           if (mainWindow) {
@@ -214,7 +236,6 @@ export class AppState {
           }
         } else if (actionId === 'general:selective-screenshot') {
           const screenshotPath = await this.takeSelectiveScreenshot();
-          if (!screenshotPath) return;
           const preview = await this.getImagePreview(screenshotPath);
           const mainWindow = this.getMainWindow();
           if (mainWindow) {
@@ -227,10 +248,14 @@ export class AppState {
         } else if (actionId === 'general:capture-and-process') {
           // Single-trigger: capture current screen then immediately request AI analysis
           const screenshotPath = await this.takeScreenshot();
-          if (!screenshotPath) return;
           const preview = await this.getImagePreview(screenshotPath);
           // Ensure the window is visible so the user can see the response
           this.showMainWindow();
+          // win.focus() can cause macOS to re-activate the app. Re-hide the dock
+          // if we are in undetectable mode.
+          if (process.platform === 'darwin' && this.isUndetectable) {
+            app.dock.hide();
+          }
           const mainWindow = this.getMainWindow();
           if (mainWindow) {
             mainWindow.webContents.send("capture-and-process", {
@@ -238,6 +263,62 @@ export class AppState {
               preview
             });
           }
+
+        // --- STEALTH SHORTCUTS: no focus, no show, pure IPC dispatch ---
+
+        // Chat actions — fire into the renderer without focusing the window
+        } else if (
+          actionId === 'chat:whatToAnswer' ||
+          actionId === 'chat:shorten' ||
+          actionId === 'chat:followUp' ||
+          actionId === 'chat:recap' ||
+          actionId === 'chat:answer' ||
+          actionId === 'chat:scrollUp' ||
+          actionId === 'chat:scrollDown'
+        ) {
+          const actionMap: Record<string, string> = {
+            'chat:whatToAnswer': 'whatToAnswer',
+            'chat:shorten': 'shorten',
+            'chat:followUp': 'followUp',
+            'chat:recap': 'recap',
+            'chat:answer': 'answer',
+            'chat:scrollUp': 'scrollUp',
+            'chat:scrollDown': 'scrollDown',
+          };
+          const action = actionMap[actionId];
+          // Send to all windows without focusing — stealth operation
+          const allWindows = BrowserWindow.getAllWindows();
+          allWindows.forEach(win => {
+            if (!win.isDestroyed()) {
+              win.webContents.send('global-shortcut', { action });
+            }
+          });
+
+        // Window movement — move window position without focus change
+        } else if (actionId === 'window:move-up') {
+          this.windowHelper.moveWindowUp();
+        } else if (actionId === 'window:move-down') {
+          this.windowHelper.moveWindowDown();
+        } else if (actionId === 'window:move-left') {
+          this.windowHelper.moveWindowLeft();
+        } else if (actionId === 'window:move-right') {
+          this.windowHelper.moveWindowRight();
+
+        // General actions that are now global (stealth)
+        } else if (actionId === 'general:process-screenshots') {
+          const allWindows = BrowserWindow.getAllWindows();
+          allWindows.forEach(win => {
+            if (!win.isDestroyed()) {
+              win.webContents.send('global-shortcut', { action: 'processScreenshots' });
+            }
+          });
+        } else if (actionId === 'general:reset-cancel') {
+          const allWindows = BrowserWindow.getAllWindows();
+          allWindows.forEach(win => {
+            if (!win.isDestroyed()) {
+              win.webContents.send('global-shortcut', { action: 'resetCancel' });
+            }
+          });
         }
       } catch (e: any) {
         if (e.message !== "Selection cancelled") {
@@ -289,6 +370,22 @@ export class AppState {
         win.webContents.send(channel, ...args);
       }
     });
+  }
+
+  public getIsMeetingActive(): boolean {
+    return this.isMeetingActive;
+  }
+
+  public isQuitting(): boolean {
+    return this._isQuitting;
+  }
+
+  public setQuitting(value: boolean): void {
+    this._isQuitting = value;
+  }
+
+  private broadcastMeetingState(): void {
+    this.broadcast('meeting-state-changed', { isActive: this.isMeetingActive });
   }
 
   private async bootstrapOllamaEmbeddings() {
@@ -574,13 +671,13 @@ export class AppState {
   public downloadUpdate(): void {
     console.log('[AutoUpdater] Starting download...')
     try {
+      // Errors during download are surfaced via autoUpdater.on("error") which
+      // already broadcasts "update-error". Do not broadcast here to avoid duplicates.
       autoUpdater.downloadUpdate().catch(err => {
         console.error('[AutoUpdater] downloadUpdate failed:', err)
-        this.broadcast('update-error', err.message || 'Download failed')
       })
     } catch (err: any) {
       console.error('[AutoUpdater] downloadUpdate exception:', err)
-      this.broadcast('update-error', err.message || 'Download failed')
     }
   }
 
@@ -697,6 +794,11 @@ export class AppState {
       };
       helper.getLauncherWindow()?.webContents.send('native-audio-transcript', payload);
       helper.getOverlayWindow()?.webContents.send('native-audio-transcript', payload);
+
+      // Feed final recruiter (system audio) transcripts to negotiation tracker
+      if (segment.isFinal && speaker === 'interviewer') {
+        this.knowledgeOrchestrator?.feedInterviewerUtterance?.(segment.text);
+      }
     });
 
     stt.on('error', (err: Error) => {
@@ -753,17 +855,17 @@ export class AppState {
 
       // 1. Sync System Audio Rate
       const sysRate = this.systemAudioCapture?.getSampleRate() || 48000;
-      console.log(`[Main] Configuring Interviewer STT to ${sysRate}Hz`);
+      if (this._verboseLogging) console.log(`[Main] Configuring Interviewer STT to ${sysRate}Hz`);
       this.googleSTT?.setSampleRate(sysRate);
       this.googleSTT?.setAudioChannelCount?.(1);
 
       // 2. Sync Mic Rate
       const micRate = this.microphoneCapture?.getSampleRate() || 48000;
-      console.log(`[Main] Configuring User STT to ${micRate}Hz`);
+      if (this._verboseLogging) console.log(`[Main] Configuring User STT to ${micRate}Hz`);
       this.googleSTT_User?.setSampleRate(micRate);
       this.googleSTT_User?.setAudioChannelCount?.(1);
 
-      console.log('[Main] Full Audio Pipeline (System + Mic) Initialized (Ready)');
+      if (this._verboseLogging) console.log('[Main] Full Audio Pipeline (System + Mic) Initialized (Ready)');
 
     } catch (err) {
       console.error('[Main] Failed to setup System Audio Pipeline:', err);
@@ -898,20 +1000,23 @@ export class AppState {
   }
 
 
-  public startAudioTest(deviceId?: string): void {
+  public async startAudioTest(deviceId?: string): Promise<void> {
     console.log(`[Main] Starting Audio Test on device: ${deviceId || 'default'}`);
     this.stopAudioTest(); // Stop any existing test
 
-    try {
-      this.audioTestCapture = new MicrophoneCapture(deviceId || undefined);
-      this.audioTestCapture.start();
+    if (!(await ensureMacMicrophoneAccess('audio test'))) {
+      throw new Error('Microphone access denied. Please allow microphone access in System Settings and try again.');
+    }
 
-      // Send to settings window if open, else main window
-      const win = this.settingsWindowHelper.getSettingsWindow() || this.getMainWindow();
+    const attachAudioTestListeners = (capture: MicrophoneCapture) => {
+      capture.on('data', (chunk: Buffer) => {
+        const targets = [
+          this.settingsWindowHelper.getSettingsWindow(),
+          this.getWindowHelper().getLauncherWindow(),
+          this.getWindowHelper().getOverlayWindow(),
+        ].filter((win): win is BrowserWindow => !!win && !win.isDestroyed());
 
-      this.audioTestCapture.on('data', (chunk: Buffer) => {
-        // Calculate basic RMS for level meter
-        if (!win || win.isDestroyed()) return;
+        if (targets.length === 0) return;
 
         let sum = 0;
         const step = 10;
@@ -925,18 +1030,32 @@ export class AppState {
         const count = len / (2 * step);
         if (count > 0) {
           const rms = Math.sqrt(sum / count);
-          // Normalize 0-1 (heuristic scaling, max comfortable mic input is around 10000-20000)
           const level = Math.min(rms / 10000, 1.0);
-          win.webContents.send('audio-level', level);
+          for (const target of targets) {
+            target.webContents.send('audio-test-level', level);
+          }
         }
       });
 
-      this.audioTestCapture.on('error', (err: Error) => {
+      capture.on('error', (err: Error) => {
         console.error('[Main] AudioTest Error:', err);
       });
+    };
 
+    try {
+      this.audioTestCapture = new MicrophoneCapture(deviceId || undefined);
+      attachAudioTestListeners(this.audioTestCapture);
+      this.audioTestCapture.start();
     } catch (err) {
-      console.error('[Main] Failed to start audio test:', err);
+      console.warn('[Main] Failed to start audio test on preferred device. Falling back to default.', err);
+      try {
+        this.audioTestCapture = new MicrophoneCapture();
+        attachAudioTestListeners(this.audioTestCapture);
+        this.audioTestCapture.start();
+      } catch (fallbackErr) {
+        console.error('[Main] Failed to start audio test:', fallbackErr);
+        throw fallbackErr;
+      }
     }
   }
 
@@ -959,8 +1078,13 @@ export class AppState {
   public async startMeeting(metadata?: any): Promise<void> {
     console.log('[Main] Starting Meeting...', metadata);
 
+    if (!(await ensureMacMicrophoneAccess('meeting start'))) {
+      const message = 'Microphone access denied. Please allow microphone access in System Settings.';
+      this.broadcast('meeting-audio-error', message);
+      throw new Error(message);
+    }
+
     this.isMeetingActive = true;
-    this.updateTrayMenu();
     this.broadcastMeetingState();
     if (metadata) {
       this.intelligenceManager.setMeetingMetadata(metadata);
@@ -976,10 +1100,6 @@ export class AppState {
     // setTimeout(100) ensures setWindowMode IPC is processed first.
     setTimeout(async () => {
       try {
-        const requestedInputDeviceId = metadata?.audio?.inputDeviceId || 'default';
-        const requestedOutputDeviceId = metadata?.audio?.outputDeviceId || 'default';
-        const requestedBackend = requestedOutputDeviceId === 'sck' ? 'sck' : 'coreaudio';
-
         // Check for audio configuration preference
         if (metadata?.audio) {
           await this.reconfigureAudio(metadata.audio.inputDeviceId, metadata.audio.outputDeviceId);
@@ -987,12 +1107,6 @@ export class AppState {
 
         // LAZY INIT: Ensure pipeline is ready (if not reconfigured above)
         this.setupSystemAudioPipeline();
-
-        const systemRate = this.systemAudioCapture?.getSampleRate() ?? 48000;
-        const microphoneRate = this.microphoneCapture?.getSampleRate() ?? 48000;
-        console.log(
-          `[Main] Meeting audio routing: input=${requestedInputDeviceId}, output=${requestedOutputDeviceId}, backend=${requestedBackend}, systemRate=${systemRate}Hz, micRate=${microphoneRate}Hz, interviewerSttRate=${systemRate}Hz, userSttRate=${microphoneRate}Hz`
-        );
 
         // Start System Audio
         this.systemAudioCapture?.start();
@@ -1007,6 +1121,14 @@ export class AppState {
           this.ragManager.startLiveIndexing('live-meeting-current');
         }
 
+        if (this._verboseLogging) {
+          const requestedInput = metadata?.audio?.inputDeviceId || 'default';
+          const requestedOutput = metadata?.audio?.outputDeviceId || 'default';
+          const backend = requestedOutput === 'sck' ? 'sck' : 'coreaudio';
+          const sysRate = this.systemAudioCapture?.getSampleRate() || 48000;
+          const micRate = this.microphoneCapture?.getSampleRate() || 48000;
+          console.log(`[Main][debug] Audio pipeline: input=${requestedInput} output=${requestedOutput} backend=${backend} sysRate=${sysRate}Hz micRate=${micRate}Hz`);
+        }
         console.log('[Main] Audio pipeline started successfully.');
       } catch (err) {
         console.error('[Main] Error initializing audio pipeline:', err);
@@ -1019,7 +1141,6 @@ export class AppState {
   public async endMeeting(): Promise<void> {
     console.log('[Main] Ending Meeting...');
     this.isMeetingActive = false; // Block new data immediately
-    this.updateTrayMenu();
     this.broadcastMeetingState();
 
     // 3. Stop System Audio
@@ -1331,23 +1452,28 @@ export class AppState {
     this.windowHelper.hideMainWindow()
   }
 
-  public showMainWindow(): void {
-    this.windowHelper.showMainWindow()
+  public showMainWindow(inactive?: boolean): void {
+    if (this.windowHelper) {
+      this.windowHelper.showMainWindow(inactive)
+    }
   }
 
   public toggleMainWindow(): void {
-    // Toggle-expand only makes sense for the overlay during an active meeting
-    if (!this.isMeetingActive) return;
+    console.log(
+      "Screenshots: ",
+      this.screenshotHelper.getScreenshotQueue().length,
+      "Extra screenshots: ",
+      this.screenshotHelper.getExtraScreenshotQueue().length
+    )
+    
+    // Send toggle-expand to the currently active window mode's window.
+    // If we use getMainWindow(), it might return the launcher window when the overlay is hidden,
+    // causing the IPC event to go to the wrong React tree and silently fail.
+    const mode = this.windowHelper.getCurrentWindowMode();
+    const targetWindow = mode === 'overlay' ? this.windowHelper.getOverlayWindow() : this.windowHelper.getLauncherWindow();
 
-    const overlayWindow = this.windowHelper.getOverlayWindow();
-    if (!overlayWindow || overlayWindow.isDestroyed()) return;
-
-    if (overlayWindow.isVisible()) {
-      // Overlay is visible — toggle expand/collapse
-      overlayWindow.webContents.send('toggle-expand');
-    } else {
-      // Overlay is hidden (e.g. after "Show Natively") — bring it back
-      this.windowHelper.switchToOverlay();
+    if (targetWindow && !targetWindow.isDestroyed()) {
+      targetWindow.webContents.send('toggle-expand');
     }
   }
 
@@ -1366,8 +1492,8 @@ export class AppState {
   }
 
   // Screenshot management methods
-  public async takeScreenshot(): Promise<string | null> {
-    if (!this.isMeetingActive) return null
+  public async takeScreenshot(): Promise<string> {
+    if (!this.getMainWindow()) throw new Error("No main window available")
 
     const wasOverlayVisible = this.windowHelper.getOverlayWindow()?.isVisible() ?? false
 
@@ -1385,8 +1511,8 @@ export class AppState {
     return screenshotPath
   }
 
-  public async takeSelectiveScreenshot(): Promise<string | null> {
-    if (!this.isMeetingActive) return null
+  public async takeSelectiveScreenshot(): Promise<string> {
+    if (!this.getMainWindow()) throw new Error("No main window available")
 
     const wasOverlayVisible = this.windowHelper.getOverlayWindow()?.isVisible() ?? false
 
@@ -1471,15 +1597,6 @@ export class AppState {
     this.windowHelper.centerAndShowWindow()
   }
 
-  private broadcastMeetingState(): void {
-    const isActive = this.isMeetingActive;
-    BrowserWindow.getAllWindows().forEach(win => {
-      if (!win.isDestroyed()) {
-        win.webContents.send('meeting-state-changed', isActive);
-      }
-    });
-  }
-
   public createTray(): void {
     this.showTray();
   }
@@ -1558,50 +1675,44 @@ export class AppState {
     const toggleAccel = toggleKb || 'CommandOrControl+B';
     const displayToggle = formatAccel(toggleAccel);
 
-    const menuTemplate: Electron.MenuItemConstructorOptions[] = [
+    const contextMenu = Menu.buildFromTemplate([
       {
         label: 'Show Natively',
         click: () => {
           this.centerAndShowWindow()
         }
-      }
-    ];
-
-    // Only show overlay-related actions when a meeting is active
-    if (this.isMeetingActive) {
-      menuTemplate.push(
-        {
-          label: `Toggle Window (${displayToggle})`,
-          click: () => {
-            this.toggleMainWindow()
-          }
-        },
-        { type: 'separator' },
-        {
-          label: `Take Screenshot (${displayScreenshot})`,
-          accelerator: screenshotAccel,
-          click: async () => {
-            try {
-              const screenshotPath = await this.takeScreenshot()
-              if (!screenshotPath) return;
-              const preview = await this.getImagePreview(screenshotPath)
-              const mainWindow = this.getMainWindow()
-              if (mainWindow) {
-                mainWindow.webContents.send("screenshot-taken", {
-                  path: screenshotPath,
-                  preview
-                })
-              }
-            } catch (error) {
-              console.error("Error taking screenshot from tray:", error)
+      },
+      {
+        label: `Toggle Window (${displayToggle})`,
+        click: () => {
+          this.toggleMainWindow()
+        }
+      },
+      {
+        type: 'separator'
+      },
+      {
+        label: `Take Screenshot (${displayScreenshot})`,
+        accelerator: screenshotAccel,
+        click: async () => {
+          try {
+            const screenshotPath = await this.takeScreenshot()
+            const preview = await this.getImagePreview(screenshotPath)
+            const mainWindow = this.getMainWindow()
+            if (mainWindow) {
+              mainWindow.webContents.send("screenshot-taken", {
+                path: screenshotPath,
+                preview
+              })
             }
+          } catch (error) {
+            console.error("Error taking screenshot from tray:", error)
           }
         }
-      );
-    }
-
-    menuTemplate.push(
-      { type: 'separator' },
+      },
+      {
+        type: 'separator'
+      },
       {
         label: 'Quit',
         accelerator: 'Command+Q',
@@ -1609,9 +1720,7 @@ export class AppState {
           app.quit()
         }
       }
-    );
-
-    const contextMenu = Menu.buildFromTemplate(menuTemplate)
+    ])
 
     this.tray.setContextMenu(contextMenu)
   }
@@ -1659,66 +1768,79 @@ export class AppState {
     // Broadcast state change to all relevant windows
     this._broadcastToAllWindows('undetectable-changed', state);
 
-    // --- STEALTH MODE LOGIC (restored from working version a820380) ---
+    // --- STEALTH MODE LOGIC ---
+    // The dock hide/show is debounced: rapid toggles update isUndetectable immediately
+    // (so content protection, IPC broadcasts and the guard above are always current),
+    // but the actual macOS dock/tray/focus operation only fires once the user stops
+    // toggling. This eliminates the race where dock.show() + NSApp.activate() lingers
+    // after a subsequent dock.hide() call.
     if (process.platform === 'darwin') {
-      const activeWindow = this.windowHelper.getMainWindow();
-
-      // Determine the truly active window to restore focus to
-      const settingsWindow = this.settingsWindowHelper.getSettingsWindow();
-      let targetFocusWindow = activeWindow;
-
-      if (settingsWindow && !settingsWindow.isDestroyed() && settingsWindow.isVisible()) {
-        targetFocusWindow = settingsWindow;
+      if (this._dockDebounceTimer) {
+        clearTimeout(this._dockDebounceTimer);
+        this._dockDebounceTimer = null;
       }
 
-      // Temporarily ignore blur to prevent popups from closing during dock hide/show
-      const modelSelectorWindow = this.modelSelectorWindowHelper.getWindow();
-      const isModelSelectorVisible = modelSelectorWindow && !modelSelectorWindow.isDestroyed() && modelSelectorWindow.isVisible();
+      this._dockDebounceTimer = setTimeout(() => {
+        this._dockDebounceTimer = null;
 
-      if (targetFocusWindow && (targetFocusWindow === settingsWindow)) {
-        this.settingsWindowHelper.setIgnoreBlur(true);
-      }
-      if (isModelSelectorVisible) {
-        this.modelSelectorWindowHelper.setIgnoreBlur(true);
-      }
+        // Read the settled state — may differ from the `state` captured above
+        // if the user toggled again before the timer fired.
+        const settled = this.isUndetectable;
 
-      if (state) {
-        console.log('[Stealth] Calling app.dock.hide()');
-        app.dock.hide();
-        this.hideTray();
-
-        // Focus the window directly without calling .show() 
-        // (.show() can cause macOS to re-register the dock icon)
-        if (targetFocusWindow && !targetFocusWindow.isDestroyed()) {
-          targetFocusWindow.focus();
+        const activeWindow = this.windowHelper.getMainWindow();
+        const settingsWindow = this.settingsWindowHelper.getSettingsWindow();
+        let targetFocusWindow = activeWindow;
+        if (settingsWindow && !settingsWindow.isDestroyed() && settingsWindow.isVisible()) {
+          targetFocusWindow = settingsWindow;
         }
-      } else {
-        console.log('[Stealth] Calling app.dock.show()');
-        app.dock.show();
-        this.showTray();
 
-        // Restore focus when coming back to foreground/dock mode
-        if (targetFocusWindow && !targetFocusWindow.isDestroyed() && targetFocusWindow.isVisible()) {
-          targetFocusWindow.focus();
+        const modelSelectorWindow = this.modelSelectorWindowHelper.getWindow();
+        const isModelSelectorVisible = modelSelectorWindow && !modelSelectorWindow.isDestroyed() && modelSelectorWindow.isVisible();
+
+        if (targetFocusWindow && targetFocusWindow === settingsWindow) {
+          this.settingsWindowHelper.setIgnoreBlur(true);
         }
-      }
+        if (isModelSelectorVisible) {
+          this.modelSelectorWindowHelper.setIgnoreBlur(true);
+        }
 
-      // Re-enable blur handling after the transition logic has settled
-      if (targetFocusWindow && (targetFocusWindow === settingsWindow)) {
-        setTimeout(() => {
-          this.settingsWindowHelper.setIgnoreBlur(false);
-        }, 500);
-      }
-      if (isModelSelectorVisible) {
-        setTimeout(() => {
-          this.modelSelectorWindowHelper.setIgnoreBlur(false);
-        }, 500);
-      }
+        if (settled) {
+          console.log('[Stealth] Calling app.dock.hide()');
+          app.dock.hide();
+          this.hideTray();
+          // Do NOT call focus() here — Natively is a ghost overlay.
+          // focus() → [NSApp activateIgnoringOtherApps:YES] which steals OS focus
+          // from whatever the user is currently doing (Zoom, browser, etc.)
+        } else {
+          console.log('[Stealth] Calling app.dock.show()');
+          app.dock.show();
+          this.showTray();
+          // Do NOT call focus() — let the user's current app retain focus
+        }
+
+        if (targetFocusWindow && targetFocusWindow === settingsWindow) {
+          setTimeout(() => { this.settingsWindowHelper.setIgnoreBlur(false); }, 500);
+        }
+        if (isModelSelectorVisible) {
+          setTimeout(() => { this.modelSelectorWindowHelper.setIgnoreBlur(false); }, 500);
+        }
+      }, 150);
     }
   }
 
   public getUndetectable(): boolean {
     return this.isUndetectable
+  }
+
+  public getVerboseLogging(): boolean {
+    return this._verboseLogging;
+  }
+
+  public setVerboseLogging(enabled: boolean): void {
+    this._verboseLogging = enabled;
+    setVerboseLoggingFlag(enabled);
+    SettingsManager.getInstance().set('verboseLogging', enabled);
+    console.log(`[AppState] verboseLogging set to ${enabled}`);
   }
 
   public setDisguise(mode: 'terminal' | 'settings' | 'activity' | 'none'): void {
@@ -1907,18 +2029,6 @@ export class AppState {
   public getDisguise(): string {
     return this.disguiseMode;
   }
-
-  public isQuitting(): boolean {
-    return this._isQuitting;
-  }
-
-  public setQuitting(value: boolean): void {
-    this._isQuitting = value;
-  }
-
-  public getIsMeetingActive(): boolean {
-    return this.isMeetingActive;
-  }
 }
 
 // Application initialization
@@ -2049,9 +2159,8 @@ async function initializeApp() {
 
   // Scrub API keys from memory on quit to minimize exposure window
   app.on("before-quit", (event) => {
-    // Allow launcher window to actually close instead of hiding to tray
-    appState.setQuitting(true);
     console.log("App is quitting, cleaning up resources...");
+    appState.setQuitting(true);
 
     // Dispose CropperWindowHelper to clean up IPC listeners and prevent memory leaks
     // This is critical to prevent resource leaks and ensure proper cleanup

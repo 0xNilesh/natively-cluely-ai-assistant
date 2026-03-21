@@ -12,7 +12,7 @@ import {
   CUSTOM_SYSTEM_PROMPT, CUSTOM_ANSWER_PROMPT, CUSTOM_WHAT_TO_ANSWER_PROMPT,
   CUSTOM_RECAP_PROMPT, CUSTOM_FOLLOWUP_PROMPT, CUSTOM_FOLLOW_UP_QUESTIONS_PROMPT, CUSTOM_ASSIST_PROMPT
 } from "./llm/prompts"
-import { deepVariableReplacer, getByPath } from './utils/curlUtils';
+import { deepVariableReplacer, getByPath, injectImageIntoMessages } from './utils/curlUtils';
 import curl2Json from "@bany/curl-to-json";
 import { CustomProvider, CurlProvider } from './services/CredentialsManager';
 import { exec } from 'child_process';
@@ -266,8 +266,19 @@ export class LLMHelper {
     return text;
   }
 
-  private async callOllama(prompt: string): Promise<string> {
+  private async callOllama(prompt: string, imagePath?: string): Promise<string> {
     try {
+      // Build optional images array — Ollama multimodal API accepts raw base64 strings (no data-URL prefix)
+      let images: string[] | undefined;
+      if (imagePath) {
+        try {
+          const imageData = await fs.promises.readFile(imagePath);
+          images = [imageData.toString("base64")];
+        } catch (e) {
+          console.warn("[LLMHelper] callOllama: failed to read image, sending text only:", e);
+        }
+      }
+
       const response = await fetch(`${this.ollamaUrl}/api/generate`, {
         method: 'POST',
         headers: {
@@ -277,6 +288,7 @@ export class LLMHelper {
           model: this.ollamaModel,
           prompt: prompt,
           stream: false,
+          ...(images ? { images } : {}),
           options: {
             temperature: 0.7,
             top_p: 0.9,
@@ -727,12 +739,17 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       // ============================================================
       if (this.knowledgeOrchestrator?.isKnowledgeMode()) {
         try {
-          // Feed the interviewer's utterance to the Technical Depth Scorer
-          // so tone adapts dynamically (HR buzzwords → high-level, technical terms → deep technical)
-          this.knowledgeOrchestrator.feedInterviewerUtterance(message);
+          // Feed only to the depth scorer — NOT feedInterviewerUtterance, which also routes to the
+          // negotiation tracker and would misclassify the user's typed question as a recruiter utterance.
+          // Recruiter utterances reach the tracker exclusively via the STT path in main.ts.
+          this.knowledgeOrchestrator.feedForDepthScoring(message);
 
           const knowledgeResult = await this.knowledgeOrchestrator.processQuestion(message);
           if (knowledgeResult) {
+            // Fix 1: short-circuit for live negotiation coaching — bypass second LLM call
+            if (knowledgeResult.liveNegotiationResponse) {
+              return JSON.stringify({ __negotiationCoaching: knowledgeResult.liveNegotiationResponse });
+            }
             // Intro question shortcut — return generated response directly
             if (knowledgeResult.isIntroQuestion && knowledgeResult.introResponse) {
               console.log('[LLMHelper] Knowledge mode: returning generated intro response');
@@ -797,11 +814,11 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       const claudeSystemPrompt = skipSystemPrompt ? undefined : this.injectLanguageInstruction(CLAUDE_SYSTEM_PROMPT);
 
       if (this.useOllama) {
-        return await this.callOllama(combinedMessages.gemini);
+        return await this.callOllama(combinedMessages.gemini, imagePaths?.[0]);
       }
 
       if (this.activeCurlProvider) {
-        return await this.chatWithCurl(message, skipSystemPrompt ? undefined : this.injectLanguageInstruction(CUSTOM_SYSTEM_PROMPT));
+        return await this.chatWithCurl(message, skipSystemPrompt ? undefined : this.injectLanguageInstruction(CUSTOM_SYSTEM_PROMPT), imagePaths?.[0]);
       }
 
       if (this.customProvider) {
@@ -964,12 +981,11 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       providers.push({ name: `OpenAI (${OPENAI_MODEL})`, execute: () => this.generateWithOpenai(message) });
     }
 
-    // Priority 2: Claude
-    if (this.claudeClient) {
-      providers.push({ name: `Claude (${CLAUDE_MODEL})`, execute: () => this.generateWithClaude(message) });
-    }
-
-    // Priority 3: Gemini Pro (don't mutate this.geminiModel to avoid race conditions)
+    // Priority 2: Gemini Pro (don't mutate this.geminiModel to avoid race conditions)
+    // NOTE: Claude is intentionally de-prioritised here — messages.create (non-streaming) is
+    // rejected by Anthropic for large payloads ("Streaming is required for operations that may
+    // take longer than 10 minutes"), causing a wasted round-trip before the Gemini fallback.
+    // Claude remains available as a last resort after Gemini Flash.
     if (this.client) {
       providers.push({
         name: `Gemini Pro (${GEMINI_PRO_MODEL})`,
@@ -1014,12 +1030,17 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       });
     }
 
-    // Priority 4: Groq (Fallback despite JSON hallucination risks)
+    // Priority 4: Claude (last resort before Groq — non-streaming, fails on large payloads)
+    if (this.claudeClient) {
+      providers.push({ name: `Claude (${CLAUDE_MODEL})`, execute: () => this.generateWithClaude(message) });
+    }
+
+    // Priority 5: Groq (Fallback despite JSON hallucination risks)
     if (this.groqClient) {
       providers.push({ name: `Groq (${GROQ_MODEL}) fallback`, execute: () => this.generateWithGroq(message) });
     }
 
-    // Priority 5: Ollama (on-device fallback — last resort, no cloud dependency)
+    // Priority 6: Ollama (on-device fallback — last resort, no cloud dependency)
     if (this.useOllama && await this.checkOllamaAvailable()) {
       providers.push({
         name: `Ollama (${this.ollamaModel})`,
@@ -1113,7 +1134,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   }
 
   // The handler for cURL requests
-  public async chatWithCurl(userMessage: string, systemPrompt?: string): Promise<string> {
+  public async chatWithCurl(userMessage: string, systemPrompt?: string, imagePath?: string): Promise<string> {
     if (!this.activeCurlProvider) throw new Error("No cURL provider active");
 
     const { curlCommand, responsePath } = this.activeCurlProvider;
@@ -1122,21 +1143,37 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     // @ts-ignore
     const curlConfig = curl2Json(curlCommand);
 
-    // 2. Prepare Variables
-    // We combine System Prompt + User Message into {{TEXT}} for simplicity in raw mode, 
-    // or you can support {{SYSTEM}} if you want to get fancy later.
+    // 2. Prepare Image (if any)
+    let base64Image = "";
+    if (imagePath) {
+      try {
+        const imageData = await fs.promises.readFile(imagePath);
+        base64Image = imageData.toString("base64");
+      } catch (e) {
+        console.warn("[LLMHelper] chatWithCurl: failed to read image:", e);
+      }
+    }
+
+    // 3. Prepare Variables
+    // We combine System Prompt + User Message into {{TEXT}} for simplicity in raw mode.
     const fullPrompt = systemPrompt ? `${systemPrompt}\n\n${userMessage}` : userMessage;
 
     const variables = {
-      TEXT: fullPrompt.replace(/\n/g, "\\n").replace(/"/g, '\\"') // Basic escaping
+      TEXT: fullPrompt.replace(/\n/g, "\\n").replace(/"/g, '\\"'), // Basic escaping (pre-existing)
+      IMAGE_BASE64: base64Image,
     };
 
-    // 3. Inject Variables into URL, Headers, and Body
+    // 4. Inject Variables into URL, Headers, and Body
     const url = deepVariableReplacer(curlConfig.url, variables);
     const headers = deepVariableReplacer(curlConfig.header || {}, variables);
-    const data = deepVariableReplacer(curlConfig.data || {}, variables);
+    let data = deepVariableReplacer(curlConfig.data || {}, variables);
 
-    // 4. Execute
+    // 4a. Auto-upgrade last user message to multimodal content array when an image is present.
+    if (base64Image && imagePath) {
+      data = injectImageIntoMessages(data, base64Image, imagePath);
+    }
+
+    // 5. Execute
     try {
       const response = await axios({
         method: curlConfig.method || 'POST',
@@ -1145,7 +1182,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         data: data
       });
 
-      // 5. Extract Answer
+      // 6. Extract Answer
       // If user didn't specify a path, try to guess or dump string
       if (!responsePath) return JSON.stringify(response.data);
 
@@ -1239,7 +1276,15 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     // 4. Inject Variables into URL, Headers, and Body
     const url = deepVariableReplacer(requestConfig.url, variables);
     const headers = deepVariableReplacer(requestConfig.header || {}, variables);
-    const body = deepVariableReplacer(requestConfig.data || {}, variables);
+    let body = deepVariableReplacer(requestConfig.data || {}, variables);
+
+    // 4a. Auto-upgrade last user message to multimodal content array when an image
+    //     is present and the body follows the OpenAI messages format.
+    //     This is a no-op for non-OpenAI formats and for templates that already
+    //     include a proper image_url part, so it is fully backward-compatible.
+    if (base64Image && imagePath) {
+      body = injectImageIntoMessages(body, base64Image, imagePath);
+    }
 
     // 5. Execute Fetch
     try {
@@ -1536,14 +1581,14 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     if (this.activeCurlProvider && !this.customProvider) {
       localProviders.push({
         name: `cURL Provider (${this.activeCurlProvider.name})`,
-        execute: () => this.chatWithCurl(userPrompt, systemPrompt)
+        execute: () => this.chatWithCurl(userPrompt, systemPrompt, isMultimodal ? imagePaths[0] : undefined)
       });
     }
 
     if (this.useOllama) {
       localProviders.push({
         name: `Ollama (${this.ollamaModel})`,
-        execute: () => this.callOllama(`${systemPrompt}\n\n${userPrompt}`)
+        execute: () => this.callOllama(`${systemPrompt}\n\n${userPrompt}`, isMultimodal ? imagePaths[0] : undefined)
       });
     }
 
@@ -1652,7 +1697,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     };
 
     if (this.useOllama) {
-      const response = await this.callOllama(combinedMessages.gemini);
+      const response = await this.callOllama(combinedMessages.gemini, imagePaths?.[0]);
       yield response;
       return;
     }
@@ -1764,8 +1809,16 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     // ============================================================
     if (this.knowledgeOrchestrator?.isKnowledgeMode()) {
       try {
+        // Feed to depth scorer only (not negotiation tracker) — mirrors non-streaming path fix.
+        this.knowledgeOrchestrator.feedForDepthScoring(message);
+
         const knowledgeResult = await this.knowledgeOrchestrator.processQuestion(message);
         if (knowledgeResult) {
+          // Fix 1: short-circuit for live negotiation coaching — bypass second LLM call
+          if (knowledgeResult.liveNegotiationResponse) {
+            yield JSON.stringify({ __negotiationCoaching: knowledgeResult.liveNegotiationResponse });
+            return;
+          }
           // Intro question shortcut — yield generated response directly
           if (knowledgeResult.isIntroQuestion && knowledgeResult.introResponse) {
             console.log('[LLMHelper] Knowledge mode (stream): returning generated intro response');
@@ -1818,7 +1871,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
     // 1. Ollama Streaming
     if (this.useOllama) {
-      yield* this.streamWithOllama(message, context, finalSystemPrompt);
+      yield* this.streamWithOllama(message, context, finalSystemPrompt, imagePaths);
       return;
     }
 
@@ -1833,6 +1886,12 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         imagePaths?.[0]
       );
       yield response;
+      return;
+    }
+
+    // 2b. CustomProvider (switchToCustom path) — full SSE-capable streaming
+    if (this.customProvider) {
+      yield* this.streamWithCustom(message, context, imagePaths, finalSystemPrompt);
       return;
     }
 
@@ -2195,10 +2254,25 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   }
 
   // --- OLLAMA STREAMING ---
-  private async * streamWithOllama(message: string, context?: string, systemPrompt: string = UNIVERSAL_SYSTEM_PROMPT): AsyncGenerator<string, void, unknown> {
+  private async * streamWithOllama(message: string, context?: string, systemPrompt: string = UNIVERSAL_SYSTEM_PROMPT, imagePaths?: string[]): AsyncGenerator<string, void, unknown> {
     const fullPrompt = context
       ? `SYSTEM: ${systemPrompt}\nCONTEXT: ${context}\nUSER: ${message}`
       : `SYSTEM: ${systemPrompt}\nUSER: ${message}`;
+
+    // Build optional images array — Ollama multimodal API accepts raw base64 strings (no data-URL prefix)
+    let images: string[] | undefined;
+    if (imagePaths?.length) {
+      const encoded: string[] = [];
+      for (const p of imagePaths) {
+        try {
+          const data = await fs.promises.readFile(p);
+          encoded.push(data.toString("base64"));
+        } catch (e) {
+          console.warn("[LLMHelper] streamWithOllama: failed to read image, skipping:", p, e);
+        }
+      }
+      if (encoded.length) images = encoded;
+    }
 
     try {
       const response = await fetch(`${this.ollamaUrl}/api/generate`, {
@@ -2208,6 +2282,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           model: this.ollamaModel,
           prompt: fullPrompt,
           stream: true,
+          ...(images ? { images } : {}),
           options: { temperature: 0.7 }
         })
       });
@@ -2273,7 +2348,13 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
     const url = deepVariableReplacer(requestConfig.url, variables);
     const headers = deepVariableReplacer(requestConfig.header || {}, variables);
-    const body = deepVariableReplacer(requestConfig.data || {}, variables);
+    let body = deepVariableReplacer(requestConfig.data || {}, variables);
+
+    // Auto-upgrade last user message to multimodal content array when an image is present.
+    // No-op for non-OpenAI formats and templates already containing a proper image_url part.
+    if (base64Image && imagePaths?.[0]) {
+      body = injectImageIntoMessages(body, base64Image, imagePaths[0]);
+    }
 
     try {
       const response = await fetch(url, {

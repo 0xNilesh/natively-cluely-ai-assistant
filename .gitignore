@@ -184,3 +184,6 @@ native-module/*.node
 **/AGENTS.md
 **/CLAUDE.md
 **/.claude/
+
+# Feature planning and AI chat logs
+planning/live-negotiation/

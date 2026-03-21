@@ -273,17 +273,14 @@ export class WindowHelper {
       }
     })
 
-    // On Windows/Linux, hide to tray instead of destroying the window on close
+    // On Windows/Linux: intercept close and hide to tray instead of quitting,
+    // unless the app is actually quitting (e.g. from tray "Quit" menu).
     if (process.platform !== 'darwin') {
       this.launcherWindow.on('close', (e) => {
-        // If the app is quitting (via tray "Quit" or app.quit()), allow the close
-        if (this.appState.isQuitting()) return;
-        e.preventDefault();
-        if (this.appState.getIsMeetingActive()) {
-          // During meeting, only hide the launcher — keep overlay running
+        if (!this.appState.isQuitting()) {
+          e.preventDefault();
           this.launcherWindow?.hide();
-        } else {
-          this.hideMainWindow();
+          this.isWindowVisible = false;
         }
       });
     }
@@ -298,15 +295,19 @@ export class WindowHelper {
       this.isWindowVisible = false
     })
 
-    // Listen for overlay close if independent closing acts as "Stop Meeting"
+    // Listen for overlay close (e.g. Cmd+W). Never truly destroy it — either
+    // hide it (during a meeting) or switch back to launcher (between meetings).
     if (this.overlayWindow) {
       this.overlayWindow.on('close', (e) => {
-        // Prevent accidental closing via cmd+w if we want to enforce workflow? 
-        // Or treat as end meeting. simpler to treat as hiding for now.
-        if (this.isWindowVisible && this.overlayWindow?.isVisible()) {
+        if (this.overlayWindow?.isVisible()) {
           e.preventDefault();
-          this.switchToLauncher();
-          // Notify backend meeting ended? Handled via IPC ideally.
+          if (this.appState.getIsMeetingActive()) {
+            // Meeting running — just hide the overlay; user can resume from the
+            // launcher's "Meeting ongoing" button which calls setWindowMode('overlay').
+            this.hideOverlay();
+          } else {
+            this.switchToLauncher();
+          }
         }
       })
     }
@@ -325,42 +326,38 @@ export class WindowHelper {
   public getOverlayWindow(): BrowserWindow | null { return this.overlayWindow }
   public getCurrentWindowMode(): 'launcher' | 'overlay' { return this.currentWindowMode }
 
-  // Show/hide overlay without affecting window mode (used by overlay renderer IPC)
-  public showOverlay(): void {
-    if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
-      this.overlayWindow.setOpacity(1);
-      this.overlayWindow.show();
-      this.overlayWindow.focus();
-    }
-  }
-
-  public hideOverlay(): void {
-    if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
-      this.overlayWindow.setOpacity(0);
-      this.overlayWindow.hide();
-    }
-  }
-
   public isVisible(): boolean {
     return this.isWindowVisible
   }
 
   public hideMainWindow(): void {
-    // Set opacity to 0 first so macOS window-hide animation is invisible to the user,
-    // preventing the screen flash and focus-loss jitter reported in issue #89.
-    this.launcherWindow?.setOpacity(0)
-    this.overlayWindow?.setOpacity(0)
     this.launcherWindow?.hide()
     this.overlayWindow?.hide()
     this.isWindowVisible = false
   }
 
-  public showMainWindow(): void {
+  // Show overlay directly without going through full switchToOverlay flow.
+  // Used by IPC handlers to show the overlay independently.
+  public showOverlay(): void {
+    if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
+      this.overlayWindow.showInactive();
+    }
+  }
+
+  // Hide overlay directly without switching to launcher.
+  // Used by IPC handlers to hide the overlay independently.
+  public hideOverlay(): void {
+    if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
+      this.overlayWindow.hide();
+    }
+  }
+
+  public showMainWindow(inactive?: boolean): void {
     // Show the window corresponding to the current mode
     if (this.currentWindowMode === 'overlay') {
-      this.switchToOverlay();
+      this.switchToOverlay(inactive);
     } else {
-      this.switchToLauncher();
+      this.switchToLauncher(inactive);
     }
   }
 
@@ -368,7 +365,10 @@ export class WindowHelper {
     if (this.isWindowVisible) {
       this.hideMainWindow()
     } else {
-      this.showMainWindow()
+      // Always show without stealing focus — Natively is a ghost overlay.
+      // The user is in another app; show the window on top but leave OS focus alone.
+      // They can click the window to focus it if they need to type.
+      this.showMainWindow(true)
     }
   }
 
@@ -384,9 +384,12 @@ export class WindowHelper {
 
   // --- Swapping Logic ---
 
-  public switchToOverlay(): void {
-    console.log('[WindowHelper] Switching to OVERLAY');
+  public switchToOverlay(inactive?: boolean): void {
+    console.log(`[WindowHelper] Switching to OVERLAY (inactive: ${!!inactive})`);
     this.currentWindowMode = 'overlay';
+
+    // Tell the overlay renderer to expand to full size (e.g. after being minimised)
+    this.overlayWindow?.webContents.send('ensure-expanded');
 
     // Show Overlay FIRST
     if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
@@ -404,34 +407,28 @@ export class WindowHelper {
       if (process.platform === 'win32' && this.contentProtection) {
         // Opacity Shield: Show at 0 opacity first to prevent frame leak
         this.overlayWindow.setOpacity(0);
-        this.overlayWindow.show();
+        if (inactive) this.overlayWindow.showInactive(); else this.overlayWindow.show();
         this.overlayWindow.setContentProtection(true);
         // Small delay to ensure Windows DWM processes the flag before making it opaque
-        
+
         if (this.opacityTimeout) clearTimeout(this.opacityTimeout);
         this.opacityTimeout = setTimeout(() => {
           if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
             this.overlayWindow.setOpacity(1);
-            this.overlayWindow.focus();
-            this.overlayWindow.setAlwaysOnTop(true, "floating");
+            if (!inactive) this.overlayWindow.focus();
+            // Note: do NOT call setAlwaysOnTop here — it triggers NSApp activation on macOS
           }
         }, 60);
       } else {
         this.overlayWindow.setContentProtection(this.contentProtection);
-        // Restore opacity in case it was zeroed by hideMainWindow's flash-prevention logic
-        this.overlayWindow.setOpacity(1);
-        this.overlayWindow.show();
-        this.overlayWindow.focus();
-        this.overlayWindow.setAlwaysOnTop(true, "floating");
+        if (inactive) this.overlayWindow.showInactive(); else this.overlayWindow.show();
+        // Only grab focus for explicit user-initiated shows (not shortcut/ghost shows)
+        if (!inactive) this.overlayWindow.focus();
+        // Do NOT re-assert setAlwaysOnTop on every show — it was set at creation time and
+        // persists across hide/show cycles. Calling it again triggers [NSApp activate] on
+        // macOS, stealing focus from Zoom/browser even when showInactive() was used.
       }
       this.isWindowVisible = true;
-
-      // Ensure overlay is expanded when shown (may have been collapsed)
-      setTimeout(() => {
-        if (this.overlayWindow && !this.overlayWindow.isDestroyed() && this.overlayWindow.isVisible()) {
-          this.overlayWindow.webContents.send('ensure-expanded');
-        }
-      }, 100);
     }
 
     // Hide Launcher SECOND
@@ -440,8 +437,8 @@ export class WindowHelper {
     }
   }
 
-  public switchToLauncher(): void {
-    console.log('[WindowHelper] Switching to LAUNCHER');
+  public switchToLauncher(inactive?: boolean): void {
+    console.log(`[WindowHelper] Switching to LAUNCHER (inactive: ${!!inactive})`);
     this.currentWindowMode = 'launcher';
 
     // Show Launcher FIRST
@@ -449,40 +446,36 @@ export class WindowHelper {
       if (process.platform === 'win32' && this.contentProtection) {
         // Opacity Shield: Show at 0 opacity first
         this.launcherWindow.setOpacity(0);
-        this.launcherWindow.show();
+        if (inactive) this.launcherWindow.showInactive(); else this.launcherWindow.show();
         this.launcherWindow.setContentProtection(true);
 
         if (this.opacityTimeout) clearTimeout(this.opacityTimeout);
         this.opacityTimeout = setTimeout(() => {
           if (this.launcherWindow && !this.launcherWindow.isDestroyed()) {
             this.launcherWindow.setOpacity(1);
-            this.launcherWindow.focus();
+            if (!inactive) this.launcherWindow.focus();
           }
         }, 60);
       } else {
         this.launcherWindow.setContentProtection(this.contentProtection);
-        // Restore opacity in case it was zeroed by hideMainWindow's flash-prevention logic
-        this.launcherWindow.setOpacity(1);
-        this.launcherWindow.show();
-        this.launcherWindow.focus();
+        if (inactive) this.launcherWindow.showInactive(); else this.launcherWindow.show();
+        if (!inactive) this.launcherWindow.focus();
       }
       this.isWindowVisible = true;
     }
 
-    // Don't hide overlay during active meeting — windows are independent
-    if (!this.appState.getIsMeetingActive()) {
-      if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
-        this.overlayWindow.hide();
-      }
+    // Hide Overlay SECOND
+    if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
+      this.overlayWindow.hide();
     }
   }
 
   // Simplified setWindowMode that just calls switchers
-  public setWindowMode(mode: 'launcher' | 'overlay'): void {
+  public setWindowMode(mode: 'launcher' | 'overlay', inactive?: boolean): void {
     if (mode === 'launcher') {
-      this.switchToLauncher();
+      this.switchToLauncher(inactive);
     } else {
-      this.switchToOverlay();
+      this.switchToOverlay(inactive);
     }
   }
 

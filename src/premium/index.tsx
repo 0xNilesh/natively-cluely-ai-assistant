@@ -52,6 +52,10 @@ const _adHook = import.meta.glob<any>(
   '../../premium/src/useAdCampaigns.ts',
   { eager: true }
 );
+const _negotiationCard = import.meta.glob<any>(
+  '../../premium/src/NegotiationCoachingCard.tsx',
+  { eager: true }
+);
 
 // ─── Helper ──────────────────────────────────────────────────────────
 function get<T>(mods: Record<string, any>, name: string, fallback: T): T {
@@ -80,3 +84,6 @@ export const RemoteCampaignToaster: React.FC<any> =
 
 export const useAdCampaigns: typeof nullAdCampaigns =
   get(_adHook, 'useAdCampaigns', nullAdCampaigns);
+
+export const NegotiationCoachingCard: React.FC<any> =
+  get(_negotiationCard, 'NegotiationCoachingCard', NullComponent);

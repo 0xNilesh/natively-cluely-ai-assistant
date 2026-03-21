@@ -30,7 +30,11 @@ export class MicrophoneCapture extends EventEmitter {
                 this.monitor = new RustMicCapture(this.deviceId);
             } catch (e) {
                 console.error('[MicrophoneCapture] Failed to create native monitor:', e);
-                // We don't throw here to allow app to start, but start() will fail
+                // Re-throw so callers (e.g. reconfigureAudio) can catch and fall back to
+                // the default device. Without this, the constructor returns a broken
+                // instance (monitor=null) and the fallback try/catch in main.ts is
+                // never reached, leaving the user with zero microphone capture.
+                throw e;
             }
         }
     }

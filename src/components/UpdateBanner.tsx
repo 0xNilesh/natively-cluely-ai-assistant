@@ -15,6 +15,7 @@ const UpdateBanner: React.FC = () => {
             console.log('[UpdateBanner] Update available:', info);
             setUpdateInfo(info);
             setErrorMessage(null);
+            setStatus('idle'); // Reset from any prior error/state before showing update info
             // If parsed notes are included in the info object (from our backend change)
             if (info.parsedNotes) {
                 setParsedNotes(info.parsedNotes);
@@ -89,6 +90,7 @@ const UpdateBanner: React.FC = () => {
 
     const handleDismiss = () => {
         setIsVisible(false);
+        setStatus('idle'); // Reset error/downloading state so next event starts clean
     };
 
     if (!isVisible) return null;

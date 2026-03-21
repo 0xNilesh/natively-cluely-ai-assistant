@@ -6,16 +6,16 @@ interface TopPillProps {
     expanded: boolean;
     onToggle: () => void;
     onQuit: () => void;
-    onLogoClick: () => void;
     appearance: OverlayAppearance;
+    onLogoClick?: () => void;
 }
 
 export default function TopPill({
     expanded,
     onToggle,
     onQuit,
-    onLogoClick,
     appearance,
+    onLogoClick,
 }: TopPillProps) {
     return (
         <div className="flex justify-center mt-2 select-none z-50">
@@ -34,7 +34,6 @@ export default function TopPill({
                 {/* LOGO BUTTON */}
                 <button
                     onClick={onLogoClick}
-                    title="Show Launcher"
                     className={`
             w-8 h-8
             rounded-full

@@ -45,40 +45,6 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
-  // --- Auto-Update IPC Handlers ---
-  safeHandle("check-for-updates", async () => {
-    try {
-      console.log("[IPC] Manual update check requested");
-      await appState.checkForUpdates();
-      return { success: true };
-    } catch (err: any) {
-      console.error("[IPC] check-for-updates failed:", err);
-      return { success: false, error: err.message };
-    }
-  });
-
-  safeHandle("download-update", async () => {
-    try {
-      console.log("[IPC] Download update requested");
-      appState.downloadUpdate();
-      return { success: true };
-    } catch (err: any) {
-      console.error("[IPC] download-update failed:", err);
-      return { success: false, error: err.message };
-    }
-  });
-
-  safeHandle("quit-and-install-update", async () => {
-    try {
-      console.log("[IPC] Quit and install update requested");
-      await appState.quitAndInstallUpdate();
-      return { success: true };
-    } catch (err: any) {
-      console.error("[IPC] quit-and-install-update failed:", err);
-      return { success: false, error: err.message };
-    }
-  });
-
   safeHandle("license:activate", async (event, key: string) => {
     try {
       const { LicenseManager } = require('../premium/electron/services/LicenseManager');
@@ -182,8 +148,8 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   )
 
-  safeHandle("set-window-mode", async (event, mode: 'launcher' | 'overlay') => {
-    appState.getWindowHelper().setWindowMode(mode);
+  safeHandle("set-window-mode", async (event, mode: 'launcher' | 'overlay', inactive?: boolean) => {
+    appState.getWindowHelper().setWindowMode(mode, inactive);
     return { success: true };
   })
 
@@ -202,7 +168,6 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle("take-screenshot", async () => {
     try {
       const screenshotPath = await appState.takeScreenshot()
-      if (!screenshotPath) return null
       const preview = await appState.getImagePreview(screenshotPath)
       return { path: screenshotPath, preview }
     } catch (error) {
@@ -214,7 +179,6 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle("take-selective-screenshot", async () => {
     try {
       const screenshotPath = await appState.takeSelectiveScreenshot()
-      if (!screenshotPath) return null
       const preview = await appState.getImagePreview(screenshotPath)
       return { path: screenshotPath, preview }
     } catch (error) {
@@ -256,22 +220,25 @@ export function initializeIpcHandlers(appState: AppState): void {
     appState.toggleMainWindow()
   })
 
+  safeHandle("show-window", async (event, inactive?: boolean) => {
+    // Default show main window (Launcher usually)
+    appState.showMainWindow(inactive)
+  })
+
+  safeHandle("hide-window", async () => {
+    appState.hideMainWindow()
+  })
+
   safeHandle("show-overlay", async () => {
-    // Show overlay if meeting is active (called from overlay renderer)
-    if (appState.getIsMeetingActive()) {
-      appState.getWindowHelper().showOverlay();
-    } else {
-      appState.showMainWindow();
-    }
+    appState.getWindowHelper().showOverlay();
   })
 
   safeHandle("hide-overlay", async () => {
-    // Hide overlay if meeting is active (called from overlay renderer)
-    if (appState.getIsMeetingActive()) {
-      appState.getWindowHelper().hideOverlay();
-    } else {
-      appState.hideMainWindow();
-    }
+    appState.getWindowHelper().hideOverlay();
+  })
+
+  safeHandle("get-meeting-active", async () => {
+    return appState.getIsMeetingActive();
   })
 
   safeHandle("reset-queues", async () => {
@@ -450,9 +417,15 @@ export function initializeIpcHandlers(appState: AppState): void {
     app.quit()
   })
 
-  safeHandle("quit-and-install-update", () => {
-    console.log('[IPC] quit-and-install-update handler called')
-    appState.quitAndInstallUpdate()
+  safeHandle("quit-and-install-update", async () => {
+    try {
+      console.log('[IPC] Quit and install update requested')
+      await appState.quitAndInstallUpdate()
+      return { success: true }
+    } catch (err: any) {
+      console.error('[IPC] quit-and-install-update failed:', err)
+      return { success: false, error: err.message }
+    }
   })
 
   safeHandle("delete-meeting", async (_, id: string) => {
@@ -460,11 +433,25 @@ export function initializeIpcHandlers(appState: AppState): void {
   });
 
   safeHandle("check-for-updates", async () => {
-    await appState.checkForUpdates()
+    try {
+      console.log('[IPC] Manual update check requested')
+      await appState.checkForUpdates()
+      return { success: true }
+    } catch (err: any) {
+      console.error('[IPC] check-for-updates failed:', err)
+      return { success: false, error: err.message }
+    }
   })
 
   safeHandle("download-update", async () => {
-    appState.downloadUpdate()
+    try {
+      console.log('[IPC] Download update requested')
+      appState.downloadUpdate()
+      return { success: true }
+    } catch (err: any) {
+      console.error('[IPC] download-update failed:', err)
+      return { success: false, error: err.message }
+    }
   })
 
   // Window movement handlers
@@ -529,6 +516,15 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle("get-open-at-login", async () => {
     const settings = app.getLoginItemSettings();
     return settings.openAtLogin;
+  });
+
+  safeHandle("get-verbose-logging", async () => {
+    return appState.getVerboseLogging();
+  });
+
+  safeHandle("set-verbose-logging", async (_, enabled: boolean) => {
+    appState.setVerboseLogging(enabled);
+    return { success: true };
   });
 
   // LLM Model Management Handlers
@@ -1409,7 +1405,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   });
 
   safeHandle("start-audio-test", async (event, deviceId?: string) => {
-    appState.startAudioTest(deviceId);
+    await appState.startAudioTest(deviceId);
     return { success: true };
   });
 
@@ -2156,6 +2152,32 @@ export function initializeIpcHandlers(appState: AppState): void {
       return { success: true, script };
     } catch (error: any) {
       console.error('[IPC] profile:generate-negotiation error:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  safeHandle("profile:get-negotiation-state", async () => {
+    try {
+      const orchestrator = appState.getKnowledgeOrchestrator();
+      if (!orchestrator) return { success: false, error: 'Engine not ready' };
+      const tracker = orchestrator.getNegotiationTracker();
+      return {
+        success: true,
+        state: tracker.getState(),
+        isActive: tracker.isActive(),
+      };
+    } catch (error: any) {
+      return { success: false, error: error.message };
+    }
+  });
+
+  safeHandle("profile:reset-negotiation", async () => {
+    try {
+      const orchestrator = appState.getKnowledgeOrchestrator();
+      if (!orchestrator) return { success: false };
+      orchestrator.resetNegotiationSession();
+      return { success: true };
+    } catch (error: any) {
       return { success: false, error: error.message };
     }
   });

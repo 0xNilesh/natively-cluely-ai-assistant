@@ -61,17 +61,17 @@ export const AboutSection: React.FC<AboutSectionProps> = () => {
 
             {/* What's New Section */}
             <div>
-                <h4 className="text-xs font-bold text-text-tertiary uppercase tracking-wider mb-2 px-1">What's New in v2.0</h4>
+                <h4 className="text-xs font-bold text-text-tertiary uppercase tracking-wider mb-2 px-1">What's New in v2.0.7</h4>
                 <div className="bg-bg-item-surface rounded-xl border border-border-subtle overflow-hidden">
                     <div className="p-3 border-b border-border-subtle bg-bg-card/50">
                         <div className="flex items-start gap-4">
                             <div className="w-10 h-10 rounded-lg bg-yellow-500/10 flex items-center justify-center text-yellow-400 shrink-0">
-                                <Sparkles size={20} />
+                                <Zap size={20} />
                             </div>
                             <div>
-                                <h5 className="text-sm font-bold text-text-primary mb-1">Premium Profile Intelligence</h5>
+                                <h5 className="text-sm font-bold text-text-primary mb-1">Capture & Analyse — ⌘⇧↵</h5>
                                 <p className="text-xs text-text-secondary leading-relaxed">
-                                    Upload your Resume & Job Description for hyper-personalized interview assistance, company research, and salary negotiation tactics.
+                                    One shortcut to screenshot your screen and instantly get AI analysis. No extra clicks — press Cmd+Shift+Enter and Natively does the rest.
                                 </p>
                             </div>
                         </div>
@@ -80,12 +80,12 @@ export const AboutSection: React.FC<AboutSectionProps> = () => {
                     <div className="p-3 border-b border-border-subtle bg-bg-card/50">
                         <div className="flex items-start gap-4">
                             <div className="w-10 h-10 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-400 shrink-0">
-                                <Zap size={20} />
+                                <Sparkles size={20} />
                             </div>
                             <div>
-                                <h5 className="text-sm font-bold text-text-primary mb-1">Live Meeting RAG</h5>
+                                <h5 className="text-sm font-bold text-text-primary mb-1">Salary Negotiation Script</h5>
                                 <p className="text-xs text-text-secondary leading-relaxed">
-                                    Instant intelligent retrieval of context directly during a live meeting using local vectors.
+                                    AI-generated negotiation playbook built from your resume, job description, and live company culture data — opening line, justification, and counter-offer fallback, on demand.
                                 </p>
                             </div>
                         </div>
@@ -97,9 +97,9 @@ export const AboutSection: React.FC<AboutSectionProps> = () => {
                                 <Globe size={20} />
                             </div>
                             <div>
-                                <h5 className="text-sm font-bold text-text-primary mb-1">Soniox & Multilingual</h5>
+                                <h5 className="text-sm font-bold text-text-primary mb-1">Vision for Custom Providers</h5>
                                 <p className="text-xs text-text-secondary leading-relaxed">
-                                    Ultra-fast streaming STT with Soniox. Set speech recognition specific to accents, dialects, and varied AI response languages.
+                                    Screenshots now flow automatically through any cURL-based or Ollama provider — no manual template edits needed. Bring your own model and get full vision support out of the box.
                                 </p>
                             </div>
                         </div>

@@ -57,7 +57,12 @@ export class ModelSelectorWindowHelper {
         if (process.platform === "darwin") {
             // Align with parent window behavior
             this.window.setVisibleOnAllWorkspaces(isOverlay, { visibleOnFullScreen: isOverlay });
-            this.window.setAlwaysOnTop(isOverlay, "floating");
+            // Only set alwaysOnTop if the value is actually changing — calling it unnecessarily
+            // triggers NSApp activation on macOS, stealing focus from other apps.
+            const currentAlwaysOnTop = this.window.isAlwaysOnTop();
+            if (currentAlwaysOnTop !== isOverlay) {
+                this.window.setAlwaysOnTop(isOverlay, "floating");
+            }
             // Always hide from MC as it's a dropdown
             this.window.setHiddenInMissionControl(true);
         }
@@ -88,13 +93,10 @@ export class ModelSelectorWindowHelper {
     public hideWindow(): void {
         if (this.window && !this.window.isDestroyed()) {
             this.window.setParentWindow(null);
-            this.window.hide()
-
-            // Restore focus
-            const mainWin = this.windowHelper?.getMainWindow();
-            if (mainWin && !mainWin.isDestroyed() && mainWin.isVisible()) {
-                mainWin.focus();
-            }
+            this.window.hide();
+            // Do NOT call mainWin.focus() here — the model selector is a floating dropdown.
+            // Explicitly focusing the main window steals OS focus from whatever the user
+            // had active (Zoom, browser, etc.) before opening the selector.
         }
     }
 

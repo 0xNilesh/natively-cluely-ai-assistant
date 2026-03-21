@@ -69,8 +69,8 @@ const UpdateModal: React.FC<UpdateModalProps> = ({
     const animationFrameRef = React.useRef<number>();
 
     React.useEffect(() => {
-        // Only run if not downloading and we have notes
-        if (status === 'downloading' || showFallback || !isOpen) return;
+        // Only run if not downloading/error and we have notes
+        if (status === 'downloading' || status === 'error' || showFallback || !isOpen) return;
 
         const scroll = () => {
             if (isUserInteractionRef.current || !scrollContainerRef.current) return;
@@ -130,7 +130,29 @@ const UpdateModal: React.FC<UpdateModalProps> = ({
                         className="relative w-[510px] h-[380px] bg-[#1E1E1E]/90 backdrop-blur-2xl rounded-xl shadow-[0_50px_100px_-20px_rgba(0,0,0,0.5)] border border-white/[0.08] overflow-hidden flex flex-col"
                     >
                         {/* Content Container */}
-                        {status === 'downloading' ? (
+                        {status === 'error' ? (
+                            <div className="p-8 flex flex-col items-center justify-center h-full text-center">
+                                <div className="space-y-2 mb-6">
+                                    <h2 className="text-[17px] font-semibold text-white tracking-tight">
+                                        Update Failed
+                                    </h2>
+                                    {errorMessage && (
+                                        <p className="text-[13px] text-red-400 font-medium">
+                                            {errorMessage}
+                                        </p>
+                                    )}
+                                    <p className="text-[13px] text-white/40">
+                                        Check your internet connection or download the update manually from GitHub.
+                                    </p>
+                                </div>
+                                <button
+                                    onClick={onDismiss}
+                                    className="px-5 py-[6px] bg-white/10 hover:bg-white/20 text-white text-[13px] font-medium rounded-lg transition-colors"
+                                >
+                                    Close
+                                </button>
+                            </div>
+                        ) : status === 'downloading' ? (
                             <div className="p-8 flex flex-col items-center justify-center h-full text-center relative">
 
                                 {/* 1. Header Text */}
@@ -201,29 +223,6 @@ const UpdateModal: React.FC<UpdateModalProps> = ({
                                     className="text-[13px] font-medium text-white/30 hover:text-white/60 transition-colors mt-auto mb-1"
                                 >
                                     Hide
-                                </button>
-                            </div>
-                        ) : status === 'error' ? (
-                            <div className="p-8 flex flex-col items-center justify-center h-full text-center relative">
-                                <div className="space-y-1.5 mb-6">
-                                    <h2 className="text-[17px] font-semibold text-white tracking-tight">
-                                        Update Failed
-                                    </h2>
-                                    <p className="text-[13px] text-red-400 font-medium">
-                                        {errorMessage || 'An error occurred while downloading the update.'}
-                                    </p>
-                                </div>
-                                <div className="bg-white/[0.03] rounded-xl border border-white/[0.06] p-4 max-w-[360px]">
-                                    <p className="text-[12px] text-white/60 leading-relaxed">
-                                        Please check your internet connection and try again. 
-                                        You can also download the latest version manually from GitHub.
-                                    </p>
-                                </div>
-                                <button
-                                    onClick={onDismiss}
-                                    className="px-5 py-[6px] bg-white/10 hover:bg-white/15 text-white text-[13px] font-medium rounded-lg mt-6 transition-colors"
-                                >
-                                    Close
                                 </button>
                             </div>
                         ) : (

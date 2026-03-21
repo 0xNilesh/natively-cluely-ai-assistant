@@ -102,7 +102,6 @@ Examples:
 3.0.0           - Major breaking change
 ```
 
-
 ---
 
 ## Files Created by Build

@@ -152,11 +152,14 @@ interface ElectronAPI {
 
   // Database
   flushDatabase: () => Promise<{ success: boolean }>
+  showWindow: () => Promise<void>
+  hideWindow: () => Promise<void>
   showOverlay: () => Promise<void>
   hideOverlay: () => Promise<void>
-  onToggleExpand: (callback: () => void) => () => void
+  getMeetingActive: () => Promise<boolean>
+  onMeetingStateChanged: (callback: (data: { isActive: boolean }) => void) => () => void
   onEnsureExpanded: (callback: () => void) => () => void
-  onMeetingStateChanged: (callback: (isActive: boolean) => void) => () => void
+  onToggleExpand: (callback: () => void) => () => void
   toggleAdvancedSettings: () => Promise<void>
 
   // Streaming listeners
@@ -216,6 +219,9 @@ interface ElectronAPI {
   resetKeybinds: () => Promise<Array<{ id: string; label: string; accelerator: string; isGlobal: boolean; defaultAccelerator: string }>>
   onKeybindsUpdate: (callback: (keybinds: Array<any>) => void) => () => void
 
+  // Global shortcut events (stealth: fired even when window is not focused)
+  onGlobalShortcut: (callback: (data: { action: string }) => void) => () => void
+
   // Donation API
   getDonationStatus: () => Promise<{ shouldShow: boolean; hasDonated: boolean; lifetimeShows: number }>;
   markDonationToastShown: () => Promise<{ success: boolean }>;
@@ -234,6 +240,8 @@ interface ElectronAPI {
   profileDeleteJD: () => Promise<{ success: boolean; error?: string }>;
   profileResearchCompany: (companyName: string) => Promise<{ success: boolean; dossier?: any; error?: string }>;
   profileGenerateNegotiation: (force?: boolean) => Promise<{ success: boolean; script?: any; error?: string }>;
+  profileGetNegotiationState: () => Promise<{ success: boolean; state?: any; isActive?: boolean; error?: string }>;
+  profileResetNegotiation: () => Promise<{ success: boolean; error?: string }>;
 
   // Tavily Search API
   setTavilyApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>;
@@ -241,6 +249,10 @@ interface ElectronAPI {
   // Overlay Opacity (Stealth Mode)
   setOverlayOpacity: (opacity: number) => Promise<void>;
   onOverlayOpacityChanged: (callback: (opacity: number) => void) => () => void;
+
+  // Verbose / Debug Logging
+  getVerboseLogging: () => Promise<boolean>;
+  setVerboseLogging: (enabled: boolean) => Promise<{ success: boolean }>;
 
   // Cropper API
   cropperConfirmed: (bounds: Electron.Rectangle) => void;
@@ -403,12 +415,20 @@ contextBridge.exposeInMainWorld("electronAPI", {
   analyzeImageFile: (path: string) => ipcRenderer.invoke("analyze-image-file", path),
   quitApp: () => ipcRenderer.invoke("quit-app"),
   toggleWindow: () => ipcRenderer.invoke("toggle-window"),
+  showWindow: (inactive?: boolean) => ipcRenderer.invoke("show-window", inactive),
+  hideWindow: () => ipcRenderer.invoke("hide-window"),
   showOverlay: () => ipcRenderer.invoke("show-overlay"),
   hideOverlay: () => ipcRenderer.invoke("hide-overlay"),
-  onMeetingStateChanged: (callback: (isActive: boolean) => void) => {
-    const subscription = (_event: any, isActive: boolean) => callback(isActive)
-    ipcRenderer.on("meeting-state-changed", subscription)
-    return () => { ipcRenderer.removeListener("meeting-state-changed", subscription) }
+  getMeetingActive: () => ipcRenderer.invoke("get-meeting-active"),
+  onMeetingStateChanged: (callback: (data: { isActive: boolean }) => void) => {
+    const subscription = (_: any, data: { isActive: boolean }) => callback(data);
+    ipcRenderer.on('meeting-state-changed', subscription);
+    return () => { ipcRenderer.removeListener('meeting-state-changed', subscription); };
+  },
+  onEnsureExpanded: (callback: () => void) => {
+    const subscription = () => callback();
+    ipcRenderer.on('ensure-expanded', subscription);
+    return () => { ipcRenderer.removeListener('ensure-expanded', subscription); };
   },
   toggleAdvancedSettings: () => ipcRenderer.invoke("toggle-advanced-settings"),
   openExternal: (url: string) => ipcRenderer.invoke("open-external", url),
@@ -439,13 +459,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on("toggle-expand", subscription)
     return () => {
       ipcRenderer.removeListener("toggle-expand", subscription)
-    }
-  },
-  onEnsureExpanded: (callback: () => void) => {
-    const subscription = () => callback()
-    ipcRenderer.on("ensure-expanded", subscription)
-    return () => {
-      ipcRenderer.removeListener("ensure-expanded", subscription)
     }
   },
 
@@ -569,7 +582,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
 
   // Window Mode
-  setWindowMode: (mode: 'launcher' | 'overlay') => ipcRenderer.invoke("set-window-mode", mode),
+  setWindowMode: (mode: 'launcher' | 'overlay', inactive?: boolean) => ipcRenderer.invoke("set-window-mode", mode, inactive),
 
   // Intelligence Mode Events
   onIntelligenceAssistUpdate: (callback: (data: { insight: string }) => void) => {
@@ -901,6 +914,15 @@ contextBridge.exposeInMainWorld("electronAPI", {
     }
   },
 
+  // Global shortcut listener — fired stealthily from main process without focusing the window
+  onGlobalShortcut: (callback: (data: { action: string }) => void) => {
+    const subscription = (_: any, data: { action: string }) => callback(data)
+    ipcRenderer.on('global-shortcut', subscription)
+    return () => {
+      ipcRenderer.removeListener('global-shortcut', subscription)
+    }
+  },
+
   // Donation API
   getDonationStatus: () => ipcRenderer.invoke("get-donation-status"),
   markDonationToastShown: () => ipcRenderer.invoke("mark-donation-toast-shown"),
@@ -919,6 +941,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   profileDeleteJD: () => ipcRenderer.invoke('profile:delete-jd'),
   profileResearchCompany: (companyName: string) => ipcRenderer.invoke('profile:research-company', companyName),
   profileGenerateNegotiation: (force?: boolean) => ipcRenderer.invoke('profile:generate-negotiation', force),
+  profileGetNegotiationState: () => ipcRenderer.invoke('profile:get-negotiation-state'),
+  profileResetNegotiation: () => ipcRenderer.invoke('profile:reset-negotiation'),
 
   // Tavily Search API
   setTavilyApiKey: (apiKey: string) => ipcRenderer.invoke('set-tavily-api-key', apiKey),
@@ -942,6 +966,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.removeListener('overlay-opacity-changed', subscription)
     }
   },
+
+  // Verbose / Debug Logging
+  getVerboseLogging: () => ipcRenderer.invoke('get-verbose-logging'),
+  setVerboseLogging: (enabled: boolean) => ipcRenderer.invoke('set-verbose-logging', enabled),
 
   // Cropper API
   cropperConfirmed: (bounds: Electron.Rectangle) => ipcRenderer.send('cropper-confirmed', bounds),

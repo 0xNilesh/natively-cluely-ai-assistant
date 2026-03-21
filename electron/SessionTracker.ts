@@ -3,6 +3,7 @@
 // Extracted from IntelligenceManager to decouple state management from LLM orchestration.
 
 import { RecapLLM } from './llm';
+import { isVerboseLogging } from './verboseLog';
 
 export interface TranscriptSegment {
     marker?: string;
@@ -202,15 +203,14 @@ export class SessionTracker {
      * Handle incoming transcript from native audio service
      */
     handleTranscript(segment: TranscriptSegment): { role: 'interviewer' | 'user' | 'assistant' } | null {
+        // Track interim segments for interviewer to prevent data loss on stop
         if (segment.speaker === 'user') {
-            if (Math.random() < 0.05 || segment.final) {
+            if (isVerboseLogging() && (Math.random() < 0.05 || segment.final)) {
                 console.log(`[SessionTracker] RX User Segment: Final=${segment.final} Text="${segment.text.substring(0, 50)}..."`);
             }
         }
-
-        // Track interim segments for interviewer to prevent data loss on stop
         if (segment.speaker === 'interviewer') {
-            if (Math.random() < 0.05 || segment.final) {
+            if (isVerboseLogging() && (Math.random() < 0.05 || segment.final)) {
                 console.log(`[SessionTracker] RX Interviewer Segment: Final=${segment.final} Text="${segment.text.substring(0, 50)}..."`);
             }
 
