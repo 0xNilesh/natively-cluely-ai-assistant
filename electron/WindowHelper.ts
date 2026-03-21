@@ -273,6 +273,16 @@ export class WindowHelper {
       }
     })
 
+    // On Windows/Linux, hide to tray instead of destroying the window on close
+    if (process.platform !== 'darwin') {
+      this.launcherWindow.on('close', (e) => {
+        // If the app is quitting (via tray "Quit" or app.quit()), allow the close
+        if (this.appState.isQuitting()) return;
+        e.preventDefault();
+        this.hideMainWindow();
+      });
+    }
+
     this.launcherWindow.on("closed", () => {
       this.launcherWindow = null
       // If launcher closes, we should probably quit app or close overlay

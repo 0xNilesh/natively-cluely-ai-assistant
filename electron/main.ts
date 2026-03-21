@@ -141,6 +141,7 @@ export class AppState {
   private isMeetingActive: boolean = false; // Guard for session state leaks
   private _disguiseTimers: NodeJS.Timeout[] = []; // Track forceUpdate timeouts
   private _ollamaBootstrapPromise: Promise<void> | null = null;
+  private _isQuitting: boolean = false;
 
 
   // Processing events
@@ -1852,6 +1853,14 @@ export class AppState {
   public getDisguise(): string {
     return this.disguiseMode;
   }
+
+  public isQuitting(): boolean {
+    return this._isQuitting;
+  }
+
+  public setQuitting(value: boolean): void {
+    this._isQuitting = value;
+  }
 }
 
 // Application initialization
@@ -1982,6 +1991,8 @@ async function initializeApp() {
 
   // Scrub API keys from memory on quit to minimize exposure window
   app.on("before-quit", (event) => {
+    // Allow launcher window to actually close instead of hiding to tray
+    appState.setQuitting(true);
     console.log("App is quitting, cleaning up resources...");
 
     // Dispose CropperWindowHelper to clean up IPC listeners and prevent memory leaks
