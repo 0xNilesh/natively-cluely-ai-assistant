@@ -934,6 +934,7 @@ export class AppState {
     console.log('[Main] Starting Meeting...', metadata);
 
     this.isMeetingActive = true;
+    this.updateTrayMenu();
     if (metadata) {
       this.intelligenceManager.setMeetingMetadata(metadata);
     }
@@ -981,6 +982,7 @@ export class AppState {
   public async endMeeting(): Promise<void> {
     console.log('[Main] Ending Meeting...');
     this.isMeetingActive = false; // Block new data immediately
+    this.updateTrayMenu();
 
     // 3. Stop System Audio
     this.systemAudioCapture?.stop();
@@ -1512,7 +1514,7 @@ export class AppState {
     const toggleAccel = toggleKb || 'CommandOrControl+B';
     const displayToggle = formatAccel(toggleAccel);
 
-    const contextMenu = Menu.buildFromTemplate([
+    const menuTemplate: Electron.MenuItemConstructorOptions[] = [
       {
         label: 'Show Natively',
         click: () => {
@@ -1524,32 +1526,37 @@ export class AppState {
         click: () => {
           this.toggleMainWindow()
         }
-      },
-      {
-        type: 'separator'
-      },
-      {
-        label: `Take Screenshot (${displayScreenshot})`,
-        accelerator: screenshotAccel,
-        click: async () => {
-          try {
-            const screenshotPath = await this.takeScreenshot()
-            const preview = await this.getImagePreview(screenshotPath)
-            const mainWindow = this.getMainWindow()
-            if (mainWindow) {
-              mainWindow.webContents.send("screenshot-taken", {
-                path: screenshotPath,
-                preview
-              })
+      }
+    ];
+
+    // Only show screenshot option when a meeting is active (overlay is running)
+    if (this.isMeetingActive) {
+      menuTemplate.push(
+        { type: 'separator' },
+        {
+          label: `Take Screenshot (${displayScreenshot})`,
+          accelerator: screenshotAccel,
+          click: async () => {
+            try {
+              const screenshotPath = await this.takeScreenshot()
+              const preview = await this.getImagePreview(screenshotPath)
+              const mainWindow = this.getMainWindow()
+              if (mainWindow) {
+                mainWindow.webContents.send("screenshot-taken", {
+                  path: screenshotPath,
+                  preview
+                })
+              }
+            } catch (error) {
+              console.error("Error taking screenshot from tray:", error)
             }
-          } catch (error) {
-            console.error("Error taking screenshot from tray:", error)
           }
         }
-      },
-      {
-        type: 'separator'
-      },
+      );
+    }
+
+    menuTemplate.push(
+      { type: 'separator' },
       {
         label: 'Quit',
         accelerator: 'Command+Q',
@@ -1557,7 +1564,9 @@ export class AppState {
           app.quit()
         }
       }
-    ])
+    );
+
+    const contextMenu = Menu.buildFromTemplate(menuTemplate)
 
     this.tray.setContextMenu(contextMenu)
   }
@@ -1860,6 +1869,10 @@ export class AppState {
 
   public setQuitting(value: boolean): void {
     this._isQuitting = value;
+  }
+
+  public getIsMeetingActive(): boolean {
+    return this.isMeetingActive;
   }
 }
 
