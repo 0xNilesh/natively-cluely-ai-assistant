@@ -279,7 +279,12 @@ export class WindowHelper {
         // If the app is quitting (via tray "Quit" or app.quit()), allow the close
         if (this.appState.isQuitting()) return;
         e.preventDefault();
-        this.hideMainWindow();
+        if (this.appState.getIsMeetingActive()) {
+          // During meeting, only hide the launcher — keep overlay running
+          this.launcherWindow?.hide();
+        } else {
+          this.hideMainWindow();
+        }
       });
     }
 
