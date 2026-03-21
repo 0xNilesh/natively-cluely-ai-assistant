@@ -261,15 +261,31 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
     }, []);
 
     // Sync Window Visibility with Expanded State
+    const collapseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
     useEffect(() => {
+        // Cancel any pending collapse resize
+        if (collapseTimeoutRef.current) {
+            clearTimeout(collapseTimeoutRef.current);
+            collapseTimeoutRef.current = null;
+        }
+
         if (isExpanded) {
             window.electronAPI.showWindow();
         } else {
             // Collapse to minimal pill — resize instead of hiding the window entirely
-            setTimeout(() => {
+            collapseTimeoutRef.current = setTimeout(() => {
                 window.electronAPI.updateContentDimensions({ width: 600, height: 48 });
+                collapseTimeoutRef.current = null;
             }, 400);
         }
+
+        return () => {
+            if (collapseTimeoutRef.current) {
+                clearTimeout(collapseTimeoutRef.current);
+                collapseTimeoutRef.current = null;
+            }
+        };
     }, [isExpanded]);
 
     // Keyboard shortcut to toggle expanded state (via Main Process)
