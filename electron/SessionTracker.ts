@@ -202,6 +202,12 @@ export class SessionTracker {
      * Handle incoming transcript from native audio service
      */
     handleTranscript(segment: TranscriptSegment): { role: 'interviewer' | 'user' | 'assistant' } | null {
+        if (segment.speaker === 'user') {
+            if (Math.random() < 0.05 || segment.final) {
+                console.log(`[SessionTracker] RX User Segment: Final=${segment.final} Text="${segment.text.substring(0, 50)}..."`);
+            }
+        }
+
         // Track interim segments for interviewer to prevent data loss on stop
         if (segment.speaker === 'interviewer') {
             if (Math.random() < 0.05 || segment.final) {
