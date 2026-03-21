@@ -1301,21 +1301,12 @@ export class AppState {
   }
 
   public toggleMainWindow(): void {
-    console.log(
-      "Screenshots: ",
-      this.screenshotHelper.getScreenshotQueue().length,
-      "Extra screenshots: ",
-      this.screenshotHelper.getExtraScreenshotQueue().length
-    )
-    
-    // Send toggle-expand to the currently active window mode's window.
-    // If we use getMainWindow(), it might return the launcher window when the overlay is hidden,
-    // causing the IPC event to go to the wrong React tree and silently fail.
-    const mode = this.windowHelper.getCurrentWindowMode();
-    const targetWindow = mode === 'overlay' ? this.windowHelper.getOverlayWindow() : this.windowHelper.getLauncherWindow();
+    // Toggle-expand only makes sense for the overlay during an active meeting
+    if (!this.isMeetingActive) return;
 
-    if (targetWindow && !targetWindow.isDestroyed()) {
-      targetWindow.webContents.send('toggle-expand');
+    const overlayWindow = this.windowHelper.getOverlayWindow();
+    if (overlayWindow && !overlayWindow.isDestroyed()) {
+      overlayWindow.webContents.send('toggle-expand');
     }
   }
 
@@ -1335,7 +1326,7 @@ export class AppState {
 
   // Screenshot management methods
   public async takeScreenshot(): Promise<string | null> {
-    if (!this.getMainWindow()) return null
+    if (!this.isMeetingActive) return null
 
     const wasOverlayVisible = this.windowHelper.getOverlayWindow()?.isVisible() ?? false
 
@@ -1354,7 +1345,7 @@ export class AppState {
   }
 
   public async takeSelectiveScreenshot(): Promise<string | null> {
-    if (!this.getMainWindow()) return null
+    if (!this.isMeetingActive) return null
 
     const wasOverlayVisible = this.windowHelper.getOverlayWindow()?.isVisible() ?? false
 
