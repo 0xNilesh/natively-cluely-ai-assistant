@@ -409,31 +409,6 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                 </div>
             </header>
 
-            {/* Meeting Active Indicator — floating pill */}
-            <AnimatePresence>
-                {isMeetingActive && (
-                    <motion.div
-                        initial={{ opacity: 0, y: 20, scale: 0.9 }}
-                        animate={{ opacity: 1, y: 0, scale: 1 }}
-                        exit={{ opacity: 0, y: 20, scale: 0.9 }}
-                        transition={{ type: "spring", stiffness: 400, damping: 25 }}
-                        className="absolute bottom-6 left-1/2 -translate-x-1/2 z-[300] flex items-center gap-3 px-4 py-2.5 rounded-full bg-bg-elevated/80 backdrop-blur-xl border border-green-500/20 shadow-[0_4px_24px_rgba(0,0,0,0.4)]"
-                    >
-                        <div className="relative flex items-center justify-center">
-                            <div className="w-2.5 h-2.5 rounded-full bg-green-500" />
-                            <div className="absolute w-2.5 h-2.5 rounded-full bg-green-500 animate-ping opacity-75" />
-                        </div>
-                        <span className="text-[12px] font-medium text-green-400">Meeting in progress</span>
-                        <button
-                            onClick={() => window.electronAPI?.setWindowMode('overlay')}
-                            className="ml-1 px-3 py-1 rounded-full bg-green-500/15 hover:bg-green-500/25 text-[11px] font-semibold text-green-400 transition-colors"
-                        >
-                            Show Overlay
-                        </button>
-                    </motion.div>
-                )}
-            </AnimatePresence>
-
             <div className="relative flex-1 flex flex-col overflow-hidden">
                 {!isDetectable && (
                     <div className="absolute inset-1 border-2 border-dashed border-white/20 rounded-2xl pointer-events-none z-[100]" />
@@ -558,28 +533,33 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                                             </AnimatePresence>
                                         </div>
 
-                                        {/* Start Natively CTA Pill */}
+                                        {/* Start Natively CTA Pill — stateful */}
                                         <button
                                             onClick={() => {
-                                                onStartMeeting();
-                                                analytics.trackCommandExecuted('start_natively_cta');
+                                                if (isMeetingActive) {
+                                                    window.electronAPI?.setWindowMode('overlay');
+                                                } else {
+                                                    onStartMeeting();
+                                                    analytics.trackCommandExecuted('start_natively_cta');
+                                                }
                                             }}
-                                            className="
+                                            className={`
                                     group relative overflow-hidden
-                                    bg-gradient-to-b from-sky-400 via-sky-500 to-blue-600
+                                    ${isMeetingActive
+                                                ? 'bg-gradient-to-b from-emerald-400 via-emerald-500 to-green-600 shadow-[inset_0_1px_1px_rgba(255,255,255,0.5),inset_0_-1px_2px_rgba(0,0,0,0.1),0_2px_10px_rgba(34,197,94,0.4),0_0_0_1px_rgba(255,255,255,0.1)] hover:shadow-[inset_0_1px_2px_rgba(255,255,255,0.6),inset_0_-1px_3px_rgba(0,0,0,0.15),0_6px_16px_rgba(34,197,94,0.6),0_0_0_1px_rgba(255,255,255,0.2)]'
+                                                : 'bg-gradient-to-b from-sky-400 via-sky-500 to-blue-600 shadow-[inset_0_1px_1px_rgba(255,255,255,0.7),inset_0_-1px_2px_rgba(0,0,0,0.1),0_2px_10px_rgba(14,165,233,0.4),0_0_0_1px_rgba(255,255,255,0.15)] hover:shadow-[inset_0_1px_2px_rgba(255,255,255,0.8),inset_0_-1px_3px_rgba(0,0,0,0.15),0_6px_16px_rgba(14,165,233,0.6),0_0_0_1px_rgba(255,255,255,0.25)]'
+                                            }
                                     text-white
                                     px-6 py-3
                                     rounded-full
                                     font-celeb font-medium tracking-normal
-                                    shadow-[inset_0_1px_1px_rgba(255,255,255,0.7),inset_0_-1px_2px_rgba(0,0,0,0.1),0_2px_10px_rgba(14,165,233,0.4),0_0_0_1px_rgba(255,255,255,0.15)]
-                                    hover:shadow-[inset_0_1px_2px_rgba(255,255,255,0.8),inset_0_-1px_3px_rgba(0,0,0,0.15),0_6px_16px_rgba(14,165,233,0.6),0_0_0_1px_rgba(255,255,255,0.25)]
                                     hover:brightness-110
                                     hover:scale-[1.01]
                                     active:scale-[0.99]
                                     transition-all duration-500 ease-out
                                     flex items-center justify-center gap-3
                                     backdrop-blur-xl shrink-0
-                                "
+                                `}
                                         >
                                             {/* Top Highlight Band */}
                                             <div className="absolute inset-x-3 top-0 h-[40%] bg-gradient-to-b from-white/40 to-transparent blur-[2px] rounded-b-lg opacity-80 pointer-events-none" />
@@ -587,8 +567,20 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                                             {/* Internal "suspended light" glow */}
                                             <div className="absolute inset-0 bg-gradient-to-tr from-transparent via-white/5 to-white/10 opacity-0 group-hover:opacity-100 transition-opacity duration-700 pointer-events-none" />
 
-                                            <img src={icon} alt="Logo" className="w-[18px] h-[18px] object-contain brightness-0 invert drop-shadow-[0_1px_2px_rgba(0,0,0,0.1)] opacity-90" />
-                                            <span className="drop-shadow-[0_1px_1px_rgba(0,0,0,0.1)] text-[20px] leading-none">Start Natively</span>
+                                            {isMeetingActive ? (
+                                                <>
+                                                    <div className="relative flex items-center justify-center">
+                                                        <div className="w-2 h-2 rounded-full bg-white" />
+                                                        <div className="absolute w-2 h-2 rounded-full bg-white animate-ping opacity-60" />
+                                                    </div>
+                                                    <span className="drop-shadow-[0_1px_1px_rgba(0,0,0,0.1)] text-[16px] leading-none">Meeting in progress</span>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <img src={icon} alt="Logo" className="w-[18px] h-[18px] object-contain brightness-0 invert drop-shadow-[0_1px_2px_rgba(0,0,0,0.1)] opacity-90" />
+                                                    <span className="drop-shadow-[0_1px_1px_rgba(0,0,0,0.1)] text-[20px] leading-none">Start Natively</span>
+                                                </>
+                                            )}
                                         </button>
                                     </div>
 
