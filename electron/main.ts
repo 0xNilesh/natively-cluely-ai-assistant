@@ -203,6 +203,7 @@ export class AppState {
           this.toggleMainWindow();
         } else if (actionId === 'general:take-screenshot') {
           const screenshotPath = await this.takeScreenshot();
+          if (!screenshotPath) return;
           const preview = await this.getImagePreview(screenshotPath);
           const mainWindow = this.getMainWindow();
           if (mainWindow) {
@@ -213,6 +214,7 @@ export class AppState {
           }
         } else if (actionId === 'general:selective-screenshot') {
           const screenshotPath = await this.takeSelectiveScreenshot();
+          if (!screenshotPath) return;
           const preview = await this.getImagePreview(screenshotPath);
           const mainWindow = this.getMainWindow();
           if (mainWindow) {
@@ -225,6 +227,7 @@ export class AppState {
         } else if (actionId === 'general:capture-and-process') {
           // Single-trigger: capture current screen then immediately request AI analysis
           const screenshotPath = await this.takeScreenshot();
+          if (!screenshotPath) return;
           const preview = await this.getImagePreview(screenshotPath);
           // Ensure the window is visible so the user can see the response
           this.showMainWindow();
@@ -1331,8 +1334,8 @@ export class AppState {
   }
 
   // Screenshot management methods
-  public async takeScreenshot(): Promise<string> {
-    if (!this.getMainWindow()) throw new Error("No main window available")
+  public async takeScreenshot(): Promise<string | null> {
+    if (!this.getMainWindow()) return null
 
     const wasOverlayVisible = this.windowHelper.getOverlayWindow()?.isVisible() ?? false
 
@@ -1350,8 +1353,8 @@ export class AppState {
     return screenshotPath
   }
 
-  public async takeSelectiveScreenshot(): Promise<string> {
-    if (!this.getMainWindow()) throw new Error("No main window available")
+  public async takeSelectiveScreenshot(): Promise<string | null> {
+    if (!this.getMainWindow()) return null
 
     const wasOverlayVisible = this.windowHelper.getOverlayWindow()?.isVisible() ?? false
 
@@ -1539,6 +1542,7 @@ export class AppState {
           click: async () => {
             try {
               const screenshotPath = await this.takeScreenshot()
+              if (!screenshotPath) return;
               const preview = await this.getImagePreview(screenshotPath)
               const mainWindow = this.getMainWindow()
               if (mainWindow) {

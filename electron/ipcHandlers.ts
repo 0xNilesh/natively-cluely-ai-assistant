@@ -168,6 +168,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle("take-screenshot", async () => {
     try {
       const screenshotPath = await appState.takeScreenshot()
+      if (!screenshotPath) return null
       const preview = await appState.getImagePreview(screenshotPath)
       return { path: screenshotPath, preview }
     } catch (error) {
@@ -179,6 +180,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle("take-selective-screenshot", async () => {
     try {
       const screenshotPath = await appState.takeSelectiveScreenshot()
+      if (!screenshotPath) return null
       const preview = await appState.getImagePreview(screenshotPath)
       return { path: screenshotPath, preview }
     } catch (error) {
