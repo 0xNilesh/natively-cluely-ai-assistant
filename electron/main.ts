@@ -402,6 +402,15 @@ export class AppState {
     autoUpdater.autoDownload = false
     autoUpdater.autoInstallOnAppQuit = false  // Manual install only via button
 
+    // Auto-detect update channel based on current version
+    const currentVersion = app.getVersion()
+    if (currentVersion.includes('beta')) {
+      autoUpdater.channel = 'beta'
+    } else {
+      autoUpdater.channel = 'stable'
+    }
+    console.log(`[AutoUpdater] Channel: ${autoUpdater.channel}, Version: ${currentVersion}`)
+
     autoUpdater.on("checking-for-update", () => {
       console.log("[AutoUpdater] Checking for update...")
       this.broadcast("update-checking")
@@ -554,11 +563,25 @@ export class AppState {
   }
 
   public async checkForUpdates(): Promise<void> {
-    await autoUpdater.checkForUpdatesAndNotify()
+    console.log('[AutoUpdater] Manual check for updates requested')
+    try {
+      await autoUpdater.checkForUpdatesAndNotify()
+    } catch (err: any) {
+      console.error('[AutoUpdater] checkForUpdates failed:', err)
+    }
   }
 
   public downloadUpdate(): void {
-    autoUpdater.downloadUpdate()
+    console.log('[AutoUpdater] Starting download...')
+    try {
+      autoUpdater.downloadUpdate().catch(err => {
+        console.error('[AutoUpdater] downloadUpdate failed:', err)
+        this.broadcast('update-error', err.message || 'Download failed')
+      })
+    } catch (err: any) {
+      console.error('[AutoUpdater] downloadUpdate exception:', err)
+      this.broadcast('update-error', err.message || 'Download failed')
+    }
   }
 
   // New Property for System Audio & Microphone

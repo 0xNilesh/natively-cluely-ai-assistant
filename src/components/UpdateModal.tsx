@@ -21,7 +21,8 @@ interface UpdateModalProps {
     onDismiss: () => void;
     onInstall: () => void;
     downloadProgress: number;
-    status: 'idle' | 'downloading' | 'ready';
+    status: 'idle' | 'downloading' | 'ready' | 'error';
+    errorMessage?: string | null;
 }
 
 const UpdateModal: React.FC<UpdateModalProps> = ({
@@ -31,7 +32,8 @@ const UpdateModal: React.FC<UpdateModalProps> = ({
     onDismiss,
     onInstall,
     downloadProgress,
-    status
+    status,
+    errorMessage
 }) => {
     // Helper to format version string
     const formatVersion = (v: string) => {
@@ -199,6 +201,29 @@ const UpdateModal: React.FC<UpdateModalProps> = ({
                                     className="text-[13px] font-medium text-white/30 hover:text-white/60 transition-colors mt-auto mb-1"
                                 >
                                     Hide
+                                </button>
+                            </div>
+                        ) : status === 'error' ? (
+                            <div className="p-8 flex flex-col items-center justify-center h-full text-center relative">
+                                <div className="space-y-1.5 mb-6">
+                                    <h2 className="text-[17px] font-semibold text-white tracking-tight">
+                                        Update Failed
+                                    </h2>
+                                    <p className="text-[13px] text-red-400 font-medium">
+                                        {errorMessage || 'An error occurred while downloading the update.'}
+                                    </p>
+                                </div>
+                                <div className="bg-white/[0.03] rounded-xl border border-white/[0.06] p-4 max-w-[360px]">
+                                    <p className="text-[12px] text-white/60 leading-relaxed">
+                                        Please check your internet connection and try again. 
+                                        You can also download the latest version manually from GitHub.
+                                    </p>
+                                </div>
+                                <button
+                                    onClick={onDismiss}
+                                    className="px-5 py-[6px] bg-white/10 hover:bg-white/15 text-white text-[13px] font-medium rounded-lg mt-6 transition-colors"
+                                >
+                                    Close
                                 </button>
                             </div>
                         ) : (

@@ -6,13 +6,15 @@ const UpdateBanner: React.FC = () => {
     const [parsedNotes, setParsedNotes] = useState<any>(null);
     const [isVisible, setIsVisible] = useState(false);
     const [downloadProgress, setDownloadProgress] = useState(0);
-    const [status, setStatus] = useState<'idle' | 'downloading' | 'ready'>('idle');
+    const [status, setStatus] = useState<'idle' | 'downloading' | 'ready' | 'error'>('idle');
+    const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
     useEffect(() => {
         // Listen for update available
         const unsubAvailable = window.electronAPI.onUpdateAvailable((info: any) => {
             console.log('[UpdateBanner] Update available:', info);
             setUpdateInfo(info);
+            setErrorMessage(null);
             // If parsed notes are included in the info object (from our backend change)
             if (info.parsedNotes) {
                 setParsedNotes(info.parsedNotes);
@@ -23,7 +25,7 @@ const UpdateBanner: React.FC = () => {
         // Listen for download progress
         const unsubProgress = window.electronAPI.onDownloadProgress((progressObj) => {
             // Ensure modal is visible if download starts
-            if (!isVisible) setIsVisible(true);
+            setIsVisible(true);
             setStatus('downloading');
             setDownloadProgress(progressObj.percent);
         });
@@ -38,12 +40,20 @@ const UpdateBanner: React.FC = () => {
             setIsVisible(true);
         });
 
+        // Listen for update errors
+        const unsubError = window.electronAPI.onUpdateError((err: string) => {
+            console.error('[UpdateBanner] Update error:', err);
+            setStatus('error');
+            setErrorMessage(err);
+        });
+
         return () => {
             unsubAvailable();
             unsubProgress();
             unsubDownloaded();
+            unsubError();
         };
-    }, [isVisible]);
+    }, []);
 
     // Demo/Test mode: Press Cmd+I to trigger backend test-fetch
     useEffect(() => {
@@ -92,6 +102,7 @@ const UpdateBanner: React.FC = () => {
             onInstall={handleInstall}
             downloadProgress={downloadProgress}
             status={status}
+            errorMessage={errorMessage}
         />
     );
 };
