@@ -223,12 +223,21 @@ export function initializeIpcHandlers(appState: AppState): void {
   })
 
   safeHandle("show-window", async () => {
-    // Default show main window (Launcher usually)
-    appState.showMainWindow()
+    // Show overlay if meeting is active (called from overlay renderer)
+    if (appState.getIsMeetingActive()) {
+      appState.getWindowHelper().showOverlay();
+    } else {
+      appState.showMainWindow();
+    }
   })
 
   safeHandle("hide-window", async () => {
-    appState.hideMainWindow()
+    // Hide overlay if meeting is active (called from overlay renderer)
+    if (appState.getIsMeetingActive()) {
+      appState.getWindowHelper().hideOverlay();
+    } else {
+      appState.hideMainWindow();
+    }
   })
 
   safeHandle("reset-queues", async () => {

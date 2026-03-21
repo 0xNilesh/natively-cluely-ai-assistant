@@ -325,6 +325,22 @@ export class WindowHelper {
   public getOverlayWindow(): BrowserWindow | null { return this.overlayWindow }
   public getCurrentWindowMode(): 'launcher' | 'overlay' { return this.currentWindowMode }
 
+  // Show/hide overlay without affecting window mode (used by overlay renderer IPC)
+  public showOverlay(): void {
+    if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
+      this.overlayWindow.setOpacity(1);
+      this.overlayWindow.show();
+      this.overlayWindow.focus();
+    }
+  }
+
+  public hideOverlay(): void {
+    if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
+      this.overlayWindow.setOpacity(0);
+      this.overlayWindow.hide();
+    }
+  }
+
   public isVisible(): boolean {
     return this.isWindowVisible
   }
