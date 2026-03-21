@@ -261,15 +261,31 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
     }, []);
 
     // Sync Window Visibility with Expanded State
+    const collapseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
     useEffect(() => {
-        if (isExpanded) {
-            window.electronAPI.showWindow();
-        } else {
-            // Slight delay to allow animation to clean up if needed, though immediate is safer for click-through
-            // Using setTimeout to ensure the render cycle completes first
-            // Increased to 400ms to allow "contract to bottom" exit animation to finish
-            setTimeout(() => window.electronAPI.hideWindow(), 400);
+        // Cancel any pending collapse resize
+        if (collapseTimeoutRef.current) {
+            clearTimeout(collapseTimeoutRef.current);
+            collapseTimeoutRef.current = null;
         }
+
+        if (isExpanded) {
+            window.electronAPI.showOverlay();
+        } else {
+            // Collapse to minimal pill — resize instead of hiding the window entirely
+            collapseTimeoutRef.current = setTimeout(() => {
+                window.electronAPI.updateContentDimensions({ width: 600, height: 48 });
+                collapseTimeoutRef.current = null;
+            }, 400);
+        }
+
+        return () => {
+            if (collapseTimeoutRef.current) {
+                clearTimeout(collapseTimeoutRef.current);
+                collapseTimeoutRef.current = null;
+            }
+        };
     }, [isExpanded]);
 
     // Keyboard shortcut to toggle expanded state (via Main Process)
@@ -277,6 +293,15 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         if (!window.electronAPI?.onToggleExpand) return;
         const unsubscribe = window.electronAPI.onToggleExpand(() => {
             setIsExpanded(prev => !prev);
+        });
+        return () => unsubscribe();
+    }, []);
+
+    // Ensure overlay is expanded when shown from launcher/tray
+    useEffect(() => {
+        if (!window.electronAPI?.onEnsureExpanded) return;
+        const unsubscribe = window.electronAPI.onEnsureExpanded(() => {
+            setIsExpanded(true);
         });
         return () => unsubscribe();
     }, []);
@@ -1534,6 +1559,7 @@ Provide only the answer, nothing else.`;
                             expanded={isExpanded}
                             onToggle={() => setIsExpanded(!isExpanded)}
                             onQuit={() => onEndMeeting ? onEndMeeting() : window.electronAPI.quitApp()}
+                            onLogoClick={() => window.electronAPI?.setWindowMode('launcher')}
                             appearance={appearance}
                         />
                         <div

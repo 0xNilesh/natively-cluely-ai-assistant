@@ -141,6 +141,7 @@ export class AppState {
   private isMeetingActive: boolean = false; // Guard for session state leaks
   private _disguiseTimers: NodeJS.Timeout[] = []; // Track forceUpdate timeouts
   private _ollamaBootstrapPromise: Promise<void> | null = null;
+  private _isQuitting: boolean = false;
 
 
   // Processing events
@@ -202,6 +203,7 @@ export class AppState {
           this.toggleMainWindow();
         } else if (actionId === 'general:take-screenshot') {
           const screenshotPath = await this.takeScreenshot();
+          if (!screenshotPath) return;
           const preview = await this.getImagePreview(screenshotPath);
           const mainWindow = this.getMainWindow();
           if (mainWindow) {
@@ -212,6 +214,7 @@ export class AppState {
           }
         } else if (actionId === 'general:selective-screenshot') {
           const screenshotPath = await this.takeSelectiveScreenshot();
+          if (!screenshotPath) return;
           const preview = await this.getImagePreview(screenshotPath);
           const mainWindow = this.getMainWindow();
           if (mainWindow) {
@@ -224,6 +227,7 @@ export class AppState {
         } else if (actionId === 'general:capture-and-process') {
           // Single-trigger: capture current screen then immediately request AI analysis
           const screenshotPath = await this.takeScreenshot();
+          if (!screenshotPath) return;
           const preview = await this.getImagePreview(screenshotPath);
           // Ensure the window is visible so the user can see the response
           this.showMainWindow();
@@ -933,6 +937,8 @@ export class AppState {
     console.log('[Main] Starting Meeting...', metadata);
 
     this.isMeetingActive = true;
+    this.updateTrayMenu();
+    this.broadcastMeetingState();
     if (metadata) {
       this.intelligenceManager.setMeetingMetadata(metadata);
     }
@@ -980,6 +986,8 @@ export class AppState {
   public async endMeeting(): Promise<void> {
     console.log('[Main] Ending Meeting...');
     this.isMeetingActive = false; // Block new data immediately
+    this.updateTrayMenu();
+    this.broadcastMeetingState();
 
     // 3. Stop System Audio
     this.systemAudioCapture?.stop();
@@ -1295,21 +1303,18 @@ export class AppState {
   }
 
   public toggleMainWindow(): void {
-    console.log(
-      "Screenshots: ",
-      this.screenshotHelper.getScreenshotQueue().length,
-      "Extra screenshots: ",
-      this.screenshotHelper.getExtraScreenshotQueue().length
-    )
-    
-    // Send toggle-expand to the currently active window mode's window.
-    // If we use getMainWindow(), it might return the launcher window when the overlay is hidden,
-    // causing the IPC event to go to the wrong React tree and silently fail.
-    const mode = this.windowHelper.getCurrentWindowMode();
-    const targetWindow = mode === 'overlay' ? this.windowHelper.getOverlayWindow() : this.windowHelper.getLauncherWindow();
+    // Toggle-expand only makes sense for the overlay during an active meeting
+    if (!this.isMeetingActive) return;
 
-    if (targetWindow && !targetWindow.isDestroyed()) {
-      targetWindow.webContents.send('toggle-expand');
+    const overlayWindow = this.windowHelper.getOverlayWindow();
+    if (!overlayWindow || overlayWindow.isDestroyed()) return;
+
+    if (overlayWindow.isVisible()) {
+      // Overlay is visible — toggle expand/collapse
+      overlayWindow.webContents.send('toggle-expand');
+    } else {
+      // Overlay is hidden (e.g. after "Show Natively") — bring it back
+      this.windowHelper.switchToOverlay();
     }
   }
 
@@ -1328,8 +1333,8 @@ export class AppState {
   }
 
   // Screenshot management methods
-  public async takeScreenshot(): Promise<string> {
-    if (!this.getMainWindow()) throw new Error("No main window available")
+  public async takeScreenshot(): Promise<string | null> {
+    if (!this.isMeetingActive) return null
 
     const wasOverlayVisible = this.windowHelper.getOverlayWindow()?.isVisible() ?? false
 
@@ -1347,8 +1352,8 @@ export class AppState {
     return screenshotPath
   }
 
-  public async takeSelectiveScreenshot(): Promise<string> {
-    if (!this.getMainWindow()) throw new Error("No main window available")
+  public async takeSelectiveScreenshot(): Promise<string | null> {
+    if (!this.isMeetingActive) return null
 
     const wasOverlayVisible = this.windowHelper.getOverlayWindow()?.isVisible() ?? false
 
@@ -1433,6 +1438,15 @@ export class AppState {
     this.windowHelper.centerAndShowWindow()
   }
 
+  private broadcastMeetingState(): void {
+    const isActive = this.isMeetingActive;
+    BrowserWindow.getAllWindows().forEach(win => {
+      if (!win.isDestroyed()) {
+        win.webContents.send('meeting-state-changed', isActive);
+      }
+    });
+  }
+
   public createTray(): void {
     this.showTray();
   }
@@ -1511,44 +1525,50 @@ export class AppState {
     const toggleAccel = toggleKb || 'CommandOrControl+B';
     const displayToggle = formatAccel(toggleAccel);
 
-    const contextMenu = Menu.buildFromTemplate([
+    const menuTemplate: Electron.MenuItemConstructorOptions[] = [
       {
         label: 'Show Natively',
         click: () => {
           this.centerAndShowWindow()
         }
-      },
-      {
-        label: `Toggle Window (${displayToggle})`,
-        click: () => {
-          this.toggleMainWindow()
-        }
-      },
-      {
-        type: 'separator'
-      },
-      {
-        label: `Take Screenshot (${displayScreenshot})`,
-        accelerator: screenshotAccel,
-        click: async () => {
-          try {
-            const screenshotPath = await this.takeScreenshot()
-            const preview = await this.getImagePreview(screenshotPath)
-            const mainWindow = this.getMainWindow()
-            if (mainWindow) {
-              mainWindow.webContents.send("screenshot-taken", {
-                path: screenshotPath,
-                preview
-              })
+      }
+    ];
+
+    // Only show overlay-related actions when a meeting is active
+    if (this.isMeetingActive) {
+      menuTemplate.push(
+        {
+          label: `Toggle Window (${displayToggle})`,
+          click: () => {
+            this.toggleMainWindow()
+          }
+        },
+        { type: 'separator' },
+        {
+          label: `Take Screenshot (${displayScreenshot})`,
+          accelerator: screenshotAccel,
+          click: async () => {
+            try {
+              const screenshotPath = await this.takeScreenshot()
+              if (!screenshotPath) return;
+              const preview = await this.getImagePreview(screenshotPath)
+              const mainWindow = this.getMainWindow()
+              if (mainWindow) {
+                mainWindow.webContents.send("screenshot-taken", {
+                  path: screenshotPath,
+                  preview
+                })
+              }
+            } catch (error) {
+              console.error("Error taking screenshot from tray:", error)
             }
-          } catch (error) {
-            console.error("Error taking screenshot from tray:", error)
           }
         }
-      },
-      {
-        type: 'separator'
-      },
+      );
+    }
+
+    menuTemplate.push(
+      { type: 'separator' },
       {
         label: 'Quit',
         accelerator: 'Command+Q',
@@ -1556,7 +1576,9 @@ export class AppState {
           app.quit()
         }
       }
-    ])
+    );
+
+    const contextMenu = Menu.buildFromTemplate(menuTemplate)
 
     this.tray.setContextMenu(contextMenu)
   }
@@ -1852,6 +1874,18 @@ export class AppState {
   public getDisguise(): string {
     return this.disguiseMode;
   }
+
+  public isQuitting(): boolean {
+    return this._isQuitting;
+  }
+
+  public setQuitting(value: boolean): void {
+    this._isQuitting = value;
+  }
+
+  public getIsMeetingActive(): boolean {
+    return this.isMeetingActive;
+  }
 }
 
 // Application initialization
@@ -1982,6 +2016,8 @@ async function initializeApp() {
 
   // Scrub API keys from memory on quit to minimize exposure window
   app.on("before-quit", (event) => {
+    // Allow launcher window to actually close instead of hiding to tray
+    appState.setQuitting(true);
     console.log("App is quitting, cleaning up resources...");
 
     // Dispose CropperWindowHelper to clean up IPC listeners and prevent memory leaks

@@ -168,6 +168,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle("take-screenshot", async () => {
     try {
       const screenshotPath = await appState.takeScreenshot()
+      if (!screenshotPath) return null
       const preview = await appState.getImagePreview(screenshotPath)
       return { path: screenshotPath, preview }
     } catch (error) {
@@ -179,6 +180,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle("take-selective-screenshot", async () => {
     try {
       const screenshotPath = await appState.takeSelectiveScreenshot()
+      if (!screenshotPath) return null
       const preview = await appState.getImagePreview(screenshotPath)
       return { path: screenshotPath, preview }
     } catch (error) {
@@ -220,13 +222,22 @@ export function initializeIpcHandlers(appState: AppState): void {
     appState.toggleMainWindow()
   })
 
-  safeHandle("show-window", async () => {
-    // Default show main window (Launcher usually)
-    appState.showMainWindow()
+  safeHandle("show-overlay", async () => {
+    // Show overlay if meeting is active (called from overlay renderer)
+    if (appState.getIsMeetingActive()) {
+      appState.getWindowHelper().showOverlay();
+    } else {
+      appState.showMainWindow();
+    }
   })
 
-  safeHandle("hide-window", async () => {
-    appState.hideMainWindow()
+  safeHandle("hide-overlay", async () => {
+    // Hide overlay if meeting is active (called from overlay renderer)
+    if (appState.getIsMeetingActive()) {
+      appState.getWindowHelper().hideOverlay();
+    } else {
+      appState.hideMainWindow();
+    }
   })
 
   safeHandle("reset-queues", async () => {

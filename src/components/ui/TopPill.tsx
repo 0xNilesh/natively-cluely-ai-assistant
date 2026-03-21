@@ -6,6 +6,7 @@ interface TopPillProps {
     expanded: boolean;
     onToggle: () => void;
     onQuit: () => void;
+    onLogoClick: () => void;
     appearance: OverlayAppearance;
 }
 
@@ -13,6 +14,7 @@ export default function TopPill({
     expanded,
     onToggle,
     onQuit,
+    onLogoClick,
     appearance,
 }: TopPillProps) {
     return (
@@ -31,6 +33,8 @@ export default function TopPill({
             >
                 {/* LOGO BUTTON */}
                 <button
+                    onClick={onLogoClick}
+                    title="Show Launcher"
                     className={`
             w-8 h-8
             rounded-full

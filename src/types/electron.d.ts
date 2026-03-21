@@ -39,8 +39,8 @@ export interface ElectronAPI {
   analyzeImageFile: (path: string) => Promise<void>
   quitApp: () => Promise<void>
   toggleWindow: () => Promise<void>
-  showWindow: () => Promise<void>
-  hideWindow: () => Promise<void>
+  showOverlay: () => Promise<void>
+  hideOverlay: () => Promise<void>
   openExternal: (url: string) => Promise<void>
   setUndetectable: (state: boolean) => Promise<{ success: boolean; error?: string }>
   getUndetectable: () => Promise<boolean>

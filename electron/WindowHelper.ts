@@ -273,6 +273,21 @@ export class WindowHelper {
       }
     })
 
+    // On Windows/Linux, hide to tray instead of destroying the window on close
+    if (process.platform !== 'darwin') {
+      this.launcherWindow.on('close', (e) => {
+        // If the app is quitting (via tray "Quit" or app.quit()), allow the close
+        if (this.appState.isQuitting()) return;
+        e.preventDefault();
+        if (this.appState.getIsMeetingActive()) {
+          // During meeting, only hide the launcher — keep overlay running
+          this.launcherWindow?.hide();
+        } else {
+          this.hideMainWindow();
+        }
+      });
+    }
+
     this.launcherWindow.on("closed", () => {
       this.launcherWindow = null
       // If launcher closes, we should probably quit app or close overlay
@@ -309,6 +324,22 @@ export class WindowHelper {
   public getLauncherWindow(): BrowserWindow | null { return this.launcherWindow }
   public getOverlayWindow(): BrowserWindow | null { return this.overlayWindow }
   public getCurrentWindowMode(): 'launcher' | 'overlay' { return this.currentWindowMode }
+
+  // Show/hide overlay without affecting window mode (used by overlay renderer IPC)
+  public showOverlay(): void {
+    if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
+      this.overlayWindow.setOpacity(1);
+      this.overlayWindow.show();
+      this.overlayWindow.focus();
+    }
+  }
+
+  public hideOverlay(): void {
+    if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
+      this.overlayWindow.setOpacity(0);
+      this.overlayWindow.hide();
+    }
+  }
 
   public isVisible(): boolean {
     return this.isWindowVisible
@@ -394,6 +425,13 @@ export class WindowHelper {
         this.overlayWindow.setAlwaysOnTop(true, "floating");
       }
       this.isWindowVisible = true;
+
+      // Ensure overlay is expanded when shown (may have been collapsed)
+      setTimeout(() => {
+        if (this.overlayWindow && !this.overlayWindow.isDestroyed() && this.overlayWindow.isVisible()) {
+          this.overlayWindow.webContents.send('ensure-expanded');
+        }
+      }, 100);
     }
 
     // Hide Launcher SECOND
@@ -431,9 +469,11 @@ export class WindowHelper {
       this.isWindowVisible = true;
     }
 
-    // Hide Overlay SECOND
-    if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
-      this.overlayWindow.hide();
+    // Don't hide overlay during active meeting — windows are independent
+    if (!this.appState.getIsMeetingActive()) {
+      if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
+        this.overlayWindow.hide();
+      }
     }
   }
 

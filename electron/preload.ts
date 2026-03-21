@@ -152,9 +152,11 @@ interface ElectronAPI {
 
   // Database
   flushDatabase: () => Promise<{ success: boolean }>
-  showWindow: () => Promise<void>
-  hideWindow: () => Promise<void>
+  showOverlay: () => Promise<void>
+  hideOverlay: () => Promise<void>
   onToggleExpand: (callback: () => void) => () => void
+  onEnsureExpanded: (callback: () => void) => () => void
+  onMeetingStateChanged: (callback: (isActive: boolean) => void) => () => void
   toggleAdvancedSettings: () => Promise<void>
 
   // Streaming listeners
@@ -401,8 +403,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
   analyzeImageFile: (path: string) => ipcRenderer.invoke("analyze-image-file", path),
   quitApp: () => ipcRenderer.invoke("quit-app"),
   toggleWindow: () => ipcRenderer.invoke("toggle-window"),
-  showWindow: () => ipcRenderer.invoke("show-window"),
-  hideWindow: () => ipcRenderer.invoke("hide-window"),
+  showOverlay: () => ipcRenderer.invoke("show-overlay"),
+  hideOverlay: () => ipcRenderer.invoke("hide-overlay"),
+  onMeetingStateChanged: (callback: (isActive: boolean) => void) => {
+    const subscription = (_event: any, isActive: boolean) => callback(isActive)
+    ipcRenderer.on("meeting-state-changed", subscription)
+    return () => { ipcRenderer.removeListener("meeting-state-changed", subscription) }
+  },
   toggleAdvancedSettings: () => ipcRenderer.invoke("toggle-advanced-settings"),
   openExternal: (url: string) => ipcRenderer.invoke("open-external", url),
   setUndetectable: (state: boolean) => ipcRenderer.invoke("set-undetectable", state),
@@ -432,6 +439,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on("toggle-expand", subscription)
     return () => {
       ipcRenderer.removeListener("toggle-expand", subscription)
+    }
+  },
+  onEnsureExpanded: (callback: () => void) => {
+    const subscription = () => callback()
+    ipcRenderer.on("ensure-expanded", subscription)
+    return () => {
+      ipcRenderer.removeListener("ensure-expanded", subscription)
     }
   },
 
