@@ -938,6 +938,7 @@ export class AppState {
 
     this.isMeetingActive = true;
     this.updateTrayMenu();
+    this.broadcastMeetingState();
     if (metadata) {
       this.intelligenceManager.setMeetingMetadata(metadata);
     }
@@ -986,6 +987,7 @@ export class AppState {
     console.log('[Main] Ending Meeting...');
     this.isMeetingActive = false; // Block new data immediately
     this.updateTrayMenu();
+    this.broadcastMeetingState();
 
     // 3. Stop System Audio
     this.systemAudioCapture?.stop();
@@ -1305,8 +1307,14 @@ export class AppState {
     if (!this.isMeetingActive) return;
 
     const overlayWindow = this.windowHelper.getOverlayWindow();
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
+    if (!overlayWindow || overlayWindow.isDestroyed()) return;
+
+    if (overlayWindow.isVisible()) {
+      // Overlay is visible — toggle expand/collapse
       overlayWindow.webContents.send('toggle-expand');
+    } else {
+      // Overlay is hidden (e.g. after "Show Natively") — bring it back
+      this.windowHelper.switchToOverlay();
     }
   }
 
@@ -1428,6 +1436,15 @@ export class AppState {
 
   public centerAndShowWindow(): void {
     this.windowHelper.centerAndShowWindow()
+  }
+
+  private broadcastMeetingState(): void {
+    const isActive = this.isMeetingActive;
+    BrowserWindow.getAllWindows().forEach(win => {
+      if (!win.isDestroyed()) {
+        win.webContents.send('meeting-state-changed', isActive);
+      }
+    });
   }
 
   public createTray(): void {

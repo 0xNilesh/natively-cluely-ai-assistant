@@ -83,10 +83,20 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
     const [isCalendarConnected, setIsCalendarConnected] = useState(false);
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [showNotification, setShowNotification] = useState(false);
+    const [isMeetingActive, setIsMeetingActive] = useState(false);
 
     // Global search state (for AI chat overlay)
     const [isGlobalChatOpen, setIsGlobalChatOpen] = useState(false);
     const [submittedGlobalQuery, setSubmittedGlobalQuery] = useState('');
+
+    // Listen for meeting state changes from main process
+    useEffect(() => {
+        if (!window.electronAPI?.onMeetingStateChanged) return;
+        const unsubscribe = window.electronAPI.onMeetingStateChanged((isActive) => {
+            setIsMeetingActive(isActive);
+        });
+        return () => unsubscribe();
+    }, []);
 
     const fetchMeetings = () => {
         if (window.electronAPI && window.electronAPI.getRecentMeetings) {
@@ -398,6 +408,14 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                     </button>
                 </div>
             </header>
+
+            {/* Meeting Active Indicator */}
+            {isMeetingActive && (
+                <div className="shrink-0 flex items-center gap-2 px-4 py-2 bg-green-500/10 border-b border-green-500/20">
+                    <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                    <span className="text-xs font-medium text-green-400">Meeting in progress</span>
+                </div>
+            )}
 
             <div className="relative flex-1 flex flex-col overflow-hidden">
                 {!isDetectable && (

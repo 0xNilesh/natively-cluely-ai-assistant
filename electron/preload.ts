@@ -155,6 +155,7 @@ interface ElectronAPI {
   showWindow: () => Promise<void>
   hideWindow: () => Promise<void>
   onToggleExpand: (callback: () => void) => () => void
+  onMeetingStateChanged: (callback: (isActive: boolean) => void) => () => void
   toggleAdvancedSettings: () => Promise<void>
 
   // Streaming listeners
@@ -403,6 +404,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
   toggleWindow: () => ipcRenderer.invoke("toggle-window"),
   showWindow: () => ipcRenderer.invoke("show-window"),
   hideWindow: () => ipcRenderer.invoke("hide-window"),
+  onMeetingStateChanged: (callback: (isActive: boolean) => void) => {
+    const subscription = (_event: any, isActive: boolean) => callback(isActive)
+    ipcRenderer.on("meeting-state-changed", subscription)
+    return () => { ipcRenderer.removeListener("meeting-state-changed", subscription) }
+  },
   toggleAdvancedSettings: () => ipcRenderer.invoke("toggle-advanced-settings"),
   openExternal: (url: string) => ipcRenderer.invoke("open-external", url),
   setUndetectable: (state: boolean) => ipcRenderer.invoke("set-undetectable", state),

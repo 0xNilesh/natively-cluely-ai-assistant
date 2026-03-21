@@ -265,10 +265,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         if (isExpanded) {
             window.electronAPI.showWindow();
         } else {
-            // Slight delay to allow animation to clean up if needed, though immediate is safer for click-through
-            // Using setTimeout to ensure the render cycle completes first
-            // Increased to 400ms to allow "contract to bottom" exit animation to finish
-            setTimeout(() => window.electronAPI.hideWindow(), 400);
+            // Collapse to minimal pill — resize instead of hiding the window entirely
+            setTimeout(() => {
+                window.electronAPI.updateContentDimensions({ width: 600, height: 48 });
+            }, 400);
         }
     }, [isExpanded]);
 

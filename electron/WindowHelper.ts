@@ -441,9 +441,11 @@ export class WindowHelper {
       this.isWindowVisible = true;
     }
 
-    // Hide Overlay SECOND
-    if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
-      this.overlayWindow.hide();
+    // Don't hide overlay during active meeting — windows are independent
+    if (!this.appState.getIsMeetingActive()) {
+      if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
+        this.overlayWindow.hide();
+      }
     }
   }
 
