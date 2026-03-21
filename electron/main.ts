@@ -225,7 +225,7 @@ export class AppState {
         if (actionId === 'general:toggle-visibility') {
           this.toggleMainWindow();
         } else if (actionId === 'general:take-screenshot') {
-          const screenshotPath = await this.takeScreenshot();
+          const screenshotPath = await this.takeScreenshot(false);
           const preview = await this.getImagePreview(screenshotPath);
           const mainWindow = this.getMainWindow();
           if (mainWindow) {
@@ -235,7 +235,7 @@ export class AppState {
             });
           }
         } else if (actionId === 'general:selective-screenshot') {
-          const screenshotPath = await this.takeSelectiveScreenshot();
+          const screenshotPath = await this.takeSelectiveScreenshot(false);
           const preview = await this.getImagePreview(screenshotPath);
           const mainWindow = this.getMainWindow();
           if (mainWindow) {
@@ -247,10 +247,10 @@ export class AppState {
           }
         } else if (actionId === 'general:capture-and-process') {
           // Single-trigger: capture current screen then immediately request AI analysis
-          const screenshotPath = await this.takeScreenshot();
+          const screenshotPath = await this.takeScreenshot(false);
           const preview = await this.getImagePreview(screenshotPath);
-          // Ensure the window is visible so the user can see the response
-          this.showMainWindow();
+          // Ensure the window is visible so the user can see the response without stealing focus
+          this.showMainWindow(true);
           // win.focus() can cause macOS to re-activate the app. Re-hide the dock
           // if we are in undetectable mode.
           if (process.platform === 'darwin' && this.isUndetectable) {
@@ -1492,7 +1492,7 @@ export class AppState {
   }
 
   // Screenshot management methods
-  public async takeScreenshot(): Promise<string> {
+  public async takeScreenshot(restoreFocus: boolean = true): Promise<string> {
     if (!this.getMainWindow()) throw new Error("No main window available")
 
     const wasOverlayVisible = this.windowHelper.getOverlayWindow()?.isVisible() ?? false
@@ -1501,9 +1501,9 @@ export class AppState {
       () => this.hideMainWindow(),
       () => {
         if (wasOverlayVisible) {
-          this.windowHelper.switchToOverlay()
+          this.windowHelper.switchToOverlay(!restoreFocus)
         } else {
-          this.showMainWindow()
+          this.showMainWindow(!restoreFocus)
         }
       }
     )
@@ -1511,7 +1511,7 @@ export class AppState {
     return screenshotPath
   }
 
-  public async takeSelectiveScreenshot(): Promise<string> {
+  public async takeSelectiveScreenshot(restoreFocus: boolean = true): Promise<string> {
     if (!this.getMainWindow()) throw new Error("No main window available")
 
     const wasOverlayVisible = this.windowHelper.getOverlayWindow()?.isVisible() ?? false
@@ -1532,9 +1532,9 @@ export class AppState {
         if (!captureArea) {
           // Restore window state before throwing
           if (wasOverlayVisible) {
-            this.windowHelper.switchToOverlay();
+            this.windowHelper.switchToOverlay(!restoreFocus);
           } else {
-            this.showMainWindow();
+            this.showMainWindow(!restoreFocus);
           }
           throw new Error("Selection cancelled");
         }
@@ -1544,9 +1544,9 @@ export class AppState {
         () => {}, // Already hidden above
         () => {
           if (wasOverlayVisible) {
-            this.windowHelper.switchToOverlay()
+            this.windowHelper.switchToOverlay(!restoreFocus)
           } else {
-            this.showMainWindow()
+            this.showMainWindow(!restoreFocus)
           }
         },
         captureArea
@@ -1559,9 +1559,9 @@ export class AppState {
       const isSelectionCancelled = error instanceof Error && error.message === "Selection cancelled";
       if (!isSelectionCancelled || process.platform !== 'win32') {
         if (wasOverlayVisible) {
-          this.windowHelper.switchToOverlay()
+          this.windowHelper.switchToOverlay(!restoreFocus)
         } else {
-          this.showMainWindow()
+          this.showMainWindow(!restoreFocus)
         }
       }
       throw error;
