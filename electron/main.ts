@@ -953,6 +953,10 @@ export class AppState {
     // setTimeout(100) ensures setWindowMode IPC is processed first.
     setTimeout(async () => {
       try {
+        const requestedInputDeviceId = metadata?.audio?.inputDeviceId || 'default';
+        const requestedOutputDeviceId = metadata?.audio?.outputDeviceId || 'default';
+        const requestedBackend = requestedOutputDeviceId === 'sck' ? 'sck' : 'coreaudio';
+
         // Check for audio configuration preference
         if (metadata?.audio) {
           await this.reconfigureAudio(metadata.audio.inputDeviceId, metadata.audio.outputDeviceId);
@@ -960,6 +964,12 @@ export class AppState {
 
         // LAZY INIT: Ensure pipeline is ready (if not reconfigured above)
         this.setupSystemAudioPipeline();
+
+        const systemRate = this.systemAudioCapture?.getSampleRate() ?? 48000;
+        const microphoneRate = this.microphoneCapture?.getSampleRate() ?? 48000;
+        console.log(
+          `[Main] Meeting audio routing: input=${requestedInputDeviceId}, output=${requestedOutputDeviceId}, backend=${requestedBackend}, systemRate=${systemRate}Hz, micRate=${microphoneRate}Hz, interviewerSttRate=${systemRate}Hz, userSttRate=${microphoneRate}Hz`
+        );
 
         // Start System Audio
         this.systemAudioCapture?.start();
