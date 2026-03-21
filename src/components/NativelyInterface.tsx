@@ -1534,6 +1534,7 @@ Provide only the answer, nothing else.`;
                             expanded={isExpanded}
                             onToggle={() => setIsExpanded(!isExpanded)}
                             onQuit={() => onEndMeeting ? onEndMeeting() : window.electronAPI.quitApp()}
+                            onLogoClick={() => window.electronAPI?.setWindowMode('launcher')}
                             appearance={appearance}
                         />
                         <div
