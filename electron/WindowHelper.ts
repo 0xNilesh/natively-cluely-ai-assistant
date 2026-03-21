@@ -404,6 +404,13 @@ export class WindowHelper {
         this.overlayWindow.setAlwaysOnTop(true, "floating");
       }
       this.isWindowVisible = true;
+
+      // Ensure overlay is expanded when shown (may have been collapsed)
+      setTimeout(() => {
+        if (this.overlayWindow && !this.overlayWindow.isDestroyed() && this.overlayWindow.isVisible()) {
+          this.overlayWindow.webContents.send('ensure-expanded');
+        }
+      }, 100);
     }
 
     // Hide Launcher SECOND

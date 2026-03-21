@@ -155,6 +155,7 @@ interface ElectronAPI {
   showWindow: () => Promise<void>
   hideWindow: () => Promise<void>
   onToggleExpand: (callback: () => void) => () => void
+  onEnsureExpanded: (callback: () => void) => () => void
   onMeetingStateChanged: (callback: (isActive: boolean) => void) => () => void
   toggleAdvancedSettings: () => Promise<void>
 
@@ -438,6 +439,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on("toggle-expand", subscription)
     return () => {
       ipcRenderer.removeListener("toggle-expand", subscription)
+    }
+  },
+  onEnsureExpanded: (callback: () => void) => {
+    const subscription = () => callback()
+    ipcRenderer.on("ensure-expanded", subscription)
+    return () => {
+      ipcRenderer.removeListener("ensure-expanded", subscription)
     }
   },
 

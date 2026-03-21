@@ -281,6 +281,15 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         return () => unsubscribe();
     }, []);
 
+    // Ensure overlay is expanded when shown from launcher/tray
+    useEffect(() => {
+        if (!window.electronAPI?.onEnsureExpanded) return;
+        const unsubscribe = window.electronAPI.onEnsureExpanded(() => {
+            setIsExpanded(true);
+        });
+        return () => unsubscribe();
+    }, []);
+
     // Session Reset Listener - Clears UI when a NEW meeting starts
     useEffect(() => {
         if (!window.electronAPI?.onSessionReset) return;
