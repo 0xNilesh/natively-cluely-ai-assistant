@@ -1,8 +1,8 @@
-// Solutions.tsx
+// Solutions.tsx — Rolling Interview Script / Teleprompter UI
 import React, { useState, useEffect, useRef } from "react"
 import { useQuery, useQueryClient } from "react-query"
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter"
-import { dracula } from "react-syntax-highlighter/dist/esm/styles/prism"
+import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism"
 
 import ScreenshotQueue from "../components/Queue/ScreenshotQueue"
 import {
@@ -12,135 +12,80 @@ import {
   ToastTitle,
   ToastVariant
 } from "../components/ui/toast"
-import { ProblemStatementData, Solution } from "../types/solutions"
-import { AudioResult } from "../types/audio"
+import { Solution } from "../types/solutions"
 import SolutionCommands from "../components/Solutions/SolutionCommands"
 import Debug from "./Debug"
 
-// (Using global ElectronAPI type from src/types/electron.d.ts)
+// ─── Phase Card ──────────────────────────────────────────────────────────────
 
-// ── Phase card for spoken scripts ─────────────────────────────────────────────
-
-const PhaseCard = ({
-  phase,
-  label,
-  icon,
-  accentClass,
-  children,
-  isLoading
-}: {
+interface PhaseCardProps {
   phase: number
   label: string
   icon: string
   accentClass: string
-  children?: React.ReactNode
-  isLoading: boolean
-}) => (
-  <div className={`rounded-lg border ${accentClass} overflow-hidden`}>
-    <div className={`flex items-center gap-2 px-3 py-2 border-b ${accentClass}`}>
+  borderClass: string
+  children: React.ReactNode
+}
+
+const PhaseCard: React.FC<PhaseCardProps> = ({ phase, label, icon, accentClass, borderClass, children }) => (
+  <div className={`rounded-xl border ${borderClass} overflow-hidden`}>
+    {/* Header */}
+    <div className={`flex items-center gap-2 px-4 py-2.5 ${accentClass}`}>
       <span className="text-base">{icon}</span>
-      <span className="text-[11px] font-semibold uppercase tracking-widest text-white/50">
-        Phase {phase}
-      </span>
-      <span className="text-[11px] font-bold text-white/80 ml-1">{label}</span>
+      <span className="text-[11px] font-bold uppercase tracking-widest opacity-80">Phase {phase}</span>
+      <span className="text-[12px] font-semibold">{label}</span>
     </div>
-    <div className="px-4 py-3">
-      {isLoading ? (
-        <p className="text-xs bg-gradient-to-r from-gray-300 via-gray-100 to-gray-300 bg-clip-text text-transparent animate-pulse">
-          Drafting interview script...
-        </p>
-      ) : (
-        children
-      )}
+    {/* Body */}
+    <div className="px-4 py-3 bg-black/40">
+      {children}
     </div>
   </div>
 )
 
-// ── Spoken script text — what the user reads aloud ────────────────────────────
+// ─── Spoken Script Block ──────────────────────────────────────────────────────
 
-const SpokenScript = ({ text }: { text: string }) => (
-  <p className="text-[14px] leading-[1.65] text-white/90 italic font-light tracking-wide">
-    &ldquo;{text}&rdquo;
-  </p>
+const SpokenScript: React.FC<{ text: string }> = ({ text }) => (
+  <div className="space-y-1.5">
+    <p className="text-[10px] font-semibold uppercase tracking-wider text-white/40">🎙️ Say this out loud</p>
+    <p className="text-[14px] leading-relaxed text-white/90 italic font-light">
+      {text}
+    </p>
+  </div>
 )
 
-// ── Complexity pill ───────────────────────────────────────────────────────────
+// ─── Complexity Pill ─────────────────────────────────────────────────────────
 
-const ComplexityPill = ({ label, value }: { label: string; value: string }) => (
-  <div className="flex items-center gap-2">
-    <span className="text-[11px] font-semibold text-white/40 uppercase tracking-wider">
-      {label}
+const ComplexityRow: React.FC<{ time: string; space: string }> = ({ time, space }) => (
+  <div className="flex flex-wrap gap-2 mt-3">
+    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-600/20 border border-blue-500/30 text-[12px] font-medium text-blue-300">
+      <span className="opacity-60">⏱ Time:</span> <strong>{time}</strong>
     </span>
-    <span className="text-[13px] font-mono text-emerald-300">{value}</span>
+    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-600/20 border border-emerald-500/30 text-[12px] font-medium text-emerald-300">
+      <span className="opacity-60">💾 Space:</span> <strong>{space}</strong>
+    </span>
   </div>
 )
 
-// ── Legacy components still used for non-coding views ─────────────────────────
+// ─── Loading Skeleton ─────────────────────────────────────────────────────────
 
-export const ContentSection = ({
-  title,
-  content,
-  isLoading
-}: {
-  title: string
-  content: React.ReactNode
-  isLoading: boolean
-}) => (
-  <div className="space-y-2">
-    <h2 className="text-[13px] font-medium text-white tracking-wide">
-      {title}
-    </h2>
-    {isLoading ? (
-      <div className="mt-4 flex">
-        <p className="text-xs bg-gradient-to-r from-gray-300 via-gray-100 to-gray-300 bg-clip-text text-transparent animate-pulse">
-          Extracting problem statement...
-        </p>
-      </div>
-    ) : (
-      <div className="text-[13px] leading-[1.4] text-gray-100 max-w-[600px]">
-        {content}
-      </div>
-    )}
-  </div>
-)
-
-export const ComplexitySection = ({
-  timeComplexity,
-  spaceComplexity,
-  isLoading
-}: {
-  timeComplexity: string | null
-  spaceComplexity: string | null
-  isLoading: boolean
-}) => (
-  <div className="space-y-2">
-    <h2 className="text-[13px] font-medium text-white tracking-wide">
-      Complexity
-    </h2>
-    {isLoading ? (
-      <p className="text-xs bg-gradient-to-r from-gray-300 via-gray-100 to-gray-300 bg-clip-text text-transparent animate-pulse">
-        Calculating complexity...
-      </p>
-    ) : (
-      <div className="space-y-1">
-        <div className="flex items-start gap-2 text-[13px] leading-[1.4] text-gray-100">
-          <div className="w-1 h-1 rounded-full bg-blue-400/80 mt-2 shrink-0" />
-          <div>
-            <strong>Time:</strong> {timeComplexity}
-          </div>
-        </div>
-        <div className="flex items-start gap-2 text-[13px] leading-[1.4] text-gray-100">
-          <div className="w-1 h-1 rounded-full bg-blue-400/80 mt-2 shrink-0" />
-          <div>
-            <strong>Space:</strong> {spaceComplexity}
-          </div>
+const ScriptLoader: React.FC = () => (
+  <div className="space-y-4 py-2">
+    <p className="text-[13px] text-center bg-gradient-to-r from-violet-300 via-white to-violet-300 bg-clip-text text-transparent animate-pulse font-medium">
+      ✍️ Drafting your interview script…
+    </p>
+    {[1, 2, 3, 4].map(i => (
+      <div key={i} className="rounded-xl border border-white/10 overflow-hidden opacity-40" style={{ animation: `pulse 1.5s ease-in-out ${i * 0.15}s infinite` }}>
+        <div className="h-8 bg-white/5" />
+        <div className="px-4 py-3 space-y-2">
+          <div className="h-3 bg-white/10 rounded w-3/4" />
+          <div className="h-3 bg-white/10 rounded w-1/2" />
         </div>
       </div>
-    )}
+    ))}
   </div>
 )
 
-// ── Main component ─────────────────────────────────────────────────────────────
+// ─── Module ───────────────────────────────────────────────────────────────────
 
 interface SolutionsProps {
   setView: React.Dispatch<React.SetStateAction<"queue" | "solutions" | "debug">>
@@ -150,15 +95,11 @@ const Solutions: React.FC<SolutionsProps> = ({ setView }) => {
   const queryClient = useQueryClient()
   const contentRef = useRef<HTMLDivElement>(null)
 
-  const [audioRecording, setAudioRecording] = useState(false)
-  const [audioResult, setAudioResult] = useState<AudioResult | null>(null)
-
   const [debugProcessing, setDebugProcessing] = useState(false)
-  const [problemStatementData, setProblemStatementData] =
-    useState<ProblemStatementData | null>(null)
 
-  // Single solution state using the new Solution type
-  const [solutionData, setSolutionData] = useState<Solution | null>(null)
+  // Single state object for the structured solution
+  const [solution, setSolution] = useState<Solution | null>(null)
+  const [isGenerating, setIsGenerating] = useState(false)
 
   const [toastOpen, setToastOpen] = useState(false)
   const [toastMessage, setToastMessage] = useState<ToastMessage>({
@@ -176,8 +117,7 @@ const Solutions: React.FC<SolutionsProps> = ({ setView }) => {
     async () => {
       try {
         return await window.electronAPI.getScreenshots()
-      } catch (error) {
-        console.error("Error loading extra screenshots:", error)
+      } catch {
         return []
       }
     },
@@ -190,307 +130,247 @@ const Solutions: React.FC<SolutionsProps> = ({ setView }) => {
   }
 
   const handleDeleteExtraScreenshot = async (index: number) => {
-    const screenshotToDelete = extraScreenshots[index]
+    const s = extraScreenshots[index]
     try {
-      const response = await window.electronAPI.deleteScreenshot(screenshotToDelete.path)
-      if (response.success) {
-        refetch()
-      } else {
-        console.error("Failed to delete extra screenshot:", response.error)
-      }
+      const resp = await window.electronAPI.deleteScreenshot(s.path)
+      if (resp.success) refetch()
     } catch (error) {
-      console.error("Error deleting extra screenshot:", error)
+      console.error("Error deleting screenshot:", error)
     }
   }
-
-  useEffect(() => {
-    const updateDimensions = () => {
-      if (contentRef.current) {
-        let contentHeight = contentRef.current.scrollHeight
-        const contentWidth = contentRef.current.scrollWidth
-        if (isTooltipVisible) contentHeight += tooltipHeight
-        window.electronAPI.updateContentDimensions({ width: contentWidth, height: contentHeight })
-      }
-    }
-
-    const resizeObserver = new ResizeObserver(updateDimensions)
-    if (contentRef.current) resizeObserver.observe(contentRef.current)
-    updateDimensions()
-
-    const cleanupFunctions = [
-      window.electronAPI.onScreenshotTaken(() => refetch()),
-      window.electronAPI.onResetView(() => {
-        setIsResetting(true)
-        queryClient.removeQueries(["solution"])
-        queryClient.removeQueries(["new_solution"])
-        refetch()
-        setTimeout(() => setIsResetting(false), 0)
-      }),
-      window.electronAPI.onSolutionStart(async () => {
-        setSolutionData(null)
-        setAudioResult(null)
-        console.log('[Solutions] onSolutionStart: generating interview script...')
-      }),
-      window.electronAPI.onSolutionError((error: string) => {
-        showToast("Processing Failed", "There was an error processing your screenshots.", "error")
-        const cached = queryClient.getQueryData(["solution"]) as Solution | null
-        if (!cached) setView("queue")
-        setSolutionData(cached)
-        console.error("Processing error:", error)
-      }),
-      window.electronAPI.onSolutionSuccess((data) => {
-        if (!data?.solution) {
-          console.warn("Received empty or invalid solution data")
-          return
-        }
-        console.log({ solution: data.solution })
-        const sol: Solution = {
-          problem_identifier_script: data.solution.problem_identifier_script || "",
-          brainstorm_script: data.solution.brainstorm_script || "",
-          code: data.solution.code || "",
-          dry_run_script: data.solution.dry_run_script || "",
-          time_complexity: data.solution.time_complexity || "",
-          space_complexity: data.solution.space_complexity || ""
-        }
-        queryClient.setQueryData(["solution"], sol)
-        setSolutionData(sol)
-      }),
-
-      // ── Debug events ──────────────────────────────────────────────────────
-      window.electronAPI.onDebugStart(() => setDebugProcessing(true)),
-      window.electronAPI.onDebugSuccess((data) => {
-        console.log({ debug_data: data })
-        queryClient.setQueryData(["new_solution"], data.solution)
-        setDebugProcessing(false)
-      }),
-      window.electronAPI.onDebugError(() => {
-        showToast("Processing Failed", "There was an error debugging your code.", "error")
-        setDebugProcessing(false)
-      }),
-      window.electronAPI.onProcessingNoScreenshots(() => {
-        showToast("No Screenshots", "There are no extra screenshots to process.", "neutral")
-      })
-    ]
-
-    return () => {
-      resizeObserver.disconnect()
-      cleanupFunctions.forEach((cleanup) => cleanup())
-    }
-  }, [isTooltipVisible, tooltipHeight])
-
-  useEffect(() => {
-    setProblemStatementData(queryClient.getQueryData(["problem_statement"]) || null)
-    const cached = queryClient.getQueryData(["solution"]) as Solution | null
-    if (cached) setSolutionData(cached)
-
-    const unsubscribe = queryClient.getQueryCache().subscribe((event) => {
-      if (event?.query.queryKey[0] === "problem_statement") {
-        setProblemStatementData(queryClient.getQueryData(["problem_statement"]) || null)
-        const audioResult = queryClient.getQueryData(["audio_result"]) as AudioResult | undefined
-        if (audioResult) {
-          setProblemStatementData({
-            problem_statement: audioResult.text,
-            input_format: { description: "Generated from audio input", parameters: [] },
-            output_format: { description: "Generated from audio input", type: "string", subtype: "text" },
-            complexity: { time: "N/A", space: "N/A" },
-            test_cases: [],
-            validation_type: "manual",
-            difficulty: "custom"
-          })
-          setSolutionData(null)
-        }
-      }
-      if (event?.query.queryKey[0] === "solution") {
-        const sol = queryClient.getQueryData(["solution"]) as Solution | null
-        setSolutionData(sol)
-      }
-    })
-    return () => unsubscribe()
-  }, [queryClient])
 
   const handleTooltipVisibilityChange = (visible: boolean, height: number) => {
     setIsTooltipVisible(visible)
     setTooltipHeight(height)
   }
 
-  const handleCodeHint = async () => {
-    try {
-      await window.electronAPI.generateCodeHint()
-    } catch (err) {
-      console.error('[Solutions] Code hint failed:', err)
+  useEffect(() => {
+    // Resize observer
+    const updateDimensions = () => {
+      if (contentRef.current) {
+        let h = contentRef.current.scrollHeight
+        const w = contentRef.current.scrollWidth
+        if (isTooltipVisible) h += tooltipHeight
+        window.electronAPI.updateContentDimensions({ width: w, height: h })
+      }
     }
-  }
+    const ro = new ResizeObserver(updateDimensions)
+    if (contentRef.current) ro.observe(contentRef.current)
+    updateDimensions()
 
-  const handleBrainstorm = async () => {
-    try {
-      await window.electronAPI.generateBrainstorm()
-    } catch (err) {
-      console.error('[Solutions] Brainstorm failed:', err)
+    const cleanups = [
+      window.electronAPI.onScreenshotTaken(() => refetch()),
+
+      // Reset
+      window.electronAPI.onResetView(() => {
+        setIsResetting(true)
+        setSolution(null)
+        setIsGenerating(false)
+        queryClient.removeQueries(["solution"])
+        queryClient.removeQueries(["new_solution"])
+        refetch()
+        setTimeout(() => setIsResetting(false), 0)
+      }),
+
+      // Script generation started
+      window.electronAPI.onSolutionStart(() => {
+        setSolution(null)
+        setIsGenerating(true)
+      }),
+
+      // Script ready
+      window.electronAPI.onSolutionSuccess((data: any) => {
+        setIsGenerating(false)
+        if (!data?.solution) {
+          console.warn("[Solutions] Received empty solution data")
+          return
+        }
+        const s = data.solution
+        const parsed: Solution = {
+          problem_identifier_script: s.problem_identifier_script ?? "",
+          brainstorm_script: s.brainstorm_script ?? "",
+          code: s.code ?? "",
+          dry_run_script: s.dry_run_script ?? "",
+          time_complexity: s.time_complexity ?? "",
+          space_complexity: s.space_complexity ?? "",
+        }
+        setSolution(parsed)
+        queryClient.setQueryData(["solution"], parsed)
+      }),
+
+      // Error
+      window.electronAPI.onSolutionError((error: string) => {
+        setIsGenerating(false)
+        showToast("Generation Failed", "Couldn't generate the interview script. Try again.", "error")
+        console.error("Solution error:", error)
+        const cached = queryClient.getQueryData<Solution>(["solution"])
+        if (!cached) setView("queue")
+        else setSolution(cached)
+      }),
+
+      // Debug events
+      window.electronAPI.onDebugStart(() => setDebugProcessing(true)),
+      window.electronAPI.onDebugSuccess((data: any) => {
+        queryClient.setQueryData(["new_solution"], data.solution)
+        setDebugProcessing(false)
+      }),
+      window.electronAPI.onDebugError(() => {
+        showToast("Debug Failed", "There was an error debugging your code.", "error")
+        setDebugProcessing(false)
+      }),
+
+      window.electronAPI.onProcessingNoScreenshots(() => {
+        showToast("No Screenshots", "There are no screenshots to process.", "neutral")
+      }),
+    ]
+
+    return () => {
+      ro.disconnect()
+      cleanups.forEach(fn => fn())
     }
+  }, [isTooltipVisible, tooltipHeight])
+
+  // Hydrate from cache on mount (e.g. navigating away & back)
+  useEffect(() => {
+    const cached = queryClient.getQueryData<Solution>(["solution"])
+    if (cached) setSolution(cached)
+
+    const unsub = queryClient.getQueryCache().subscribe(event => {
+      if (event?.query.queryKey[0] === "solution") {
+        const s = queryClient.getQueryData<Solution>(["solution"])
+        if (s) setSolution(s)
+      }
+    })
+    return () => unsub()
+  }, [queryClient])
+
+  // ── Render ────────────────────────────────────────────────────────────────
+
+  if (!isResetting && queryClient.getQueryData(["new_solution"])) {
+    return (
+      <Debug
+        isProcessing={debugProcessing}
+        setIsProcessing={setDebugProcessing}
+      />
+    )
   }
-
-  // ── Is this a coding problem with our new interview script? ─────────────────
-  const isCodingMode =
-    problemStatementData?.validation_type === "coding" ||
-    (solutionData && "problem_identifier_script" in solutionData)
-
-  const scriptLoading = problemStatementData !== null && solutionData === null
 
   return (
     <>
-      {!isResetting && queryClient.getQueryData(["new_solution"]) ? (
-        <Debug isProcessing={debugProcessing} setIsProcessing={setDebugProcessing} />
-      ) : (
-        <div ref={contentRef} className="relative space-y-3 px-4 py-3">
-          <Toast open={toastOpen} onOpenChange={setToastOpen} variant={toastMessage.variant} duration={3000}>
-            <ToastTitle>{toastMessage.title}</ToastTitle>
-            <ToastDescription>{toastMessage.description}</ToastDescription>
-          </Toast>
+      <div ref={contentRef} className="relative space-y-3 px-4 py-3">
+        <Toast open={toastOpen} onOpenChange={setToastOpen} variant={toastMessage.variant} duration={3000}>
+          <ToastTitle>{toastMessage.title}</ToastTitle>
+          <ToastDescription>{toastMessage.description}</ToastDescription>
+        </Toast>
 
-          {/* Screenshot queue strip */}
-          {solutionData && (
-            <div className="bg-transparent w-fit">
-              <div className="pb-3">
-                <div className="space-y-3 w-fit">
-                  <ScreenshotQueue
-                    isLoading={debugProcessing}
-                    screenshots={extraScreenshots}
-                    onDeleteScreenshot={handleDeleteExtraScreenshot}
+        {/* Screenshot queue strip */}
+        {solution && (
+          <div className="bg-transparent w-fit pb-1">
+            <ScreenshotQueue
+              isLoading={debugProcessing}
+              screenshots={extraScreenshots}
+              onDeleteScreenshot={handleDeleteExtraScreenshot}
+            />
+          </div>
+        )}
+
+        {/* Action bar */}
+        <SolutionCommands
+          extraScreenshots={extraScreenshots}
+          onTooltipVisibilityChange={handleTooltipVisibilityChange}
+        />
+
+        {/* ── Main content ────────────────────────────────────────────── */}
+        <div className="w-full text-sm bg-black/50 rounded-xl overflow-hidden">
+          <div className="px-4 py-4 space-y-4 max-w-full">
+
+            {/* Loading */}
+            {isGenerating && !solution && <ScriptLoader />}
+
+            {/* 4-Phase Teleprompter */}
+            {solution && (
+              <div className="space-y-4">
+
+                {/* Phase 1 — Understand */}
+                <PhaseCard
+                  phase={1}
+                  label="Understand the Problem"
+                  icon="🧠"
+                  accentClass="bg-sky-900/40 text-sky-200"
+                  borderClass="border-sky-700/30"
+                >
+                  <SpokenScript text={solution.problem_identifier_script} />
+                </PhaseCard>
+
+                {/* Phase 2 — Brainstorm */}
+                <PhaseCard
+                  phase={2}
+                  label="Brainstorm Approaches"
+                  icon="💡"
+                  accentClass="bg-violet-900/40 text-violet-200"
+                  borderClass="border-violet-700/30"
+                >
+                  <SpokenScript text={solution.brainstorm_script} />
+                </PhaseCard>
+
+                {/* Phase 3 — Implement */}
+                <PhaseCard
+                  phase={3}
+                  label="Write the Code"
+                  icon="⌨️"
+                  accentClass="bg-zinc-800/60 text-zinc-200"
+                  borderClass="border-zinc-600/30"
+                >
+                  <div className="rounded-lg overflow-hidden">
+                    <SyntaxHighlighter
+                      language="python"
+                      style={vscDarkPlus}
+                      showLineNumbers
+                      customStyle={{
+                        margin: 0,
+                        padding: "1rem",
+                        fontSize: "13px",
+                        lineHeight: "1.6",
+                        background: "transparent",
+                        whiteSpace: "pre-wrap",
+                        wordBreak: "break-word",
+                      }}
+                      lineNumberStyle={{ color: "rgba(255,255,255,0.2)", minWidth: "2.5em", paddingRight: "1.2em" }}
+                      wrapLongLines
+                    >
+                      {solution.code}
+                    </SyntaxHighlighter>
+                  </div>
+                </PhaseCard>
+
+                {/* Phase 4 — Verify */}
+                <PhaseCard
+                  phase={4}
+                  label="Dry Run & Complexity"
+                  icon="✅"
+                  accentClass="bg-emerald-900/40 text-emerald-200"
+                  borderClass="border-emerald-700/30"
+                >
+                  <SpokenScript text={solution.dry_run_script} />
+                  <ComplexityRow
+                    time={solution.time_complexity}
+                    space={solution.space_complexity}
                   />
-                </div>
+                </PhaseCard>
+
               </div>
-            </div>
-          )}
+            )}
 
-          {/* Commands bar */}
-          <SolutionCommands
-            extraScreenshots={extraScreenshots}
-            onTooltipVisibilityChange={handleTooltipVisibilityChange}
-            onCodeHint={handleCodeHint}
-            onBrainstorm={handleBrainstorm}
-          />
+            {/* Empty — not generating and no solution yet */}
+            {!isGenerating && !solution && (
+              <p className="text-center text-white/30 text-[13px] py-6">
+                Take a screenshot of your problem (⌘H) and press ⌘↵ to generate the script.
+              </p>
+            )}
 
-          {/* Main content */}
-          <div className="w-full text-sm text-black bg-black/60 rounded-md">
-            <div className="rounded-lg overflow-hidden">
-              <div className="px-4 py-3 space-y-4 max-w-full">
-
-                {/* ── Non-coding / manual result (audio, generic screenshot) ── */}
-                {!isCodingMode && problemStatementData?.validation_type === "manual" ? (
-                  <ContentSection
-                    title={problemStatementData?.output_format?.subtype === "voice" ? "Audio Result" : "Screenshot Result"}
-                    content={problemStatementData.problem_statement}
-                    isLoading={false}
-                  />
-                ) : (
-                  <>
-                    {/* Problem statement header */}
-                    {problemStatementData && (
-                      <div className="space-y-1">
-                        <h2 className="text-[11px] font-semibold uppercase tracking-widest text-white/40">
-                          Problem Detected
-                        </h2>
-                        <p className="text-[13px] leading-[1.5] text-gray-200 max-w-[600px] line-clamp-3">
-                          {problemStatementData.problem_statement}
-                        </p>
-                      </div>
-                    )}
-
-                    {/* Loading state while script is generating */}
-                    {problemStatementData && scriptLoading && (
-                      <div className="mt-2 flex items-center gap-2">
-                        <p className="text-xs bg-gradient-to-r from-indigo-300 via-purple-200 to-indigo-300 bg-clip-text text-transparent animate-pulse">
-                          Drafting interview script...
-                        </p>
-                      </div>
-                    )}
-
-                    {/* Initial loading (no problem yet) */}
-                    {!problemStatementData && (
-                      <div className="mt-4 flex">
-                        <p className="text-xs bg-gradient-to-r from-gray-300 via-gray-100 to-gray-300 bg-clip-text text-transparent animate-pulse">
-                          Analyzing screenshot...
-                        </p>
-                      </div>
-                    )}
-
-                    {/* ── Rolling Interview Script ── */}
-                    {solutionData && isCodingMode && (
-                      <div className="space-y-3">
-
-                        {/* Phase 1 — Understand */}
-                        <PhaseCard
-                          phase={1}
-                          label="Understand"
-                          icon="🎯"
-                          accentClass="border-sky-500/30 bg-sky-950/30"
-                          isLoading={false}
-                        >
-                          <SpokenScript text={solutionData.problem_identifier_script} />
-                        </PhaseCard>
-
-                        {/* Phase 2 — Brainstorm */}
-                        <PhaseCard
-                          phase={2}
-                          label="Brainstorm"
-                          icon="💡"
-                          accentClass="border-violet-500/30 bg-violet-950/30"
-                          isLoading={false}
-                        >
-                          <SpokenScript text={solutionData.brainstorm_script} />
-                        </PhaseCard>
-
-                        {/* Phase 3 — Implement */}
-                        <PhaseCard
-                          phase={3}
-                          label="Implement"
-                          icon="⌨️"
-                          accentClass="border-amber-500/30 bg-amber-950/20"
-                          isLoading={false}
-                        >
-                          <SyntaxHighlighter
-                            showLineNumbers
-                            language="python"
-                            style={dracula}
-                            customStyle={{
-                              maxWidth: "100%",
-                              margin: 0,
-                              padding: "0.75rem",
-                              whiteSpace: "pre-wrap",
-                              wordBreak: "break-all",
-                              borderRadius: "0.375rem",
-                              fontSize: "12px"
-                            }}
-                            wrapLongLines={true}
-                          >
-                            {solutionData.code}
-                          </SyntaxHighlighter>
-                        </PhaseCard>
-
-                        {/* Phase 4 — Verify */}
-                        <PhaseCard
-                          phase={4}
-                          label="Verify"
-                          icon="✅"
-                          accentClass="border-emerald-500/30 bg-emerald-950/30"
-                          isLoading={false}
-                        >
-                          <SpokenScript text={solutionData.dry_run_script} />
-                          <div className="mt-3 flex flex-wrap gap-4 border-t border-white/10 pt-3">
-                            <ComplexityPill label="Time" value={solutionData.time_complexity} />
-                            <ComplexityPill label="Space" value={solutionData.space_complexity} />
-                          </div>
-                        </PhaseCard>
-
-                      </div>
-                    )}
-                  </>
-                )}
-              </div>
-            </div>
           </div>
         </div>
-      )}
+      </div>
     </>
   )
 }

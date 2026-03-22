@@ -12,6 +12,13 @@
 </head>
 
 <body style="background-color: transparent; margin: 0; overflow: hidden;">
+  <!-- Synchronously apply cached theme before any render — prevents flash/mixed theme -->
+  <script>
+    try {
+      var t = localStorage.getItem('natively_resolved_theme');
+      if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+    } catch(e) {}
+  </script>
   <div id="root"></div>
   <script type="module" src="/src/main.tsx"></script>
 </body>

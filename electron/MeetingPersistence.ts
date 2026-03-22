@@ -21,7 +21,7 @@ export class MeetingPersistence {
      * Stops the meeting immediately, snapshots data, and triggers background processing.
      * Returns immediately so UI can switch.
      */
-    public async stopMeeting(): Promise<void> {
+    public async stopMeeting(): Promise<string | null> {
         console.log('[MeetingPersistence] Stopping meeting and queueing save...');
 
         // 0. Force-save any pending interim transcript
@@ -32,7 +32,7 @@ export class MeetingPersistence {
         if (durationMs < 1000) {
             console.log("Meeting too short, ignoring.");
             this.session.reset();
-            return;
+            return null;
         }
 
         const snapshot = {
@@ -43,11 +43,15 @@ export class MeetingPersistence {
             context: this.session.getFullSessionContext()
         };
 
+        // BUG-04 fix: snapshot metadata BEFORE reset() clears it so the
+        // background processAndSaveMeeting worker receives the calendar info.
+        const metadataSnapshot = this.session.getMeetingMetadata();
+
         // 2. Reset state immediately so new meeting can start or UI is clean
         this.session.reset();
 
         const meetingId = crypto.randomUUID();
-        this.processAndSaveMeeting(snapshot, meetingId).catch(err => {
+        this.processAndSaveMeeting(snapshot, meetingId, metadataSnapshot).catch(err => {
             console.error('[MeetingPersistence] Background processing failed:', err);
         });
 
@@ -76,16 +80,23 @@ export class MeetingPersistence {
         } catch (e) {
             console.error("Failed to save placeholder", e);
         }
+
+        return meetingId;
     }
 
     /**
      * Heavy lifting: LLM Title, Summary, and DB Write
      */
-    private async processAndSaveMeeting(data: { transcript: TranscriptSegment[], usage: any[], startTime: number, durationMs: number, context: string }, meetingId: string): Promise<void> {
+    private async processAndSaveMeeting(
+        data: { transcript: TranscriptSegment[], usage: any[], startTime: number, durationMs: number, context: string },
+        meetingId: string,
+        // BUG-04 fix: accept metadata snapshot so calendar info is not lost after session.reset()
+        metadata?: { title?: string; calendarEventId?: string; source?: 'manual' | 'calendar' } | null
+    ): Promise<void> {
         let title = "Untitled Session";
         let summaryData: { actionItems: string[], keyPoints: string[] } = { actionItems: [], keyPoints: [] };
 
-        const metadata = this.session.getMeetingMetadata();
+        // Use passed-in metadata snapshot (NOT this.session.getMeetingMetadata() which is already cleared)
         let calendarEventId: string | undefined;
         let source: 'manual' | 'calendar' = 'manual';
 
@@ -166,8 +177,7 @@ export class MeetingPersistence {
 
             DatabaseManager.getInstance().saveMeeting(meetingData, data.startTime, data.durationMs);
 
-            // Clear metadata
-            this.session.clearMeetingMetadata();
+            // Metadata was already snapshotted before session.reset() — nothing to clear here.
 
             // Notify Frontend to refresh list
             const wins = require('electron').BrowserWindow.getAllWindows();
@@ -206,8 +216,11 @@ export class MeetingPersistence {
                     return `[${label}]: ${t.text}`;
                 }).join('\n') || "";
 
-                const parts = details.duration.split(':');
-                const durationMs = ((parseInt(parts[0]) * 60) + parseInt(parts[1])) * 1000;
+                const parts = (details.duration || '0:00').split(':');
+                // EC-07 fix: guard against malformed duration strings (e.g. corrupted DB row)
+                const mins = parseInt(parts[0]) || 0;
+                const secs = parseInt(parts[1]) || 0;
+                const durationMs = ((mins * 60) + secs) * 1000;
                 const startTime = new Date(details.date).getTime();
 
                 const snapshot = {

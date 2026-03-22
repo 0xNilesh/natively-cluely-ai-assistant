@@ -93,13 +93,6 @@ interface ElectronAPI {
   generateWhatToSay: (question?: string, imagePaths?: string[]) => Promise<{ answer: string | null; question?: string; error?: string }>
   generateFollowUp: (intent: string, userRequest?: string) => Promise<{ refined: string | null; intent: string }>
   generateRecap: () => Promise<{ summary: string | null }>
-  generateCodeHint: () => Promise<{ hint: string | null; error?: string }>
-  getDetectedQuestion: () => Promise<{ question: string | null; source: 'screenshot' | 'transcript' | null }>
-  setCodingQuestion: (question: string) => Promise<{ success: boolean }>
-  generateBrainstorm: () => Promise<{ brainstorm: string | null; error?: string }>
-  getActionButtonMode: () => Promise<'recap' | 'brainstorm'>
-  setActionButtonMode: (mode: 'recap' | 'brainstorm') => Promise<{ success: boolean }>
-  onActionButtonModeChanged: (callback: (mode: 'recap' | 'brainstorm') => void) => () => void
   submitManualQuestion: (question: string) => Promise<{ answer: string | null; question: string }>
   getIntelligenceContext: () => Promise<{ context: string; lastAssistantMessage: string | null; activeMode: string }>
   resetIntelligence: () => Promise<{ success: boolean; error?: string }>
@@ -119,6 +112,8 @@ interface ElectronAPI {
   onIntelligenceSuggestedAnswer: (callback: (data: { answer: string; question: string; confidence: number }) => void) => () => void
   onIntelligenceRefinedAnswer: (callback: (data: { answer: string; intent: string }) => void) => () => void
   onIntelligenceRecap: (callback: (data: { summary: string }) => void) => () => void
+  onIntelligenceClarify: (callback: (data: { clarification: string }) => void) => () => void
+  onIntelligenceClarifyToken: (callback: (data: { token: string }) => void) => () => void
   onIntelligenceManualStarted: (callback: () => void) => () => void
   onIntelligenceManualResult: (callback: (data: { answer: string; question: string }) => void) => () => void
   onIntelligenceModeChanged: (callback: (data: { mode: string }) => void) => () => void
@@ -563,13 +558,17 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // Intelligence Mode IPC
   generateAssist: () => ipcRenderer.invoke("generate-assist"),
   generateWhatToSay: (question?: string, imagePaths?: string[]) => ipcRenderer.invoke("generate-what-to-say", question, imagePaths),
+  generateClarify: () => ipcRenderer.invoke("generate-clarify"),
+  generateCodeHint: (imagePaths?: string[], problemStatement?: string) => ipcRenderer.invoke("generate-code-hint", imagePaths, problemStatement),
+  generateBrainstorm: (imagePaths?: string[], problemStatement?: string) => ipcRenderer.invoke("generate-brainstorm", imagePaths, problemStatement),
   generateFollowUp: (intent: string, userRequest?: string) => ipcRenderer.invoke("generate-follow-up", intent, userRequest),
   generateFollowUpQuestions: () => ipcRenderer.invoke("generate-follow-up-questions"),
   generateRecap: () => ipcRenderer.invoke("generate-recap"),
-  generateCodeHint: () => ipcRenderer.invoke("generate-code-hint"),
-  getDetectedQuestion: () => ipcRenderer.invoke("get-detected-question"),
-  setCodingQuestion: (question: string) => ipcRenderer.invoke("set-coding-question", question),
-  generateBrainstorm: () => ipcRenderer.invoke("generate-brainstorm"),
+  submitManualQuestion: (question: string) => ipcRenderer.invoke("submit-manual-question", question),
+  getIntelligenceContext: () => ipcRenderer.invoke("get-intelligence-context"),
+  resetIntelligence: () => ipcRenderer.invoke("reset-intelligence"),
+
+  // Action Button Mode (Dynamic Recap / Brainstorm toggle)
   getActionButtonMode: () => ipcRenderer.invoke("get-action-button-mode"),
   setActionButtonMode: (mode: 'recap' | 'brainstorm') => ipcRenderer.invoke("set-action-button-mode", mode),
   onActionButtonModeChanged: (callback: (mode: 'recap' | 'brainstorm') => void) => {
@@ -577,10 +576,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on('action-button-mode-changed', subscription);
     return () => { ipcRenderer.removeListener('action-button-mode-changed', subscription); };
   },
-  generateClarify: () => ipcRenderer.invoke("generate-clarify"),
-  submitManualQuestion: (question: string) => ipcRenderer.invoke("submit-manual-question", question),
-  getIntelligenceContext: () => ipcRenderer.invoke("get-intelligence-context"),
-  resetIntelligence: () => ipcRenderer.invoke("reset-intelligence"),
 
   // Meeting Lifecycle
   startMeeting: (metadata?: any) => ipcRenderer.invoke("start-meeting", metadata),

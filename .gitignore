@@ -186,4 +186,7 @@ native-module/*.node
 **/.claude/
 
 # Feature planning and AI chat logs
-planning/live-negotiation/
+planning/live-negotiation/temp/
+
+# Temporary working files (animation feature WIP)
+temp/

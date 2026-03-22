@@ -11,6 +11,8 @@ export interface ShortcutConfig {
     answer: string[];
     codeHint: string[];
     brainstorm: string[];
+    shorten: string[];
+    recap: string[];
     scrollUp: string[];
     scrollDown: string[];
     // Window Movement
@@ -36,6 +38,8 @@ export const DEFAULT_SHORTCUTS: ShortcutConfig = {
     answer: ['⌘', '5'],
     codeHint: ['⌘', '6'],
     brainstorm: ['⌘', '7'],
+    shorten: [],
+    recap: [],
     scrollUp: ['↑'],
     scrollDown: ['↓'],
     moveWindowUp: ['⌘', 'Shift', '↑'],
@@ -71,6 +75,8 @@ export const useShortcuts = () => {
                 else if (kb.id === 'chat:answer') newShortcuts.answer = keys;
                 else if (kb.id === 'chat:codeHint') newShortcuts.codeHint = keys;
                 else if (kb.id === 'chat:brainstorm') newShortcuts.brainstorm = keys;
+                else if (kb.id === 'chat:shorten') newShortcuts.shorten = keys;
+                else if (kb.id === 'chat:recap') newShortcuts.recap = keys;
                 else if (kb.id === 'chat:scrollUp') newShortcuts.scrollUp = keys;
                 else if (kb.id === 'chat:scrollDown') newShortcuts.scrollDown = keys;
                 else if (kb.id === 'chat:auto-answer-mode') newShortcuts.autoAnswerMode = keys;
@@ -131,6 +137,8 @@ export const useShortcuts = () => {
             case 'answer': backendId = 'chat:answer'; break;
             case 'codeHint': backendId = 'chat:codeHint'; break;
             case 'brainstorm': backendId = 'chat:brainstorm'; break;
+            case 'shorten': backendId = 'chat:shorten'; break;
+            case 'recap': backendId = 'chat:recap'; break;
             case 'scrollUp': backendId = 'chat:scrollUp'; break;
             case 'scrollDown': backendId = 'chat:scrollDown'; break;
             // Window

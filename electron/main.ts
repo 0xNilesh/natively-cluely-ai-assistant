@@ -644,8 +644,11 @@ export class AppState {
   }
 
   private isVersionNewer(current: string, latest: string): boolean {
-    const c = current.split('.').map(Number);
-    const l = latest.split('.').map(Number);
+    // EC-01 fix: strip pre-release suffixes (e.g. "2.1.0-beta.1" → "2.1.0")
+    // before splitting so Number() never returns NaN on comparison.
+    const stripPre = (v: string) => v.replace(/-.*$/, '');
+    const c = stripPre(current).split('.').map(Number);
+    const l = stripPre(latest).split('.').map(Number);
 
     for (let i = 0; i < 3; i++) {
       const cv = c[i] || 0;
@@ -1145,8 +1148,15 @@ export class AppState {
     // ★ ASYNC AUDIO INIT: Return INSTANTLY so the IPC response goes back
     // to the renderer immediately, allowing the UI to switch to overlay
     // without waiting for SCK/audio initialization (which takes 5-7 seconds).
-    // setTimeout(100) ensures setWindowMode IPC is processed first.
+    // setTimeout(0) ensures setWindowMode IPC is processed first.
     setTimeout(async () => {
+      // BUG-02 fix: a fast start→stop sequence can call endMeeting() before
+      // this callback fires, leaving isMeetingActive=false. If that happened,
+      // do NOT boot the audio pipeline — it would run forever with no stop signal.
+      if (!this.isMeetingActive) {
+        console.warn('[Main] Meeting was cancelled before audio pipeline could start — aborting init.');
+        return;
+      }
       try {
         // Check for audio configuration preference
         if (metadata?.audio) {
@@ -1191,64 +1201,81 @@ export class AppState {
     this.isMeetingActive = false; // Block new data immediately
     this.broadcastMeetingState();
 
-    // 3. Stop System Audio
+    // Stop audio captures synchronously — these are fire-and-forget internally
     this.systemAudioCapture?.stop();
     this.googleSTT?.stop();
-
-    // 4. Stop Microphone
     this.microphoneCapture?.stop();
     this.googleSTT_User?.stop();
 
-    // 4b. Stop JIT RAG live indexing (flush remaining segments)
-    if (this.ragManager) {
-      await this.ragManager.stopLiveIndexing();
-    }
+    // Save session state and reset context — MeetingPersistence.stopMeeting() is
+    // already fire-and-forget internally (processAndSaveMeeting runs in background).
+    // Capture the meetingId NOW so the background IIFE uses a deterministic ID
+    // rather than getRecentMeetings(1) which could return a different meeting if the
+    // user starts a new session before background processing finishes.
+    const meetingId = await this.intelligenceManager.stopMeeting();
 
-    // 4. Reset Intelligence Context & Save
-    await this.intelligenceManager.stopMeeting();
-
-    // 5. Revert to Default Model (One-Way Sync Revert)
-    // This ensures next meeting starts with default, not the temporary one used in this session
+    // Revert to Default Model — synchronous, no blocking I/O
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
       const cm = CredentialsManager.getInstance();
       const defaultModel = cm.getDefaultModel();
-      
-      // Re-fetch custom providers to ensure context correctness
-      const curlProviders = cm.getCurlProviders();
-      const legacyProviders = cm.getCustomProviders();
-      const all = [...(curlProviders || []), ...(legacyProviders || [])];
-
+      const all = [...(cm.getCurlProviders() || []), ...(cm.getCustomProviders() || [])];
       console.log(`[Main] Reverting model to default: ${defaultModel}`);
       this.processingHelper.getLLMHelper().setModel(defaultModel, all);
-
-      // Broadcast revert to UI
       BrowserWindow.getAllWindows().forEach(win => {
         if (!win.isDestroyed()) win.webContents.send('model-changed', defaultModel);
       });
-
     } catch (e) {
-      console.error("[Main] Failed to revert model:", e);
+      console.error('[Main] Failed to revert model:', e);
     }
 
-    // 6. Process meeting for RAG (embeddings)
-    await this.processCompletedMeetingForRAG();
-
-    // 7. Clean up JIT RAG provisional chunks (post-meeting RAG replaces them)
-    if (this.ragManager) {
-      this.ragManager.deleteMeetingData('live-meeting-current');
+    // ─── Background post-processing ──────────────────────────────────────────
+    // These are the previously blocking operations that caused the stop-button
+    // delay. They are pure background tasks with no UI dependency:
+    //   • stopLiveIndexing flushes the JIT RAG live stream
+    //   • processCompletedMeetingForRAG embeds the full meeting into the vector store
+    //   • deleteMeetingData cleans up provisional JIT chunks
+    // Chain them sequentially in the background so ordering is preserved,
+    // but the IPC call returns immediately and the UI transitions without delay.
+    const ragManager = this.ragManager;
+    if (meetingId) {
+      (async () => {
+        try {
+          if (ragManager) {
+            await ragManager.stopLiveIndexing();
+            console.log('[Main] Live RAG indexing stopped.');
+          }
+          await this.processCompletedMeetingForRAG(meetingId);
+          // Guard: only delete live-meeting-current provisional chunks if no new
+          // meeting has started while we were processing. If a new meeting IS active,
+          // 'live-meeting-current' now belongs to that session — leave it alone.
+          if (ragManager && !this.isMeetingActive) {
+            ragManager.deleteMeetingData('live-meeting-current');
+            console.log('[Main] JIT RAG provisional chunks cleaned up.');
+          } else if (this.isMeetingActive) {
+            console.log('[Main] New meeting started during cleanup — skipping live-meeting-current deletion.');
+          }
+        } catch (err) {
+          console.error('[Main] Background post-meeting RAG processing failed:', err);
+        }
+      })();
+    } else {
+      // Meeting was too short — still flush the live indexer and clean up
+      if (ragManager) {
+        ragManager.stopLiveIndexing().catch(() => {});
+        if (!this.isMeetingActive) ragManager.deleteMeetingData('live-meeting-current');
+      }
     }
+    // ─────────────────────────────────────────────────────────────────────────
   }
 
-  private async processCompletedMeetingForRAG(): Promise<void> {
+  private async processCompletedMeetingForRAG(meetingId: string): Promise<void> {
     if (!this.ragManager) return;
 
     try {
-      // Get the most recent meeting from database
-      const meetings = DatabaseManager.getInstance().getRecentMeetings(1);
-      if (meetings.length === 0) return;
-
-      const meeting = DatabaseManager.getInstance().getMeetingDetails(meetings[0].id);
+      // Use the explicit meetingId passed from endMeeting() — deterministic, never
+      // picks up a concurrently started meeting the way getRecentMeetings(1) could.
+      const meeting = DatabaseManager.getInstance().getMeetingDetails(meetingId);
       if (!meeting || !meeting.transcript || meeting.transcript.length === 0) return;
 
       // Convert transcript to RAG format

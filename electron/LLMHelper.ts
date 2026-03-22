@@ -532,33 +532,71 @@ export class LLMHelper {
   }
 
   public async generateSolution(problemInfo: any) {
+    const prompt = `Given this problem or situation:\n${JSON.stringify(problemInfo, null, 2)}\n\nPlease provide your response in the following JSON format:\n{
+  "solution": {
+    "code": "The code or main answer here.",
+    "problem_statement": "Restate the problem or situation.",
+    "context": "Relevant background/context.",
+    "suggested_responses": ["First possible answer or action", "Second possible answer or action", "..."],
+    "reasoning": "Explanation of why these suggestions are appropriate."
+  }
+}\nImportant: Return ONLY the JSON object, without any markdown formatting or code blocks.`
+
+    try {
+      const text = await this.generateWithVisionFallback(IMAGE_ANALYSIS_PROMPT, prompt)
+      const parsed = JSON.parse(this.cleanJsonResponse(text))
+      return parsed
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  /**
+   * Generate a structured 4-phase "Rolling Interview Script" from screenshot(s).
+   * Returns a typed Solution with: problem_identifier_script, brainstorm_script,
+   * code, dry_run_script, time_complexity, space_complexity.
+   */
+  public async generateRollingScript(imagePaths: string[]): Promise<{
+    problem_identifier_script: string;
+    brainstorm_script: string;
+    code: string;
+    dry_run_script: string;
+    time_complexity: string;
+    space_complexity: string;
+  }> {
     const systemPrompt = `You are an elite FAANG Senior Software Engineer taking a live technical interview.
-The user has provided a problem statement. You must generate a highly structured "Rolling Interview Script" that the candidate can read out loud to pass the interview perfectly.
+The user has provided a screenshot of a coding problem. You must generate a highly structured "Rolling Interview Script" that the candidate can read out loud to pass the interview perfectly.
 
 Output EXACTLY this JSON structure, and nothing else (no markdown fences around the whole response):
 {
   "problem_identifier_script": "1-2 conversational sentences confirming you understand the problem and its edge cases. Start with 'So just to make sure I understand...'",
-  "brainstorm_script": "3-4 conversational sentences. First, mention a naive/brute-force approach. Then, pivot to the optimal approach, mentioning data structures. End by asking the interviewer if you can proceed with the optimal approach. Keep it natural.",
-  "code": "The full, production-ready, heavily-commented optimal code solution. Include imports.",
-  "dry_run_script": "2-3 conversational sentences doing a quick dry-run of the code with a simple example input. (e.g., 'Let's trace this. If our array is [1,2], the loop starts...')",
-  "time_complexity": "O(...) with a 5-word explanation",
-  "space_complexity": "O(...) with a 5-word explanation"
+  "brainstorm_script": "3-4 conversational sentences. First, mention a naive/brute-force approach and its complexity. Then, pivot to the optimal approach, mentioning the key data structure or algorithm. End by asking the interviewer if you can proceed with the optimal approach. Keep it natural.",
+  "code": "The full, production-ready, heavily-commented optimal code solution in the language shown or Python if unclear. Include all necessary imports.",
+  "dry_run_script": "2-3 conversational sentences doing a quick dry-run of the code with a simple example input. E.g., 'Let\\'s trace this. If our array is [1,2], the loop starts...'",
+  "time_complexity": "O(...) — brief 5-word explanation",
+  "space_complexity": "O(...) — brief 5-word explanation"
 }
 
 CRITICAL RULES:
 - The scripts MUST sound like a human speaking out loud in an interview. Use "I", "we", "my first thought is".
-- The JSON must be perfectly valid. Escape quotes properly.
-`;
+- The JSON must be perfectly valid. Escape any internal quotes with backslash.
+- Do NOT wrap the JSON in markdown fences.`;
 
-    const prompt = `Here is the problem to solve:\n${JSON.stringify(problemInfo, null, 2)}\n\nGenerate the Rolling Interview Script JSON now.`
+    const userPrompt = `Please analyze the coding problem shown in the screenshot(s) and generate the Rolling Interview Script JSON.`;
 
     try {
-      const text = await this.generateWithVisionFallback(systemPrompt, prompt)
-      const cleaned = this.cleanJsonResponse(text)
-      // Extract JSON block if the model wrapped it in markdown fences
-      const jsonMatch = cleaned.match(/\{[\s\S]*\}/)
-      const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : cleaned)
-      return parsed
+      const raw = await this.generateWithVisionFallback(systemPrompt, userPrompt, imagePaths);
+      const cleaned = this.cleanJsonResponse(raw);
+
+      // Primary: direct parse
+      try {
+        return JSON.parse(cleaned);
+      } catch (_) {
+        // Fallback: extract JSON block via regex
+        const match = cleaned.match(/\{[\s\S]*\}/);
+        if (match) return JSON.parse(match[0]);
+        throw new Error('Could not extract valid JSON from LLM response');
+      }
     } catch (error) {
       throw error;
     }

@@ -1,10 +1,9 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ArrowRight, Check, Bell, Sparkles, Heart, Rocket } from 'lucide-react';
+import { ArrowRight, Bell, Rocket } from 'lucide-react';
 import mainui from "../UI_comp/mainui.png";
 
 // --- Types ---
-// ... (rest of imports and types unchanged)
 
 interface FeatureSlide {
     id: string;
@@ -109,22 +108,6 @@ export const FeatureSpotlight: React.FC = () => {
             console.log(`[FeatureSpotlight] User removed interest in: ${currentFeature.id}`);
         }
     };
-
-    // --- Styles ---
-
-    // Warmth tuning for support slide
-    const subtitleColor = isSupport ? '#C8C8CC' : '#AEAEB2'; // Warmer gray vs Cool gray
-    const buttonBg = isSupport
-        ? (isInterested ? 'rgba(255, 100, 100, 0.15)' : 'rgba(255, 240, 240, 0.08)') // Warmer tint
-        : (isInterested ? 'rgba(50, 200, 100, 0.15)' : 'rgba(255, 255, 255, 0.05)');
-
-    const buttonBorder = isSupport
-        ? (isInterested ? 'rgba(255, 150, 150, 0.3)' : 'rgba(255, 200, 200, 0.15)')
-        : (isInterested ? 'rgba(52, 211, 153, 0.3)' : 'rgba(255, 255, 255, 0.1)');
-
-    const buttonText = isSupport
-        ? (isInterested ? '#FFD1D1' : '#F2F2F7')
-        : (isInterested ? '#CDFAD1' : '#EBEBF5');
 
     return (
         <div

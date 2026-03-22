@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom';
 import { Search, Sparkles, FileText } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { useResolvedTheme } from '../hooks/useResolvedTheme';
 
 // ============================================
 // Types
@@ -93,6 +94,7 @@ const TopSearchPill: React.FC<TopSearchPillProps> = ({
     onOpenMeeting,
     onExpansionChange
 }) => {
+    const isLight = useResolvedTheme() === 'light';
     const [state, setState] = useState<PillState>('idle');
     const [query, setQuery] = useState('');
     const [selectedIndex, setSelectedIndex] = useState(-1);
@@ -270,7 +272,7 @@ const TopSearchPill: React.FC<TopSearchPillProps> = ({
                             <div
                                 className={`
                                     relative overflow-hidden
-                                    bg-[#F2F2F7]/90 dark:bg-[#161618]/90
+                                    ${isLight ? 'bg-[#F2F2F7]/90' : 'bg-[#161618]/90'}
                                     backdrop-blur-xl backdrop-saturate-150
                                     rounded-2xl
                                     shadow-sm
@@ -282,7 +284,7 @@ const TopSearchPill: React.FC<TopSearchPillProps> = ({
                                     onClick={() => state === 'idle' && open()}
                                 >
                                     <div className="absolute left-3 flex items-center pointer-events-none">
-                                        <Search size={14} className="text-text-tertiary dark:text-[#7C7C7E]" />
+                                        <Search size={14} className="text-text-tertiary" />
                                     </div>
                                     <input
                                         ref={inputRef}
@@ -294,7 +296,7 @@ const TopSearchPill: React.FC<TopSearchPillProps> = ({
                                         w-full bg-transparent
                                         pl-9 pr-4 py-1
                                         text-[13px] text-text-primary
-                                        placeholder-text-tertiary dark:placeholder-[#7C7C7E]
+                                        placeholder-text-tertiary
                                         focus:outline-none
                                         ${state === 'idle' ? 'cursor-default' : 'cursor-text'}
                                     `}

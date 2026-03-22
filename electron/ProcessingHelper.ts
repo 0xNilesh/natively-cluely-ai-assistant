@@ -151,43 +151,44 @@ export class ProcessingHelper {
 
       const allPaths = this.appState.getScreenshotHelper().getScreenshotQueue();
 
-      // NEW: Handle screenshot as plain text (like audio)
       mainWindow.webContents.send(this.appState.PROCESSING_EVENTS.INITIAL_START)
       this.appState.setView("solutions")
       this.currentProcessingAbortController = new AbortController()
       try {
-        const imageResult = await this.llmHelper.analyzeImageFiles(allPaths);
+        // Generate the structured 4-phase rolling interview script
+        const rollingScript = await this.llmHelper.generateRollingScript(allPaths);
+
         const problemInfo = {
-          problem_statement: imageResult.text,
+          problem_statement: rollingScript.problem_identifier_script,
           input_format: { description: "Generated from screenshot", parameters: [] as any[] },
-          output_format: { description: "Generated from screenshot", type: "string", subtype: "coding" },
-          complexity: { time: "N/A", space: "N/A" },
+          output_format: { description: "Generated from screenshot", type: "string", subtype: "structured" },
+          complexity: { time: rollingScript.time_complexity, space: rollingScript.space_complexity },
           test_cases: [] as any[],
-          validation_type: "coding",
+          validation_type: "structured",
           difficulty: "custom"
         };
         mainWindow.webContents.send(this.appState.PROCESSING_EVENTS.PROBLEM_EXTRACTED, problemInfo);
         this.appState.setProblemInfo(problemInfo);
-        // Store in session so Code Hint has the question even without a screenshot of the problem
-        try {
-          const intelligenceManager = this.appState.getIntelligenceManager();
-          if (problemInfo.problem_statement?.trim()) {
-            intelligenceManager.setCodingQuestion(problemInfo.problem_statement.trim(), 'screenshot');
-          }
-        } catch (e) {
-          // Non-fatal — code hint will fall back to transcript context
-        }
 
-        // Generate the Rolling Interview Script and send to renderer
-        const solution = await this.llmHelper.generateSolution(problemInfo);
-        mainWindow.webContents.send(this.appState.PROCESSING_EVENTS.SOLUTION_SUCCESS, { solution });
+        // Send the full structured solution so Solutions.tsx renders the 4 phases
+        mainWindow.webContents.send(this.appState.PROCESSING_EVENTS.SOLUTION_SUCCESS, {
+          solution: {
+            problem_identifier_script: rollingScript.problem_identifier_script,
+            brainstorm_script: rollingScript.brainstorm_script,
+            code: rollingScript.code,
+            dry_run_script: rollingScript.dry_run_script,
+            time_complexity: rollingScript.time_complexity,
+            space_complexity: rollingScript.space_complexity,
+          }
+        });
       } catch (error: any) {
-        // console.error("Image processing error:", error)
+        console.error("[ProcessingHelper] Rolling script generation failed:", error);
         mainWindow.webContents.send(this.appState.PROCESSING_EVENTS.INITIAL_SOLUTION_ERROR, error.message)
       } finally {
         this.currentProcessingAbortController = null
       }
       return;
+
     } else {
       // Debug mode
       const extraScreenshotQueue = this.appState.getScreenshotHelper().getExtraScreenshotQueue()

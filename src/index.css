@@ -178,6 +178,10 @@
   filter: brightness(0) !important;
 }
 
+[data-theme='dark'] .force-black-icon {
+  filter: brightness(0) invert(1) !important;
+}
+
 /* Light mode: liquid-glass — clean frosted white panel */
 [data-theme='light'] .liquid-glass {
   background: rgba(255, 255, 255, 0.80);

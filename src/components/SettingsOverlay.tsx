@@ -1740,7 +1740,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
 
                                             {/* Data Metrics & Extracted Skills */}
                                             <div className="p-5 pt-0 mt-auto">
-                                                <div className="flex items-center justify-between bg-bg-item-surface dark:bg-[#1A1A1A] border border-border-subtle py-4 px-6 rounded-2xl shadow-sm">
+                                                <div className="flex items-center justify-between bg-bg-item-surface border border-border-subtle py-4 px-6 rounded-2xl shadow-sm">
                                                     <div className="flex flex-col items-center justify-center flex-1">
                                                         <span className="text-[20px] font-bold text-text-primary tracking-tight leading-none mb-1">{profileData?.experienceCount || 0}</span>
                                                         <div className="flex items-center gap-1.5">

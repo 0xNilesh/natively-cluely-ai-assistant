@@ -17,7 +17,7 @@ if (window.electronAPI?.getThemeMode) {
     localStorage.setItem(THEME_CACHE_KEY, resolved);
   });
 
-  window.electronAPI.onThemeChanged(({ resolved }) => {
+  window.electronAPI?.onThemeChanged?.(({ resolved }) => {
     document.documentElement.setAttribute('data-theme', resolved);
     localStorage.setItem(THEME_CACHE_KEY, resolved);
   });

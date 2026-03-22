@@ -2,7 +2,6 @@
 import { BrowserWindow, screen, app } from "electron"
 import { AppState } from "./main"
 import path from "node:path"
-import { KeybindManager } from "./services/KeybindManager"
 
 const isEnvDev = process.env.NODE_ENV === "development"
 const isPackaged = app.isPackaged;
@@ -20,8 +19,6 @@ const startUrl = isDev
 export class WindowHelper {
   private launcherWindow: BrowserWindow | null = null
   private overlayWindow: BrowserWindow | null = null
-  private lastOverlayBounds: Electron.Rectangle | null = null
-  private lastOverlayDisplayId: number | null = null
   private isWindowVisible: boolean = false
   // Position/Size tracking for Launcher
   private launcherPosition: { x: number; y: number } | null = null
@@ -29,11 +26,9 @@ export class WindowHelper {
   // Track current window mode (persists even when overlay is hidden via Cmd+B)
   private currentWindowMode: 'launcher' | 'overlay' = 'launcher'
 
-
   private appState: AppState
   private contentProtection: boolean = false
   private opacityTimeout: NodeJS.Timeout | null = null
-
 
   // Initialize with explicit number type and 0 value
   private screenWidth: number = 0
@@ -60,66 +55,6 @@ export class WindowHelper {
         win.setContentProtection(enable);
       }
     });
-  }
-
-  private clampBoundsToWorkArea(
-    bounds: Electron.Rectangle,
-    workArea: Electron.Rectangle,
-    minHeight: number
-  ): Electron.Rectangle {
-    const maxAllowedWidth = Math.floor(workArea.width * 0.9)
-    const maxAllowedHeight = Math.floor(workArea.height * 0.9)
-    const width = Math.min(Math.max(bounds.width, 300), maxAllowedWidth)
-    const height = Math.min(Math.max(bounds.height, minHeight), maxAllowedHeight)
-    const maxX = workArea.x + workArea.width - width
-    const maxY = workArea.y + workArea.height - height
-    const x = Math.min(Math.max(bounds.x, workArea.x), maxX)
-    const y = Math.min(Math.max(bounds.y, workArea.y), maxY)
-
-    return { x, y, width, height }
-  }
-
-  private rememberOverlayBounds(bounds?: Electron.Rectangle): void {
-    const targetBounds = bounds ?? this.overlayWindow?.getBounds()
-    if (!targetBounds || targetBounds.width <= 0 || targetBounds.height <= 0) return
-
-    this.lastOverlayBounds = { ...targetBounds }
-    this.lastOverlayDisplayId = screen.getDisplayMatching(targetBounds).id
-  }
-
-  private getDefaultOverlayBounds(): Electron.Rectangle {
-    const primaryDisplay = screen.getPrimaryDisplay()
-    const workArea = primaryDisplay.workArea
-    const currentBounds = this.overlayWindow?.getBounds()
-    const width = Math.max(currentBounds?.width ?? 600, 300)
-    const height = Math.max(currentBounds?.height ?? 216, 216)
-
-    return {
-      x: Math.floor(workArea.x + (workArea.width - width) / 2),
-      y: Math.floor(workArea.y + (workArea.height - height) / 2),
-      width,
-      height
-    }
-  }
-
-  private getOverlayBoundsForShow(): Electron.Rectangle {
-    const desiredBounds = this.lastOverlayBounds
-      ? {
-          ...this.lastOverlayBounds,
-          width: Math.max(this.lastOverlayBounds.width, 300),
-          height: Math.max(this.lastOverlayBounds.height, 216)
-        }
-      : this.getDefaultOverlayBounds()
-    const workArea = screen.getDisplayMatching(desiredBounds).workArea
-    return this.clampBoundsToWorkArea(desiredBounds, workArea, 216)
-  }
-
-  public getLastOverlayBounds(): Electron.Rectangle | null {
-    return this.lastOverlayBounds ? { ...this.lastOverlayBounds } : null
-  }
-
-  public getLastOverlayDisplayId(): number | null {
-    return this.lastOverlayDisplayId
   }
 
   public setWindowDimensions(width: number, height: number): void {
@@ -152,25 +87,22 @@ export class WindowHelper {
   // Dedicated method for overlay window resizing - decoupled from launcher
   public setOverlayDimensions(width: number, height: number): void {
     if (!this.overlayWindow || this.overlayWindow.isDestroyed()) return
+    console.log('[WindowHelper] setOverlayDimensions:', width, height);
 
-    const currentBounds = this.overlayWindow.getBounds()
-    const workArea = screen.getDisplayMatching(currentBounds).workArea
+    const [currentX, currentY] = this.overlayWindow.getPosition()
+    const primaryDisplay = screen.getPrimaryDisplay()
+    const workArea = primaryDisplay.workAreaSize
+    const maxAllowedWidth = Math.floor(workArea.width * 0.9)
+    const maxAllowedHeight = Math.floor(workArea.height * 0.9)
+    const newWidth = Math.min(Math.max(width, 300), maxAllowedWidth) // min 300, max 90%
+    const newHeight = Math.min(Math.max(height, 1), maxAllowedHeight) // min 1, max 90%
+    const maxX = workArea.width - newWidth
+    const maxY = workArea.height - newHeight
+    const newX = Math.min(Math.max(currentX, 0), maxX)
+    const newY = Math.min(Math.max(currentY, 0), maxY)
 
-    // Keep the visual centre of the window fixed as width changes so the
-    // OS-level window tracks the CSS spring expansion symmetrically.
-    const widthDelta = width - currentBounds.width
-    const adjustedX = widthDelta !== 0
-      ? currentBounds.x - Math.floor(widthDelta / 2)
-      : currentBounds.x
-
-    const nextBounds = this.clampBoundsToWorkArea(
-      { x: adjustedX, y: currentBounds.y, width, height },
-      workArea,
-      1
-    )
-
-    this.overlayWindow.setBounds(nextBounds)
-    this.rememberOverlayBounds(nextBounds)
+    this.overlayWindow.setContentSize(newWidth, newHeight)
+    this.overlayWindow.setPosition(newX, newY)
   }
 
   public createWindow(): void {
@@ -366,14 +298,6 @@ export class WindowHelper {
     // Listen for overlay close (e.g. Cmd+W). Never truly destroy it — either
     // hide it (during a meeting) or switch back to launcher (between meetings).
     if (this.overlayWindow) {
-      this.overlayWindow.on("move", () => {
-        this.rememberOverlayBounds()
-      })
-
-      this.overlayWindow.on("resize", () => {
-        this.rememberOverlayBounds()
-      })
-
       this.overlayWindow.on('close', (e) => {
         if (this.overlayWindow?.isVisible()) {
           e.preventDefault();
@@ -401,6 +325,17 @@ export class WindowHelper {
   public getLauncherWindow(): BrowserWindow | null { return this.launcherWindow }
   public getOverlayWindow(): BrowserWindow | null { return this.overlayWindow }
   public getCurrentWindowMode(): 'launcher' | 'overlay' { return this.currentWindowMode }
+
+  public getLastOverlayBounds(): Electron.Rectangle | null {
+    if (!this.overlayWindow || this.overlayWindow.isDestroyed()) return null;
+    return this.overlayWindow.getBounds();
+  }
+
+  public getLastOverlayDisplayId(): number | null {
+    if (!this.overlayWindow || this.overlayWindow.isDestroyed()) return null;
+    const bounds = this.overlayWindow.getBounds();
+    return screen.getDisplayMatching(bounds).id;
+  }
 
   public isVisible(): boolean {
     return this.isWindowVisible
@@ -463,16 +398,22 @@ export class WindowHelper {
   public switchToOverlay(inactive?: boolean): void {
     console.log(`[WindowHelper] Switching to OVERLAY (inactive: ${!!inactive})`);
     this.currentWindowMode = 'overlay';
-    KeybindManager.getInstance().setMode('overlay');
 
     // Tell the overlay renderer to expand to full size (e.g. after being minimised)
     this.overlayWindow?.webContents.send('ensure-expanded');
 
     // Show Overlay FIRST
     if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
-      const nextBounds = this.getOverlayBoundsForShow()
-      this.overlayWindow.setBounds(nextBounds);
-      this.rememberOverlayBounds(nextBounds)
+      // Reset overlay position to center or last known? 
+      // For now, center it nicely
+      const primaryDisplay = screen.getPrimaryDisplay()
+      const workArea = primaryDisplay.workArea;
+      const currentBounds = this.overlayWindow.getBounds();
+      const targetHeight = Math.max(currentBounds.height, 216);
+      const x = Math.floor(workArea.x + (workArea.width - 600) / 2)
+      const y = Math.floor(workArea.y + (workArea.height - 600) / 2)
+
+      this.overlayWindow.setBounds({ x, y, width: 600, height: targetHeight });
 
       if (process.platform === 'win32' && this.contentProtection) {
         // Opacity Shield: Show at 0 opacity first to prevent frame leak
@@ -510,7 +451,6 @@ export class WindowHelper {
   public switchToLauncher(inactive?: boolean): void {
     console.log(`[WindowHelper] Switching to LAUNCHER (inactive: ${!!inactive})`);
     this.currentWindowMode = 'launcher';
-    KeybindManager.getInstance().setMode('launcher');
 
     // Show Launcher FIRST
     if (this.launcherWindow && !this.launcherWindow.isDestroyed()) {

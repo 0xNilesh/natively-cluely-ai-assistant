@@ -479,12 +479,9 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             }
 
-            const context = this.session.getFormattedContext(120);
-            if (!context) {
-                console.warn('[IntelligenceEngine] No context available for clarify');
-                this.setMode('idle');
-                return null;
-            }
+            const rawContext = this.session.getFormattedContext(120);
+            // If no transcript yet, use a generic prompt — the LLM will ask a scoping question
+            const context = rawContext || '[No transcript available yet. The candidate just joined the interview. Generate an opening clarifying question to understand the scope and constraints of the upcoming problem.]';
 
             const generationId = ++this.currentGenerationId;
             let fullClarification = "";
