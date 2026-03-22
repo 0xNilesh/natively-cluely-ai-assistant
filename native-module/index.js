@@ -310,12 +310,6 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-console.log(
-  '[natively-audio] Loaded native addon source:',
-  localFileExisted ? 'local bundled binary' : 'platform package',
-  `(platform=${platform}, arch=${arch})`
-)
-
 const { getHardwareId, verifyGumroadKey, SystemAudioCapture, MicrophoneCapture, getInputDevices, getOutputDevices } = nativeBinding
 
 module.exports.getHardwareId = getHardwareId
