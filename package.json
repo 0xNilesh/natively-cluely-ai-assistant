@@ -26,6 +26,7 @@
     "files": [
       "dist",
       "dist-electron",
+      "native-module",
       "package.json",
       "node_modules",
       "!**/native-module/target",
@@ -221,7 +222,6 @@
     "ws": "^8.19.0"
   },
   "optionalDependencies": {
-    "natively-audio": "file:./native-module",
     "sqlite-vec-darwin-arm64": "^0.1.7-alpha.2",
     "sqlite-vec-darwin-x64": "^0.1.7-alpha.2"
   }
