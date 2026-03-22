@@ -1311,10 +1311,10 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                             <h3 className="text-lg font-bold text-text-primary mb-1">General settings</h3>
                                             <p className="text-xs text-text-secondary mb-2">Customize how Natively works for you</p>
 
-                                            <div className={`rounded-xl border overflow-hidden ${isLight ? 'bg-bg-card border-border-subtle divide-y divide-border-subtle' : 'bg-transparent border-transparent divide-y divide-border-subtle/20'}`}>
+                                            <div className={`rounded-xl border ${isLight ? 'bg-bg-card border-border-subtle divide-y divide-border-subtle' : 'bg-transparent border-transparent divide-y divide-border-subtle/20'}`}>
                                             <div className="space-y-0">
                                                 {/* Open at Login */}
-                                                <div className="flex items-center justify-between px-4 py-4">
+                                                <div className="flex items-center justify-between px-4 py-3">
                                                     <div className="flex items-center gap-4">
                                                         <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle flex items-center justify-center text-text-tertiary">
                                                             <Power size={20} />
@@ -1337,7 +1337,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                 </div>
 
                                                 {/* Debug Logging */}
-                                                <div className="flex items-center justify-between px-4 py-4">
+                                                <div className="flex items-center justify-between px-4 py-3">
                                                     <div className="flex items-center gap-4">
                                                         <div className={`w-10 h-10 bg-bg-item-surface rounded-lg border flex items-center justify-center transition-colors ${verboseLogging ? 'border-amber-500/40 text-amber-400' : 'border-border-subtle text-text-tertiary'}`}>
                                                             <Terminal size={20} />
@@ -1360,7 +1360,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                 </div>
 
                                                 {/* Interviewer Transcript */}
-                                                <div className="flex items-center justify-between px-4 py-4">
+                                                <div className="flex items-center justify-between px-4 py-3">
                                                     <div className="flex items-center gap-4">
                                                         <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle flex items-center justify-center text-text-tertiary">
                                                             <MessageSquare size={20} />
@@ -1385,7 +1385,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
 
 
                                                 {/* Theme */}
-                                                <div className="flex items-center justify-between px-4 py-4">
+                                                <div className="flex items-center justify-between px-4 py-3">
                                                     <div className="flex items-center gap-4">
                                                         <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle flex items-center justify-center text-text-tertiary">
                                                             <Palette size={20} />
@@ -1438,7 +1438,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                 </div>
 
                                                 {/* AI Response Language */}
-                                                <div className="flex items-center justify-between px-4 py-4">
+                                                <div className="flex items-center justify-between px-4 py-3">
                                                     <div className="flex items-center gap-4">
                                                         <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle flex items-center justify-center text-text-tertiary">
                                                             <Globe size={20} />
@@ -1481,7 +1481,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                 </div>
 
                                                 {/* Version */}
-                                                <div className="flex items-start justify-between gap-4 px-4 py-4">
+                                                <div className="flex items-start justify-between gap-4 px-4 py-3">
                                                     <div className="flex items-start gap-4">
                                                         <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle flex items-center justify-center text-text-tertiary shrink-0">
                                                             <BadgeCheck size={20} />
@@ -1740,7 +1740,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
 
                                             {/* Data Metrics & Extracted Skills */}
                                             <div className="p-5 pt-0 mt-auto">
-                                                <div className="flex items-center justify-between bg-bg-item-surface border border-border-subtle py-4 px-6 rounded-2xl shadow-sm">
+                                                <div className="flex items-center justify-between bg-bg-input border border-border-subtle py-4 px-6 rounded-2xl shadow-sm">
                                                     <div className="flex flex-col items-center justify-center flex-1">
                                                         <span className="text-[20px] font-bold text-text-primary tracking-tight leading-none mb-1">{profileData?.experienceCount || 0}</span>
                                                         <div className="flex items-center gap-1.5">

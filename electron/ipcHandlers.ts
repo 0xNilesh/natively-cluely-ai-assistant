@@ -144,6 +144,12 @@ export function initializeIpcHandlers(appState: AppState): void {
       ) {
         // NativelyInterface logic - Resize ONLY the overlay window using dedicated method
         appState.getWindowHelper().setOverlayDimensions(width, height)
+      } else if (
+        launcherWin && !launcherWin.isDestroyed() && launcherWin.webContents.id === senderWebContents.id
+      ) {
+        // EC-05 fix: launcher window resize events were previously silently ignored.
+        // Log them so that if the launcher ever sends this IPC it's visible in logs.
+        console.log(`[IPC] update-content-dimensions: launcher window resize request ${width}x${height} (ignored — launcher has fixed dimensions)`);
       }
     }
   )
@@ -182,7 +188,8 @@ export function initializeIpcHandlers(appState: AppState): void {
       const preview = await appState.getImagePreview(screenshotPath)
       return { path: screenshotPath, preview }
     } catch (error) {
-      if (error.message === "Selection cancelled") {
+      // EC-04 fix: cast unknown error to Error before accessing .message
+      if ((error as Error).message === "Selection cancelled") {
         return { cancelled: true }
       }
       throw error
@@ -628,6 +635,10 @@ export function initializeIpcHandlers(appState: AppState): void {
       const llmHelper = appState.processingHelper.getLLMHelper();
       llmHelper.setApiKey(apiKey);
 
+      // CQ-06 fix: cancel any in-flight LLM stream before swapping LLM clients.
+      // Use resetEngine() (NOT reset()) so session transcript is preserved mid-meeting.
+      // initializeLLMs() now also calls engine.reset() internally for double-safety.
+      appState.getIntelligenceManager().resetEngine();
       // Re-init IntelligenceManager
       appState.getIntelligenceManager().initializeLLMs();
 
@@ -647,6 +658,8 @@ export function initializeIpcHandlers(appState: AppState): void {
       const llmHelper = appState.processingHelper.getLLMHelper();
       llmHelper.setGroqApiKey(apiKey);
 
+      // CQ-06 fix: cancel in-flight stream before re-init (engine only, not session)
+      appState.getIntelligenceManager().resetEngine();
       // Re-init IntelligenceManager
       appState.getIntelligenceManager().initializeLLMs();
 
@@ -666,6 +679,8 @@ export function initializeIpcHandlers(appState: AppState): void {
       const llmHelper = appState.processingHelper.getLLMHelper();
       llmHelper.setOpenaiApiKey(apiKey);
 
+      // CQ-06 fix: cancel in-flight stream before re-init (engine only, not session)
+      appState.getIntelligenceManager().resetEngine();
       // Re-init IntelligenceManager
       appState.getIntelligenceManager().initializeLLMs();
 
@@ -685,6 +700,8 @@ export function initializeIpcHandlers(appState: AppState): void {
       const llmHelper = appState.processingHelper.getLLMHelper();
       llmHelper.setClaudeApiKey(apiKey);
 
+      // CQ-06 fix: cancel in-flight stream before re-init (engine only, not session)
+      appState.getIntelligenceManager().resetEngine();
       // Re-init IntelligenceManager
       appState.getIntelligenceManager().initializeLLMs();
 
@@ -1546,8 +1563,20 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle("generate-code-hint", async (_, imagePaths?: string[], problemStatement?: string) => {
     try {
+      // If no explicit images were passed from the frontend, fall back to the
+      // screenshot queue so the AI can always "see" the user's screen.
+      const resolvedImagePaths: string[] =
+        imagePaths && imagePaths.length > 0
+          ? imagePaths
+          : appState.getScreenshotQueue();
+
+      console.log(`[IPC] generate-code-hint: using ${resolvedImagePaths.length} image(s) (${imagePaths?.length ? 'explicit' : 'queue fallback'})`);
+
       const intelligenceManager = appState.getIntelligenceManager();
-      const hint = await intelligenceManager.runCodeHint(imagePaths, problemStatement);
+      const hint = await intelligenceManager.runCodeHint(
+        resolvedImagePaths.length > 0 ? resolvedImagePaths : undefined,
+        problemStatement
+      );
       return { hint };
     } catch (error: any) {
       throw error;
@@ -1556,8 +1585,20 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle("generate-brainstorm", async (_, imagePaths?: string[], problemStatement?: string) => {
     try {
+      // If no explicit images were passed from the frontend, fall back to the
+      // screenshot queue so the AI can always "see" the user's screen.
+      const resolvedImagePaths: string[] =
+        imagePaths && imagePaths.length > 0
+          ? imagePaths
+          : appState.getScreenshotQueue();
+
+      console.log(`[IPC] generate-brainstorm: using ${resolvedImagePaths.length} image(s) (${imagePaths?.length ? 'explicit' : 'queue fallback'})`);
+
       const intelligenceManager = appState.getIntelligenceManager();
-      const script = await intelligenceManager.runBrainstorm(imagePaths, problemStatement);
+      const script = await intelligenceManager.runBrainstorm(
+        resolvedImagePaths.length > 0 ? resolvedImagePaths : undefined,
+        problemStatement
+      );
       return { script };
     } catch (error: any) {
       throw error;

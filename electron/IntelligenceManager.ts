@@ -68,10 +68,13 @@ export class IntelligenceManager extends EventEmitter {
     // ============================================
 
     initializeLLMs(): void {
+        // Cancel any in-flight streams before swapping LLM clients
+        this.engine.reset();
         this.engine.initializeLLMs();
     }
 
     reinitializeLLMs(): void {
+        this.engine.reset();
         this.engine.reinitializeLLMs();
     }
 
@@ -209,6 +212,16 @@ export class IntelligenceManager extends EventEmitter {
     // ============================================
     // Reset (resets all sub-modules)
     // ============================================
+
+    /**
+     * resetEngine: Cancel in-flight LLM streams WITHOUT touching session state.
+     * Use this when swapping API keys or providers mid-session so the transcript
+     * is not wiped. (full reset() also clears the session — only use that at
+     * end of meeting or explicit session teardown.)
+     */
+    resetEngine(): void {
+        this.engine.reset();
+    }
 
     reset(): void {
         this.session.reset();

@@ -295,15 +295,28 @@ export class IntelligenceEngine extends EventEmitter {
 
             const generationId = ++this.currentGenerationId;
             let fullAnswer = "";
+            // RC-03 fix: hold a reference to the generator so we can call .return()
+            // to properly terminate the network request when a new generation starts.
             const stream = this.whatToAnswerLLM.generateStream(preparedTranscript, temporalContext, intentResult, imagePaths);
+            let streamAborted = false;
 
             for await (const token of stream) {
                 if (this.currentGenerationId !== generationId) {
                     console.log('[IntelligenceEngine] _what_to_say stream aborted by new generation');
+                    // RC-03 fix: .return() signals the generator to clean up and stops
+                    // the underlying network request (SDK generators honour this).
+                    await stream.return(undefined);
+                    streamAborted = true;
                     break;
                 }
                 this.emit('suggested_answer_token', token, question || 'inferred', confidence);
                 fullAnswer += token;
+            }
+
+            if (streamAborted) {
+                // Aborted mid-stream — don't update session or emit final event
+                this.setMode('idle');
+                return null;
             }
 
             if (!fullAnswer || fullAnswer.trim().length < 5) {
@@ -319,6 +332,8 @@ export class IntelligenceEngine extends EventEmitter {
                 answer: fullAnswer
             });
 
+            // CQ-05 fix: only emit the "complete" event after a non-aborted stream.
+            // The renderer already has all tokens — this is for metadata only (e.g. copying, history).
             this.emit('suggested_answer', fullAnswer, question || 'What to Answer', confidence);
 
             this.setMode('idle');
@@ -362,17 +377,20 @@ export class IntelligenceEngine extends EventEmitter {
                 refinementRequest,
                 context
             );
+            let streamAborted = false;
 
             for await (const token of stream) {
                 if (this.currentGenerationId !== generationId) {
                     console.log('[IntelligenceEngine] _follow_up stream aborted by new generation');
+                    await stream.return(undefined);
+                    streamAborted = true;
                     break;
                 }
                 this.emit('refined_answer_token', token, intent);
                 fullRefined += token;
             }
 
-            if (fullRefined) {
+            if (!streamAborted && fullRefined) {
                 this.session.addAssistantMessage(fullRefined);
                 this.emit('refined_answer', fullRefined, intent);
 
@@ -431,10 +449,13 @@ export class IntelligenceEngine extends EventEmitter {
             const generationId = ++this.currentGenerationId;
             let fullSummary = "";
             const stream = this.recapLLM.generateStream(context);
+            let streamAborted = false;
 
             for await (const token of stream) {
                 if (this.currentGenerationId !== generationId) {
                     console.log('[IntelligenceEngine] _recap stream aborted by new generation');
+                    await stream.return(undefined);
+                    streamAborted = true;
                     break;
                 }
                 this.emit('recap_token', token);
@@ -442,7 +463,7 @@ export class IntelligenceEngine extends EventEmitter {
             }
 
             // Only emit final if not aborted
-            if (fullSummary && this.currentGenerationId === generationId) {
+            if (!streamAborted && fullSummary && this.currentGenerationId === generationId) {
                 this.emit('recap', fullSummary);
 
                 this.session.pushUsage({

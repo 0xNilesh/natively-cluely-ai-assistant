@@ -1,10 +1,16 @@
 import { EventEmitter } from 'events';
-import { loadNativeModule } from './nativeModuleLoader';
+import { app } from 'electron';
+import path from 'path';
 
-// RustMicCapture is the native Rust class (napi-rs) that captures microphone input.
-// Uses eager init — the monitor is created in the constructor and kept alive across
-// stop/restart cycles to avoid re-initialization latency.
-const NativeModule: any = loadNativeModule();
+// Load the native module
+let NativeModule: any = null;
+
+try {
+    NativeModule = require('natively-audio');
+} catch (e) {
+    console.error('[MicrophoneCapture] Failed to load native module:', e);
+}
+
 const { MicrophoneCapture: RustMicCapture } = NativeModule || {};
 
 export class MicrophoneCapture extends EventEmitter {

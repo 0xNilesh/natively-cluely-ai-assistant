@@ -530,6 +530,10 @@ export class SessionTracker {
                     if (epochSummary && epochSummary.trim().length > 0) {
                         this.transcriptEpochSummaries.push(epochSummary.trim());
                         console.log(`[SessionTracker] Epoch summary created (${this.transcriptEpochSummaries.length} total)`);
+                    } else {
+                        // Empty LLM response — store a basic marker so context is not lost
+                        const marker = `[Earlier discussion: ${oldEntries.length} segments — ${oldEntries.slice(0, 3).map(s => s.text.substring(0, 40)).join('; ')}...]`;
+                        this.transcriptEpochSummaries.push(marker);
                     }
                 } catch (e) {
                     // If summarization fails, store a simple marker
@@ -537,6 +541,12 @@ export class SessionTracker {
                     this.transcriptEpochSummaries.push(fallback);
                     console.warn('[SessionTracker] Epoch summarization failed, using fallback marker');
                 }
+            } else {
+                // BUG-03 fix: recapLLM not yet available — always push a plain marker so early
+                // context is not silently discarded with no record in transcriptEpochSummaries.
+                const marker = `[Earlier discussion (no LLM): ${oldEntries.length} segments — ${oldEntries.slice(0, 3).map(s => s.text.substring(0, 40)).join('; ')}...]`;
+                this.transcriptEpochSummaries.push(marker);
+                console.warn('[SessionTracker] recapLLM not available — storing plain epoch marker');
             }
 
             // Cap epoch summaries to prevent LLM context window overflow

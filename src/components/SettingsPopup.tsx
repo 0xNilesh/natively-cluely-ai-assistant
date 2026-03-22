@@ -190,7 +190,8 @@ const SettingsPopup = () => {
 
     return (
         <div className="w-fit h-fit bg-transparent flex flex-col">
-            <div ref={contentRef} className={`w-[200px] backdrop-blur-md border rounded-[16px] overflow-hidden shadow-2xl px-2 pt-2 pb-2 flex flex-col animate-scale-in origin-top-left justify-between ${popupPanelClass}`}>
+            <div ref={contentRef} className={`w-[200px] max-h-[280px] backdrop-blur-md border rounded-[16px] overflow-hidden shadow-2xl p-2 flex flex-col animate-scale-in origin-top-left ${popupPanelClass}`}>
+                <div className="flex-1 overflow-y-auto scrollbar-hide flex flex-col min-h-0">
 
                 {/* Undetectability */}
                 <div className={`flex items-center justify-between px-3 py-2 rounded-lg transition-colors duration-200 group cursor-default ${itemHoverClass}`}>
@@ -377,13 +378,21 @@ const SettingsPopup = () => {
                     </div>
                 </div>
 
+                </div>
             </div>
         </div>
     );
 };
 
+interface CustomGhostProps {
+    className?: string;
+    fill?: string;
+    stroke?: string;
+    eyeColor?: string;
+}
+
 // Custom Ghost with dynamic eye color support
-const CustomGhost = ({ className, fill, stroke, eyeColor }: { className?: string, fill?: string, stroke?: string, eyeColor?: string }) => (
+const CustomGhost = ({ className, fill, stroke, eyeColor }: CustomGhostProps) => (
     <svg
         xmlns="http://www.w3.org/2000/svg"
         viewBox="0 0 24 24"

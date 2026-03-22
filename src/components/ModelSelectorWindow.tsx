@@ -31,24 +31,19 @@ const ModelSelectorWindow = () => {
     // Load Data
     useEffect(() => {
         const loadModels = async () => {
-            // Only show loader if we don't have cached models
-            if (availableModels.length === 0) {
-                setIsLoading(true);
-            }
             try {
+                // If we already have models, don't show loading to avoid flicker
+                if (availableModels.length === 0) {
+                    setIsLoading(true);
+                }
+                
                 // 1. Get Stored Credentials (to know which Cloud providers are active)
                 const creds = await window.electronAPI?.getStoredCredentials?.();
 
-                // 2. Get Custom Providers
+                // 2. Custom Providers
                 const customProviders = await window.electronAPI?.getCustomProviders?.() || [];
 
-                // 3. Get Ollama Models (if any available/checked previously)
-                // We won't trigger a fresh check here to avoid startup delay, just check if we have any cached?
-                // Actually, let's just ask for available ones. If none, user has to go to settings to refresh.
-                // Or maybe we do a quick check if they have used it before?
-                // Let's rely on what the backend might know or just skip for now if not easy.
-                // The implementation plan said "unified list of connected models".
-                // It's fast if Ollama server is running.
+                // 3. Ollama
                 let ollamaModels: string[] = [];
                 try {
                     let oModels = await window.electronAPI?.getAvailableOllamaModels?.();
@@ -118,12 +113,16 @@ const ModelSelectorWindow = () => {
         };
 
         loadModels();
+        window.addEventListener('focus', loadModels);
 
         // Listen for changes
         const unsubscribe = window.electronAPI?.onModelChanged?.((modelId: string) => {
             setCurrentModel(modelId);
         });
-        return () => unsubscribe?.();
+        return () => {
+            unsubscribe?.();
+            window.removeEventListener('focus', loadModels);
+        };
     }, []);
 
     const handleSelectFn = (modelId: string) => {

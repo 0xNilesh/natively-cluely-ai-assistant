@@ -912,10 +912,32 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
 
         // Stream Token
         cleanups.push(window.electronAPI.onGeminiStreamToken((token) => {
+            // Guard: if this token is the negotiation coaching JSON sentinel, accumulate it
+            // silently. The JSON is always emitted as a single complete `yield JSON.stringify(...)`
+            // call, so one parse attempt is sufficient. The onGeminiStreamDone handler will
+            // detect the accumulated JSON and render the proper card UI — we just prevent the
+            // raw JSON characters from ever appearing in the chat bubble.
+            try {
+                const parsed = JSON.parse(token);
+                if (parsed?.__negotiationCoaching) {
+                    // Store the raw JSON text (Done handler needs it) but don't show it.
+                    setMessages(prev => {
+                        const lastMsg = prev[prev.length - 1];
+                        if (lastMsg && lastMsg.isStreaming && lastMsg.role === 'system') {
+                            const updated = [...prev];
+                            updated[prev.length - 1] = { ...lastMsg, text: token };
+                            return updated;
+                        }
+                        return prev;
+                    });
+                    return; // Skip the normal append below
+                }
+            } catch {
+                // Not JSON — normal text token, fall through to the standard append.
+            }
+
             setMessages(prev => {
                 const lastMsg = prev[prev.length - 1];
-                // Should we be updating the last message or finding the specific streaming one?
-                // Assuming the last added message is the one we are streaming into.
                 if (lastMsg && lastMsg.isStreaming && lastMsg.role === 'system') {
                     const updated = [...prev];
                     updated[prev.length - 1] = {
@@ -1002,6 +1024,27 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         // JIT RAG Stream listeners (for live meeting RAG responses)
         if (window.electronAPI.onRAGStreamChunk) {
             cleanups.push(window.electronAPI.onRAGStreamChunk((data: { chunk: string }) => {
+                // Same guard as onGeminiStreamToken: suppress raw JSON if this chunk is
+                // the negotiation coaching sentinel. The onRAGStreamComplete handler will
+                // convert it to the proper card UI.
+                try {
+                    const parsed = JSON.parse(data.chunk);
+                    if (parsed?.__negotiationCoaching) {
+                        setMessages(prev => {
+                            const lastMsg = prev[prev.length - 1];
+                            if (lastMsg && lastMsg.isStreaming && lastMsg.role === 'system') {
+                                const updated = [...prev];
+                                updated[prev.length - 1] = { ...lastMsg, text: data.chunk };
+                                return updated;
+                            }
+                            return prev;
+                        });
+                        return; // Skip normal append
+                    }
+                } catch {
+                    // Normal text chunk — fall through.
+                }
+
                 setMessages(prev => {
                     const lastMsg = prev[prev.length - 1];
                     if (lastMsg && lastMsg.isStreaming && lastMsg.role === 'system') {

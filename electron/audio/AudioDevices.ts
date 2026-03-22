@@ -1,8 +1,13 @@
-import { loadNativeModule } from './nativeModuleLoader';
+import path from 'path';
 
-// NativeModule may be null if the Rust binary isn't built yet (new clone without `npm run build:native`).
-// All methods below handle this gracefully by returning empty arrays.
-const NativeModule: any = loadNativeModule();
+let NativeModule: any = null;
+
+try {
+    NativeModule = require('natively-audio');
+} catch (e) {
+    console.error('[AudioDevices] Failed to load native module:', e);
+}
+
 const { getInputDevices, getOutputDevices } = NativeModule || {};
 
 export interface AudioDevice {

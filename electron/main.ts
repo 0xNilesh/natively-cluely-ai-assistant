@@ -19,7 +19,20 @@ process.on('unhandledRejection', (reason, promise) => {
   logToFile('[CRITICAL] Unhandled Rejection at: ' + promise + ' reason: ' + (reason instanceof Error ? reason.stack : reason));
 });
 
-const logFile = path.join(app.getPath('documents'), 'natively_debug.log');
+// CQ-04 fix: do NOT call app.getPath() at module load time.
+// app.getPath('documents') is not guaranteed to be available before app.whenReady().
+// Use a lazy getter instead — the path is resolved on first logToFile() call.
+let _logFile: string | null = null;
+const getLogFile = (): string | null => {
+  if (_logFile) return _logFile;
+  try {
+    _logFile = path.join(app.getPath('documents'), 'natively_debug.log');
+    return _logFile;
+  } catch {
+    // app.ready not yet fired — return null, logToFile will skip silently
+    return null;
+  }
+};
 
 const originalLog = console.log;
 const originalWarn = console.warn;
@@ -30,6 +43,10 @@ const LOG_MAX_BYTES = 10 * 1024 * 1024;
 
 function logToFile(msg: string) {
   try {
+    const logFile = getLogFile();
+    // If the app isn't ready yet (path not available), skip silently.
+    if (!logFile) return;
+
     // P2-1: rotate the log file when it exceeds LOG_MAX_BYTES so that long-running
     // sessions (or meetings with dense transcripts) don't fill the user's disk.
     // The previous log is kept as .log.1 for one-generation rollover.
@@ -1014,7 +1031,15 @@ export class AppState {
   public async reconfigureSttProvider(): Promise<void> {
     console.log('[Main] Reconfiguring STT Provider...');
 
-    // Stop existing STT instances
+    // RC-01 fix: pause audio captures FIRST so their EventEmitter queues drain
+    // before we null-out the STT instances. Without this, buffered 'data' events
+    // still in-flight call this.googleSTT?.write() while googleSTT is already null.
+    if (this.isMeetingActive) {
+      this.systemAudioCapture?.stop();
+      this.microphoneCapture?.stop();
+    }
+
+    // Now safe to destroy STT instances — no more audio events incoming
     if (this.googleSTT) {
       this.googleSTT.stop();
       this.googleSTT.removeAllListeners();
@@ -1029,8 +1054,10 @@ export class AppState {
     // Reinitialize the pipeline (will pick up the new provider from CredentialsManager)
     this.setupSystemAudioPipeline();
 
-    // Start the new STT instances if a meeting is active
+    // Restart audio captures and new STT instances if a meeting is active
     if (this.isMeetingActive) {
+      this.systemAudioCapture?.start();
+      this.microphoneCapture?.start();
       this.googleSTT?.start();
       this.googleSTT_User?.start();
     }
@@ -1099,6 +1126,10 @@ export class AppState {
       this.audioTestCapture.start();
     } catch (err) {
       console.warn('[Main] Failed to start audio test on preferred device. Falling back to default.', err);
+      // RC-02 fix: explicitly stop and null the failed capture before creating
+      // the fallback to prevent a brief double-microphone-capture window.
+      try { this.audioTestCapture?.stop(); } catch { /* ignore errors on already-failed capture */ }
+      this.audioTestCapture = null;
       try {
         this.audioTestCapture = new MicrophoneCapture();
         attachAudioTestListeners(this.audioTestCapture);

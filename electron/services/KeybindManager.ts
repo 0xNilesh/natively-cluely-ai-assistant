@@ -119,6 +119,7 @@ export class KeybindManager {
                 }
 
                 // Validate and merge
+                let hadConflicts = false;
                 for (const fileKb of data) {
                     if (this.keybinds.has(fileKb.id)) {
                         const current = this.keybinds.get(fileKb.id)!;
@@ -134,16 +135,22 @@ export class KeybindManager {
                             });
                             
                             if (conflictId) {
-                                // Conflict found in saved data. Unbind the old one.
+                                // EC-03 fix: mark that we resolved a conflict so we can persist below
                                 const conflictKb = this.keybinds.get(conflictId)!;
                                 conflictKb.accelerator = '';
                                 this.keybinds.set(conflictId, conflictKb);
+                                hadConflicts = true;
                             }
                         }
 
                         current.accelerator = fileKb.accelerator;
                         this.keybinds.set(fileKb.id, current);
                     }
+                }
+
+                // EC-03 fix: persist resolved conflicts so they are not re-detected on next launch
+                if (hadConflicts) {
+                    this.save();
                 }
             }
         } catch (error) {
