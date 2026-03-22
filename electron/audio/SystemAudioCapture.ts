@@ -1,15 +1,9 @@
 import { EventEmitter } from 'events';
-import { app } from 'electron';
-import path from 'path';
+import { loadNativeModule } from './nativeModuleLoader';
 
-let NativeModule: any = null;
-
-try {
-    NativeModule = require('natively-audio');
-} catch (e) {
-    console.error('[SystemAudioCapture] Failed to load native module:', e);
-}
-
+// RustAudioCapture is the native Rust class (napi-rs) that captures system audio.
+// May be null if the .node binary isn't available — constructor logs an error in that case.
+const NativeModule: any = loadNativeModule();
 const { SystemAudioCapture: RustAudioCapture } = NativeModule || {};
 
 export class SystemAudioCapture extends EventEmitter {
@@ -111,5 +105,18 @@ export class SystemAudioCapture extends EventEmitter {
         this.monitor = null;
         this.isRecording = false;
         this.emit('stop');
+    }
+
+    /**
+     * Permanently dispose this instance.
+     * Stops capture, removes all event listeners, and releases the native monitor.
+     * After destroy(), do not reuse this instance.
+     */
+    public destroy(): void {
+        this.stop();
+        // Clear listeners BEFORE nulling monitor. In-flight Rust callbacks (e.g., data
+        // or speech_ended delivered via napi scheduler) must not fire after disposal.
+        this.removeAllListeners();
+        this.monitor = null;
     }
 }
