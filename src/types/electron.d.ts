@@ -49,6 +49,10 @@ export interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
   setUndetectable: (state: boolean) => Promise<{ success: boolean; error?: string }>
   getUndetectable: () => Promise<boolean>
+  setOverlayMousePassthrough: (enabled: boolean) => Promise<{ success: boolean }>
+  toggleOverlayMousePassthrough: () => Promise<{ success: boolean; enabled: boolean }>
+  getOverlayMousePassthrough: () => Promise<boolean>
+  onOverlayMousePassthroughChanged: (callback: (enabled: boolean) => void) => () => void
   setDisguise: (mode: 'terminal' | 'settings' | 'activity' | 'none') => Promise<{ success: boolean; error?: string }>
   getDisguise: () => Promise<'none' | 'terminal' | 'settings' | 'activity'>
   onDisguiseChanged: (callback: (mode: 'terminal' | 'settings' | 'activity' | 'none') => void) => () => void

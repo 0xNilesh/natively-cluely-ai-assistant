@@ -22,6 +22,7 @@ export interface ShortcutConfig {
     moveWindowRight: string[];
     // General
     toggleVisibility: string[];
+    toggleMousePassthrough: string[];
     processScreenshots: string[];
     captureAndProcess: string[];
     resetCancel: string[];
@@ -47,6 +48,7 @@ export const DEFAULT_SHORTCUTS: ShortcutConfig = {
     moveWindowLeft: ['⌘', 'Shift', '←'],
     moveWindowRight: ['⌘', 'Shift', '→'],
     toggleVisibility: ['⌘', 'B'],
+    toggleMousePassthrough: ['⌘', 'Shift', 'B'],
     processScreenshots: ['⌘', 'Enter'],
     captureAndProcess: ['⌘', 'Shift', 'Enter'],
     resetCancel: ['⌘', 'R'],
@@ -87,6 +89,7 @@ export const useShortcuts = () => {
                 else if (kb.id === 'window:move-right') newShortcuts.moveWindowRight = keys;
                 // General
                 else if (kb.id === 'general:toggle-visibility') newShortcuts.toggleVisibility = keys;
+                else if (kb.id === 'general:toggle-mouse-passthrough') newShortcuts.toggleMousePassthrough = keys;
                 else if (kb.id === 'general:process-screenshots') newShortcuts.processScreenshots = keys;
                 else if (kb.id === 'general:capture-and-process') newShortcuts.captureAndProcess = keys;
                 else if (kb.id === 'general:reset-cancel') newShortcuts.resetCancel = keys;
@@ -148,6 +151,7 @@ export const useShortcuts = () => {
             case 'moveWindowRight': backendId = 'window:move-right'; break;
             // General
             case 'toggleVisibility': backendId = 'general:toggle-visibility'; break;
+            case 'toggleMousePassthrough': backendId = 'general:toggle-mouse-passthrough'; break;
             case 'processScreenshots': backendId = 'general:process-screenshots'; break;
             case 'captureAndProcess': backendId = 'general:capture-and-process'; break;
             case 'resetCancel': backendId = 'general:reset-cancel'; break;

@@ -507,6 +507,21 @@ export function initializeIpcHandlers(appState: AppState): void {
     return appState.getUndetectable()
   })
 
+  // Adapted from public PR #113 — verify premium interaction
+  safeHandle("set-overlay-mouse-passthrough", async (_, enabled: boolean) => {
+    appState.setOverlayMousePassthrough(enabled)
+    return { success: true }
+  })
+
+  safeHandle("toggle-overlay-mouse-passthrough", async () => {
+    const enabled = appState.toggleOverlayMousePassthrough()
+    return { success: true, enabled }
+  })
+
+  safeHandle("get-overlay-mouse-passthrough", async () => {
+    return appState.getOverlayMousePassthrough()
+  })
+
   safeHandle("get-disguise", async () => {
     return appState.getDisguise()
   })

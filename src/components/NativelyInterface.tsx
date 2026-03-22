@@ -25,7 +25,8 @@ import {
     Link,
     Code,
     Copy,
-    Check
+    Check,
+    PointerOff
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -209,6 +210,14 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         localStorage.setItem('natively_undetectable', String(isUndetectable));
         localStorage.setItem('natively_hideChatHidesWidget', String(hideChatHidesWidget));
     }, [isUndetectable, hideChatHidesWidget]);
+
+    // Mouse Passthrough State
+    const [isMousePassthrough, setIsMousePassthrough] = useState(false);
+    useEffect(() => {
+        window.electronAPI?.getOverlayMousePassthrough?.().then(setIsMousePassthrough).catch(() => {});
+        const unsub = window.electronAPI?.onOverlayMousePassthroughChanged?.((v) => setIsMousePassthrough(v));
+        return () => unsub?.();
+    }, []);
 
     // Auto-resize Window
     useLayoutEffect(() => {
@@ -1685,6 +1694,11 @@ Provide only the answer, nothing else.`;
                 setInputValue('');
             }
         },
+        toggleMousePassthrough: () => {
+            const newState = !isMousePassthrough;
+            setIsMousePassthrough(newState);
+            window.electronAPI?.setOverlayMousePassthrough?.(newState);
+        },
         takeScreenshot: async () => {
             try {
                 const data = await window.electronAPI.takeScreenshot();
@@ -1720,6 +1734,11 @@ Provide only the answer, nothing else.`;
                 setAttachedContext([]);
                 setInputValue('');
             }
+        },
+        toggleMousePassthrough: () => {
+            const newState = !isMousePassthrough;
+            setIsMousePassthrough(newState);
+            window.electronAPI?.setOverlayMousePassthrough?.(newState);
         },
         takeScreenshot: async () => {
             try {
@@ -1768,6 +1787,9 @@ Provide only the answer, nothing else.`;
             } else if (isShortcutPressed(e, 'selectiveScreenshot')) {
                 e.preventDefault();
                 handlers.selectiveScreenshot();
+            } else if (isShortcutPressed(e, 'toggleMousePassthrough')) {
+                e.preventDefault();
+                handlers.toggleMousePassthrough();
             }
         };
 
@@ -2099,7 +2121,6 @@ Provide only the answer, nothing else.`;
 
                                         <div className="w-px h-3 mx-1" style={appearance.dividerStyle} />
 
-                                        {/* Settings Gear */}
                                         <div className="relative">
                                             <button
                                                 onClick={(e) => {
@@ -2136,6 +2157,30 @@ Provide only the answer, nothing else.`;
                                                 style={appearance.iconStyle}
                                             >
                                                 <SlidersHorizontal className="w-3.5 h-3.5" />
+                                            </button>
+                                        </div>
+
+                                        <div className="w-px h-3 mx-1" style={appearance.dividerStyle} />
+
+                                        {/* Mouse Passthrough Toggle */}
+                                        <div className="relative">
+                                            <button
+                                                onClick={() => {
+                                                    const newState = !isMousePassthrough;
+                                                    setIsMousePassthrough(newState);
+                                                    window.electronAPI?.setOverlayMousePassthrough?.(newState);
+                                                }}
+                                                className={`
+                                                    w-7 h-7 flex items-center justify-center rounded-lg
+                                                    interaction-base interaction-press
+                                                    ${isMousePassthrough
+                                                        ? 'overlay-icon-surface overlay-icon-surface-hover text-sky-400 opacity-100'
+                                                        : 'overlay-icon-surface overlay-icon-surface-hover overlay-text-interactive'}
+                                                `}
+                                                title={`Mouse Passthrough: ${isMousePassthrough ? 'ON' : 'OFF'}`}
+                                                style={appearance.iconStyle}
+                                            >
+                                                <PointerOff className="w-3.5 h-3.5" />
                                             </button>
                                         </div>
 

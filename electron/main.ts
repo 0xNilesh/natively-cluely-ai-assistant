@@ -272,6 +272,9 @@ export class AppState {
       try {
         if (actionId === 'general:toggle-visibility') {
           this.toggleMainWindow();
+        } else if (actionId === 'general:toggle-mouse-passthrough') {
+          // Adapted from public PR #113 — verify premium interaction
+          this.toggleOverlayMousePassthrough();
         } else if (actionId === 'general:take-screenshot') {
           const screenshotPath = await this.takeScreenshot(false);
           const preview = await this.getImagePreview(screenshotPath);
@@ -1232,6 +1235,11 @@ export class AppState {
     this.isMeetingActive = false; // Block new data immediately
     this.broadcastMeetingState();
 
+    // Reset Mouse Passthrough so the next meeting overlay starts fresh and focusable
+    if (this.overlayMousePassthrough) {
+      this.setOverlayMousePassthrough(false);
+    }
+
     // Stop audio captures synchronously — these are fire-and-forget internally
     this.systemAudioCapture?.stop();
     this.googleSTT?.stop();
@@ -2005,6 +2013,29 @@ export class AppState {
 
   public getUndetectable(): boolean {
     return this.isUndetectable
+  }
+
+  // --- Mouse Passthrough (Adapted from public PR #113 — verify premium interaction) ---
+  private overlayMousePassthrough: boolean = false;
+
+  public setOverlayMousePassthrough(state: boolean): void {
+    if (this.overlayMousePassthrough === state) return;
+
+    console.log(`[Overlay] setOverlayMousePassthrough(${state}) called`);
+
+    this.overlayMousePassthrough = state;
+    this.windowHelper.syncOverlayInteractionPolicy();
+    this._broadcastToAllWindows('overlay-mouse-passthrough-changed', state);
+  }
+
+  public toggleOverlayMousePassthrough(): boolean {
+    const next = !this.overlayMousePassthrough;
+    this.setOverlayMousePassthrough(next);
+    return next;
+  }
+
+  public getOverlayMousePassthrough(): boolean {
+    return this.overlayMousePassthrough;
   }
 
   public getVerboseLogging(): boolean {

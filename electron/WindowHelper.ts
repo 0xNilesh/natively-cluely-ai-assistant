@@ -347,11 +347,35 @@ export class WindowHelper {
     this.isWindowVisible = false
   }
 
+  // Apply or remove click-through (mouse passthrough) on the overlay window.
+  // Called whenever the passthrough state changes in AppState.
+  public syncOverlayInteractionPolicy(): void {
+    if (!this.overlayWindow || this.overlayWindow.isDestroyed()) return;
+
+    const passthrough = this.appState.getOverlayMousePassthrough();
+    if (passthrough) {
+      // forward: true — pointer events are still delivered to the OS layer beneath
+      this.overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+      // Focusable must stay false while in passthrough so keyboard focus can't land here
+      this.overlayWindow.setFocusable(false);
+      console.log('[WindowHelper] Overlay mouse passthrough ON');
+    } else {
+      this.overlayWindow.setIgnoreMouseEvents(false);
+      this.overlayWindow.setFocusable(true);
+      console.log('[WindowHelper] Overlay mouse passthrough OFF');
+    }
+  }
+
   // Show overlay directly without going through full switchToOverlay flow.
   // Used by IPC handlers to show the overlay independently.
   public showOverlay(): void {
     if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
-      this.overlayWindow.showInactive();
+      // Always use showInactive when passthrough is on — never steal focus
+      if (this.appState.getOverlayMousePassthrough()) {
+        this.overlayWindow.showInactive();
+      } else {
+        this.overlayWindow.showInactive();
+      }
     }
   }
 
