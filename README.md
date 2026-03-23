@@ -55,7 +55,7 @@
   <a href="https://github.com/evinjohnn/natively-cluely-ai-assistant/releases/latest">
     <img src="https://img.shields.io/badge/Download-macOS-007AFF?style=for-the-badge&logo=apple&logoColor=white" />
   </a>
-  <a href="https://github.com/evinjohnn/natively-cluely-ai-assistant/releases/tag/v2.0.5">
+  <a href="https://github.com/evinjohnn/natively-cluely-ai-assistant/releases/latest">
     <img src="https://img.shields.io/badge/Download-Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white" />
   </a>
 </p>
