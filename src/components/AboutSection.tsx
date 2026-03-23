@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import evinProfile from '../assets/evin.png';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
+import { getPlatformShortcut } from '../utils/platformUtils';
 
 interface AboutSectionProps { }
 
@@ -71,9 +72,9 @@ export const AboutSection: React.FC<AboutSectionProps> = () => {
                                 <Zap size={20} />
                             </div>
                             <div>
-                                <h5 className="text-sm font-bold text-text-primary mb-1">Capture & Analyse — ⌘⇧↵</h5>
+                                <h5 className="text-sm font-bold text-text-primary mb-1">Capture & Analyse — {getPlatformShortcut(['⌘', '⇧', 'Enter']).join('+')}</h5>
                                 <p className="text-xs text-text-secondary leading-relaxed">
-                                    One shortcut to screenshot your screen and instantly get AI analysis. No extra clicks — press Cmd+Shift+Enter and Natively does the rest.
+                                    One shortcut to screenshot your screen and instantly get AI analysis. No extra clicks — press {getPlatformShortcut(['⌘', '⇧', 'Enter']).join('+')} and Natively does the rest.
                                 </p>
                             </div>
                         </div>
