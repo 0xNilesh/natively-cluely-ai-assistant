@@ -1,4 +1,4 @@
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 /// Returns a deterministic hardware fingerprint (SHA-256 hash of the machine UID).
 /// This is used to lock license keys to a specific physical device.
@@ -59,7 +59,10 @@ impl Task for VerifyGumroadTask {
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
                         let success = json["success"].as_bool().unwrap_or(false);
                         let msg = json["message"].as_str().unwrap_or("");
-                        println!("[LicenseRust] Gumroad response (pid={}): success={}, msg={}", pid, success, msg);
+                        println!(
+                            "[LicenseRust] Gumroad response (pid={}): success={}, msg={}",
+                            pid, success, msg
+                        );
                         if success {
                             return Ok("OK".to_string());
                         }
