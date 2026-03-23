@@ -276,17 +276,20 @@ While Natively is **free and open-source forever**, we also offer a **Pro Editio
 
 ---
 
-### What's New in v2.0.6
+### What's New in v2.0.7
 
-Version 2.0.6 delivers massive upgrades to vision processing, model rotation stability, and critical bug fixes found during a comprehensive senior engineering audit.
+Version 2.0.7 delivers massive upgrades to vision processing, introduces mouse passthrough mode, overhauls native audio stability, and resolves critical bugs found during a comprehensive senior engineering audit.
 
-- **Multimodal Groq Support**: Integrated `meta-llama/llama-4-scout-17b-16e-instruct` into the ecosystem for ultra-fast screenshot analysis capability, with increased vision max completion tokens (up to 28672) to properly support full code generation.
+- **Multimodal Groq Support**: Integrated `meta-llama/llama-4-scout-17b-16e-instruct` into the ecosystem for ultra-fast screenshot analysis capability, with increased vision max completion tokens (up to 8192) to properly support full code generation.
+- **Mouse Passthrough Mode**: Added a global hotkey to effortlessly toggle mouse pass-through, allowing direct click-through interactions with background windows beneath the assistant.
+- **Native Audio Loader Stability**: Bypassed restrictive node resolution by mapping absolute paths directly to `.node` binaries, successfully repairing persistent start-up issues particularly on Windows Git Bash.
 - **Model Roster Update**: Updated baseline architecture natively to default to `gpt-5.4-chat`, `gemini-3.1`, and `claude-sonnet-4-6`.
 - **Model Rotation Engine**: Fortified the 3-tier fallback mechanisms and auto-upgrade logic for Gemini, Claude, GPT, and Groq models.
 - **SQLite-Vec Dimension Fix**: Resolved a critical silent data-corruption bug in vector storage by provisioning per-dimension table pairs (`vec_chunks_768`, `vec_chunks_1536`, `vec_chunks_3072`), directly fixing a bug that dropped 100% of Ollama embeddings in local native search.
+- **Permanent Hide Trap & Data Loss Fix**: Repaired a critical IPC routing flaw where hiding the UI permanently trapped the app in the background, which inadvertently caused data corruption (lost API keys) when users force-quit the application.
 - **Thread Safety & Race Conditions**: Eliminated fatal global state mutation risks during API fallback loops and patched `SettingsManager` early-access crashes on boot.
-- **Memory Leaks Eliminated**: Patched multiple memory leak vectors including unbounded process disguise timers and dangling opacity shield timers during rapid focus toggles.
-- **Cross-Platform Stability**: Resolved unhandled promise rejections on React dev-server drops, corrected hardcoded Windows icon paths, and refined process disguise routing for Windows and macOS contexts.
+- **Memory & Listener Leaks Eliminated**: Eradicated memory leaks by clearing unbounded array loops in the disguise engine, aggressively detaching Rust/C++ native event emitters on audio stops, and cleanly destroying opacity shield timers.
+- **Cross-Platform Stability**: Implemented a Windows "opacity shield" for flash-free stealth window toggles, resolved unhandled promise rejections, corrected hardcoded OS icon paths, and refined process disguise mappings (e.g., mapping MacOS Terminal to Windows Command Prompt).
 
 ---
 
@@ -299,7 +302,7 @@ Version 2.0.6 delivers massive upgrades to vision processing, model rotation sta
 - [Why Natively wins](#why-natively-wins)
 - [Why Natively?](#why-natively)
 - [Natively Pro](#natively-pro)
-- [What's New in v2.0.6](#whats-new-in-v206)
+- [What's New in v2.0.7](#whats-new-in-v207)
 - [Privacy & Security](#privacy--security-core-design-principle)
 - [Installation](#installation-developers--contributors)
 - [AI Providers](#ai-providers)

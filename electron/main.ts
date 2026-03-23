@@ -1988,12 +1988,26 @@ export class AppState {
         }
 
         if (settled) {
+          // Capture whether Natively is currently the frontmost app BEFORE
+          // dock.hide() — that call triggers an implicit macOS app-deactivation
+          // which shifts keyboard focus to the next frontmost app (Chrome, etc.).
+          const nativelyWasFocused =
+            targetFocusWindow != null &&
+            !targetFocusWindow.isDestroyed() &&
+            targetFocusWindow.isFocused();
+
           console.log('[Stealth] Calling app.dock.hide()');
           app.dock.hide();
           this.hideTray();
-          // Do NOT call focus() here — Natively is a ghost overlay.
-          // focus() → [NSApp activateIgnoringOtherApps:YES] which steals OS focus
-          // from whatever the user is currently doing (Zoom, browser, etc.)
+
+          // If Natively was the focused window when the user toggled stealth,
+          // restore focus to our window after dock.hide() so macOS does not
+          // hand control to Chrome / whatever is behind us.
+          // We use win.focus() (not app.focus()) to avoid the heavy-handed
+          // [NSApp activateIgnoringOtherApps:YES] side-effect.
+          if (nativelyWasFocused && targetFocusWindow && !targetFocusWindow.isDestroyed()) {
+            targetFocusWindow.focus();
+          }
         } else {
           console.log('[Stealth] Calling app.dock.show()');
           app.dock.show();
@@ -2247,6 +2261,18 @@ async function initializeApp() {
   // 2. Wait for app to be ready
   await app.whenReady()
 
+  // 2a. PRE-EMPTIVE dock hide: must happen before ANY operation that causes macOS to
+  // register a dock entry (app.setName, BrowserWindow creation, etc.).
+  // We read isUndetectable directly from settings here — AppState singleton isn't
+  // constructed yet, so we cannot call appState.getUndetectable().
+  if (process.platform === 'darwin') {
+    // SettingsManager is already statically imported — no require() needed.
+    const isUndetectableOnStartup = SettingsManager.getInstance().get('isUndetectable') ?? false;
+    if (isUndetectableOnStartup) {
+      app.dock.hide();
+    }
+  }
+
   // 3. Initialize Managers
   // Initialize CredentialsManager and load keys explicitly
   // This fixes the issue where keys (especially in production) aren't loaded in time for RAG/LLM
@@ -2287,19 +2313,14 @@ async function initializeApp() {
 
   appState.createWindow()
 
-  // Apply initial stealth state based on isUndetectable setting
-  if (appState.getUndetectable()) {
-    // Stealth mode: hide dock and tray
-    if (process.platform === 'darwin') {
-      app.dock.hide();
-    }
-  } else {
-    // Normal mode: show dock and tray
+  // Apply initial stealth state based on isUndetectable setting.
+  // NOTE: app.dock.hide() was already called pre-emptively before createWindow()
+  // when isUndetectable=true. Here we only need to initialize the tray for non-stealth mode.
+  if (!appState.getUndetectable()) {
+    // Normal mode: show tray (dock is already showing — no need to call dock.show() again)
     appState.showTray();
-    if (process.platform === 'darwin') {
-      app.dock.show();
-    }
   }
+  // Stealth mode: dock is already hidden, tray stays hidden, no action needed here.
   // Register global shortcuts using KeybindManager
   KeybindManager.getInstance().registerGlobalShortcuts()
 
