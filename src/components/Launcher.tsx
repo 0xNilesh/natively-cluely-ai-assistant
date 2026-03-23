@@ -365,7 +365,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
     return (
         <div className="h-full w-full flex flex-col bg-bg-primary text-text-primary font-sans overflow-hidden selection:bg-accent-secondary/30">
             {/* 1. Header (Static) */}
-            <header className="relative h-[40px] shrink-0 flex items-center justify-between pl-0 pr-2 drag-region select-none bg-bg-secondary border-b border-border-subtle z-[200]">
+            <header className="relative w-full h-[40px] shrink-0 flex items-center justify-between pl-0 drag-region select-none bg-bg-secondary border-b border-border-subtle z-[200]">
                 {/* Left: Spacing for Traffic Lights + Navigation Arrows */}
                 <div className="flex items-center gap-1 no-drag">
                     {isMac && <div className="w-[70px]" />} {/* Traffic Light Spacer (macOS only) */}
@@ -425,7 +425,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                 />
 
                 {/* Right: Actions */}
-                <div className="flex items-center gap-3 no-drag">
+                <div className="flex items-center gap-3 no-drag shrink-0">
                     <button
                         onClick={() => {
                             onOpenSettings();
