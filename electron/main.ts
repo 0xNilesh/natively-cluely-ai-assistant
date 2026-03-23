@@ -1594,14 +1594,17 @@ export class AppState {
       this.screenshotHelper.getExtraScreenshotQueue().length
     )
     
-    // Send toggle-expand to the currently active window mode's window.
-    // If we use getMainWindow(), it might return the launcher window when the overlay is hidden,
-    // causing the IPC event to go to the wrong React tree and silently fail.
     const mode = this.windowHelper.getCurrentWindowMode();
-    const targetWindow = mode === 'overlay' ? this.windowHelper.getOverlayWindow() : this.windowHelper.getLauncherWindow();
-
-    if (targetWindow && !targetWindow.isDestroyed()) {
-      targetWindow.webContents.send('toggle-expand');
+    
+    if (mode === 'launcher') {
+      // In launcher mode, just physically hide/show the window
+      this.windowHelper.toggleMainWindow();
+    } else {
+      // In overlay mode, send toggle-expand IPC to expand/collapse the UI
+      const targetWindow = this.windowHelper.getOverlayWindow();
+      if (targetWindow && !targetWindow.isDestroyed()) {
+        targetWindow.webContents.send('toggle-expand');
+      }
     }
   }
 

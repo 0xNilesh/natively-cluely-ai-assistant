@@ -197,6 +197,18 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
             if (isShortcutPressed(e, 'toggleVisibility')) {
                 e.preventDefault();
                 window.electronAPI.toggleWindow();
+            } else if (isShortcutPressed(e, 'moveWindowUp')) {
+                e.preventDefault();
+                window.electronAPI.moveWindowUp?.();
+            } else if (isShortcutPressed(e, 'moveWindowDown')) {
+                e.preventDefault();
+                window.electronAPI.moveWindowDown?.();
+            } else if (isShortcutPressed(e, 'moveWindowLeft')) {
+                e.preventDefault();
+                window.electronAPI.moveWindowLeft?.();
+            } else if (isShortcutPressed(e, 'moveWindowRight')) {
+                e.preventDefault();
+                window.electronAPI.moveWindowRight?.();
             }
         };
         window.addEventListener('keydown', handleKeyDown);

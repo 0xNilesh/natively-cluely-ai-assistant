@@ -324,7 +324,7 @@ const App: React.FC = () => {
   // Renders if window=launcher OR no param
   return (
     <ErrorBoundary context="Launcher">
-    <div className="h-full min-h-0 w-full relative">
+    <div className="h-full min-h-0 w-full relative bg-[#000000]">
       <AnimatePresence>
         {showStartup ? (
           <motion.div

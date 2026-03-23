@@ -251,7 +251,12 @@ export const useShortcuts = () => {
 
         // Normalize checks
         const eventKey = event.key.toLowerCase();
-        const configKey = mainKey.toLowerCase();
+        let configKey = mainKey.toLowerCase();
+
+        if (configKey === '↑') configKey = 'arrowup';
+        if (configKey === '↓') configKey = 'arrowdown';
+        if (configKey === '←') configKey = 'arrowleft';
+        if (configKey === '→') configKey = 'arrowright';
 
         // Handle Space specifically
         if (configKey === 'space') {
