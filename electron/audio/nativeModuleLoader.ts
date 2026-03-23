@@ -1,5 +1,47 @@
 import path from 'path';
 
+export interface AudioDeviceInfo {
+  id: string;
+  name: string;
+}
+
+export interface NativeModule {
+  getHardwareId(): string;
+  verifyGumroadKey(licenseKey: string): Promise<string>;
+  getInputDevices(): Array<AudioDeviceInfo>;
+  getOutputDevices(): Array<AudioDeviceInfo>;
+  SystemAudioCapture: new (deviceId?: string | null) => {
+    getSampleRate(): number;
+    start(callback: (...args: any[]) => any, onSpeechEnded?: (...args: any[]) => any): void;
+    stop(): void;
+  };
+  MicrophoneCapture: new (deviceId?: string | null) => {
+    getSampleRate(): number;
+    start(callback: (...args: any[]) => any, onSpeechEnded?: (...args: any[]) => any): void;
+    stop(): void;
+  };
+}
+
+const REQUIRED_METHODS = ['getHardwareId', 'verifyGumroadKey', 'getInputDevices', 'getOutputDevices'];
+const REQUIRED_CONSTRUCTORS = ['SystemAudioCapture', 'MicrophoneCapture'];
+
+/**
+ * Validates that a loaded native module conforms to the NativeModule interface.
+ * Throws immediately if any required method or constructor is missing.
+ */
+function validateNativeModule(mod: any): asserts mod is NativeModule {
+    for (const fn of REQUIRED_METHODS) {
+        if (typeof mod[fn] !== 'function') {
+            throw new Error(`NativeModule: missing or invalid method "${fn}" (expected function, got ${typeof mod[fn]})`);
+        }
+    }
+    for (const cls of REQUIRED_CONSTRUCTORS) {
+        if (typeof mod[cls] !== 'function') {
+            throw new Error(`NativeModule: missing or invalid constructor "${cls}" (expected constructor, got ${typeof mod[cls]})`);
+        }
+    }
+}
+
 /**
  * Maps platform+arch to the NAPI-RS compiled binary name.
  * These filenames are produced by `npx napi build` in native-module/.
@@ -16,8 +58,7 @@ function getNativeBinaryName(): string {
 }
 
 // undefined = not yet attempted, null = attempted but failed, object = loaded
-type CacheState = object | null | undefined;
-let cached: CacheState = undefined;
+let cached: NativeModule | null | undefined = undefined;
 
 /**
  * Loads the Rust native module directly from the .node binary file.
@@ -43,7 +84,7 @@ let cached: CacheState = undefined;
  * The function returns null on failure rather than throwing, so the app
  * degrades gracefully (audio device enumeration returns empty arrays).
  */
-export function loadNativeModule(): object | null {
+export function loadNativeModule(): NativeModule | null {
     if (cached !== undefined) return cached;
 
     // Lazily import app to avoid "Cannot use require of electron module" errors
@@ -75,9 +116,11 @@ export function loadNativeModule(): object | null {
 
     for (const filePath of candidates) {
         try {
-            cached = require(filePath);
+            const mod = require(filePath);
+            validateNativeModule(mod);
+            cached = mod;
             console.log(`[nativeModuleLoader] Loaded ${binary} from: ${filePath}`);
-            return cached as object;
+            return cached;
         } catch (err: unknown) {
             // Log per-path failure so developers can diagnose ABI mismatches,
             // missing builds, or wrong paths — not just a generic "failed" message.

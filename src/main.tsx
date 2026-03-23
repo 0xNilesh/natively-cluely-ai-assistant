@@ -5,6 +5,13 @@ import "./index.css"
 
 const THEME_CACHE_KEY = 'natively_resolved_theme';
 
+// Set platform attribute synchronously — before React renders — so CSS selectors
+// like html[data-platform="win32"] work immediately without a flash on first paint.
+document.documentElement.setAttribute(
+  'data-platform',
+  window.electronAPI?.platform ?? process?.platform ?? ''
+);
+
 // Step 1: Apply cached theme synchronously — before React renders.
 // This ensures useResolvedTheme()'s initial useState read sees the correct value.
 const cachedTheme = localStorage.getItem(THEME_CACHE_KEY) as 'light' | 'dark' | null;

@@ -23,8 +23,8 @@ export const DEFAULT_KEYBINDS: KeybindConfig[] = [
     // Chat - Global shortcuts (work even when app is not focused - stealth mode)
     { id: 'chat:whatToAnswer', label: 'What to Answer', accelerator: 'CommandOrControl+1', isGlobal: true, defaultAccelerator: 'CommandOrControl+1' },
     { id: 'chat:clarify', label: 'Clarify', accelerator: 'CommandOrControl+2', isGlobal: true, defaultAccelerator: 'CommandOrControl+2' },
-    { id: 'chat:followUp', label: 'Follow Up', accelerator: 'CommandOrControl+3', isGlobal: true, defaultAccelerator: 'CommandOrControl+3' },
-    { id: 'chat:dynamicAction4', label: 'Recap / Brainstorm', accelerator: 'CommandOrControl+4', isGlobal: true, defaultAccelerator: 'CommandOrControl+4' },
+    { id: 'chat:dynamicAction4', label: 'Recap / Brainstorm', accelerator: 'CommandOrControl+3', isGlobal: true, defaultAccelerator: 'CommandOrControl+3' },
+    { id: 'chat:followUp', label: 'Follow Up', accelerator: 'CommandOrControl+4', isGlobal: true, defaultAccelerator: 'CommandOrControl+4' },
     { id: 'chat:answer', label: 'Answer / Record', accelerator: 'CommandOrControl+5', isGlobal: true, defaultAccelerator: 'CommandOrControl+5' },
     { id: 'chat:codeHint', label: 'Get Code Hint', accelerator: 'CommandOrControl+6', isGlobal: true, defaultAccelerator: 'CommandOrControl+6' },
     { id: 'chat:brainstorm', label: 'Brainstorm Approaches', accelerator: 'CommandOrControl+7', isGlobal: true, defaultAccelerator: 'CommandOrControl+7' },
@@ -97,8 +97,6 @@ export class KeybindManager {
 
     public setWindowHelper(windowHelper: any) {
         this.windowHelper = windowHelper;
-        // Re-register globals now that we have the helper
-        this.registerGlobalShortcuts();
     }
 
     private load() {
@@ -113,6 +111,7 @@ export class KeybindManager {
                 // Migrate renamed IDs so saved user customizations survive renames
                 const ID_MIGRATIONS: Record<string, string> = {
                     'chat:recap': 'chat:dynamicAction4',
+                    'chat:followup': 'chat:followUp',  // casing fix — persisted keybinds.json may have old casing
                 };
                 for (const fileKb of data) {
                     if (ID_MIGRATIONS[fileKb.id]) {
@@ -249,6 +248,30 @@ export class KeybindManager {
     }
 
     public updateMenu() {
+        // On Windows/Linux, set a minimal menu (for shortcuts like DevTools)
+        // but hide the menu bar from the UI
+        if (process.platform !== 'darwin') {
+            const template: any[] = [
+                {
+                    label: 'View',
+                    submenu: [
+                        { role: 'reload' },
+                        { role: 'forceReload' },
+                        { role: 'toggleDevTools' },
+                        { type: 'separator' },
+                        { role: 'resetZoom' },
+                        { role: 'zoomIn' },
+                        { role: 'zoomOut' },
+                        { type: 'separator' },
+                        { role: 'togglefullscreen' }
+                    ]
+                }
+            ];
+            const menu = Menu.buildFromTemplate(template);
+            Menu.setApplicationMenu(menu);
+            return;
+        }
+
         const toggleKb = this.keybinds.get('general:toggle-visibility');
         const toggleAccelerator = toggleKb ? toggleKb.accelerator : 'CommandOrControl+B';
 

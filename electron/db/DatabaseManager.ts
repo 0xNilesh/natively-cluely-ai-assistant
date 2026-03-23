@@ -79,6 +79,7 @@ export class DatabaseManager {
             }
 
             this.db = new Database(this.dbPath);
+            this.db.pragma('journal_mode = WAL');
 
             // Load sqlite-vec extension for native vector search
             try {

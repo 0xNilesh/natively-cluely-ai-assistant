@@ -500,21 +500,29 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             }
 
-            const rawContext = this.session.getFormattedContext(120);
+            const rawContext = this.session.getFormattedContext(180);
             // If no transcript yet, use a generic prompt — the LLM will ask a scoping question
             const context = rawContext || '[No transcript available yet. The candidate just joined the interview. Generate an opening clarifying question to understand the scope and constraints of the upcoming problem.]';
 
             const generationId = ++this.currentGenerationId;
             let fullClarification = "";
             const stream = this.clarifyLLM.generateStream(context);
+            let streamAborted = false;
 
             for await (const token of stream) {
                 if (this.currentGenerationId !== generationId) {
                     console.log('[IntelligenceEngine] _clarify stream aborted by new generation');
+                    await stream.return(undefined);
+                    streamAborted = true;
                     break;
                 }
                 this.emit('clarify_token', token);
                 fullClarification += token;
+            }
+
+            if (streamAborted) {
+                this.setMode('idle');
+                return null;
             }
 
             // Only update history and emit final if not aborted
@@ -667,7 +675,7 @@ export class IntelligenceEngine extends EventEmitter {
 
             // Pull transcript as fallback context when no question is pinned
             const transcriptContext = questionContext === null
-                ? this.session.getFormattedContext(120)
+                ? this.session.getFormattedContext(180)
                 : null;
 
             console.log(`[IntelligenceEngine] Code hint — question source: ${questionContext ? (questionSource ?? 'passed') : 'none'}, transcript lines: ${transcriptContext ? transcriptContext.split('\n').length : 0}, images: ${imagePaths?.length ?? 0}`);
@@ -731,24 +739,41 @@ export class IntelligenceEngine extends EventEmitter {
                 return "Please configure your API Keys in Settings to use this feature.";
             }
 
-            let context = this.session.getFormattedContext(120);
+            let context = this.session.getFormattedContext(180);
             // Prepend the problem statement so the LLM knows exactly what to brainstorm
             const resolvedProblem = problemStatement?.trim() ||
                 this.session.getDetectedCodingQuestion().question?.trim();
+
+            if (!context.trim() && !resolvedProblem && (!imagePaths || imagePaths.length === 0)) {
+                this.setMode('idle');
+                const msg = "There's nothing to brainstorm right now. Make sure your question is visible or spoken aloud, then try again.";
+                this.session.addAssistantMessage(msg);
+                this.emit('suggested_answer', msg, 'Brainstorming Approaches', 1.0);
+                return msg;
+            }
+
             if (resolvedProblem) {
                 context = `<problem_statement>\n${resolvedProblem}\n</problem_statement>\n\n${context}`;
             }
             const generationId = ++this.currentGenerationId;
             let fullResult = "";
             const stream = this.brainstormLLM.generateStream(context, imagePaths);
+            let streamAborted = false;
 
             for await (const token of stream) {
                 if (this.currentGenerationId !== generationId) {
                     console.log('[IntelligenceEngine] brainstorm stream aborted by new generation');
+                    await stream.return(undefined);
+                    streamAborted = true;
                     break;
                 }
                 this.emit('suggested_answer_token', token, 'Brainstorming Approaches', 1.0);
                 fullResult += token;
+            }
+
+            if (streamAborted) {
+                this.setMode('idle');
+                return null;
             }
 
             if (!fullResult || fullResult.trim().length < 5) {

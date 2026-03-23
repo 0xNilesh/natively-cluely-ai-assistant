@@ -69,37 +69,62 @@ export class OllamaBootstrap {
     onProgress: (status: string, percent: number) => void,
     signal?: AbortSignal
   ): Promise<void> {
-    const res = await fetch(`${this.baseUrl}/api/pull`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: model, stream: true }),
-      signal,
-    });
+    // FIX (P1-3): Wrap with a hard timeout so a stalled Ollama HTTP stream
+    // doesn't hang the caller indefinitely.
+    const timeoutController = new AbortController();
+    const timeoutId = setTimeout(() => timeoutController.abort(), 10 * 60 * 1000); // 10 min
 
-    if (!res.ok) throw new Error(`Ollama pull failed: ${res.statusText}`);
+    // Merge external signal with our timeout signal
+    const effectiveSignal = (() => {
+      if (!signal) return timeoutController.signal;
+      const merged = new AbortController();
+      const abort = () => merged.abort();
+      signal.addEventListener('abort', abort, { once: true });
+      timeoutController.signal.addEventListener('abort', abort, { once: true });
+      return merged.signal;
+    })();
 
-    const reader = res.body!.getReader();
-    const decoder = new TextDecoder();
+    try {
+      const res = await fetch(`${this.baseUrl}/api/pull`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: model, stream: true }),
+        signal: effectiveSignal,
+      });
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+      if (!res.ok) throw new Error(`Ollama pull failed: ${res.statusText}`);
 
-      const lines = decoder.decode(value).split('\n').filter(Boolean);
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
 
-      for (const line of lines) {
-        try {
-          const event = JSON.parse(line);
-          if (event.total && event.completed) {
-            const percent = Math.round((event.completed / event.total) * 100);
-            onProgress(event.status ?? 'downloading', percent);
-          } else if (event.status) {
-            onProgress(event.status, 0);
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const lines = decoder.decode(value).split('\n').filter(Boolean);
+
+          for (const line of lines) {
+            try {
+              const event = JSON.parse(line);
+              if (event.total && event.completed) {
+                const percent = Math.round((event.completed / event.total) * 100);
+                onProgress(event.status ?? 'downloading', percent);
+              } else if (event.status) {
+                onProgress(event.status, 0);
+              }
+            } catch {
+              // Partial JSON line — ignore
+            }
           }
-        } catch {
-          // Partial JSON line — ignore
         }
+      } finally {
+        // Always release the reader lock, even on AbortError, preventing
+        // the underlying connection from being held open indefinitely.
+        reader.cancel().catch(() => { /* ignore cancel errors */ });
       }
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 

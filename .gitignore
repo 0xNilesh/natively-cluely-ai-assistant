@@ -172,16 +172,17 @@ native-module/*.node
 
 .github/RepoGuide.md
 
-# Agent work sessions (Claude Code / Sisyphus)
+# AI / Agent tooling
 .sisyphus/
+.opencode/
+.planning/
+opencode.json
 
 # Agent documentation patterns
 **/AGENTS.md
 **/CLAUDE.md
 **/.claude/
 
-# Feature planning and AI chat logs
-planning/live-negotiation/temp/
-
-# Temporary working files (animation feature WIP)
+# Temporary working files
 temp/
+planning/live-negotiation/temp/

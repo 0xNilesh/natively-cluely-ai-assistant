@@ -494,3 +494,13 @@ a {
 .disable-transitions, .disable-transitions * {
   transition: none !important;
 }
+
+/* ── Windows / Linux window chrome – rounded corners ──────────────────────────
+   Using positive selectors (not :not()) avoids a brief border-radius flash on
+   macOS during cold-start, before the data-platform attribute is set.
+   ─────────────────────────────────────────────────────────────────────────── */
+html[data-platform="win32"] body,
+html[data-platform="linux"] body {
+  border-radius: 8px !important;
+  overflow: hidden;
+}

@@ -35,6 +35,10 @@ export interface ElectronAPI {
   moveWindowRight: () => Promise<void>
   moveWindowUp: () => Promise<void>
   moveWindowDown: () => Promise<void>
+  windowMinimize: () => Promise<void>
+  windowMaximize: () => Promise<void>
+  windowClose: () => Promise<void>
+  windowIsMaximized: () => Promise<boolean>
 
   analyzeImageFile: (path: string) => Promise<void>
   quitApp: () => Promise<void>
@@ -45,6 +49,7 @@ export interface ElectronAPI {
   hideOverlay: () => Promise<void>
   getMeetingActive: () => Promise<boolean>
   onMeetingStateChanged: (callback: (data: { isActive: boolean }) => void) => () => void
+  onWindowMaximizedChanged: (callback: (isMaximized: boolean) => void) => () => void
   onEnsureExpanded: (callback: () => void) => () => void
   openExternal: (url: string) => Promise<void>
   setUndetectable: (state: boolean) => Promise<{ success: boolean; error?: string }>
@@ -304,6 +309,9 @@ export interface ElectronAPI {
   cropperConfirmed: (bounds: { x: number; y: number; width: number; height: number }) => void;
   cropperCancelled: () => void;
   onResetCropper: (callback: (data: { hudPosition: { x: number; y: number } }) => void) => () => void;
+
+  // Platform
+  platform: NodeJS.Platform;
 }
 
 declare global {

@@ -1,6 +1,8 @@
+import { getModifierSymbol, isMac } from './platformUtils';
+
 /**
- * Converts an Electron Accelerator string to an array of keys for the frontend.
- * Example: "CommandOrControl+Shift+Space" -> ["Meta", "Shift", "Space"]
+ * Converts an Electron Accelerator string to an array of platform-aware keys for the frontend.
+ * Modifier symbols adapt to the current platform (e.g. ⌘ on macOS, Ctrl on Windows/Linux).
  */
 export function acceleratorToKeys(accelerator: string): string[] {
     if (!accelerator) return [];
@@ -12,15 +14,17 @@ export function acceleratorToKeys(accelerator: string): string[] {
             case 'cmd':
             case 'command':
             case 'meta':
-                return '⌘';
+                return getModifierSymbol('commandorcontrol');
             case 'control':
             case 'ctrl':
-                return '⌃';
+                // On macOS, explicit 'Ctrl' in an accelerator maps to the ⌃ key.
+                // On Win/Linux, Ctrl IS CommandOrControl so show the same Ctrl label.
+                return getModifierSymbol('ctrl');
             case 'alt':
             case 'option':
-                return '⌥';
+                return getModifierSymbol('alt');
             case 'shift':
-                return '⇧';
+                return getModifierSymbol('shift');
             case 'up':
             case 'arrowup':
                 return '↑';
@@ -59,7 +63,9 @@ export function keysToAccelerator(keys: string[]): string {
             case 'control':
             case 'ctrl':
             case '⌃':
-                modifiers.push('Control');
+                // On non-Mac treating ⌃ (explicit Ctrl) as CommandOrControl keeps Electron happy.
+                // If you need a Mac-only Ctrl binding, use 'Ctrl' directly in accelerator template.
+                modifiers.push(isMac ? 'Control' : 'CommandOrControl');
                 break;
             case 'alt':
             case 'option':

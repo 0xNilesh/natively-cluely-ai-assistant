@@ -36,6 +36,8 @@ export class RAGManager {
     private retriever: RAGRetriever;
     private llmHelper: LLMHelper | null = null;
     private liveIndexer: LiveRAGIndexer;
+    /** Guards against concurrent reprocessMeeting() calls for the same meeting ID. */
+    private _reprocessInFlight = new Set<string>();
 
     constructor(config: RAGManagerConfig) {
         this.db = config.db;
@@ -317,45 +319,57 @@ export class RAGManager {
      * Useful for demo meetings or reprocessing failed ones
      */
     async reprocessMeeting(meetingId: string): Promise<void> {
+        // Guard: if this meeting is already being reprocessed, skip to prevent
+        // concurrent runs from clearing each other's queue work.
+        if (this._reprocessInFlight.has(meetingId)) {
+            console.log(`[RAGManager] Reprocessing already in-flight for ${meetingId}, skipping duplicate call`);
+            return;
+        }
+        this._reprocessInFlight.add(meetingId);
+
         console.log(`[RAGManager] Reprocessing meeting ${meetingId}`);
 
-        // delete existing RAG data first to avoid duplicates
-        this.deleteMeetingData(meetingId);
+        try {
+            // delete existing RAG data first to avoid duplicates
+            this.deleteMeetingData(meetingId);
 
-        // Fetch meeting details from DB
-        const { DatabaseManager } = require('../db/DatabaseManager');
-        const meeting = DatabaseManager.getInstance().getMeetingDetails(meetingId);
+            // Fetch meeting details from DB
+            const { DatabaseManager } = require('../db/DatabaseManager');
+            const meeting = DatabaseManager.getInstance().getMeetingDetails(meetingId);
 
-        if (!meeting) {
-            console.error(`[RAGManager] Meeting ${meetingId} not found for reprocessing`);
-            return;
+            if (!meeting) {
+                console.error(`[RAGManager] Meeting ${meetingId} not found for reprocessing`);
+                return;
+            }
+
+            if (!meeting.transcript || meeting.transcript.length === 0) {
+                console.log(`[RAGManager] Meeting ${meetingId} has no transcript, skipping`);
+                return;
+            }
+
+            // Convert to RawSegment format
+            const segments = meeting.transcript.map((t: any) => ({
+                speaker: t.speaker,
+                text: t.text,
+                timestamp: t.timestamp
+            }));
+
+            // Get summary if available
+            let summary: string | undefined;
+            if (meeting.detailedSummary) {
+                summary = [
+                    ...(meeting.detailedSummary.overview ? [meeting.detailedSummary.overview] : []),
+                    ...(meeting.detailedSummary.keyPoints || []),
+                    ...(meeting.detailedSummary.actionItems || []).map((a: any) => `Action: ${a}`)
+                ].join('. ');
+            } else if (meeting.summary) {
+                summary = meeting.summary;
+            }
+
+            await this.processMeeting(meetingId, segments, summary);
+        } finally {
+            this._reprocessInFlight.delete(meetingId);
         }
-
-        if (!meeting.transcript || meeting.transcript.length === 0) {
-            console.log(`[RAGManager] Meeting ${meetingId} has no transcript, skipping`);
-            return;
-        }
-
-        // Convert to RawSegment format
-        const segments = meeting.transcript.map((t: any) => ({
-            speaker: t.speaker,
-            text: t.text,
-            timestamp: t.timestamp
-        }));
-
-        // Get summary if available
-        let summary: string | undefined;
-        if (meeting.detailedSummary) {
-            summary = [
-                ...(meeting.detailedSummary.overview ? [meeting.detailedSummary.overview] : []),
-                ...(meeting.detailedSummary.keyPoints || []),
-                ...(meeting.detailedSummary.actionItems || []).map((a: any) => `Action: ${a}`)
-            ].join('. ');
-        } else if (meeting.summary) {
-            summary = meeting.summary;
-        }
-
-        await this.processMeeting(meetingId, segments, summary);
     }
 
     /**
@@ -380,11 +394,12 @@ export class RAGManager {
             return;
         }
 
-        // Double check queue to avoid double-queueing
-        const queueStatus = this.getQueueStatus();
-        // This is a naive check (checks total pending), but good enough for now. 
-        // Ideally we check if *this* meeting is in queue. 
-        // For now, relies on isMeetingProcessed check mostly.
+        // Guard: also check the in-flight set — reprocessMeeting() itself is guarded,
+        // but checking here avoids even printing the "Processing now..." log redundantly.
+        if (this._reprocessInFlight.has(demoId)) {
+            console.log(`[RAGManager] Demo meeting reprocessing already in-flight, skipping`);
+            return;
+        }
 
         console.log('[RAGManager] Demo meeting found but not processed. Processing now...');
         await this.reprocessMeeting(demoId);

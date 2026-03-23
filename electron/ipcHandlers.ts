@@ -356,10 +356,18 @@ export function initializeIpcHandlers(appState: AppState): void {
   });
 
   // Streaming IPC Handler
+  // SECURITY FIX (P0-1): Monotonic stream ID prevents interleaved tokens from concurrent stream requests.
+  // Each new invocation increments the ID; any in-flight iteration bails as soon as it detects
+  // that a newer stream has taken over.
+  let _chatStreamId = 0;
+
   safeHandle("gemini-chat-stream", async (event, message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean }) => {
     try {
       console.log("[IPC] gemini-chat-stream started using LLMHelper.streamChat");
       const llmHelper = appState.processingHelper.getLLMHelper();
+
+      // Claim a new stream ID — any prior stream will detect this and stop emitting.
+      const myStreamId = ++_chatStreamId;
 
       // Update IntelligenceManager with USER message immediately
       const intelligenceManager = appState.getIntelligenceManager();
@@ -392,22 +400,32 @@ export function initializeIpcHandlers(appState: AppState): void {
         const stream = llmHelper.streamChat(message, imagePaths, context, options?.skipSystemPrompt ? "" : undefined);
 
         for await (const token of stream) {
+          // Bail if a newer stream has taken over (user triggered a new request)
+          if (_chatStreamId !== myStreamId) {
+            console.log(`[IPC] gemini-chat-stream ${myStreamId} superseded by ${_chatStreamId}, stopping.`);
+            return null;
+          }
           event.sender.send("gemini-stream-token", token);
           fullResponse += token;
         }
 
-        event.sender.send("gemini-stream-done");
+        // Final check: only send done if we are still the active stream
+        if (_chatStreamId === myStreamId) {
+          event.sender.send("gemini-stream-done");
 
-        // Update IntelligenceManager with ASSISTANT message after completion
-        if (fullResponse.trim().length > 0) {
-          intelligenceManager.addAssistantMessage(fullResponse);
-          // Log Usage for streaming chat
-          intelligenceManager.logUsage('chat', message, fullResponse);
+          // Update IntelligenceManager with ASSISTANT message after completion
+          if (fullResponse.trim().length > 0) {
+            intelligenceManager.addAssistantMessage(fullResponse);
+            // Log Usage for streaming chat
+            intelligenceManager.logUsage('chat', message, fullResponse);
+          }
         }
 
       } catch (streamError: any) {
         console.error("[IPC] Streaming error:", streamError);
-        event.sender.send("gemini-stream-error", streamError.message || "Unknown streaming error");
+        if (_chatStreamId === myStreamId) {
+          event.sender.send("gemini-stream-error", streamError.message || "Unknown streaming error");
+        }
       }
 
       return null; // Return null as data is sent via events
@@ -481,6 +499,23 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle("center-and-show-window", async () => {
     appState.centerAndShowWindow()
   })
+
+  // Window Controls
+  safeHandle("window-minimize", async () => {
+    appState.getWindowHelper().minimizeWindow();
+  });
+
+  safeHandle("window-maximize", async () => {
+    appState.getWindowHelper().maximizeWindow();
+  });
+
+  safeHandle("window-close", async () => {
+    appState.getWindowHelper().closeWindow();
+  });
+
+  safeHandle("window-is-maximized", async () => {
+    return appState.getWindowHelper().isMainWindowMaximized();
+  });
 
   // Settings Window
   safeHandle("toggle-settings-window", (event, { x, y } = {}) => {
@@ -743,8 +778,28 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
-  safeHandle("save-custom-provider", async (_, provider: any) => {
+  safeHandle("save-custom-provider", async (_, provider: unknown) => {
     try {
+      // SECURITY FIX (P1-2): Validate provider payload shape before persisting.
+      // Prevents malformed/malicious renderer data from polluting CredentialsManager.
+      if (
+        typeof provider !== 'object' || provider === null ||
+        typeof (provider as any).id !== 'string' ||
+        typeof (provider as any).name !== 'string' ||
+        typeof (provider as any).curlCommand !== 'string'
+      ) {
+        console.error('[IPC] save-custom-provider: invalid payload shape', typeof provider);
+        return { success: false, error: 'Invalid provider payload' };
+      }
+
+      const curlCmd: string = (provider as any).curlCommand;
+      // Require {{TEXT}} so the app always has a defined injection point for the user prompt.
+      // We do NOT require the string to start with 'curl' — curlCommand is a template field,
+      // not necessarily a raw CLI string, and over-constraining it would break valid providers.
+      if (!curlCmd.includes('{{TEXT}}')) {
+        return { success: false, error: 'curlCommand must contain {{TEXT}} placeholder for the prompt' };
+      }
+
       const { CredentialsManager } = require('./services/CredentialsManager');
       // Save as CurlProvider (supports responsePath)
       CredentialsManager.getInstance().saveCurlProvider(provider);
@@ -1503,10 +1558,12 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle("seed-demo", async () => {
     DatabaseManager.getInstance().seedDemoMeeting();
 
-    // Trigger RAG processing for the new demo meeting
+    // Ensure RAG embeddings exist for the demo meeting.
+    // Use ensureDemoMeetingProcessed so we skip if already embedded
+    // (avoids re-clearing 14 queue items on every app launch once processed).
     const ragManager = appState.getRAGManager();
     if (ragManager && ragManager.isReady()) {
-      ragManager.reprocessMeeting('demo-meeting').catch(console.error);
+      ragManager.ensureDemoMeetingProcessed().catch(console.error);
     }
 
     return { success: true };

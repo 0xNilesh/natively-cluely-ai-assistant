@@ -144,8 +144,8 @@ const Solutions: React.FC<SolutionsProps> = ({ setView }) => {
     setTooltipHeight(height)
   }
 
+  // Effect 1: ResizeObserver — re-runs when tooltip geometry changes so dimensions stay accurate.
   useEffect(() => {
-    // Resize observer
     const updateDimensions = () => {
       if (contentRef.current) {
         let h = contentRef.current.scrollHeight
@@ -157,7 +157,13 @@ const Solutions: React.FC<SolutionsProps> = ({ setView }) => {
     const ro = new ResizeObserver(updateDimensions)
     if (contentRef.current) ro.observe(contentRef.current)
     updateDimensions()
+    return () => ro.disconnect()
+  }, [isTooltipVisible, tooltipHeight])
 
+  // Effect 2: IPC listeners — registered exactly once on mount, cleaned up on unmount.
+  // FIX (P2-5): Separated from the ResizeObserver effect so that tooltip height changes
+  // do NOT cause all 8 IPC listeners to be torn down and re-registered on every resize.
+  useEffect(() => {
     const cleanups = [
       window.electronAPI.onScreenshotTaken(() => refetch()),
 
@@ -224,11 +230,8 @@ const Solutions: React.FC<SolutionsProps> = ({ setView }) => {
       }),
     ]
 
-    return () => {
-      ro.disconnect()
-      cleanups.forEach(fn => fn())
-    }
-  }, [isTooltipVisible, tooltipHeight])
+    return () => cleanups.forEach(fn => fn())
+  }, [])
 
   // Hydrate from cache on mount (e.g. navigating away & back)
   useEffect(() => {

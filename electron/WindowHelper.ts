@@ -1,5 +1,5 @@
 
-import { BrowserWindow, screen, app } from "electron"
+import { BrowserWindow, screen, app, Menu } from "electron"
 import { AppState } from "./main"
 import path from "node:path"
 
@@ -124,6 +124,8 @@ export class WindowHelper {
     const y = Math.round(workArea.x + topMargin);
 
     // --- 1. Create Launcher Window ---
+    const isMac = process.platform === "darwin";
+
     const launcherSettings: Electron.BrowserWindowConstructorOptions = {
       width: width,
       height: height,
@@ -139,13 +141,14 @@ export class WindowHelper {
         webSecurity: !isDev, // DEBUG: Disable web security only in dev
       },
       show: false, // DEBUG: Force show -> Fixed white screen, now relies on ready-to-show
-      titleBarStyle: 'hiddenInset',
-      trafficLightPosition: { x: 14, y: 14 },
-      vibrancy: 'under-window',
-      visualEffectState: 'followWindow',
-      transparent: true,
+      // Platform-specific frame settings
+      ...(isMac
+        ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 14, y: 14 } }
+        : { frame: false, titleBarOverlay: false, autoHideMenuBar: true }),
+      ...(isMac ? { vibrancy: 'under-window' as const, visualEffectState: 'followWindow' as const } : {}),
+      transparent: isMac,
       hasShadow: true,
-      backgroundColor: "#00000000",
+      backgroundColor: isMac ? "#00000000" : "#000000",
       focusable: true,
       resizable: true,
       movable: true,
@@ -257,6 +260,14 @@ export class WindowHelper {
   private setupWindowListeners(): void {
     if (!this.launcherWindow) return
 
+    // Suppress Windows system context menu on right-click (title bar)
+    this.launcherWindow.on('system-context-menu', (e, point) => {
+      e.preventDefault();
+      if (!this.appState.getUndetectable()) {
+        this.showContextMenu(this.launcherWindow!, point);
+      }
+    });
+
     this.launcherWindow.on("move", () => {
       if (this.launcherWindow) {
         const bounds = this.launcherWindow.getBounds()
@@ -283,6 +294,14 @@ export class WindowHelper {
           this.isWindowVisible = false;
         }
       });
+
+      // Sync maximize state to renderer so WindowControls stays in sync (Windows/Linux only)
+      this.launcherWindow.on('maximize', () => {
+        this.launcherWindow?.webContents.send('window-maximized-changed', true);
+      });
+      this.launcherWindow.on('unmaximize', () => {
+        this.launcherWindow?.webContents.send('window-maximized-changed', false);
+      });
     }
 
     this.launcherWindow.on("closed", () => {
@@ -298,6 +317,13 @@ export class WindowHelper {
     // Listen for overlay close (e.g. Cmd+W). Never truly destroy it — either
     // hide it (during a meeting) or switch back to launcher (between meetings).
     if (this.overlayWindow) {
+      this.overlayWindow.on('system-context-menu', (e, point) => {
+        e.preventDefault();
+        if (!this.appState.getUndetectable()) {
+          this.showContextMenu(this.overlayWindow!, point);
+        }
+      });
+
       this.overlayWindow.on('close', (e) => {
         if (this.overlayWindow?.isVisible()) {
           e.preventDefault();
@@ -339,6 +365,11 @@ export class WindowHelper {
 
   public isVisible(): boolean {
     return this.isWindowVisible
+  }
+
+  public isMainWindowMaximized(): boolean {
+    const win = this.launcherWindow;
+    return !!win && !win.isDestroyed() && win.isMaximized();
   }
 
   public hideMainWindow(): void {
@@ -530,4 +561,48 @@ export class WindowHelper {
   public moveWindowLeft(): void { this.moveActiveWindow(-this.step, 0) }
   public moveWindowDown(): void { this.moveActiveWindow(0, this.step) }
   public moveWindowUp(): void { this.moveActiveWindow(0, -this.step) }
+
+  private showContextMenu(win: BrowserWindow, point: { x: number; y: number }): void {
+    const template: Electron.MenuItemConstructorOptions[] = [
+      {
+        label: 'Developer Console',
+        click: () => { win.webContents.toggleDevTools(); }
+      },
+      { type: 'separator' },
+      { role: 'reload' },
+      { role: 'forceReload' },
+      { type: 'separator' },
+      { role: 'copy' },
+      { role: 'paste' },
+      { role: 'selectAll' },
+    ];
+    const menu = Menu.buildFromTemplate(template);
+    menu.popup({ window: win, x: point.x, y: point.y });
+  }
+
+  public minimizeWindow(): void {
+    const win = this.launcherWindow;
+    if (!win || win.isDestroyed()) return;
+    if (this.opacityTimeout) clearTimeout(this.opacityTimeout);
+    win.minimize();
+  }
+
+  public maximizeWindow(): void {
+    const win = this.launcherWindow;
+    if (!win || win.isDestroyed()) return;
+    if (win.isMaximized()) {
+      win.unmaximize();
+    } else {
+      win.maximize();
+    }
+  }
+
+  public closeWindow(): void {
+    const win = this.launcherWindow;
+    if (!win || win.isDestroyed()) return;
+    if (this.opacityTimeout) clearTimeout(this.opacityTimeout);
+    // On Windows/Linux the 'close' event listener intercepts this
+    // and hides to tray unless the app is actually quitting.
+    win.close();
+  }
 }

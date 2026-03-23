@@ -2535,14 +2535,22 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       // 1. Check for process on port 11434
       try {
         const { stdout } = await execAsync(`lsof -t -i:11434`);
-        const pid = stdout.trim();
-        if (pid) {
+        // SECURITY FIX (P1-1): Validate EACH PID token from lsof before shell interpolation.
+        // lsof -t returns one PID per line when multiple processes are on the port.
+        const pids = stdout.trim().split(/\s+/).filter(p => /^\d+$/.test(p));
+        for (const pid of pids) {
           console.log(`[LLMHelper] Found blocking PID: ${pid}. Killing...`);
           await execAsync(`kill -9 ${pid}`);
         }
+        if (pids.length === 0 && stdout.trim()) {
+          console.warn(`[LLMHelper] Unexpected lsof output (no valid PIDs): "${stdout.trim().substring(0, 50)}". Skipping kill.`);
+        }
       } catch (e: any) {
-        // lsof returns 1 if no process found, which throws error in execAsync
-        // Ignore unless it's a real error
+        // lsof returns exit code 1 if no process found — that is expected, swallow it.
+        // Only surface genuinely unexpected errors.
+        if (!e.message?.includes('exit code 1') && e.code !== 1) {
+          console.warn('[LLMHelper] lsof error (non-fatal):', e.message);
+        }
       }
 
       // 2. Restart Ollama through the Manager (which handles polling and background spawn)

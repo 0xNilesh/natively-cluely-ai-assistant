@@ -2191,19 +2191,13 @@ export class AppState {
     }
     this._disguiseTimers = [];
 
-    // Force periodic updates to ensure process title sticks
-    const forceUpdate = () => {
-      process.title = appName;
-      // Only call app.setName when NOT in stealth — it causes dock to re-show
-      if (isMac && !this.isUndetectable) {
-        app.setName(appName);
-      }
-    };
-
-    // Helper to queue a timeout and remove it from array once executed smoothly
+    // Periodically re-assert process.title only — it can drift on some systems.
+    // NOTE: We intentionally do NOT call app.setName() here — it was already called
+    // synchronously above, and repeated calls on macOS cause the system to briefly
+    // show a second dock tile while re-registering the app identity.
     const scheduleUpdate = (ms: number) => {
       const ts = setTimeout(() => {
-        forceUpdate();
+        process.title = appName;
         this._disguiseTimers = this._disguiseTimers.filter(t => t !== ts);
       }, ms);
       this._disguiseTimers.push(ts);
@@ -2240,6 +2234,16 @@ export class AppState {
 // Application initialization
 
 async function initializeApp() {
+  // 1. Enforce single instance — prevent duplicate dock icons from leftover processes.
+  // In development mode with hot-reload this is still safe because electron is restarted
+  // by the build step, not re-launched by concurrently while the old process is alive.
+  const gotLock = app.requestSingleInstanceLock();
+  if (!gotLock) {
+    console.log('[Main] Another instance is already running. Quitting this instance.');
+    app.quit();
+    return;
+  }
+
   // 2. Wait for app to be ready
   await app.whenReady()
 
@@ -2261,81 +2265,78 @@ async function initializeApp() {
   // Apply the full disguise payload (names, dock icon, AUMID) early
   appState.applyInitialDisguise();
 
-  app.whenReady().then(() => {
-    // Start the Ollama lifecycle manager
-    OllamaManager.getInstance().init().catch(console.error);
+  // Start the Ollama lifecycle manager
+  OllamaManager.getInstance().init().catch(console.error);
 
-    // NOTE: CredentialsManager.init() and loadStoredCredentials() are already called
-    // above before this block — do NOT call them again here to avoid double key-load.
+  // NOTE: CredentialsManager.init() and loadStoredCredentials() are already called
+  // above before this block — do NOT call them again here to avoid double key-load.
 
-    // Anonymous install ping - one-time, non-blocking
-    // See electron/services/InstallPingManager.ts for privacy details
-    const { sendAnonymousInstallPing } = require('./services/InstallPingManager');
-    sendAnonymousInstallPing();
+  // Anonymous install ping - one-time, non-blocking
+  // See electron/services/InstallPingManager.ts for privacy details
+  const { sendAnonymousInstallPing } = require('./services/InstallPingManager');
+  sendAnonymousInstallPing();
 
-    // Load stored Google Service Account path (for Speech-to-Text)
-    const storedServiceAccountPath = CredentialsManager.getInstance().getGoogleServiceAccountPath();
-    if (storedServiceAccountPath) {
-      console.log("[Init] Loading stored Google Service Account path");
-      appState.updateGoogleCredentials(storedServiceAccountPath);
+  // Load stored Google Service Account path (for Speech-to-Text)
+  const storedServiceAccountPath = CredentialsManager.getInstance().getGoogleServiceAccountPath();
+  if (storedServiceAccountPath) {
+    console.log("[Init] Loading stored Google Service Account path");
+    appState.updateGoogleCredentials(storedServiceAccountPath);
+  }
+
+  console.log("App is ready")
+
+  appState.createWindow()
+
+  // Apply initial stealth state based on isUndetectable setting
+  if (appState.getUndetectable()) {
+    // Stealth mode: hide dock and tray
+    if (process.platform === 'darwin') {
+      app.dock.hide();
     }
-
-    console.log("App is ready")
-
-    appState.createWindow()
-
-    // Apply initial stealth state based on isUndetectable setting
-    if (appState.getUndetectable()) {
-      // Stealth mode: hide dock and tray
-      if (process.platform === 'darwin') {
-        app.dock.hide();
-      }
-    } else {
-      // Normal mode: show dock and tray
-      appState.showTray();
-      if (process.platform === 'darwin') {
-        app.dock.show();
-      }
+  } else {
+    // Normal mode: show dock and tray
+    appState.showTray();
+    if (process.platform === 'darwin') {
+      app.dock.show();
     }
-    // Register global shortcuts using KeybindManager
-    KeybindManager.getInstance().registerGlobalShortcuts()
+  }
+  // Register global shortcuts using KeybindManager
+  KeybindManager.getInstance().registerGlobalShortcuts()
 
-    // Pre-create settings window in background for faster first open
-    appState.settingsWindowHelper.preloadWindow()
+  // Pre-create settings window in background for faster first open
+  appState.settingsWindowHelper.preloadWindow()
 
-    // Initialize CalendarManager
-    try {
-      const { CalendarManager } = require('./services/CalendarManager');
-      const calMgr = CalendarManager.getInstance();
-      calMgr.init();
+  // Initialize CalendarManager
+  try {
+    const { CalendarManager } = require('./services/CalendarManager');
+    const calMgr = CalendarManager.getInstance();
+    calMgr.init();
 
-      calMgr.on('start-meeting-requested', (event: any) => {
-        console.log('[Main] Start meeting requested from calendar notification', event);
-        appState.centerAndShowWindow();
-        appState.startMeeting({
-          title: event.title,
-          calendarEventId: event.id,
-          source: 'calendar'
-        });
+    calMgr.on('start-meeting-requested', (event: any) => {
+      console.log('[Main] Start meeting requested from calendar notification', event);
+      appState.centerAndShowWindow();
+      appState.startMeeting({
+        title: event.title,
+        calendarEventId: event.id,
+        source: 'calendar'
       });
-
-      calMgr.on('open-requested', () => {
-        appState.centerAndShowWindow();
-      });
-
-      console.log('[Main] CalendarManager initialized');
-    } catch (e) {
-      console.error('[Main] Failed to initialize CalendarManager:', e);
-    }
-
-    // Recover unprocessed meetings (persistence check)
-    appState.getIntelligenceManager().recoverUnprocessedMeetings().catch(err => {
-      console.error('[Main] Failed to recover unprocessed meetings:', err);
     });
 
+    calMgr.on('open-requested', () => {
+      appState.centerAndShowWindow();
+    });
 
-    // Note: We do NOT force dock show here anymore, respecting stealth mode.
-  })
+    console.log('[Main] CalendarManager initialized');
+  } catch (e) {
+    console.error('[Main] Failed to initialize CalendarManager:', e);
+  }
+
+  // Recover unprocessed meetings (persistence check)
+  appState.getIntelligenceManager().recoverUnprocessedMeetings().catch(err => {
+    console.error('[Main] Failed to recover unprocessed meetings:', err);
+  });
+
+  // Note: We do NOT force dock show here anymore, respecting stealth mode.
 
   app.on("activate", () => {
     console.log("App activated")

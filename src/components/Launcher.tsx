@@ -13,6 +13,8 @@ import { FeatureSpotlight } from './FeatureSpotlight';
 import { analytics } from '../lib/analytics/analytics.service'; // Added analytics import
 import { useShortcuts } from '../hooks/useShortcuts';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
+import { isMac } from '../utils/platformUtils';
+import WindowControls from './WindowControls';
 
 interface Meeting {
     id: string;
@@ -132,7 +134,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
     useEffect(() => {
         let mounted = true;
         console.log("Launcher mounted");
-        // Seed demo data if needed (safe to call always)
+        // Seed demo data if needed (safe to call always — runs ONCE on mount)
         if (window.electronAPI && window.electronAPI.seedDemo) {
             window.electronAPI.seedDemo().catch(err => console.error("Failed to seed demo:", err));
         }
@@ -179,7 +181,18 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
         // Simple polling for events every minute
         const interval = setInterval(fetchEvents, 60000);
 
-        // Global Keydown for Launcher-specific shortcuts (Cmd+B)
+        return () => {
+            mounted = false;
+            if (removeMeetingsListener) removeMeetingsListener();
+            if (removeUndetectableListener) removeUndetectableListener();
+            if (removeMeetingStateListener) removeMeetingStateListener();
+            clearInterval(interval);
+        };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []); // Mount-only: stable setup that must run exactly once
+
+    // Separate effect for keyboard listener — re-registers when isShortcutPressed changes
+    useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
             if (isShortcutPressed(e, 'toggleVisibility')) {
                 e.preventDefault();
@@ -187,13 +200,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
             }
         };
         window.addEventListener('keydown', handleKeyDown);
-
         return () => {
-            mounted = false;
-            if (removeMeetingsListener) removeMeetingsListener();
-            if (removeUndetectableListener) removeUndetectableListener();
-            if (removeMeetingStateListener) removeMeetingStateListener();
-            clearInterval(interval);
             window.removeEventListener('keydown', handleKeyDown);
         };
     }, [isShortcutPressed]);
@@ -349,7 +356,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
             <header className="relative h-[40px] shrink-0 flex items-center justify-between pl-0 pr-2 drag-region select-none bg-bg-secondary border-b border-border-subtle z-[200]">
                 {/* Left: Spacing for Traffic Lights + Navigation Arrows */}
                 <div className="flex items-center gap-1 no-drag">
-                    <div className="w-[70px]" /> {/* Traffic Light Spacer */}
+                    {isMac && <div className="w-[70px]" />} {/* Traffic Light Spacer (macOS only) */}
 
                     {/* Back Button */}
                     <button
@@ -417,6 +424,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                     >
                         <Settings size={18} />
                     </button>
+                    {!isMac && <WindowControls />}
                 </div>
             </header>
 
