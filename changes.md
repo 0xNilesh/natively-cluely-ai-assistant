@@ -13,3 +13,13 @@
 - [src/components/MeetingChatOverlay.tsx, GlobalChatOverlay.tsx]: added explicit opacity-50 class to logo imgs — restores intended 50% dark-mode opacity now that CSS rule no longer sets it
 - [src/components/MeetingDetails.tsx]: removed dead grayscale class from AI logo img — force-black-icon's filter:brightness(0)!important fully overrides grayscale, making it a no-op
 - [electron/WindowHelper.ts]: added getLastOverlayBounds() and getLastOverlayDisplayId() methods — required by main.ts ScreenshotCaptureSession but were missing from WindowHelper, causing TS2339 build error
+- [electron/WindowHelper.ts]: fixed taskbar exposure bug on Windows — updated centerAndShowWindow() to route tray clicks to the Stealth Overlay instead of the launcher window when a meeting is active
+- [electron/main.ts]: fixed dock exposure bug on macOS — updated app.activate handler to block app.dock.show() when isMeetingActive() is true
+- [src/components/NativelyInterface.tsx, src/components/Launcher.tsx]: removed native HTML title tooltips from Settings and Mouse Passthrough floating buttons to prevent unstyled text boxes from appearing on hover
+- [native-module/src/lib.rs]: migrated native audio entrypoints to napi-rs v3 ThreadsafeFunction API (wrapping payloads in Ok()), fixed critical bug where `device_id.take()` permanently consumed the selected device causing restarts to fall back to default
+- [native-module/index.d.ts]: added napi v3 TypeScript definitions for MicrophoneCapture and SystemAudioCapture; tightened `verifyGumroadKey` return type from `Promise<unknown>` to `Promise<string>`
+- [native-module/package.json]: removed stale v2 `@napi-rs/cli` devDependency and added `targets: ["defaults"]` for napi v3 compatibility
+- [electron/audio/MicrophoneCapture.ts, electron/audio/SystemAudioCapture.ts]: updated callback signatures to err-first `(err, arg)` format for napi v3; fixed `isRecording` race condition to ensure state resets on errors; deferred `getSampleRate()` execution in SystemAudioCapture until background SCK init completes
+- [src/components/AboutSection.tsx]: replaced hardcoded Mac `⌘⇧↵` symbols with `getPlatformShortcut` utility to dynamically show correct keys (e.g. `Ctrl+Shift+Enter`) on Windows
+- [src/components/Launcher.tsx]: fixed Windows header layout clipping by removing right padding (`pr-2`) and adding `shrink-0` to the actions container
+- [README.md]: added instructions for `npm run build:native` and clarified `dist` step for Windows maintainers

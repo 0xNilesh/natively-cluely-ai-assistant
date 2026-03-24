@@ -55,7 +55,7 @@
   <a href="https://github.com/evinjohnn/natively-cluely-ai-assistant/releases/latest">
     <img src="https://img.shields.io/badge/Download-macOS-007AFF?style=for-the-badge&logo=apple&logoColor=white" />
   </a>
-  <a href="https://github.com/evinjohnn/natively-cluely-ai-assistant/releases/tag/v2.0.5">
+  <a href="https://github.com/evinjohnn/natively-cluely-ai-assistant/releases/latest">
     <img src="https://img.shields.io/badge/Download-Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white" />
   </a>
 </p>
@@ -276,20 +276,20 @@ While Natively is **free and open-source forever**, we also offer a **Pro Editio
 
 ---
 
-### What's New in v2.0.7
+### What's New in v20.08
 
-Version 2.0.7 delivers massive upgrades to vision processing, introduces mouse passthrough mode, overhauls native audio stability, and resolves critical bugs found during a comprehensive senior engineering audit.
+Version 20.08 introduces major advancements in stealth routing, Mouse Passthrough Mode, Multimodal Groq support, and resolves critical bugs to ensure a seamless workflow.
 
-- **Multimodal Groq Support**: Integrated `meta-llama/llama-4-scout-17b-16e-instruct` into the ecosystem for ultra-fast screenshot analysis capability, with increased vision max completion tokens (up to 8192) to properly support full code generation.
-- **Mouse Passthrough Mode**: Added a global hotkey to effortlessly toggle mouse pass-through, allowing direct click-through interactions with background windows beneath the assistant.
-- **Native Audio Loader Stability**: Bypassed restrictive node resolution by mapping absolute paths directly to `.node` binaries, successfully repairing persistent start-up issues particularly on Windows Git Bash.
-- **Model Roster Update**: Updated baseline architecture natively to default to `gpt-5.4-chat`, `gemini-3.1`, and `claude-sonnet-4-6`.
-- **Model Rotation Engine**: Fortified the 3-tier fallback mechanisms and auto-upgrade logic for Gemini, Claude, GPT, and Groq models.
-- **SQLite-Vec Dimension Fix**: Resolved a critical silent data-corruption bug in vector storage by provisioning per-dimension table pairs (`vec_chunks_768`, `vec_chunks_1536`, `vec_chunks_3072`), directly fixing a bug that dropped 100% of Ollama embeddings in local native search.
-- **Permanent Hide Trap & Data Loss Fix**: Repaired a critical IPC routing flaw where hiding the UI permanently trapped the app in the background, which inadvertently caused data corruption (lost API keys) when users force-quit the application.
-- **Thread Safety & Race Conditions**: Eliminated fatal global state mutation risks during API fallback loops and patched `SettingsManager` early-access crashes on boot.
-- **Memory & Listener Leaks Eliminated**: Eradicated memory leaks by clearing unbounded array loops in the disguise engine, aggressively detaching Rust/C++ native event emitters on audio stops, and cleanly destroying opacity shield timers.
-- **Cross-Platform Stability**: Implemented a Windows "opacity shield" for flash-free stealth window toggles, resolved unhandled promise rejections, corrected hardcoded OS icon paths, and refined process disguise mappings (e.g., mapping MacOS Terminal to Windows Command Prompt).
+- **Multimodal Groq Support**: Integrated `meta-llama/llama-4-scout-17b-16e-instruct` into the ecosystem for high-speed screenshot analysis capability, with increased max completion tokens (up to 8192).
+- **Mouse Passthrough Mode**: Merged backend Electron mouse event management with full state-sync between the global keybind manager and the React renderer interface.
+- **Instant Stealth Boot & Windows Opacity Shield**: Refactored the app to immediately apply cached `isUndetectable` states on boot and implemented an opacity shield to eliminate a 1-frame screen flash when showing protected UI elements.
+- **Model Roster & Rotation Engine**: Updated default architecture models to utilize the latest generation `gpt-5.4-chat`, `gemini-3.1`, and `claude-sonnet-4-6`, while fortifying the 3-tier fallback mechanisms.
+- **Permanent Hide & Visibility Flaw**: Repaired a critical IPC routing bug where hiding the session UI dynamically misrouted `Cmd+B` unhide commands to the background Launcher, eliminating the "invisible interface" trap.
+- **SQLite-Vec Corruptions**: Fixed a critical silent data-corruption bug caused by tight strict dimensionality constraints (`float[1536]`), ensuring 100% of generated embeddings are retained and searchable.
+- **Groq Multimedia Drop**: Resolved a "Front Door" routing bug where image attachments bypassed the Groq engine completely and triggered false LLM connection errors.
+- **Critical Race Conditions & Thread Safety**: Eliminated dangerous global state mutations during LLM fallback loops and patched `SettingsManager` early-initialization fatal crashes.
+- **Memory & Resource Leaks**: Hardened native audio listener destruction to prevent zombie callbacks, and cleared dangling floating timeout IDs on opacity shields and disguise timers.
+- **Native Module Loader Pipeline (Cross-Platform Stability)**: Integrated a custom NAPI-RS absolute binary loader (`nativeModuleLoader.ts`) to entirely bypass POSIX-symlink `require` failures on Windows Git Bash, alongside numerous enhancements like rectifying hardcoded `natively.icns` dependencies.
 
 ---
 
@@ -302,7 +302,7 @@ Version 2.0.7 delivers massive upgrades to vision processing, introduces mouse p
 - [Why Natively wins](#why-natively-wins)
 - [Why Natively?](#why-natively)
 - [Natively Pro](#natively-pro)
-- [What's New in v2.0.7](#whats-new-in-v207)
+- [What's New in v20.08](#whats-new-in-v2008)
 - [Privacy & Security](#privacy--security-core-design-principle)
 - [Installation](#installation-developers--contributors)
 - [AI Providers](#ai-providers)
