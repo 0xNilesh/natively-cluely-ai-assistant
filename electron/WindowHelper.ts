@@ -1,6 +1,7 @@
 
 import { BrowserWindow, screen, app, Menu } from "electron"
 import { AppState } from "./main"
+import { KeybindManager } from "./services/KeybindManager"
 import path from "node:path"
 
 const isEnvDev = process.env.NODE_ENV === "development"
@@ -459,6 +460,7 @@ export class WindowHelper {
   public switchToOverlay(inactive?: boolean): void {
     console.log(`[WindowHelper] Switching to OVERLAY (inactive: ${!!inactive})`);
     this.currentWindowMode = 'overlay';
+    KeybindManager.getInstance().setMode('overlay');
 
     // Tell the overlay renderer to expand to full size (e.g. after being minimised)
     this.overlayWindow?.webContents.send('ensure-expanded');
@@ -512,6 +514,7 @@ export class WindowHelper {
   public switchToLauncher(inactive?: boolean): void {
     console.log(`[WindowHelper] Switching to LAUNCHER (inactive: ${!!inactive})`);
     this.currentWindowMode = 'launcher';
+    KeybindManager.getInstance().setMode('launcher');
 
     // Show Launcher FIRST
     if (this.launcherWindow && !this.launcherWindow.isDestroyed()) {
