@@ -276,9 +276,9 @@ While Natively is **free and open-source forever**, we also offer a **Pro Editio
 
 ---
 
-### What's New in v20.08
+### What's New in v2.0.8
 
-Version 20.08 introduces major advancements in stealth routing, Mouse Passthrough Mode, Multimodal Groq support, and resolves critical bugs to ensure a seamless workflow.
+Version 2.0.8 introduces major advancements in stealth routing, Mouse Passthrough Mode, Multimodal Groq support, and resolves critical bugs to ensure a seamless workflow.
 
 - **Multimodal Groq Support**: Integrated `meta-llama/llama-4-scout-17b-16e-instruct` into the ecosystem for high-speed screenshot analysis capability, with increased max completion tokens (up to 8192).
 - **Mouse Passthrough Mode**: Merged backend Electron mouse event management with full state-sync between the global keybind manager and the React renderer interface.
@@ -302,7 +302,7 @@ Version 20.08 introduces major advancements in stealth routing, Mouse Passthroug
 - [Why Natively wins](#why-natively-wins)
 - [Why Natively?](#why-natively)
 - [Natively Pro](#natively-pro)
-- [What's New in v20.08](#whats-new-in-v2008)
+- [What's New in v2.0.8](#whats-new-in-v208)
 - [Privacy & Security](#privacy--security-core-design-principle)
 - [Installation](#installation-developers--contributors)
 - [AI Providers](#ai-providers)
