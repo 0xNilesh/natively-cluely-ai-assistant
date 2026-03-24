@@ -463,6 +463,12 @@ cd natively-cluely-ai-assistant
 npm install
 ```
 
+### Build Native Audio Module (Rust)
+
+```bash
+npm run build:native
+```
+
 ### Environment Variables
 
 Create a `.env` file:
@@ -503,6 +509,8 @@ npm start
 ```bash
 npm run dist
 ```
+
+This runs: Vite build → TypeScript compile → native module build → electron-builder
 
 ---
 

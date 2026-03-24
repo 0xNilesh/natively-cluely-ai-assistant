@@ -69,14 +69,22 @@ export class SystemAudioCapture extends EventEmitter {
                 console.log(`[SystemAudioCapture] Detected sample rate: ${this.detectedSampleRate}`);
             }
 
-            this.monitor.start((chunk: Uint8Array) => {
-                // The native module sends raw PCM bytes (Uint8Array) via zero-copy napi::Buffer
+            this.monitor.start((err: Error | null, chunk: Buffer) => {
+                // napi v3 ThreadsafeFunction passes (err, arg) format
+                if (err) {
+                    console.error('[SystemAudioCapture] Callback error:', err);
+                    return;
+                }
                 if (chunk && chunk.length > 0) {
                     const buffer = Buffer.from(chunk);
                     this.emit('data', buffer);
                 }
-            }, () => {
+            }, (err: Error | null, ended: boolean) => {
                 // Speech-ended callback from Rust SilenceSuppressor
+                if (err) {
+                    console.error('[SystemAudioCapture] Speech ended callback error:', err);
+                    return;
+                }
                 this.emit('speech_ended');
             });
 

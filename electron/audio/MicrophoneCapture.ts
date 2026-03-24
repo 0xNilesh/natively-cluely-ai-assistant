@@ -70,7 +70,12 @@ export class MicrophoneCapture extends EventEmitter {
         try {
             console.log('[MicrophoneCapture] Starting native capture...');
 
-            this.monitor.start((chunk: Uint8Array) => {
+            this.monitor.start((err: Error | null, chunk: Buffer) => {
+                // napi v3 ThreadsafeFunction passes (err, arg) format
+                if (err) {
+                    console.error('[MicrophoneCapture] Callback error:', err);
+                    return;
+                }
                 if (chunk && chunk.length > 0) {
                     // Debug: log occasionally
                     if (Math.random() < 0.05) {
@@ -78,8 +83,12 @@ export class MicrophoneCapture extends EventEmitter {
                     }
                     this.emit('data', Buffer.from(chunk));
                 }
-            }, () => {
+            }, (err: Error | null, ended: boolean) => {
                 // Speech-ended callback from Rust SilenceSuppressor
+                if (err) {
+                    console.error('[MicrophoneCapture] Speech ended callback error:', err);
+                    return;
+                }
                 this.emit('speech_ended');
             });
 
