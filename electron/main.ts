@@ -2365,7 +2365,9 @@ async function initializeApp() {
   app.on("activate", () => {
     console.log("App activated")
     if (process.platform === 'darwin') {
-      if (!appState.getUndetectable()) {
+      // Do NOT call dock.show() while a meeting is running — the dock icon
+      // appearing mid-meeting is a critical stealth failure.
+      if (!appState.getUndetectable() && !appState.getIsMeetingActive()) {
         app.dock.show();
       }
     }

@@ -2153,7 +2153,7 @@ Provide only the answer, nothing else.`;
                                                     ? 'overlay-icon-surface overlay-icon-surface-hover overlay-text-primary'
                                                     : 'overlay-icon-surface overlay-icon-surface-hover overlay-text-interactive'}
                                         `}
-                                                title="Settings"
+
                                                 style={appearance.iconStyle}
                                             >
                                                 <SlidersHorizontal className="w-3.5 h-3.5" />
@@ -2177,7 +2177,7 @@ Provide only the answer, nothing else.`;
                                                         ? 'overlay-icon-surface overlay-icon-surface-hover text-sky-400 opacity-100'
                                                         : 'overlay-icon-surface overlay-icon-surface-hover overlay-text-interactive'}
                                                 `}
-                                                title={`Mouse Passthrough: ${isMousePassthrough ? 'ON' : 'OFF'}`}
+
                                                 style={appearance.iconStyle}
                                             >
                                                 <PointerOff className="w-3.5 h-3.5" />

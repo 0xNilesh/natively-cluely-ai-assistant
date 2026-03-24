@@ -70,10 +70,14 @@ export class MicrophoneCapture extends EventEmitter {
         try {
             console.log('[MicrophoneCapture] Starting native capture...');
 
+            this.isRecording = true; // Set BEFORE start() to prevent re-entrant calls
+
             this.monitor.start((err: Error | null, chunk: Buffer) => {
                 // napi v3 ThreadsafeFunction passes (err, arg) format
                 if (err) {
                     console.error('[MicrophoneCapture] Callback error:', err);
+                    this.isRecording = false; // Allow recovery via restart
+                    this.emit('error', err);
                     return;
                 }
                 if (chunk && chunk.length > 0) {
@@ -83,8 +87,9 @@ export class MicrophoneCapture extends EventEmitter {
                     }
                     this.emit('data', Buffer.from(chunk));
                 }
-            }, (err: Error | null, ended: boolean) => {
-                // Speech-ended callback from Rust SilenceSuppressor
+            }, (err: Error | null, _ended: boolean) => {
+                // Speech-ended callback from Rust SilenceSuppressor.
+                // _ended is always `true` when fired (Rust only invokes on speech→silence transition).
                 if (err) {
                     console.error('[MicrophoneCapture] Speech ended callback error:', err);
                     return;
@@ -92,10 +97,10 @@ export class MicrophoneCapture extends EventEmitter {
                 this.emit('speech_ended');
             });
 
-            this.isRecording = true;
             this.emit('start');
         } catch (error) {
             console.error('[MicrophoneCapture] Failed to start:', error);
+            this.isRecording = false;
             this.emit('error', error);
         }
     }

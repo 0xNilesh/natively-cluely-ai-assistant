@@ -443,9 +443,15 @@ export class WindowHelper {
   }
 
   public centerAndShowWindow(): void {
-    // Default to launcher
-    this.switchToLauncher();
-    this.launcherWindow?.center();
+    // If a meeting is active (overlay mode), bring the overlay up instead of the
+    // launcher — switching to the launcher during a meeting would expose it in the
+    // taskbar/dock and break stealth.
+    if (this.currentWindowMode === 'overlay') {
+      this.switchToOverlay(); // explicit user action, so we want to grant focus
+    } else {
+      this.switchToLauncher();
+      this.launcherWindow?.center();
+    }
   }
 
   // --- Swapping Logic ---

@@ -82,7 +82,7 @@ impl SystemAudioCapture {
 
         self.stop_signal.store(false, Ordering::SeqCst);
         let stop_signal = self.stop_signal.clone();
-        let device_id = self.device_id.take();
+        let device_id = self.device_id.clone();
         let sample_rate_shared = self.sample_rate.clone();
 
         // ★ ALL init + DSP runs in background thread — start() returns INSTANTLY

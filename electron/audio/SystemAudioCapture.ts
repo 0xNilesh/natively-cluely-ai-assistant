@@ -62,25 +62,24 @@ export class SystemAudioCapture extends EventEmitter {
 
         try {
             console.log('[SystemAudioCapture] Starting native capture...');
-            
-            // Fetch real sample rate as soon as monitor starts
-            if (typeof this.monitor.get_sample_rate === 'function') {
-                this.detectedSampleRate = this.monitor.get_sample_rate();
-                console.log(`[SystemAudioCapture] Detected sample rate: ${this.detectedSampleRate}`);
-            }
+
+            this.isRecording = true; // Set BEFORE start() to prevent re-entrant calls
 
             this.monitor.start((err: Error | null, chunk: Buffer) => {
                 // napi v3 ThreadsafeFunction passes (err, arg) format
                 if (err) {
                     console.error('[SystemAudioCapture] Callback error:', err);
+                    this.isRecording = false; // Allow recovery via restart
+                    this.emit('error', err);
                     return;
                 }
                 if (chunk && chunk.length > 0) {
                     const buffer = Buffer.from(chunk);
                     this.emit('data', buffer);
                 }
-            }, (err: Error | null, ended: boolean) => {
-                // Speech-ended callback from Rust SilenceSuppressor
+            }, (err: Error | null, _ended: boolean) => {
+                // Speech-ended callback from Rust SilenceSuppressor.
+                // _ended is always `true` when fired (Rust only invokes on speech→silence transition).
                 if (err) {
                     console.error('[SystemAudioCapture] Speech ended callback error:', err);
                     return;
@@ -88,10 +87,29 @@ export class SystemAudioCapture extends EventEmitter {
                 this.emit('speech_ended');
             });
 
-            this.isRecording = true;
+            // getSampleRate MUST be called AFTER start() — background init updates
+            // the atomic once SCK/CoreAudio initialises (~5-7s). Reading before start()
+            // always returns the constructor default (48000), not the real hardware rate.
+            if (typeof this.monitor.get_sample_rate === 'function') {
+                // Poll until the background thread has published a non-default rate,
+                // or fall back after a short delay. Use a one-shot timer so we don't
+                // block the main thread.
+                const pollRate = () => {
+                    const rate = this.monitor?.get_sample_rate?.();
+                    if (rate && rate !== this.detectedSampleRate) {
+                        this.detectedSampleRate = rate;
+                        console.log(`[SystemAudioCapture] Detected sample rate: ${rate}Hz`);
+                    }
+                };
+                // Poll at 1s and 8s — covers both fast (CoreAudio) and slow (SCK) init.
+                setTimeout(pollRate, 1000);
+                setTimeout(pollRate, 8000);
+            }
+
             this.emit('start');
         } catch (error) {
             console.error('[SystemAudioCapture] Failed to start:', error);
+            this.isRecording = false;
             this.emit('error', error);
         }
     }
