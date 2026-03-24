@@ -23,7 +23,7 @@ import { RECOGNITION_LANGUAGES } from '../config/languages';
 const SONIOX_WEBSOCKET_URL = 'wss://stt-rt.soniox.com/transcribe-websocket';
 const RECONNECT_BASE_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 30000;
-const KEEPALIVE_INTERVAL_MS = 15000;
+const KEEPALIVE_INTERVAL_MS = 5000;
 
 export class SonioxStreamingSTT extends EventEmitter {
     private apiKey: string;

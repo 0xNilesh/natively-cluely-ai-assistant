@@ -1,5 +1,5 @@
 /**
- * DeepgramStreamingSTT - WebSocket-based streaming Speech-to-Text using Deepgram Nova-2
+ * DeepgramStreamingSTT - WebSocket-based streaming Speech-to-Text using Deepgram Nova-3
  *
  * Implements the same EventEmitter interface as GoogleSTT:
  *   Events: 'transcript' ({ text, isFinal, confidence }), 'error' (Error)
@@ -15,7 +15,7 @@ import { RECOGNITION_LANGUAGES } from '../config/languages';
 
 const RECONNECT_BASE_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 30000;
-const KEEPALIVE_INTERVAL_MS = 15000;
+const KEEPALIVE_INTERVAL_MS = 5000;
 
 export class DeepgramStreamingSTT extends EventEmitter {
     private apiKey: string;

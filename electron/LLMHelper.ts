@@ -1178,7 +1178,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     const response = await this.openaiClient.chat.completions.create({
       model,
       messages,
-      max_completion_tokens: MAX_OUTPUT_TOKENS,
+      max_completion_tokens: model.toLowerCase().includes('claude') ? CLAUDE_MAX_OUTPUT_TOKENS : MAX_OUTPUT_TOKENS,
     });
 
     return response.choices[0]?.message?.content || "";
@@ -1814,6 +1814,25 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     }
 
     // ============================================================
+    // PRIORITIZE USER'S SELECTED PROVIDER
+    // Ensure the model the user selected handles the request first 
+    // before falling back to others.
+    // ============================================================
+    const currentFamilyLabel = this.isClaudeModel(this.currentModelId) ? 'Claude' 
+      : this.isOpenAiModel(this.currentModelId) ? 'OpenAI'
+      : this.isGroqModel(this.currentModelId) ? 'Groq'
+      : this.isGeminiModel(this.currentModelId) ? 'Gemini'
+      : '';
+
+    if (currentFamilyLabel) {
+      providers.sort((a, b) => {
+        if (a.name.startsWith(currentFamilyLabel) && !b.name.startsWith(currentFamilyLabel)) return -1;
+        if (!a.name.startsWith(currentFamilyLabel) && b.name.startsWith(currentFamilyLabel)) return 1;
+        return 0;
+      });
+    }
+
+    // ============================================================
     // RELENTLESS RETRY: Try all providers, then retry entire chain
     // with exponential backoff. Max 2 full rotations.
     // ============================================================
@@ -2086,7 +2105,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       model,
       messages,
       stream: true,
-      max_completion_tokens: MAX_OUTPUT_TOKENS,
+      max_completion_tokens: model.toLowerCase().includes('claude') ? CLAUDE_MAX_OUTPUT_TOKENS : MAX_OUTPUT_TOKENS,
     });
 
     for await (const chunk of stream) {
@@ -2147,7 +2166,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       model,
       messages,
       stream: true,
-      max_completion_tokens: MAX_OUTPUT_TOKENS,
+      max_completion_tokens: model.toLowerCase().includes('claude') ? CLAUDE_MAX_OUTPUT_TOKENS : MAX_OUTPUT_TOKENS,
     });
 
     for await (const chunk of stream) {
