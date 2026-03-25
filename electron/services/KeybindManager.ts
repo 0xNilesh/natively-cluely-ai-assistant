@@ -61,7 +61,6 @@ export class KeybindManager {
         if (actionId === 'general:toggle-visibility') return true;
         if (actionId === 'general:toggle-mouse-passthrough') return true;
         if (actionId.startsWith('window:move-')) return true;
-        
         return false;
     }
 
