@@ -21,9 +21,37 @@ interface UpdateModalProps {
     onDismiss: () => void;
     onInstall: () => void;
     downloadProgress: number;
-    status: 'idle' | 'downloading' | 'ready' | 'error';
+    status: 'idle' | 'downloading' | 'ready' | 'error' | 'instructions';
     errorMessage?: string | null;
+    instructionsArch?: 'arm64' | 'x64' | null;
 }
+
+const CopyBlock = ({ command }: { command: string }) => {
+    const [copied, setCopied] = React.useState(false);
+    const handleCopy = () => {
+        navigator.clipboard.writeText(command);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+    };
+    return (
+        <div className="flex items-center justify-between bg-black/20 rounded-lg pl-3 pr-1.5 py-1.5 border border-white/[0.03] group hover:border-white/10 transition-colors mt-1.5 mb-2.5 w-full">
+            <code className="text-[10px] font-mono text-blue-400 truncate mr-2 select-all overflow-hidden whitespace-nowrap">
+                {command}
+            </code>
+            <button
+                onClick={handleCopy}
+                className="h-6 px-2.5 rounded-md bg-white/5 hover:bg-white/10 active:bg-white/15 flex items-center justify-center transition-colors border border-white/5 flex-shrink-0"
+                title="Copy to clipboard"
+            >
+                {copied ? (
+                    <span className="text-[10px] font-semibold text-green-400">Copied</span>
+                ) : (
+                    <span className="text-[10px] font-medium text-white/50 group-hover:text-white/80">Copy</span>
+                )}
+            </button>
+        </div>
+    );
+};
 
 const UpdateModal: React.FC<UpdateModalProps> = ({
     isOpen,
@@ -33,7 +61,8 @@ const UpdateModal: React.FC<UpdateModalProps> = ({
     onInstall,
     downloadProgress,
     status,
-    errorMessage
+    errorMessage,
+    instructionsArch
 }) => {
     // Helper to format version string
     const formatVersion = (v: string) => {
@@ -47,14 +76,11 @@ const UpdateModal: React.FC<UpdateModalProps> = ({
 
     const showFallback = !parsedNotes || (!parsedNotes.summary && (!parsedNotes.sections || parsedNotes.sections.length === 0));
 
-    // State to control which view is shown (Info vs Progress)
-    const [showProgress, setShowProgress] = React.useState(false);
     const [copied, setCopied] = React.useState(false);
 
     // Auto-switch to progress view if status changes to downloading AND it was user-initiated
     const handleUpdateClick = () => {
         onInstall();
-        setShowProgress(true);
     };
 
     const handleCopyCommand = () => {
@@ -151,6 +177,38 @@ const UpdateModal: React.FC<UpdateModalProps> = ({
                                 >
                                     Close
                                 </button>
+                            </div>
+                        ) : status === 'instructions' ? (
+                            <div className="p-8 flex flex-col h-full relative text-left w-full max-w-full">
+                                <div className="space-y-1.5 mb-5 text-center mt-2">
+                                    <h2 className="text-[17px] font-semibold text-white tracking-tight">
+                                        Manual Update Required
+                                    </h2>
+                                    <p className="text-[13px] text-white/40 font-medium leading-relaxed">
+                                        The download has started in your browser. Follow these steps to install the update:
+                                    </p>
+                                </div>
+                                <div className="flex-1 overflow-y-auto custom-scrollbar pr-2 mb-4 space-y-2 w-full">
+                                    <div className="space-y-1 w-full">
+                                        <p className="text-[12px] font-medium text-white/80">1. Clear quarantine on the downloaded file:</p>
+                                        <CopyBlock command={`xattr -cr ~/Downloads/Natively-${displayVersion.replace('v', '')}-${instructionsArch || 'arm64'}.dmg`} />
+                                    </div>
+                                    <div className="space-y-1 mt-1 pl-0.5">
+                                        <p className="text-[12px] font-medium text-white/80">2. Open the file and install Natively.</p>
+                                    </div>
+                                    <div className="space-y-1 mt-3 w-full">
+                                        <p className="text-[12px] font-medium text-white/80">3. Clear quarantine on the installed app:</p>
+                                        <CopyBlock command="xattr -cr /Applications/Natively.app" />
+                                    </div>
+                                </div>
+                                <div className="flex items-center justify-center mt-auto w-full">
+                                    <button
+                                        onClick={onDismiss}
+                                        className="px-6 py-[6px] bg-white/10 hover:bg-white/20 text-white text-[13px] font-medium rounded-lg transition-colors w-[200px]"
+                                    >
+                                        Done
+                                    </button>
+                                </div>
                             </div>
                         ) : status === 'downloading' ? (
                             <div className="p-8 flex flex-col items-center justify-center h-full text-center relative">

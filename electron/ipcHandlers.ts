@@ -8,6 +8,7 @@ import * as path from "path";
 import * as fs from "fs";
 import { AudioDevices } from "./audio/AudioDevices";
 
+
 import { RECOGNITION_LANGUAGES, AI_RESPONSE_LANGUAGES } from "./config/languages"
 
 export function initializeIpcHandlers(appState: AppState): void {
@@ -582,6 +583,10 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle("set-verbose-logging", async (_, enabled: boolean) => {
     appState.setVerboseLogging(enabled);
     return { success: true };
+  });
+
+  safeHandle("get-arch", async () => {
+    return process.arch;
   });
 
   // LLM Model Management Handlers

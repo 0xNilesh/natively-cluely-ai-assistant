@@ -264,6 +264,9 @@ interface ElectronAPI {
   // Verbose / Debug Logging
   getVerboseLogging: () => Promise<boolean>;
   setVerboseLogging: (enabled: boolean) => Promise<{ success: boolean }>;
+  
+  // Arch
+  getArch: () => Promise<string>;
 
   // Cropper API
   cropperConfirmed: (bounds: Electron.Rectangle) => void;
@@ -1030,6 +1033,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // Verbose / Debug Logging
   getVerboseLogging: () => ipcRenderer.invoke('get-verbose-logging'),
   setVerboseLogging: (enabled: boolean) => ipcRenderer.invoke('set-verbose-logging', enabled),
+  
+  // Arch
+  getArch: () => ipcRenderer.invoke('get-arch'),
 
   // Cropper API
   cropperConfirmed: (bounds: Electron.Rectangle) => ipcRenderer.send('cropper-confirmed', bounds),

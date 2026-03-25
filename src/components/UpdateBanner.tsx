@@ -6,8 +6,9 @@ const UpdateBanner: React.FC = () => {
     const [parsedNotes, setParsedNotes] = useState<any>(null);
     const [isVisible, setIsVisible] = useState(false);
     const [downloadProgress, setDownloadProgress] = useState(0);
-    const [status, setStatus] = useState<'idle' | 'downloading' | 'ready' | 'error'>('idle');
+    const [status, setStatus] = useState<'idle' | 'downloading' | 'ready' | 'error' | 'instructions'>('idle');
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
+    const [instructionsArch, setInstructionsArch] = useState<'arm64' | 'x64' | null>(null);
 
     useEffect(() => {
         // Listen for update available
@@ -56,36 +57,51 @@ const UpdateBanner: React.FC = () => {
         };
     }, []);
 
-    // Demo/Test mode: Press Cmd+I to trigger backend test-fetch
+    // Demo/Test mode: Press Cmd+I to trigger backend test-fetch or Cmd+J for UI mock
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
             if (!import.meta.env.DEV) return;
-            // The user specifically mentioned Cmd+I should be working
-            // Checking: metaKey + i (case insensitive)
+            
             if (e.metaKey && !e.shiftKey && e.key.toLowerCase() === 'i') {
                 e.preventDefault();
                 console.log("[UpdateBanner] Cmd+I pressed: Triggering Test Release Fetch...");
-
-                // Call the new test method
-                window.electronAPI.testReleaseFetch()
-                    .then((result: { success: boolean; error?: string }) => {
-                        if (result.success) {
-                            console.log("[UpdateBanner] Test fetch successful");
-                        } else {
-                            console.error("[UpdateBanner] Test fetch failed:", result.error);
-                        }
-                    })
-                    .catch((err: any) => console.error("[UpdateBanner] Test fetch error:", err));
+                window.electronAPI.testReleaseFetch().catch(console.error);
+            }
+            
+            if (e.metaKey && !e.shiftKey && e.key.toLowerCase() === 'j') {
+                e.preventDefault();
+                console.log("[UpdateBanner] Cmd+J pressed: Triggering Instruction UI mock...");
+                setUpdateInfo({ version: '2.0.8' });
+                setParsedNotes({ summary: 'Test Update', fullBody: 'Testing', sections: [{ title: 'Notes', items: ['UI Test'] }] });
+                setStatus('idle');
+                setIsVisible(true);
             }
         };
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, []);
 
-    const handleInstall = () => {
-        setStatus('downloading');
-        // Trigger download via IPC
-        window.electronAPI.downloadUpdate();
+    const handleInstall = async () => {
+        if (window.electronAPI.platform === 'darwin') {
+            try {
+                const arch = await window.electronAPI.getArch();
+                const isArm = arch === 'arm64';
+                const dmgSuffix = isArm ? 'arm64' : 'x64';
+                setInstructionsArch(dmgSuffix);
+                const version = updateInfo?.version ? updateInfo.version.replace('v', '') : '2.0.8';
+                const url = `https://github.com/evinjohnn/natively-cluely-ai-assistant/releases/download/v${version}/Natively-${version}-${dmgSuffix}.dmg`;
+                window.electronAPI.openExternal(url);
+                setStatus('instructions');
+            } catch (err) {
+                console.error("Failed to get arch", err);
+                setStatus('downloading');
+                window.electronAPI.downloadUpdate();
+            }
+        } else {
+            setStatus('downloading');
+            // Trigger download via IPC
+            window.electronAPI.downloadUpdate();
+        }
     };
 
     const handleDismiss = () => {
@@ -105,6 +121,7 @@ const UpdateBanner: React.FC = () => {
             downloadProgress={downloadProgress}
             status={status}
             errorMessage={errorMessage}
+            instructionsArch={instructionsArch}
         />
     );
 };

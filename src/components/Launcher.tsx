@@ -425,7 +425,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                 />
 
                 {/* Right: Actions */}
-                <div className="flex items-center gap-3 no-drag shrink-0">
+                <div className={`flex items-center gap-3 no-drag shrink-0 ${isMac ? 'mr-1' : ''}`}>
                     <button
                         onClick={() => {
                             onOpenSettings();

@@ -20,6 +20,7 @@
     "build:native": "node scripts/build-native.js"
   },
   "build": {
+    "generateUpdatesFilesForAllChannels": true,
     "appId": "com.electron.meeting-notes",
     "afterPack": "./scripts/ad-hoc-sign.js",
     "productName": "Natively",
@@ -118,7 +119,8 @@
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
-      "deleteAppDataOnUninstall": false
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "${productName}-Setup-${version}.${ext}"
     },
     "publish": [
       {
@@ -155,7 +157,7 @@
     "cross-env": "^7.0.3",
     "dotenv": "^17.3.1",
     "electron": "^33.2.0",
-    "electron-builder": "^25.1.8",
+    "electron-builder": "^26.8.1",
     "electron-is-dev": "^3.0.1",
     "electron-rebuild": "^3.2.9",
     "postcss": "^8.4.49",

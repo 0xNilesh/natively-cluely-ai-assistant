@@ -305,6 +305,9 @@ export interface ElectronAPI {
   getVerboseLogging: () => Promise<boolean>;
   setVerboseLogging: (enabled: boolean) => Promise<{ success: boolean }>;
 
+  // Arch
+  getArch: () => Promise<string>;
+
   // Cropper API
   cropperConfirmed: (bounds: { x: number; y: number; width: number; height: number }) => void;
   cropperCancelled: () => void;

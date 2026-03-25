@@ -460,7 +460,7 @@ export class WindowHelper {
   public switchToOverlay(inactive?: boolean): void {
     console.log(`[WindowHelper] Switching to OVERLAY (inactive: ${!!inactive})`);
     this.currentWindowMode = 'overlay';
-    KeybindManager.getInstance().setMode('overlay');
+    KeybindManager.getInstance().setMode('overlay'); // Adapted from public PR #123 — verify premium interaction
 
     // Tell the overlay renderer to expand to full size (e.g. after being minimised)
     this.overlayWindow?.webContents.send('ensure-expanded');
@@ -514,7 +514,7 @@ export class WindowHelper {
   public switchToLauncher(inactive?: boolean): void {
     console.log(`[WindowHelper] Switching to LAUNCHER (inactive: ${!!inactive})`);
     this.currentWindowMode = 'launcher';
-    KeybindManager.getInstance().setMode('launcher');
+    KeybindManager.getInstance().setMode('launcher'); // Adapted from public PR #123 — verify premium interaction
 
     // Show Launcher FIRST
     if (this.launcherWindow && !this.launcherWindow.isDestroyed()) {
