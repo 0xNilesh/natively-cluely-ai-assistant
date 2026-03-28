@@ -278,7 +278,7 @@ While Natively is **free and open-source forever**, we also offer a **Pro Editio
 
 ### What's New in v2.0.9
 
-Version 2.0.9 delivers the Natively API tier, fixes the root-cause audio transcription bug, hardens stealth and shortcuts, and integrates numerous community PRs.
+Version 2.0.9 delivers the fixes the root-cause audio transcription bug, hardens stealth and shortcuts, and integrates numerous community PRs.
 
 - **Fixed Audio Transcription**: Resolved the root-cause zero-transcription bug — Deepgram was receiving raw PCM without `encoding=linear16` in the WebSocket URL, causing an immediate `upstream_closed` loop with no output.
 - **Dual-Channel STT**: System audio and microphone now connect to the Natively API simultaneously using per-channel session keys (`system` / `mic`), eliminating `concurrent_session_blocked` errors.
