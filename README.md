@@ -38,7 +38,7 @@
 [![License](https://img.shields.io/badge/License-AGPL--3.0-blue?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows-blueviolet?style=flat-square)](https://github.com/evinjohnn/natively-cluely-ai-assistant/releases)
 [![Downloads](https://img.shields.io/github/downloads/evinjohnn/natively-cluely-ai-assistant/total?style=flat-square&color=success)](https://github.com/evinjohnn/natively-cluely-ai-assistant/releases)
-![Repo Views](https://img.shields.io/badge/Views-70.4k-orange?style=flat-square)
+![Repo Views](https://img.shields.io/badge/Views-109.5k-orange?style=flat-square)
 [![Stars](https://img.shields.io/github/stars/evinjohnn/natively-cluely-ai-assistant?style=flat-square&color=gold)](https://github.com/evinjohnn/natively-cluely-ai-assistant)
 ![Status](https://img.shields.io/badge/Status-active-success?style=flat-square)
 [![X Community](https://img.shields.io/badge/Community-black?style=flat-square&logo=x&logoColor=white)](https://x.com/i/communities/2031398735515693507)
@@ -276,20 +276,21 @@ While Natively is **free and open-source forever**, we also offer a **Pro Editio
 
 ---
 
-### What's New in v2.0.8
+### What's New in v2.0.9
 
-Version 2.0.8 introduces major advancements in stealth routing, Mouse Passthrough Mode, Multimodal Groq support, and resolves critical bugs to ensure a seamless workflow.
+Version 2.0.9 delivers the Natively API tier, fixes the root-cause audio transcription bug, hardens stealth and shortcuts, and integrates numerous community PRs.
 
-- **Multimodal Groq Support**: Integrated `meta-llama/llama-4-scout-17b-16e-instruct` into the ecosystem for high-speed screenshot analysis capability, with increased max completion tokens (up to 8192).
-- **Mouse Passthrough Mode**: Merged backend Electron mouse event management with full state-sync between the global keybind manager and the React renderer interface.
-- **Instant Stealth Boot & Windows Opacity Shield**: Refactored the app to immediately apply cached `isUndetectable` states on boot and implemented an opacity shield to eliminate a 1-frame screen flash when showing protected UI elements.
-- **Model Roster & Rotation Engine**: Updated default architecture models to utilize the latest generation `gpt-5.4-chat`, `gemini-3.1`, and `claude-sonnet-4-6`, while fortifying the 3-tier fallback mechanisms.
-- **Permanent Hide & Visibility Flaw**: Repaired a critical IPC routing bug where hiding the session UI dynamically misrouted `Cmd+B` unhide commands to the background Launcher, eliminating the "invisible interface" trap.
-- **SQLite-Vec Corruptions**: Fixed a critical silent data-corruption bug caused by tight strict dimensionality constraints (`float[1536]`), ensuring 100% of generated embeddings are retained and searchable.
-- **Groq Multimedia Drop**: Resolved a "Front Door" routing bug where image attachments bypassed the Groq engine completely and triggered false LLM connection errors.
-- **Critical Race Conditions & Thread Safety**: Eliminated dangerous global state mutations during LLM fallback loops and patched `SettingsManager` early-initialization fatal crashes.
-- **Memory & Resource Leaks**: Hardened native audio listener destruction to prevent zombie callbacks, and cleared dangling floating timeout IDs on opacity shields and disguise timers.
-- **Native Module Loader Pipeline (Cross-Platform Stability)**: Integrated a custom NAPI-RS absolute binary loader (`nativeModuleLoader.ts`) to entirely bypass POSIX-symlink `require` failures on Windows Git Bash, alongside numerous enhancements like rectifying hardcoded `natively.icns` dependencies.
+- **Fixed Audio Transcription**: Resolved the root-cause zero-transcription bug — Deepgram was receiving raw PCM without `encoding=linear16` in the WebSocket URL, causing an immediate `upstream_closed` loop with no output.
+- **Natively API Integration**: New hosted STT + AI tier. Activate with an API key to route transcription through Deepgram/Google and AI calls through the Natively API server, with an inline usage dashboard (quota bars, plan badge, reset date).
+- **Dual-Channel STT**: System audio and microphone now connect to the Natively API simultaneously using per-channel session keys (`system` / `mic`), eliminating `concurrent_session_blocked` errors.
+- **LLM Resilience & Fallbacks**: 60 s / 3-retry wrapper for OpenAI and 90 s / 3-retry wrapper for Claude; Natively API falls back to Gemini on failure; `streamChat` chain now tries Natively first across all call sites.
+- **STT Over-Billing Fixed**: Removed duplicate mic-channel billing (was doubling every session); added 30 s minimum threshold for short reconnect sessions; replaced `Math.ceil` with `Math.round` for fairer rounding.
+- **Screen Recording Permission Flow**: Proactive TCC dialog via `desktopCapturer.getSources()` before the audio pipeline starts; clear error when permission is `denied` or `restricted` instead of silent black frames.
+- **Dodo Payments Integration**: Webhook processing with HMAC-SHA256 verification, 24 h idempotent replay guard, `subscription.on_hold` / `subscription.failed` handling, and correct plan detection via product-ID env vars.
+- **STT Key Pre-Population**: Settings panel now correctly restores saved STT provider keys (Groq, OpenAI, Deepgram, ElevenLabs, Azure, IBM, Soniox) across provider switches.
+- **GoogleSTT Proactive Restart**: Pre-emptive stream restart at 4 min 30 s avoids the hard 5-minute gRPC limit, eliminating the 1-second transcription gap in long sessions.
+- **REST STT Upload Size**: Audio resampled to 16 kHz mono before upload — ~6× smaller files, reliably under the Groq/OpenAI 25 MB limit.
+- **Integrated Several PRs**: napi-rs v3 migration for native audio, Windows header layout fix, platform-aware shortcut symbols in About section, TypeScript type-safety fixes across `electron.d.ts`, `preload.ts`, and `ipcHandlers.ts`.
 
 ---
 
@@ -302,7 +303,7 @@ Version 2.0.8 introduces major advancements in stealth routing, Mouse Passthroug
 - [Why Natively wins](#why-natively-wins)
 - [Why Natively?](#why-natively)
 - [Natively Pro](#natively-pro)
-- [What's New in v2.0.8](#whats-new-in-v208)
+- [What's New in v2.0.9](#whats-new-in-v209)
 - [Privacy & Security](#privacy--security-core-design-principle)
 - [Installation](#installation-developers--contributors)
 - [AI Providers](#ai-providers)
