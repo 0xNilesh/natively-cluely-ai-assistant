@@ -281,7 +281,6 @@ While Natively is **free and open-source forever**, we also offer a **Pro Editio
 Version 2.0.9 delivers the Natively API tier, fixes the root-cause audio transcription bug, hardens stealth and shortcuts, and integrates numerous community PRs.
 
 - **Fixed Audio Transcription**: Resolved the root-cause zero-transcription bug — Deepgram was receiving raw PCM without `encoding=linear16` in the WebSocket URL, causing an immediate `upstream_closed` loop with no output.
-- **Natively API Integration**: New hosted STT + AI tier. Activate with an API key to route transcription through Deepgram/Google and AI calls through the Natively API server, with an inline usage dashboard (quota bars, plan badge, reset date).
 - **Dual-Channel STT**: System audio and microphone now connect to the Natively API simultaneously using per-channel session keys (`system` / `mic`), eliminating `concurrent_session_blocked` errors.
 - **LLM Resilience & Fallbacks**: 60 s / 3-retry wrapper for OpenAI and 90 s / 3-retry wrapper for Claude; Natively API falls back to Gemini on failure; `streamChat` chain now tries Natively first across all call sites.
 - **STT Over-Billing Fixed**: Removed duplicate mic-channel billing (was doubling every session); added 30 s minimum threshold for short reconnect sessions; replaced `Math.ceil` with `Math.round` for fairer rounding.
