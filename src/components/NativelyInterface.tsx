@@ -270,13 +270,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         return () => clearTimeout(timer);
     }, []);
 
-    // Auto-scroll
-    useEffect(() => {
-        if (isExpanded) {
-            messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-        }
-    }, [messages, isExpanded, isProcessing]);
-
     // Build conversation context from messages
     useEffect(() => {
         const context = messages
@@ -764,6 +757,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
                 hasScreenshot: true,
                 screenshotPreview: currentAttachments[0].preview
             }]);
+            // Scroll to bottom when user sends message
+            setTimeout(() => {
+            	messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+            }, 50);
         }
 
         try {
@@ -868,6 +865,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
                 hasScreenshot: true,
                 screenshotPreview: currentAttachments[0].preview
             }]);
+        	// Scroll to bottom when user sends message
+        	setTimeout(() => {
+        		messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        	}, 50);
         }
 
         try {
@@ -899,6 +900,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
                 hasScreenshot: true,
                 screenshotPreview: currentAttachments[0].preview
             }]);
+        	// Scroll to bottom when user sends message
+        	setTimeout(() => {
+        		messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        	}, 50);
         }
 
         try {
@@ -1165,6 +1170,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
                 hasScreenshot: currentAttachments.length > 0,
                 screenshotPreview: currentAttachments[0]?.preview
             }]);
+            
+            // Scroll to bottom when user sends message
+            setTimeout(() => {
+                messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+            }, 50);
 
             // Add placeholder for streaming response
             setMessages(prev => [...prev, {
@@ -1268,6 +1278,11 @@ Provide only the answer, nothing else.`;
             hasScreenshot: currentAttachments.length > 0,
             screenshotPreview: currentAttachments[0]?.preview
         }]);
+
+        // Scroll to bottom when user sends message
+        setTimeout(() => {
+            messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        }, 50);
 
         // Add placeholder for streaming response
         setMessages(prev => [...prev, {
