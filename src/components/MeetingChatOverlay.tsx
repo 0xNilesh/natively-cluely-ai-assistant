@@ -197,11 +197,6 @@ const MeetingChatOverlay: React.FC<MeetingChatOverlayProps> = ({
     const chatWindowRef = useRef<HTMLDivElement>(null);
     const streamBuffer = useStreamBuffer();
 
-    // Auto-scroll to bottom on new messages
-    useEffect(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, [messages]);
-
     // Submit initial query when overlay opens
     useEffect(() => {
         if (isOpen && initialQuery && messages.length === 0) {
@@ -292,6 +287,11 @@ const MeetingChatOverlay: React.FC<MeetingChatOverlayProps> = ({
         setMessages(prev => [...prev, userMessage]);
         setChatState('waiting_for_llm');
         setErrorMessage(null);
+
+        // Scroll to bottom when user sends message
+        setTimeout(() => {
+            messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        }, 50);
 
         const assistantMessageId = `assistant-${Date.now()}`;
 

@@ -125,11 +125,6 @@ const GlobalChatOverlay: React.FC<GlobalChatOverlayProps> = ({
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const chatWindowRef = useRef<HTMLDivElement>(null);
 
-    // Auto-scroll to bottom on new messages
-    useEffect(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, [messages]);
-
     // Submit initial query when overlay opens
     useEffect(() => {
         if (isOpen && initialQuery && messages.length === 0) {
@@ -185,6 +180,11 @@ const GlobalChatOverlay: React.FC<GlobalChatOverlayProps> = ({
         setMessages(prev => [...prev, userMessage]);
         setChatState('waiting_for_llm');
         setErrorMessage(null);
+        
+        // Scroll to bottom when user sends message
+        setTimeout(() => {
+            messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        }, 50);
 
         const assistantMessageId = `assistant-${Date.now()}`;
 

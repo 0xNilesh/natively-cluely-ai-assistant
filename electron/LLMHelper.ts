@@ -232,10 +232,9 @@ export class LLMHelper {
     const custom = customProviders.find(p => p.id === targetModelId);
     if (custom) {
       this.useOllama = false;
-      this.customProvider = null;
-      // Treat text-only custom providers as CurlProviders (responsePath optional)
-      this.activeCurlProvider = custom as CurlProvider;
-      console.log(`[LLMHelper] Switched to cURL Provider: ${custom.name}`);
+      this.customProvider = custom;
+      this.activeCurlProvider = null;
+      console.log(`[LLMHelper] Switched to Custom Provider: ${custom.name}`);
       return;
     }
 
@@ -1378,6 +1377,9 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     // OpenAI delta/streaming format: { choices: [{ delta: { content: "..." } }] }
     if (data.choices?.[0]?.delta?.content) return data.choices[0].delta.content;
 
+    // NOTE: reasoning_content (model's thinking process) is intentionally NOT extracted
+    // to avoid showing internal reasoning to users. Only final content is returned.
+
     // Anthropic format: { content: [{ text: "..." }] }
     if (Array.isArray(data.content) && data.content[0]?.text) return data.content[0].text;
 
@@ -1390,7 +1392,20 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     // Generic result field
     if (typeof data.result === 'string') return data.result;
 
-    // Fallback: stringify the whole response
+    // For streaming responses: return empty string instead of raw JSON
+    // This prevents JSON artifacts from appearing in the output
+    if (data.choices?.[0]?.delta !== undefined) {
+      // It's a streaming delta chunk with no extractable content
+      return "";
+   	}
+
+    // For streaming responses with empty choices array (e.g., final usage chunk)
+    // This handles: { "choices": [], "usage": { ... } }
+    if (Array.isArray(data.choices) && data.choices.length === 0) {
+      return "";
+    }
+    
+    // Fallback: stringify the whole response (only for non-streaming responses)
     console.warn("[LLMHelper] Could not extract text from custom provider response, returning raw JSON");
     return JSON.stringify(data);
   }
@@ -1945,7 +1960,13 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       return;
     }
 
-    // 2. Custom Provider Streaming (via cURL - Non-streaming fallback for now)
+    // 2a. CustomProvider (switchToCustom path) — full SSE-capable streaming
+    if (this.customProvider) {
+      yield* this.streamWithCustom(message, context, imagePaths, finalSystemPrompt);
+      return;
+    }
+
+    // 2b. Custom Provider Streaming (via cURL - Non-streaming fallback for now)
     if (this.activeCurlProvider) {
       const response = await this.executeCustomProvider(
         this.activeCurlProvider.curlCommand,
@@ -1956,12 +1977,6 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         imagePaths?.[0]
       );
       yield response;
-      return;
-    }
-
-    // 2b. CustomProvider (switchToCustom path) — full SSE-capable streaming
-    if (this.customProvider) {
-      yield* this.streamWithCustom(message, context, imagePaths, finalSystemPrompt);
       return;
     }
 
@@ -2465,7 +2480,8 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
       // If no SSE content was yielded, try parsing the full body as JSON
       // This handles non-streaming responses (e.g. Ollama with stream: false)
-      if (!yieldedAny && fullBody.trim().length > 0) {
+      // But skip if it looks like SSE data (starts with "data: ")
+      if (!yieldedAny && fullBody.trim().length > 0 && !fullBody.trim().startsWith("data: ")) {
         try {
           const data = JSON.parse(fullBody);
           const extracted = this.extractFromCommonFormats(data);
