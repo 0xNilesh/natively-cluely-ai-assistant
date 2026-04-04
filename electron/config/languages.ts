@@ -62,6 +62,7 @@ export const ENGLISH_VARIANTS: Record<string, EnglishVariant> = {
 
 export const RECOGNITION_LANGUAGES: Record<string, LanguageOption> = {
     ...ENGLISH_VARIANTS,
+    'indonesian': { label: 'Indonesian', code: 'indonesian', bcp47: 'id-ID', iso639: 'id', group: 'Indonesian' },
     'russian': { label: 'Russian', code: 'russian', bcp47: 'ru-RU', iso639: 'ru', group: 'Russian' },
     'spanish': { label: 'Spanish', code: 'spanish', bcp47: 'es-ES', iso639: 'es', group: 'Spanish' },
     'french': { label: 'French', code: 'french', bcp47: 'fr-FR', iso639: 'fr', group: 'French' },
@@ -76,6 +77,7 @@ export const RECOGNITION_LANGUAGES: Record<string, LanguageOption> = {
 
 export const AI_RESPONSE_LANGUAGES = [
     { label: 'English', code: 'English' },
+    { label: 'Indonesian', code: 'Indonesian' },
     { label: 'Russian', code: 'Russian' },
     { label: 'Spanish', code: 'Spanish' },
     { label: 'French', code: 'French' },
