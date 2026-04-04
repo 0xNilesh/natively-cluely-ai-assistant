@@ -139,7 +139,7 @@ impl SpeakerInput {
 }
 
 extern "C" fn proc(
-    device: ca::Device,
+    _device: ca::Device,
     _now: &cat::AudioTimeStamp,
     input_data: &cat::AudioBufList<1>,
     _input_time: &cat::AudioTimeStamp,
@@ -149,10 +149,13 @@ extern "C" fn proc(
 ) -> os::Status {
     let ctx = ctx.unwrap();
 
+    // BUGFIX: Do NOT overwrite with the overall aggregate device actual_sample_rate().
+    // The macOS Global Process Tap forces the actual input_data buffer to operate strictly
+    // at the ASBD format rate (usually 48000Hz). Telling JS the clock is running at 16k/24kHz
+    // (AirPods HFP) causes STT to process 48kHz arrays at 24kHz speed (deep demom voice).
+    // The ASBD format is the ONLY source of truth for the buffer layout!
     ctx.current_sample_rate.store(
-        device
-            .actual_sample_rate()
-            .unwrap_or(ctx.format.absd().sample_rate) as u32,
+        ctx.format.absd().sample_rate as u32,
         Ordering::Release,
     );
 

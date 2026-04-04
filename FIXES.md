@@ -156,5 +156,97 @@ Full priority chain: OpenAI → Claude → Gemini Pro → Gemini Flash → Groq 
 ### Remaining Risks
 1. **`OPENAI_MODEL = "gpt-5.4"`**: Now drives the `generateWithOpenai` fallback path as the baseline. Confirmed valid per OpenAI API docs.
 2. **`gemini-3.1-pro-preview` and `gemini-3.1-flash-lite-preview`**: These model IDs are used in `generateContentStructured`. If Gemini releases these under different names, both Pro and Flash attempts will fail. The Groq/Ollama fallbacks will still catch it.
-3. **Issue #90 timing**: The `setTimeout(..., 0)` before calling `handleWhatToSay` relies on React flushing state before the next microtask. In React 18 with concurrent mode, this may occasionally miss if the render is deferred. A more robust solution would use `useLayoutEffect` or a `useCallback` ref pattern, but this pattern matches the existing codebase style.
+3. **Issue #90 timing**: Replaced `setTimeout(0)` with `requestAnimationFrame` + `pendingCaptureRef` for reliable React 18 concurrent mode support (see Issue #135 below).
 4. **Issue #89 on Windows**: The `setOpacity(0)` flash-prevention is applied universally, but Windows has its own opacity-shield path for content protection. The new `setOpacity(0)` call in `hideMainWindow` runs before the Windows path too — this is harmless (the Windows show path already manages opacity independently) but worth noting.
+
+---
+
+## Issue #133 — Screenshot & screen-analyze shortcuts silent-fail in launcher mode
+
+### Root Cause
+`KeybindManager.shouldRegister()` had an allowlist that only permitted `general:toggle-visibility`, `general:toggle-mouse-passthrough`, and `window:move-*` when the app was in `launcher` mode. All three screenshot/screen-analyze shortcuts (`general:take-screenshot`, `general:selective-screenshot`, `general:capture-and-process`) returned `false`, so `globalShortcut.register()` was **never called for them in launcher mode**.
+
+The window would briefly flicker (because `setOpacity(0)` / `hide()` was working) but the global shortcut was never registered with the OS — so pressing `Cmd+H`, `Cmd+Shift+H`, or `Cmd+Shift+Enter` in any other app did nothing. The IPC never fired, no screenshot was taken, nothing was attached.
+
+This also caused custom key rebinds to silently fail: `setKeybind()` saved the new accelerator and called `registerGlobalShortcuts()`, but `shouldRegister()` filtered the new accelerator out again for the same reason.
+
+### Fix Summary
+Added three lines to `shouldRegister()` to explicitly allow the three screenshot/analyze shortcuts in both launcher and overlay modes:
+
+```ts
+if (actionId === 'general:take-screenshot') return true;
+if (actionId === 'general:selective-screenshot') return true;
+if (actionId === 'general:capture-and-process') return true;
+```
+
+### Files Modified
+- `electron/services/KeybindManager.ts` — `shouldRegister()`: added screenshot shortcuts to the launcher-mode allowlist
+
+### Edge Cases Handled
+- Fixes rebind silent failure: new accelerators bound via Settings → Shortcuts are now correctly re-registered after `setKeybind()` calls `registerGlobalShortcuts()`
+- All three shortcuts (full screenshot, selective screenshot, capture+analyze) work from any focused app, whether Natively is in launcher or overlay mode
+
+### How to Test
+1. Launch the app (launcher mode)
+2. Focus any other app (browser, editor, terminal)
+3. Press `Cmd+H` — screenshot should be captured and attached to the Natively chat
+4. Press `Cmd+Shift+H` — cropper selection should appear
+5. Press `Cmd+Shift+Enter` — screenshot should be captured and screen-analysis should trigger immediately
+6. Change any of the three shortcuts in Settings → Shortcuts, then verify the NEW shortcut works
+
+---
+
+## Issue #134 — Window invisible after screenshot (opacity not restored)
+
+### Root Cause
+`WindowHelper.hideMainWindow()` was calling `win.hide()` directly without first resetting opacity. After Issue #89 added `setOpacity(0)` pre-hide to prevent the macOS animation flash, the restore paths (`switchToLauncher`, `switchToOverlay`, `showOverlay`) were not uniformly calling `setOpacity(1)` before `show()`. This meant windows could reappear invisible after a screenshot on macOS/Linux.
+
+Additionally, `showOverlay()` had an `if/else` branch on mouse passthrough state but **both branches called `showInactive()`** — a copy-paste bug that meant the overlay could never get proper keyboard/mouse focus even when passthrough was explicitly turned off.
+
+### Fix Summary
+- `hideMainWindow()`: added `setOpacity(0)` calls before `hide()` on both `launcherWindow` and `overlayWindow` for a consistent, animation-free disappearance
+- `switchToOverlay()` non-Windows path: added explicit `setOpacity(1)` before `show()`
+- `switchToLauncher()` non-Windows path: added explicit `setOpacity(1)` before `show()`
+- `showOverlay()`: fixed the passthrough `if/else` — when passthrough is OFF, now correctly calls `showInactive()` + `focus()` so the user can interact with the overlay; also adds `setOpacity(1)` restore before either branch
+
+### Files Modified
+- `electron/WindowHelper.ts` — `hideMainWindow()`, `switchToOverlay()`, `switchToLauncher()`, `showOverlay()`
+
+### Edge Cases Handled
+- Windows content-protection path already manages opacity via a 60ms deferred timeout — the `setOpacity(1)` restore is only added to the `else` (macOS/Linux) branch to avoid interfering
+- `showOverlay()` guard tightened: returns early if window is destroyed rather than entering the body
+
+### How to Test
+1. Take a screenshot with `Cmd+H` — window should disappear instantly (no flash) and reappear fully opaque
+2. Take a selective screenshot with `Cmd+Shift+H` — same
+3. With mouse passthrough OFF, click on the overlay — it should receive focus and respond to keyboard input
+
+---
+
+## Issue #135 — `Cmd+Shift+Enter` screen-analyze intermittently sends screenshot-less request (React 18 race)
+
+### Root Cause
+`NativelyInterface.tsx` used `setTimeout(() => handleWhatToSay(), 0)` after `setAttachedContext(...)`, hoping React would flush the state update before the timeout fired. In React 18 concurrent mode, the renderer may batch/defer updates, so `handleWhatToSay()` sometimes ran before `attachedContext` had the new screenshot — resulting in `currentAttachments` being empty and the AI being called with no image context.
+
+### Fix Summary
+Two-part fix:
+
+1. **`pendingCaptureRef`** — a `useRef` is set synchronously (before the animation frame) with the incoming screenshot data. This bypasses React state entirely for the timing-critical path.
+
+2. **`requestAnimationFrame` replaces `setTimeout(0)`** — rAF is guaranteed to fire after the browser has committed the current render, making it more robust than `setTimeout(0)` under concurrent scheduling.
+
+3. **`handleWhatToSay` checks `pendingCaptureRef`** — merges the pending screenshot into `currentAttachments` even if `attachedContext` state hasn't flushed, ensuring the image is always sent to the AI.
+
+### Files Modified
+- `src/components/NativelyInterface.tsx` — added `pendingCaptureRef`, updated `onCaptureAndProcess` handler, updated `handleWhatToSay`
+
+### Edge Cases Handled
+- Duplicate screenshot guard preserved: same path-dedup check before merging from ref
+- Ref is cleared (`pendingCaptureRef.current = null`) inside the rAF callback after use — no memory leak or stale data on subsequent shortcut presses
+- `handleWhatToSay` called from other shortcuts (not via capture-and-process) is unaffected — `pendingCaptureRef.current` is null in that case, so the merge is a no-op
+
+### How to Test
+1. Open any other app and press `Cmd+Shift+Enter` rapidly 3–4 times in quick succession
+2. Each invocation should trigger a separate screen-analyze with a screenshot attached (visible in the chat as a thumbnail + "What should I say about this?" bubble)
+3. No invocation should silently skip the image and send a text-only request
+

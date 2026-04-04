@@ -78,8 +78,9 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
     public setCredentials(_path: string): void {}
 
     public start(): void {
-        if (this.isActive) return;     // Already active
+        if (this.isActive) return;
         if (this.isConnecting) return; // Already mid-connect (prevents double-connect race)
+        this.isActive = true;          // Set immediately so write() buffers audio during WS handshake
         this.shouldReconnect = true;
         this.reconnectAttempts = 0;
         this.connect();
@@ -218,13 +219,20 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
         });
 
         this.ws.on('open', () => {
-            this.isActive = true;
+            // Guard: stop() calls removeAllListeners() before closing, so this handler
+            // normally won't fire after stop(). But if there's a narrow race, bail out.
+            if (!this.isActive || !this.shouldReconnect) {
+                this.ws?.close();
+                this.ws = null;
+                this.isConnecting = false;
+                return;
+            }
             this.isConnecting = false;
             this.reconnectAttempts = 0;
             console.log('[ElevenLabsStreaming] Connected');
-            
-            // Note: ElevenLabs might require waiting for 'session_started' before sending.
-            // We'll flush the buffer in 'session_started'.
+
+            // Note: ElevenLabs requires waiting for 'session_started' before sending audio.
+            // Buffer flush happens in the 'session_started' message handler below.
         });
 
         this.ws.on('message', (data: WebSocket.RawData) => {

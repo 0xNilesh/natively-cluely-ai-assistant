@@ -97,9 +97,15 @@ impl SystemAudioCapture {
                     match speaker::SpeakerInput::new(None) {
                         Ok(i) => i,
                         Err(e2) => {
-                            eprintln!(
+                            let msg = format!(
                                 "[SystemAudioCapture] FATAL: All init attempts failed: {}",
                                 e2
+                            );
+                            eprintln!("{}", msg);
+                            // Notify JS so it can emit 'error' and reset isRecording
+                            tsfn.call(
+                                Err(napi::Error::from_reason(msg)),
+                                ThreadsafeFunctionCallMode::NonBlocking,
                             );
                             return;
                         }

@@ -8,6 +8,11 @@ export interface AudioDeviceInfo {
 export interface NativeModule {
   getHardwareId(): string;
   verifyGumroadKey(licenseKey: string): Promise<string>;
+  // Dodo Payments — all three require a binary rebuild (cargo build --release)
+  // They are optional (?) so the module loads even with a stale binary.
+  verifyDodoKey?: (licenseKey: string, deviceLabel: string) => Promise<string>;
+  validateDodoKey?: (licenseKey: string) => Promise<string>;
+  deactivateDodoKey?: (licenseKey: string, instanceId: string) => Promise<string>;
   getInputDevices(): Array<AudioDeviceInfo>;
   getOutputDevices(): Array<AudioDeviceInfo>;
   SystemAudioCapture: new (deviceId?: string | null) => {
@@ -22,14 +27,25 @@ export interface NativeModule {
   };
 }
 
+// Hard-required: crash the module load if any of these are missing.
+// These exist in the ORIGINAL binary (pre-Dodo build).
 const REQUIRED_METHODS = ['getHardwareId', 'verifyGumroadKey', 'getInputDevices', 'getOutputDevices'];
 const REQUIRED_CONSTRUCTORS = ['SystemAudioCapture', 'MicrophoneCapture'];
+// Soft-required: warn (do NOT crash) if missing.
+// All three Dodo functions require a binary rebuild (cargo build --release).
+// LicenseManager checks these individually with optional chaining (?.) and
+// degrades gracefully: falls through to Gumroad if verifyDodoKey is missing,
+// skips revocation check if validateDodoKey is missing,
+// skips server deactivation if deactivateDodoKey is missing.
+const SOFT_REQUIRED_METHODS = ['verifyDodoKey', 'validateDodoKey', 'deactivateDodoKey'];
 
 /**
  * Validates that a loaded native module conforms to the NativeModule interface.
- * Throws immediately if any required method or constructor is missing.
+ * Throws immediately if any required method or constructor is missing,
+ * or if the functional smoke-test fails (which catches asar-stub false-pass).
  */
 function validateNativeModule(mod: any): asserts mod is NativeModule {
+    // Hard-required: any missing function here aborts the entire module load.
     for (const fn of REQUIRED_METHODS) {
         if (typeof mod[fn] !== 'function') {
             throw new Error(`NativeModule: missing or invalid method "${fn}" (expected function, got ${typeof mod[fn]})`);
@@ -40,17 +56,58 @@ function validateNativeModule(mod: any): asserts mod is NativeModule {
             throw new Error(`NativeModule: missing or invalid constructor "${cls}" (expected constructor, got ${typeof mod[cls]})`);
         }
     }
+
+    // Soft-required: warn, but do NOT crash.
+    // These are newly-added Dodo functions that require a binary rebuild (cargo build).
+    // The app remains fully functional for audio and Gumroad; only Dodo validate/deactivate
+    // will be unavailable until the next build ships the new binary.
+    for (const fn of SOFT_REQUIRED_METHODS) {
+        if (typeof mod[fn] !== 'function') {
+            console.warn(
+                `[nativeModuleLoader] WARNING: optional method "${fn}" not found in binary — ` +
+                `Dodo license validation/deactivation will be unavailable until binary is rebuilt.`
+            );
+        }
+    }
+
+    // Functional smoke-test: actually call a cheap synchronous native function.
+    // This catches the Electron asar-stub false-pass: the JS index.js stub
+    // exports all the right names (passing the checks above) but its internal
+    // require('./index.*.node') fails silently when run from inside the sealed
+    // asar. Calling getInputDevices() forces a real native ABI call.
+    //
+    // NOTE: The guard MUST be separate from the try/catch that wraps the call.
+    // Placing the throw INSIDE the try means our own error gets caught by the
+    // same catch block, producing a double-wrapped message and losing the stack.
+    let result: unknown;
+    try {
+        result = mod.getInputDevices();
+    } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new Error(`NativeModule: functional smoke-test threw (${msg}) — likely loaded asar stub instead of real binary`);
+    }
+    // Guard is OUTSIDE the try block so our throw propagates cleanly.
+    if (!Array.isArray(result)) {
+        throw new Error(
+            `NativeModule: getInputDevices() returned ${typeof result} instead of Array` +
+            ` — likely loaded asar stub instead of real binary`
+        );
+    }
 }
 
 /**
  * Maps platform+arch to the NAPI-RS compiled binary name.
- * These filenames are produced by `npx napi build` in native-module/.
+ * These filenames are produced by \`npx napi build\` in native-module/.
  * Naming convention: index.<platform>-<arch>-<abi>.node
  */
 function getNativeBinaryName(): string {
     const { platform, arch } = process;
     const map: Record<string, Record<string, string>> = {
-        win32:  { x64: 'index.win32-x64-msvc.node' },
+        win32:  {
+            x64:   'index.win32-x64-msvc.node',
+            ia32:  'index.win32-ia32-msvc.node',
+            arm64: 'index.win32-arm64-msvc.node',
+        },
         darwin: { x64: 'index.darwin-x64.node', arm64: 'index.darwin-arm64.node' },
         linux:  { x64: 'index.linux-x64-gnu.node', arm64: 'index.linux-arm64-gnu.node' },
     };
@@ -71,15 +128,14 @@ let cached: NativeModule | null | undefined = undefined;
  * IMPORTANT: `app` is imported inside this function (not at module top-level)
  * so this module is safe to import from renderer processes, workers, and tests.
  *
- * Candidate paths cover three scenarios:
- *   1. Development — app.getAppPath() returns the project root where
- *      native-module/index.*.node lives after `npm run build:native`.
- *   2. Development fallback — one level up, in case the app is launched
- *      from a subdirectory.
- *   3. Production (ASAR) — electron-builder packs the project into app.asar
- *      but unpacks .node files to app.asar.unpacked/ (configured via
- *      asarUnpack in package.json). process.resourcesPath is only valid in
- *      packaged Electron, so it is guarded before use.
+ * Candidate paths are tried in this order:
+ *   1. Production/electron:dev — app.asar.unpacked/ via process.resourcesPath.
+ *      This MUST be first: in a packaged app, app.getAppPath() returns the
+ *      sealed app.asar archive. Requiring a path inside app.asar causes
+ *      Electron's fs interceptor to serve the JS index.js stub (not the native
+ *      binary), which exports the right names but cannot dlopen the real ABI.
+ *   2. Development — app.getAppPath() returns the raw project root.
+ *   3. Development fallback — one level up if launched from a subdirectory.
  *
  * The function returns null on failure rather than throwing, so the app
  * degrades gracefully (audio device enumeration returns empty arrays).
@@ -102,17 +158,25 @@ export function loadNativeModule(): NativeModule | null {
 
     const binary = getNativeBinaryName();
 
-    // Build candidate paths.
-    // process.resourcesPath is only defined in packaged Electron — guard it.
-    const candidates: string[] = [
-        path.join(appPath, 'native-module', binary),
-        path.join(appPath, '..', 'native-module', binary),
-    ];
+    const candidates: string[] = [];
+
+    // 1. Production/electron:dev — app.asar.unpacked via process.resourcesPath.
+    //    NOTE: process.resourcesPath is set in BOTH packaged apps AND when
+    //    running `npm run electron:dev` (it points to the Electron binary's
+    //    resources dir). The path below won't exist in electron:dev so this
+    //    candidate simply fails and we fall through to #2. That is correct
+    //    behavior — the warn log is expected and harmless.
     if (process.resourcesPath) {
         candidates.push(
             path.join(process.resourcesPath, 'app.asar.unpacked', 'native-module', binary)
         );
     }
+
+    // 2. Development — app.getAppPath() returns the project root directly
+    candidates.push(path.join(appPath, 'native-module', binary));
+
+    // 3. Development fallback — one level up if launched from a subdirectory
+    candidates.push(path.join(appPath, '..', 'native-module', binary));
 
     for (const filePath of candidates) {
         try {

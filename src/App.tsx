@@ -10,6 +10,7 @@ import StartupSequence from "./components/StartupSequence"
 import { AnimatePresence, motion } from "framer-motion"
 import UpdateBanner from "./components/UpdateBanner"
 import { SupportToaster } from "./components/SupportToaster"
+import { NativelyQuotaBanner } from "./components/NativelyQuotaBanner"
 import { AlertCircle } from "lucide-react"
 import { clampOverlayOpacity, OVERLAY_OPACITY_DEFAULT, getDefaultOverlayOpacity } from "./lib/overlayAppearance"
 import {
@@ -18,6 +19,7 @@ import {
   PremiumPromoToaster,
   RemoteCampaignToaster,
   PremiumUpgradeModal,
+  NativelyApiPromoToaster,
   useAdCampaigns
 } from './premium'
 import { analytics } from "./lib/analytics/analytics.service"
@@ -128,7 +130,12 @@ const App: React.FC = () => {
 
     // Basic status check for campaign targeting
     window.electronAPI?.profileGetStatus?.().then(s => setHasProfile(s?.hasProfile || false)).catch(() => {});
-    window.electronAPI?.licenseCheckPremium?.().then(setIsPremiumActive).catch(() => {});
+    // Use async check to detect server-side revocations (Dodo validate endpoint).
+    // Falls back to licenseCheckPremium (sync) if the async method is not available
+    // in the current build (backwards compatibility with older preloads).
+    // Both methods fail-open on network errors — offline users are never locked out.
+    const premiumCheck = window.electronAPI?.licenseCheckPremiumAsync ?? window.electronAPI?.licenseCheckPremium;
+    premiumCheck?.().then(setIsPremiumActive).catch(() => {});
 
     // Listen for meeting processing completion to trigger post-meeting ads
     const removeMeetingsListener = window.electronAPI?.onMeetingsUpdated?.(() => {
@@ -415,6 +422,15 @@ const App: React.FC = () => {
 
       <UpdateBanner />
       <SupportToaster />
+      <NativelyQuotaBanner />
+      {isLauncherMainView && !isSettingsOpen && (
+        <NativelyApiPromoToaster
+          onOpenSettings={(tab: string) => {
+            setSettingsInitialTab(tab);
+            setIsSettingsOpen(true);
+          }}
+        />
+      )}
       {isLauncherMainView && !isSettingsOpen && (
         <>
           <ProfileFeatureToaster 

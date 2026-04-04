@@ -31,8 +31,9 @@ export interface StoredCredentials {
     customProviders?: CustomProvider[];
     curlProviders?: CurlProvider[];
     defaultModel?: string;
+    nativelyApiKey?: string;
     // STT Provider settings
-    sttProvider?: 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox';
+    sttProvider?: 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively';
     groqSttApiKey?: string;
     groqSttModel?: string;
     openAiSttApiKey?: string;
@@ -106,7 +107,7 @@ export class CredentialsManager {
         return this.credentials.customProviders || [];
     }
 
-    public getSttProvider(): 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' {
+    public getSttProvider(): 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' {
         return this.credentials.sttProvider || 'google';
     }
 
@@ -165,6 +166,10 @@ export class CredentialsManager {
         return this.credentials.defaultModel || 'gemini-3.1-flash-lite-preview';
     }
 
+    public getNativelyApiKey(): string | undefined {
+        return this.credentials.nativelyApiKey;
+    }
+
     public getAllCredentials(): StoredCredentials {
         return { ...this.credentials };
     }
@@ -203,7 +208,7 @@ export class CredentialsManager {
         console.log('[CredentialsManager] Google Service Account path updated');
     }
 
-    public setSttProvider(provider: 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox'): void {
+    public setSttProvider(provider: 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively'): void {
         this.credentials.sttProvider = provider;
         this.saveCredentials();
         console.log(`[CredentialsManager] STT Provider set to: ${provider}`);
@@ -291,6 +296,46 @@ export class CredentialsManager {
         this.credentials.defaultModel = model;
         this.saveCredentials();
         console.log(`[CredentialsManager] Default Model set to: ${model}`);
+    }
+
+    public setNativelyApiKey(key: string): void {
+        const trimmed = key.trim();
+        this.credentials.nativelyApiKey = trimmed || undefined;
+
+        if (trimmed) {
+            // Auto-promote natively to default model unless user already chose a non-Gemini/Groq model
+            const current = this.credentials.defaultModel || '';
+            const isAutoDefault = !current
+                || current.startsWith('gemini-')
+                || current.startsWith('llama-')
+                || current.startsWith('mixtral-')
+                || current.startsWith('gemma-')
+                || current === 'gemini'
+                || current === 'llama';
+            if (isAutoDefault) {
+                this.credentials.defaultModel = 'natively';
+                console.log('[CredentialsManager] Auto-set default model to natively');
+            }
+
+            // Auto-promote natively STT if still on the default Google STT
+            if (!this.credentials.sttProvider || this.credentials.sttProvider === 'google') {
+                this.credentials.sttProvider = 'natively';
+                console.log('[CredentialsManager] Auto-set STT provider to natively');
+            }
+        } else {
+            // Key cleared — revert natively-auto-set defaults back to safe fallbacks
+            if (this.credentials.defaultModel === 'natively') {
+                this.credentials.defaultModel = 'gemini-3.1-flash-lite-preview';
+                console.log('[CredentialsManager] Natively key cleared — reset default model to Gemini Flash');
+            }
+            if (this.credentials.sttProvider === 'natively') {
+                this.credentials.sttProvider = 'google';
+                console.log('[CredentialsManager] Natively key cleared — reset STT provider to Google');
+            }
+        }
+
+        this.saveCredentials();
+        console.log('[CredentialsManager] Natively API Key updated');
     }
 
     public getPreferredModel(provider: 'gemini' | 'groq' | 'openai' | 'claude'): string | undefined {

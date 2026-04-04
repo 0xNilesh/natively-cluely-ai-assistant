@@ -2,7 +2,7 @@
 
 import path from "node:path"
 import fs from "node:fs"
-import { app, desktopCapturer, screen } from "electron"
+import { app, desktopCapturer, screen, systemPreferences } from "electron"
 import { v4 as uuidv4 } from "uuid"
 import util from "util"
 import sharp from "sharp"
@@ -362,10 +362,10 @@ export class ScreenshotHelper {
 
     // Create directories if they don't exist
     if (!fs.existsSync(this.screenshotDir)) {
-      fs.mkdirSync(this.screenshotDir, { recursive: true })
+      fs.mkdirSync(this.screenshotDir)
     }
     if (!fs.existsSync(this.extraScreenshotDir)) {
-      fs.mkdirSync(this.extraScreenshotDir, { recursive: true })
+      fs.mkdirSync(this.extraScreenshotDir)
     }
   }
 
@@ -382,6 +382,23 @@ export class ScreenshotHelper {
     area?: Electron.Rectangle,
     preferredDisplay?: Electron.Display
   ): Promise<void> {
+    // On macOS, check screen recording permission before calling desktopCapturer.
+    // Without permission, getSources() returns sources with blank thumbnails (black
+    // frames) rather than throwing — so we must check proactively (issue #133).
+    if (process.platform === 'darwin') {
+      const status = systemPreferences.getMediaAccessStatus('screen');
+      if (status === 'denied') {
+        throw new Error(
+          'Screen Recording permission is denied. Please enable it in System Settings > Privacy & Security > Screen Recording, then restart Natively.'
+        );
+      }
+      if (status === 'restricted') {
+        throw new Error(
+          'Screen Recording is restricted on this device (MDM or parental controls). Contact your administrator to allow screen capture.'
+        );
+      }
+    }
+
     let targetDisplay: Electron.Display;
 
     if (preferredDisplay) {
@@ -392,23 +409,23 @@ export class ScreenshotHelper {
     } else {
       targetDisplay = screen.getPrimaryDisplay();
     }
-
+    
     const { scaleFactor } = targetDisplay;
     const displayBounds = targetDisplay.bounds;
-
+    
     console.log(`[ScreenshotHelper] Target display bounds: ${JSON.stringify(displayBounds)}, scale: ${scaleFactor}`);
-
+    
     let sources: Electron.DesktopCapturerSource[];
 
     try {
       console.log('[ScreenshotHelper] Capturing screen with desktopCapturer...');
-
+      
       // Get thumbnail size matching the target display's resolution
       const thumbnailSize = {
         width: Math.round(displayBounds.width * scaleFactor),
         height: Math.round(displayBounds.height * scaleFactor)
       };
-
+      
       sources = await desktopCapturer.getSources({
         types: ['screen'],
         thumbnailSize
@@ -425,9 +442,7 @@ export class ScreenshotHelper {
       if ((error as NodeJS.ErrnoException).name === 'NotFoundError') {
         throw new Error('No screen sources available. Please ensure at least one display is connected.');
       }
-      // Improved error message extraction
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      throw new Error(`Failed to capture screen: ${errorMessage}`);
+      throw new Error(`Failed to capture screen: ${(error as Error).message}`);
     }
 
     if (sources.length === 0) {
@@ -440,7 +455,7 @@ export class ScreenshotHelper {
     // Find the source matching our target display using reliable display_id mapping
     const targetDisplayId = targetDisplay.id.toString();
     let selectedSource: Electron.DesktopCapturerSource | null = null;
-
+    
     // Build a map of sources by display_id (same logic as in getDisplaysIntersectingSelection)
     for (const source of sources) {
       if ('display_id' in source && source.display_id) {
@@ -451,15 +466,15 @@ export class ScreenshotHelper {
         }
       }
     }
-
+    
     // Last resort: use first source
     if (!selectedSource) {
       console.warn(`[ScreenshotHelper] display_id ${targetDisplayId} not found in sources, using first available`);
       selectedSource = sources[0];
     }
-
+    
     console.log(`[ScreenshotHelper] Final source: ${selectedSource.name} (id: ${selectedSource.id})`);
-
+    
     let image = selectedSource.thumbnail;
 
     if (area) {
@@ -468,27 +483,27 @@ export class ScreenshotHelper {
       // area coordinates are absolute screen coordinates
       const cropX = Math.round((area.x - displayBounds.x) * scaleFactor);
       const cropY = Math.round((area.y - displayBounds.y) * scaleFactor);
-
+      
       const croppedArea = {
         x: Math.max(0, cropX),
         y: Math.max(0, cropY),
         width: Math.round(area.width * scaleFactor),
         height: Math.round(area.height * scaleFactor)
       };
-
+      
       console.log(`[ScreenshotHelper] Cropping relative to display: ${JSON.stringify(croppedArea)}`);
-
+      
       // Ensure crop area is within image bounds
       const imgWidth = image.getSize().width;
       const imgHeight = image.getSize().height;
-
+      
       if (croppedArea.x + croppedArea.width > imgWidth) {
         croppedArea.width = imgWidth - croppedArea.x;
       }
       if (croppedArea.y + croppedArea.height > imgHeight) {
         croppedArea.height = imgHeight - croppedArea.y;
       }
-
+      
       if (croppedArea.width > 0 && croppedArea.height > 0) {
         image = image.crop(croppedArea);
       } else {

@@ -19,9 +19,61 @@ function verifyArtifacts(expectedArtifacts) {
   }
 }
 
-function runCommand(command) {
+function runCommand(command, extraEnv = {}) {
   console.log(`> ${command}`);
-  execSync(command, { stdio: 'inherit', cwd: nativeModulePath });
+  execSync(command, { stdio: 'inherit', cwd: nativeModulePath, env: { ...process.env, ...extraEnv } });
+}
+
+// Resolve the actual clang runtime lib path (Xcode version changes across machines).
+// Rust's cross-compilation toolchain embeds a stale version number; we override with LIBRARY_PATH.
+function getClangLibPath() {
+  try {
+    const clangBase = '/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang';
+    const versions = fs.readdirSync(clangBase).filter(d => /^\d/.test(d)).sort();
+    if (versions.length > 0) {
+      return path.join(clangBase, versions[versions.length - 1], 'lib', 'darwin');
+    }
+  } catch {}
+  return null;
+}
+
+// Fix hardcoded absolute paths to .dylib files in macOS native modules.
+// When built on macOS, the linker embeds absolute paths to dependencies.
+// We rewrite them to @loader_path so the .node file is portable.
+function fixMacOSDylibPaths(nodeFilePath) {
+  try {
+    // List all dependent libraries
+    const otoolOutput = execSync(`otool -L "${nodeFilePath}"`, { encoding: 'utf8' });
+    const lines = otoolOutput.split('\n').slice(1); // Skip first line (filename)
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+
+      // Extract the path (first token before whitespace)
+      const dylibPath = trimmed.split(/\s+/)[0];
+
+      // Skip system frameworks and @-prefixed paths (already relative)
+      if (dylibPath.startsWith('/System/') ||
+          dylibPath.startsWith('/usr/lib/') ||
+          dylibPath.startsWith('@')) {
+        continue;
+      }
+
+      // Extract just the filename from the absolute path
+      const dylibName = path.basename(dylibPath);
+      const relativePath = `@loader_path/${dylibName}`;
+
+      console.log(`  Fixing dylib path: ${dylibPath} -> ${relativePath}`);
+
+      // Rewrite the path in the .node file
+      execSync(`install_name_tool -change "${dylibPath}" "${relativePath}" "${nodeFilePath}"`);
+    }
+
+    console.log(`Fixed dylib paths in: ${path.basename(nodeFilePath)}`);
+  } catch (err) {
+    console.warn(`Warning: Could not fix dylib paths for ${path.basename(nodeFilePath)}: ${err.message}`);
+  }
 }
 
 if (os.platform() === 'darwin') {
@@ -40,6 +92,11 @@ if (os.platform() === 'darwin') {
     'aarch64-apple-darwin': 'index.darwin-arm64.node',
   };
 
+  const clangLibPath = getClangLibPath();
+  if (clangLibPath) {
+    console.log(`Using clang runtime path: ${clangLibPath}`);
+  }
+
   for (const target of macTargets) {
     try {
       runCommand(`rustup target add ${target}`);
@@ -48,7 +105,15 @@ if (os.platform() === 'darwin') {
     }
 
     console.log(`\n--- Building for ${target} ---`);
-    runCommand(`npx napi build --platform --target ${target} --release`);
+    const extraEnv = clangLibPath ? { LIBRARY_PATH: clangLibPath } : {};
+    runCommand(`npx napi build --platform --target ${target} --release`, extraEnv);
+  }
+
+  // Fix hardcoded absolute paths in .node binaries
+  for (const target of macTargets) {
+    const artifact = artifactMap[target];
+    const artifactPath = path.join(nativeModulePath, artifact);
+    fixMacOSDylibPaths(artifactPath);
   }
 
   verifyArtifacts(macTargets.map((target) => artifactMap[target]));

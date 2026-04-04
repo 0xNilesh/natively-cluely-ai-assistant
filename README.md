@@ -38,7 +38,7 @@
 [![License](https://img.shields.io/badge/License-AGPL--3.0-blue?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows-blueviolet?style=flat-square)](https://github.com/evinjohnn/natively-cluely-ai-assistant/releases)
 [![Downloads](https://img.shields.io/github/downloads/evinjohnn/natively-cluely-ai-assistant/total?style=flat-square&color=success)](https://github.com/evinjohnn/natively-cluely-ai-assistant/releases)
-![Repo Views](https://img.shields.io/badge/Views-109.5k-orange?style=flat-square)
+![Repo Views](https://img.shields.io/badge/Views-169.5k-orange?style=flat-square)
 [![Stars](https://img.shields.io/github/stars/evinjohnn/natively-cluely-ai-assistant?style=flat-square&color=gold)](https://github.com/evinjohnn/natively-cluely-ai-assistant)
 ![Status](https://img.shields.io/badge/Status-active-success?style=flat-square)
 [![X Community](https://img.shields.io/badge/Community-black?style=flat-square&logo=x&logoColor=white)](https://x.com/i/communities/2031398735515693507)
@@ -278,9 +278,10 @@ While Natively is **free and open-source forever**, we also offer a **Pro Editio
 
 ### What's New in v2.0.9
 
-Version 2.0.9 delivers the fixes the root-cause audio transcription bug, hardens stealth and shortcuts, and integrates numerous community PRs.
+Version 2.0.9 delivers the Natively API tier, fixes the root-cause audio transcription bug, hardens stealth and shortcuts, and integrates numerous community PRs.
 
 - **Fixed Audio Transcription**: Resolved the root-cause zero-transcription bug — Deepgram was receiving raw PCM without `encoding=linear16` in the WebSocket URL, causing an immediate `upstream_closed` loop with no output.
+- **Natively API Integration**: New hosted STT + AI tier. Activate with an API key to route transcription through Deepgram/Google and AI calls through the Natively API server, with an inline usage dashboard (quota bars, plan badge, reset date).
 - **Dual-Channel STT**: System audio and microphone now connect to the Natively API simultaneously using per-channel session keys (`system` / `mic`), eliminating `concurrent_session_blocked` errors.
 - **LLM Resilience & Fallbacks**: 60 s / 3-retry wrapper for OpenAI and 90 s / 3-retry wrapper for Claude; Natively API falls back to Gemini on failure; `streamChat` chain now tries Natively first across all call sites.
 - **STT Over-Billing Fixed**: Removed duplicate mic-channel billing (was doubling every session); added 30 s minimum threshold for short reconnect sessions; replaced `Math.ceil` with `Math.round` for fairer rounding.

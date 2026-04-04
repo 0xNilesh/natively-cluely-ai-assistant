@@ -50,7 +50,11 @@ export class RAGManager {
             openaiKey: config.openaiKey,
             geminiKey: config.geminiKey,
             ollamaUrl: config.ollamaUrl
-        });
+        }).then(() => {
+            // Backfill provider metadata for meetings that were embedded before the
+            // embedding_provider column was written (or where the write failed silently).
+            this._backfillEmbeddingProviderMetadata();
+        }).catch(() => { /* non-critical, suppress */ });
     }
 
     /**
@@ -65,7 +69,27 @@ export class RAGManager {
     }
 
     initializeEmbeddings(keys: { openaiKey?: string, geminiKey?: string, ollamaUrl?: string }): void {
-        this.embeddingPipeline.initialize(keys);
+        const initPromise = this.embeddingPipeline.initialize(keys);
+        // After init, backfill embedding_provider on meetings that have embedded chunks
+        // but a NULL metadata column (common for meetings embedded before this metadata
+        // write was introduced, or where the write silently failed).
+        if (initPromise && typeof initPromise.then === 'function') {
+            initPromise.then(() => {
+                this._backfillEmbeddingProviderMetadata();
+            }).catch(() => { /* silent — backfill is non-critical */ });
+        } else {
+            // Synchronous path (shouldn't happen but be safe)
+            this._backfillEmbeddingProviderMetadata();
+        }
+    }
+
+    private _backfillEmbeddingProviderMetadata(): void {
+        const providerName = this.embeddingPipeline.getActiveProviderName();
+        const provider = (this.embeddingPipeline as any).provider;
+        const dimensions = provider?.dimensions;
+        if (providerName && dimensions) {
+            this.vectorStore.backfillEmbeddingProviderMetadata(providerName, dimensions);
+        }
     }
 
     /**

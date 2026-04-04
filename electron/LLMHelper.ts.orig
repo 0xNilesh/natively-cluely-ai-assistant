@@ -243,9 +243,10 @@ export class LLMHelper {
     const custom = customProviders.find(p => p.id === targetModelId);
     if (custom) {
       this.useOllama = false;
-      this.customProvider = custom;
-      this.activeCurlProvider = null;
-      console.log(`[LLMHelper] Switched to Custom Provider: ${custom.name}`);
+      this.customProvider = null;
+      // Treat text-only custom providers as CurlProviders (responsePath optional)
+      this.activeCurlProvider = custom as CurlProvider;
+      console.log(`[LLMHelper] Switched to cURL Provider: ${custom.name}`);
       return;
     }
 
@@ -1133,19 +1134,8 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       });
     }
 
-    // Priority 7: Natively API — used when no other provider is available, or as final fallback
-    const nativelyKeyForStructured = this.nativelyKey || (() => {
-      try { return require('./services/CredentialsManager').CredentialsManager.getInstance().getNativelyApiKey() || null; } catch { return null; }
-    })();
-    if (nativelyKeyForStructured) {
-      providers.push({
-        name: 'Natively API',
-        execute: () => this.generateWithNatively(message)
-      });
-    }
-
     if (providers.length === 0) {
-      throw new Error('No reasoning model available. Please configure an OpenAI, Claude, Gemini, Groq, or Natively API key.');
+      throw new Error('No reasoning model available. Please configure an OpenAI, Claude, Gemini, or Groq API key.');
     }
 
     const MAX_ROTATIONS = 3;
@@ -1494,9 +1484,6 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     // OpenAI delta/streaming format: { choices: [{ delta: { content: "..." } }] }
     if (data.choices?.[0]?.delta?.content) return data.choices[0].delta.content;
 
-    // NOTE: reasoning_content (model's thinking process) is intentionally NOT extracted
-    // to avoid showing internal reasoning to users. Only final content is returned.
-
     // Anthropic format: { content: [{ text: "..." }] }
     if (Array.isArray(data.content) && data.content[0]?.text) return data.content[0].text;
 
@@ -1509,20 +1496,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     // Generic result field
     if (typeof data.result === 'string') return data.result;
 
-    // For streaming responses: return empty string instead of raw JSON
-    // This prevents JSON artifacts from appearing in the output
-    if (data.choices?.[0]?.delta !== undefined) {
-      // It's a streaming delta chunk with no extractable content
-      return "";
-   	}
-
-    // For streaming responses with empty choices array (e.g., final usage chunk)
-    // This handles: { "choices": [], "usage": { ... } }
-    if (Array.isArray(data.choices) && data.choices.length === 0) {
-      return "";
-    }
-    
-    // Fallback: stringify the whole response (only for non-streaming responses)
+    // Fallback: stringify the whole response
     console.warn("[LLMHelper] Could not extract text from custom provider response, returning raw JSON");
     return JSON.stringify(data);
   }
@@ -2020,14 +1994,13 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     message: string,
     imagePaths?: string[],
     context?: string,
-    systemPromptOverride?: string, // Optional override (defaults to HARD_SYSTEM_PROMPT)
-    ignoreKnowledgeMode: boolean = false
+    systemPromptOverride?: string // Optional override (defaults to HARD_SYSTEM_PROMPT)
   ): AsyncGenerator<string, void, unknown> {
 
     // ============================================================
     // KNOWLEDGE MODE INTERCEPT (Streaming)
     // ============================================================
-    if (!ignoreKnowledgeMode && this.knowledgeOrchestrator?.isKnowledgeMode()) {
+    if (this.knowledgeOrchestrator?.isKnowledgeMode()) {
       try {
         // Feed to depth scorer only (not negotiation tracker) — mirrors non-streaming path fix.
         this.knowledgeOrchestrator.feedForDepthScoring(message);
@@ -2109,13 +2082,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       return;
     }
 
-    // 2a. CustomProvider (switchToCustom path) — full SSE-capable streaming
-    if (this.customProvider) {
-      yield* this.streamWithCustom(message, context, imagePaths, finalSystemPrompt);
-      return;
-    }
-
-    // 2b. Custom Provider Streaming (via cURL - Non-streaming fallback for now)
+    // 2. Custom Provider Streaming (via cURL - Non-streaming fallback for now)
     if (this.activeCurlProvider) {
       const response = await this.executeCustomProvider(
         this.activeCurlProvider.curlCommand,
@@ -2126,6 +2093,12 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         imagePaths?.[0]
       );
       yield response;
+      return;
+    }
+
+    // 2b. CustomProvider (switchToCustom path) — full SSE-capable streaming
+    if (this.customProvider) {
+      yield* this.streamWithCustom(message, context, imagePaths, finalSystemPrompt);
       return;
     }
 
@@ -2218,20 +2191,9 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       // Race strategy (default)
       const raceMsg = `${finalSystemPrompt}\n\n${userContent}`;
       yield* this.streamWithGeminiParallelRace(raceMsg, imagePaths);
-      return;
+    } else {
+      throw new Error("No LLM provider available");
     }
-
-    // 5. Last-resort: Natively API (if user has a key but no cloud provider configured)
-    if (this.hasNatively()) {
-      try {
-        yield* this.streamWithNatively(userContent, finalSystemPrompt, imagePaths);
-        return;
-      } catch (e: any) {
-        console.warn('[LLMHelper] Natively last-resort fallback failed:', e.message);
-      }
-    }
-
-    throw new Error("No AI provider configured. Please add at least one API key in Settings.");
   }
 
   /**
@@ -2770,8 +2732,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
       // If no SSE content was yielded, try parsing the full body as JSON
       // This handles non-streaming responses (e.g. Ollama with stream: false)
-      // But skip if it looks like SSE data (starts with "data: ")
-      if (!yieldedAny && fullBody.trim().length > 0 && !fullBody.trim().startsWith("data: ")) {
+      if (!yieldedAny && fullBody.trim().length > 0) {
         try {
           const data = JSON.parse(fullBody);
           const extracted = this.extractFromCommonFormats(data);

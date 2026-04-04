@@ -66,10 +66,23 @@ export function initializeIpcHandlers(appState: AppState): void {
       return false;
     }
   });
+  // Async variant: performs Dodo server-side revocation check on startup.
+  // Returns false only if the server definitively revokes the key.
+  // Network errors fail-open (returns cached sync result).
+  safeHandle("license:check-premium-async", async () => {
+    try {
+      const { LicenseManager } = require('../premium/electron/services/LicenseManager');
+      return await LicenseManager.getInstance().isPremiumAsync();
+    } catch {
+      return false;
+    }
+  });
   safeHandle("license:deactivate", async () => {
     try {
       const { LicenseManager } = require('../premium/electron/services/LicenseManager');
-      LicenseManager.getInstance().deactivate();
+      // deactivate() is async — it calls the Dodo server to free the activation slot
+      // before removing the local license file. Must be awaited.
+      await LicenseManager.getInstance().deactivate();
       // Auto-disable knowledge mode when license is removed
       try {
         const orchestrator = appState.getKnowledgeOrchestrator();
@@ -178,7 +191,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       const preview = await appState.getImagePreview(screenshotPath)
       return { path: screenshotPath, preview }
     } catch (error) {
-      console.error("Error taking screenshot:", error)
+      // console.error("Error taking screenshot:", error)
       throw error
     }
   })
@@ -362,7 +375,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   // that a newer stream has taken over.
   let _chatStreamId = 0;
 
-  safeHandle("gemini-chat-stream", async (event, message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean }) => {
+  safeHandle("gemini-chat-stream", async (event, message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean, ignoreKnowledgeMode?: boolean }) => {
     try {
       console.log("[IPC] gemini-chat-stream started using LLMHelper.streamChat");
       const llmHelper = appState.processingHelper.getLLMHelper();
@@ -398,7 +411,7 @@ export function initializeIpcHandlers(appState: AppState): void {
 
       try {
         // USE streamChat which handles routing
-        const stream = llmHelper.streamChat(message, imagePaths, context, options?.skipSystemPrompt ? "" : undefined);
+        const stream = llmHelper.streamChat(message, imagePaths, context, options?.skipSystemPrompt ? "" : undefined, options?.ignoreKnowledgeMode);
 
         for await (const token of stream) {
           // Bail if a newer stream has taken over (user triggered a new request)
@@ -767,6 +780,62 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
+  safeHandle("set-natively-api-key", async (_, apiKey: string) => {
+    try {
+      const { CredentialsManager } = require('./services/CredentialsManager');
+      const cm = CredentialsManager.getInstance();
+      const prevSttProvider = cm.getSttProvider();
+      cm.setNativelyApiKey(apiKey);
+
+      // Update LLMHelper immediately (same pattern as other provider keys)
+      const llmHelper = appState.processingHelper.getLLMHelper();
+      llmHelper.setNativelyKey(apiKey || null);
+
+      // Sync the model into LLMHelper and notify the UI whenever the effective default changed
+      const defaultModel = cm.getDefaultModel();
+      const providers = [...(cm.getCurlProviders() || []), ...(cm.getCustomProviders() || [])];
+      llmHelper.setModel(defaultModel, providers);
+      BrowserWindow.getAllWindows().forEach(win => {
+        if (!win.isDestroyed()) win.webContents.send('model-changed', defaultModel);
+      });
+
+      // If setNativelyApiKey auto-promoted the STT provider to 'natively', reconfigure
+      // the audio pipeline immediately — without this, the in-memory pipeline still uses
+      // the old STT provider (e.g. Google) until the app restarts.
+      const newSttProvider = cm.getSttProvider();
+      if (newSttProvider !== prevSttProvider) {
+        console.log(`[IPC] set-natively-api-key: STT provider changed ${prevSttProvider} → ${newSttProvider}, reconfiguring pipeline`);
+        await appState.reconfigureSttProvider();
+      }
+
+      return { success: true };
+    } catch (error: any) {
+      console.error("Error saving Natively API key:", error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  safeHandle("get-natively-usage", async () => {
+    try {
+      const { CredentialsManager } = require('./services/CredentialsManager');
+      const key = CredentialsManager.getInstance().getNativelyApiKey();
+      if (!key) return { ok: false, error: 'no_key' };
+
+      const res = await fetch('https://natively-api-production.up.railway.app/v1/usage', {
+        headers: { 'x-natively-key': key },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({})) as any;
+        return { ok: false, error: body.error || 'request_failed', status: res.status };
+      }
+      const data = await res.json() as any;
+      return { ok: true, ...data };
+    } catch (error: any) {
+      return { ok: false, error: error.message || 'network_error' };
+    }
+  });
+
   // Custom Provider Handlers
   safeHandle("get-custom-providers", async () => {
     try {
@@ -926,6 +995,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         hasGroqKey: hasKey(creds.groqApiKey),
         hasOpenaiKey: hasKey(creds.openaiApiKey),
         hasClaudeKey: hasKey(creds.claudeApiKey),
+        hasNativelyKey: hasKey(creds.nativelyApiKey),
         googleServiceAccountPath: creds.googleServiceAccountPath || null,
         sttProvider: creds.sttProvider || 'google',
         groqSttModel: creds.groqSttModel || 'whisper-large-v3-turbo',
@@ -938,6 +1008,16 @@ export function initializeIpcHandlers(appState: AppState): void {
         hasIbmWatsonKey: hasKey(creds.ibmWatsonApiKey),
         ibmWatsonRegion: creds.ibmWatsonRegion || 'us-south',
         hasSonioxKey: hasKey(creds.sonioxApiKey),
+        // STT key values — returned so the settings UI can pre-populate input fields.
+        // AI model keys (Gemini/Groq/OpenAI/Claude) remain boolean-only; STT keys are
+        // surfaced here because users need to see which key is active when switching providers.
+        sttGroqKey: creds.groqSttApiKey || '',
+        sttOpenaiKey: creds.openAiSttApiKey || '',
+        sttDeepgramKey: creds.deepgramApiKey || '',
+        sttElevenLabsKey: creds.elevenLabsApiKey || '',
+        sttAzureKey: creds.azureApiKey || '',
+        sttIbmKey: creds.ibmWatsonApiKey || '',
+        sttSonioxKey: creds.sonioxApiKey || '',
         hasTavilyKey: hasKey(creds.tavilyApiKey),
         // Dynamic Model Discovery - preferred models
         geminiPreferredModel: creds.geminiPreferredModel || undefined,
@@ -946,7 +1026,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         claudePreferredModel: creds.claudePreferredModel || undefined,
       };
     } catch (error: any) {
-      return { hasGeminiKey: false, hasGroqKey: false, hasOpenaiKey: false, hasClaudeKey: false, googleServiceAccountPath: null, sttProvider: 'google', groqSttModel: 'whisper-large-v3-turbo', hasSttGroqKey: false, hasSttOpenaiKey: false, hasDeepgramKey: false, hasElevenLabsKey: false, hasAzureKey: false, azureRegion: 'eastus', hasIbmWatsonKey: false, ibmWatsonRegion: 'us-south', hasSonioxKey: false, hasTavilyKey: false };
+      return { hasGeminiKey: false, hasGroqKey: false, hasOpenaiKey: false, hasClaudeKey: false, hasNativelyKey: false, googleServiceAccountPath: null, sttProvider: 'google', groqSttModel: 'whisper-large-v3-turbo', hasSttGroqKey: false, hasSttOpenaiKey: false, hasDeepgramKey: false, hasElevenLabsKey: false, hasAzureKey: false, azureRegion: 'eastus', hasIbmWatsonKey: false, ibmWatsonRegion: 'us-south', hasSonioxKey: false, hasTavilyKey: false, sttGroqKey: '', sttOpenaiKey: '', sttDeepgramKey: '', sttElevenLabsKey: '', sttAzureKey: '', sttIbmKey: '', sttSonioxKey: '' };
     }
   });
 
@@ -994,7 +1074,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   // STT Provider Management Handlers
   // ==========================================
 
-  safeHandle("set-stt-provider", async (_, provider: 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox') => {
+  safeHandle("set-stt-provider", async (_, provider: 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively') => {
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
       CredentialsManager.getInstance().setSttProvider(provider);
@@ -1387,6 +1467,9 @@ export function initializeIpcHandlers(appState: AppState): void {
     try {
       const llmHelper = appState.processingHelper.getLLMHelper();
       llmHelper.setGroqFastTextMode(enabled);
+
+      const { SettingsManager } = require('./services/SettingsManager');
+      SettingsManager.getInstance().set('groqFastTextMode', enabled);
 
       // Broadcast to all windows
       BrowserWindow.getAllWindows().forEach(win => {
@@ -2176,6 +2259,10 @@ export function initializeIpcHandlers(appState: AppState): void {
         return { success: false, error: 'Knowledge engine not initialized' };
       }
       orchestrator.setKnowledgeMode(enabled);
+
+      const { SettingsManager } = require('./services/SettingsManager');
+      SettingsManager.getInstance().set('knowledgeMode', enabled);
+
       return { success: true };
     } catch (error: any) {
       return { success: false, error: error.message };
@@ -2277,13 +2364,20 @@ export function initializeIpcHandlers(appState: AppState): void {
       }
       const engine = orchestrator.getCompanyResearchEngine();
 
-      // Wire Tavily Search provider if key is configured
+      // Wire search provider: Tavily (user key) → Natively API (fallback) → none (LLM-only)
       const { CredentialsManager } = require('./services/CredentialsManager');
       const cm = CredentialsManager.getInstance();
       const tavilyApiKey = cm.getTavilyApiKey();
       if (tavilyApiKey) {
         const { TavilySearchProvider } = require('../premium/electron/knowledge/TavilySearchProvider');
         engine.setSearchProvider(new TavilySearchProvider(tavilyApiKey));
+      } else {
+        const nativelyKey = cm.getNativelyApiKey();
+        if (nativelyKey) {
+          const { NativelySearchProvider } = require('../premium/electron/knowledge/NativelySearchProvider');
+          engine.setSearchProvider(new NativelySearchProvider(nativelyKey));
+          console.log('[IPC] Company research: using Natively API search (no Tavily key configured)');
+        }
       }
 
       // Build full JD context so the dossier is tailored to the exact role
@@ -2300,7 +2394,8 @@ export function initializeIpcHandlers(appState: AppState): void {
         min_years_experience: activeJD.min_years_experience,
       } : {};
       const dossier = await engine.researchCompany(companyName, jdCtx, true);
-      return { success: true, dossier };
+      const searchQuotaExhausted = (engine.searchProvider as any)?.quotaExhausted === true;
+      return { success: true, dossier, searchQuotaExhausted };
     } catch (error: any) {
       console.error('[IPC] profile:research-company error:', error);
       return { success: false, error: error.message };

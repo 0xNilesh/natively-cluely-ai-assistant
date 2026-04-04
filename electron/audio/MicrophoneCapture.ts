@@ -34,10 +34,14 @@ export class MicrophoneCapture extends EventEmitter {
     }
 
     public getSampleRate(): number {
-        if (this.monitor && typeof this.monitor.get_sample_rate === 'function') {
-            const nativeRate = this.monitor.get_sample_rate();
-            console.log(`[MicrophoneCapture] Real native rate: ${nativeRate}`);
-            return nativeRate;
+        if (this.monitor) {
+            // NAPI-RS V3 auto-converts Rust snake_case to camelCase
+            if (typeof this.monitor.getSampleRate === 'function') {
+                return this.monitor.getSampleRate();
+            } else if (typeof this.monitor.get_sample_rate === 'function') {
+                // Fallback for V2 or explicit js_name
+                return this.monitor.get_sample_rate();
+            }
         }
         return 48000; // Safe default for most modern mics before native initialization
     }

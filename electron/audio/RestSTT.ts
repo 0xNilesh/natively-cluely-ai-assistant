@@ -294,8 +294,16 @@ export class RestSTT extends EventEmitter {
             return;
         }
 
-        // Add WAV header
-        const wavBuffer = this.addWavHeader(rawPcm, this.sampleRate);
+        // Resample to 16kHz mono before upload. At 48kHz stereo this produces a
+        // 6x smaller WAV file, reducing upload latency and keeping file sizes well
+        // under the Groq/OpenAI 25MB limit even for 10-second safety-net flushes.
+        const TARGET_RATE = 16_000;
+        const pcm16k = this.sampleRate === TARGET_RATE && this.numChannels === 1
+            ? rawPcm
+            : this.resampleTo16kHz(rawPcm);
+
+        // Add WAV header — stamp with actual rate/channel after resampling (always 16kHz mono)
+        const wavBuffer = this.addWavHeader(pcm16k, TARGET_RATE);
 
         this.isUploading = true;
 
@@ -385,6 +393,57 @@ export class RestSTT extends EventEmitter {
     }
 
     /**
+     * Resample Int16LE PCM from inputRate/numChannels → 16kHz mono.
+     * Uses integer decimation (same approach as Rust DSP and OpenAIStreamingSTT).
+     * Returns a new Buffer containing the resampled 16-bit mono PCM.
+     */
+    private resampleTo16kHz(raw: Buffer): Buffer {
+        const TARGET_RATE = 16_000;
+
+        // Build Int16Array from the raw buffer using safe byte-by-byte reads
+        // to avoid alignment issues with unaligned ArrayBuffer slices.
+        const numSamples = Math.floor(raw.length / 2);
+        const inputS16 = new Int16Array(numSamples);
+        for (let i = 0; i < numSamples; i++) {
+            inputS16[i] = raw.readInt16LE(i * 2);
+        }
+
+        // Already at target rate and mono — return as-is
+        if (this.sampleRate === TARGET_RATE && this.numChannels === 1) {
+            return Buffer.from(inputS16.buffer);
+        }
+
+        // Mix down multi-channel to mono
+        let monoS16: Int16Array;
+        if (this.numChannels > 1) {
+            const monoLen = Math.floor(inputS16.length / this.numChannels);
+            monoS16 = new Int16Array(monoLen);
+            for (let i = 0; i < monoLen; i++) {
+                let sum = 0;
+                for (let c = 0; c < this.numChannels; c++) {
+                    sum += inputS16[i * this.numChannels + c];
+                }
+                monoS16[i] = Math.round(sum / this.numChannels);
+            }
+        } else {
+            monoS16 = inputS16;
+        }
+
+        // Decimate to target rate
+        if (this.sampleRate === TARGET_RATE) {
+            return Buffer.from(monoS16.buffer);
+        }
+
+        const factor = this.sampleRate / TARGET_RATE;
+        const outLen = Math.floor(monoS16.length / factor);
+        const outS16 = new Int16Array(outLen);
+        for (let i = 0; i < outLen; i++) {
+            outS16[i] = monoS16[Math.floor(i * factor)];
+        }
+        return Buffer.from(outS16.buffer);
+    }
+
+    /**
      * Check if audio buffer is essentially silence
      */
     private isSilent(pcmBuffer: Buffer): boolean {
@@ -404,10 +463,11 @@ export class RestSTT extends EventEmitter {
     }
 
     /**
-     * Add a WAV RIFF header to raw PCM data
-     * Critical: Most REST STT APIs require a valid WAV file, NOT raw PCM
+     * Add a WAV RIFF header to raw PCM data.
+     * channels defaults to 1 (mono) because callers always resample to mono first.
+     * Critical: Most REST STT APIs require a valid WAV file, NOT raw PCM.
      */
-    private addWavHeader(samples: Buffer, sampleRate: number = 16000): Buffer {
+    private addWavHeader(samples: Buffer, sampleRate: number = 16_000, channels: number = 1): Buffer {
         const buffer = Buffer.alloc(44 + samples.length);
         // RIFF chunk descriptor
         buffer.write('RIFF', 0);
@@ -417,11 +477,11 @@ export class RestSTT extends EventEmitter {
         buffer.write('fmt ', 12);
         buffer.writeUInt32LE(16, 16); // Subchunk1Size (16 for PCM)
         buffer.writeUInt16LE(1, 20);  // AudioFormat (1 = PCM)
-        buffer.writeUInt16LE(this.numChannels, 22);  // NumChannels
-        buffer.writeUInt32LE(sampleRate, 24); // SampleRate
-        buffer.writeUInt32LE(sampleRate * this.numChannels * (this.bitsPerSample / 8), 28); // ByteRate
-        buffer.writeUInt16LE(this.numChannels * (this.bitsPerSample / 8), 32); // BlockAlign
-        buffer.writeUInt16LE(this.bitsPerSample, 34); // BitsPerSample
+        buffer.writeUInt16LE(channels, 22);
+        buffer.writeUInt32LE(sampleRate, 24);
+        buffer.writeUInt32LE(sampleRate * channels * (this.bitsPerSample / 8), 28); // ByteRate
+        buffer.writeUInt16LE(channels * (this.bitsPerSample / 8), 32);              // BlockAlign
+        buffer.writeUInt16LE(this.bitsPerSample, 34);
         // data sub-chunk
         buffer.write('data', 36);
         buffer.writeUInt32LE(samples.length, 40);

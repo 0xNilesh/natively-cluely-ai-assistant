@@ -407,7 +407,7 @@ ${contextString}`;
                         question,
                         undefined,
                         systemPrompt,
-                        { skipSystemPrompt: true }
+                        { skipSystemPrompt: true, ignoreKnowledgeMode: true }
                     );
                 }
             } else {
@@ -459,7 +459,7 @@ ${contextString}`;
                     question,
                     undefined,
                     systemPrompt,
-                    { skipSystemPrompt: true }
+                    { skipSystemPrompt: true, ignoreKnowledgeMode: true }
                 );
             }
 

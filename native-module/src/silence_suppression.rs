@@ -44,6 +44,12 @@ pub struct SilenceSuppressionConfig {
     /// Native sample rate of the audio being processed (e.g. 48000)
     /// Used to calculate decimation ratio for 16kHz VAD input.
     pub native_sample_rate: u32,
+
+    /// Whether to use ML-based WebRTC VAD in addition to the RMS volume gate.
+    pub use_vad: bool,
+
+    /// The strictness level of the WebRTC VAD models.
+    pub vad_mode: VadMode,
 }
 
 impl Default for SilenceSuppressionConfig {
@@ -56,37 +62,48 @@ impl Default for SilenceSuppressionConfig {
             adaptive_min_floor: 20.0,
             ema_alpha: 0.02,
             native_sample_rate: 48000,
+            use_vad: true,
+            vad_mode: VadMode::Quality,
         }
     }
 }
 
 impl SilenceSuppressionConfig {
-    /// Create config for system audio (very permissive - system audio is quieter)
+    /// Create config for system audio (very permissive - system audio is quieter).
+    /// Disables VAD because system audio (e.g., YouTube, games) often contains non-human
+    /// sounds which the ML VAD model rigidly suppresses, breaking the STT pipeline (#127).
     pub fn for_system_audio() -> Self {
         Self {
             speech_threshold_rms: 30.0,
-            speech_hangover: Duration::from_millis(300),
+            speech_hangover: Duration::from_millis(600), // increased from 300ms to preserve context across brief pauses
             silence_keepalive_interval: Duration::from_millis(100),
             adaptive_multiplier: 3.0,
             adaptive_min_floor: 10.0,
             ema_alpha: 0.02,
             native_sample_rate: 48000,
+            use_vad: false,
+            vad_mode: VadMode::Quality, // ignored when use_vad is false
         }
     }
 
-    /// Create config for microphone (standard)
+    /// Create config for microphone (standard).
+    /// Uses Normal VAD mode instead of Aggressive because built-in microphones with heavy
+    /// hardware DSP (like macOS Apple Silicon) sound "unnatural" to strict models (#128).
     pub fn for_microphone() -> Self {
         Self {
             speech_threshold_rms: 100.0,
-            speech_hangover: Duration::from_millis(150),
+            speech_hangover: Duration::from_millis(500), // increased from 150ms to prevent clipping trailing consonants (s, t, etc)
             silence_keepalive_interval: Duration::from_millis(100),
             adaptive_multiplier: 3.0,
             adaptive_min_floor: 20.0,
             ema_alpha: 0.02,
             native_sample_rate: 48000,
+            use_vad: true,
+            vad_mode: VadMode::Quality,
         }
     }
 }
+
 
 /// Silence suppression state machine with adaptive threshold + WebRTC VAD
 pub struct SilenceSuppressor {
@@ -134,16 +151,33 @@ impl SilenceSuppressor {
         let initial_threshold = config.speech_threshold_rms;
         let decimation_factor = config.native_sample_rate as f64 / 16000.0;
 
-        let vad = Vad::new_with_rate_and_mode(VadSampleRate::Rate16kHz, VadMode::Aggressive);
+        // Reconstruct the VadMode variant to avoid partially moving `config` (since VadMode isn't Copy)
+        let mode_clone = match &config.vad_mode {
+            VadMode::Quality => VadMode::Quality,
+            VadMode::LowBitrate => VadMode::LowBitrate,
+            VadMode::Aggressive => VadMode::Aggressive,
+            VadMode::VeryAggressive => VadMode::VeryAggressive,
+        };
+
+        let vad_mode_str = match &config.vad_mode {
+            VadMode::Quality => "Quality",
+            VadMode::LowBitrate => "LowBitrate",
+            VadMode::Aggressive => "Aggressive",
+            VadMode::VeryAggressive => "VeryAggressive",
+        };
+
+        let vad = Vad::new_with_rate_and_mode(VadSampleRate::Rate16kHz, mode_clone);
 
         println!(
             "[SilenceSuppressor] Created: threshold={} (adaptive), hangover={}ms, \
-             keepalive={}ms, native_rate={}Hz, decimation={:.2}x, VAD=Aggressive",
+             keepalive={}ms, native_rate={}Hz, decimation={:.2}x, use_vad={}, VAD_mode={}",
             config.speech_threshold_rms,
             config.speech_hangover.as_millis(),
             config.silence_keepalive_interval.as_millis(),
             config.native_sample_rate,
             decimation_factor,
+            config.use_vad,
+            vad_mode_str,
         );
 
         Self {
@@ -153,12 +187,12 @@ impl SilenceSuppressor {
             decimation_factor,
             vad,
             config,
-            state: SuppressionState::Active, // Start in active to not miss first words
+            state: SuppressionState::Suppressed, // MUST start suppressed to avoid false speech_ended on startup
             last_speech_time: now,
             last_keepalive_time: now,
             frames_sent: 0,
             frames_suppressed: 0,
-            was_speaking: true,
+            was_speaking: false, // Prevents false edge detection immediately after init
         }
     }
 
@@ -177,8 +211,13 @@ impl SilenceSuppressor {
         // Stage 1: Fast RMS check (rejects obvious silence cheaply)
         // Stage 2: WebRTC VAD (rejects non-speech noise: typing, dogs, fans)
         let has_speech = if rms >= self.adaptive_threshold {
-            // Stage 2: Decimate to 16kHz and run ML-based voice detection
-            self.is_voice(frame)
+            if self.config.use_vad {
+                // Stage 2: Decimate to 16kHz and run ML-based voice detection
+                self.is_voice(frame)
+            } else {
+                // RMS is high enough and VAD is disabled (e.g. system audio)
+                true
+            }
         } else {
             false
         };
@@ -301,12 +340,12 @@ impl SilenceSuppressor {
     /// Reset state (e.g., when meeting ends)
     pub fn reset(&mut self) {
         let now = Instant::now();
-        self.state = SuppressionState::Active;
+        self.state = SuppressionState::Suppressed; // Fix: reset to suppressed, same as new()
         self.last_speech_time = now;
         self.last_keepalive_time = now;
         self.noise_floor_ema = self.config.adaptive_min_floor;
         self.adaptive_threshold = self.config.speech_threshold_rms;
-        self.was_speaking = true;
+        self.was_speaking = false;
     }
 }
 
@@ -363,6 +402,8 @@ mod tests {
             adaptive_min_floor: 20.0,
             ema_alpha: 0.02,
             native_sample_rate: 16000,
+            use_vad: true,
+            vad_mode: VadMode::Quality,
         });
 
         let silent_frame: Vec<i16> = vec![0; 320];
@@ -383,6 +424,8 @@ mod tests {
             adaptive_min_floor: 20.0,
             ema_alpha: 0.02,
             native_sample_rate: 16000,
+            use_vad: true,
+            vad_mode: VadMode::Quality,
         });
 
         // Send a loud speech-like frame

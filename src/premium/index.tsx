@@ -56,6 +56,10 @@ const _negotiationCard = import.meta.glob<any>(
   '../../premium/src/NegotiationCoachingCard.tsx',
   { eager: true }
 );
+const _nativelyApiPromo = import.meta.glob<any>(
+  '../../premium/src/NativelyApiPromoToaster.tsx',
+  { eager: true }
+);
 
 // ─── Helper ──────────────────────────────────────────────────────────
 function get<T>(mods: Record<string, any>, name: string, fallback: T): T {
@@ -87,3 +91,6 @@ export const useAdCampaigns: typeof nullAdCampaigns =
 
 export const NegotiationCoachingCard: React.FC<any> =
   get(_negotiationCard, 'NegotiationCoachingCard', NullComponent);
+
+export const NativelyApiPromoToaster: React.FC<any> =
+  get(_nativelyApiPromo, 'NativelyApiPromoToaster', NullComponent);

@@ -10,6 +10,8 @@ export interface AppSettings {
     disguiseMode?: 'terminal' | 'settings' | 'activity' | 'none';
     verboseLogging?: boolean;
     actionButtonMode?: 'recap' | 'brainstorm';
+    groqFastTextMode?: boolean;
+    knowledgeMode?: boolean;
 }
 
 export class SettingsManager {

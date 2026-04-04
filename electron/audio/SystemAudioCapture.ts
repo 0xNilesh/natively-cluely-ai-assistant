@@ -11,6 +11,8 @@ export class SystemAudioCapture extends EventEmitter {
     private deviceId: string | null = null;
     private detectedSampleRate: number = 48000;
     private monitor: any = null;
+    private chunkCount: number = 0;
+    private sampleRatePollTimers: NodeJS.Timeout[] = [];
 
     constructor(deviceId?: string | null) {
         super();
@@ -25,13 +27,23 @@ export class SystemAudioCapture extends EventEmitter {
     }
 
     public getSampleRate(): number {
-        if (this.monitor && typeof this.monitor.get_sample_rate === 'function') {
-            const nativeRate = this.monitor.get_sample_rate();
-            if (nativeRate !== this.detectedSampleRate) {
-                console.log(`[SystemAudioCapture] Real native rate: ${nativeRate}`);
-                this.detectedSampleRate = nativeRate;
+        if (this.monitor) {
+            // NAPI-RS V3 auto-converts Rust snake_case to camelCase
+            if (typeof this.monitor.getSampleRate === 'function') {
+                const nativeRate = this.monitor.getSampleRate();
+                if (nativeRate !== this.detectedSampleRate) {
+                    console.log(`[SystemAudioCapture] Real native rate: ${nativeRate}`);
+                    this.detectedSampleRate = nativeRate;
+                }
+                return nativeRate;
+            } else if (typeof this.monitor.get_sample_rate === 'function') {
+                const nativeRate = this.monitor.get_sample_rate();
+                if (nativeRate !== this.detectedSampleRate) {
+                    console.log(`[SystemAudioCapture] Real native rate: ${nativeRate}`);
+                    this.detectedSampleRate = nativeRate;
+                }
+                return nativeRate;
             }
-            return nativeRate;
         }
         return this.detectedSampleRate;
     }
@@ -62,6 +74,7 @@ export class SystemAudioCapture extends EventEmitter {
 
         try {
             console.log('[SystemAudioCapture] Starting native capture...');
+            this.chunkCount = 0;
 
             this.isRecording = true; // Set BEFORE start() to prevent re-entrant calls
 
@@ -74,6 +87,10 @@ export class SystemAudioCapture extends EventEmitter {
                     return;
                 }
                 if (chunk && chunk.length > 0) {
+                    this.chunkCount++;
+                    if (this.chunkCount <= 3 || this.chunkCount % 200 === 0) {
+                        console.log(`[SystemAudioCapture] Chunk #${this.chunkCount}: ${chunk.length} bytes from Rust`);
+                    }
                     const buffer = Buffer.from(chunk);
                     this.emit('data', buffer);
                 }
@@ -90,20 +107,24 @@ export class SystemAudioCapture extends EventEmitter {
             // getSampleRate MUST be called AFTER start() — background init updates
             // the atomic once SCK/CoreAudio initialises (~5-7s). Reading before start()
             // always returns the constructor default (48000), not the real hardware rate.
-            if (typeof this.monitor.get_sample_rate === 'function') {
-                // Poll until the background thread has published a non-default rate,
-                // or fall back after a short delay. Use a one-shot timer so we don't
-                // block the main thread.
+            // Fetch real sample rate as soon as monitor starts
+            if (typeof this.monitor.getSampleRate === 'function' || typeof this.monitor.get_sample_rate === 'function') {
                 const pollRate = () => {
-                    const rate = this.monitor?.get_sample_rate?.();
+                    const rate = typeof this.monitor?.getSampleRate === 'function' 
+                        ? this.monitor.getSampleRate() 
+                        : this.monitor?.get_sample_rate?.();
                     if (rate && rate !== this.detectedSampleRate) {
                         this.detectedSampleRate = rate;
                         console.log(`[SystemAudioCapture] Detected sample rate: ${rate}Hz`);
+                        this.emit('sample_rate_changed', rate);
                     }
                 };
-                // Poll at 1s and 8s — covers both fast (CoreAudio) and slow (SCK) init.
-                setTimeout(pollRate, 1000);
-                setTimeout(pollRate, 8000);
+                
+                // Poll quickly initially, then once after SCK is likely fully initialized.
+                // Store timer IDs so stop() can cancel them if called before they fire —
+                // prevents a stale poll from reading a null or re-created monitor instance.
+                this.sampleRatePollTimers.push(setTimeout(pollRate, 1000));
+                this.sampleRatePollTimers.push(setTimeout(pollRate, 8000));
             }
 
             this.emit('start');
@@ -119,6 +140,11 @@ export class SystemAudioCapture extends EventEmitter {
      */
     public stop(): void {
         if (!this.isRecording) return;
+
+        // Cancel pending sample-rate polls before nulling the monitor to prevent
+        // stale timers from reading a null or re-created monitor on the next start().
+        for (const t of this.sampleRatePollTimers) clearTimeout(t);
+        this.sampleRatePollTimers = [];
 
         console.log('[SystemAudioCapture] Stopping capture...');
         try {

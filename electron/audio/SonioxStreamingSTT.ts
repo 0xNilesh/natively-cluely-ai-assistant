@@ -39,9 +39,6 @@ export class SonioxStreamingSTT extends EventEmitter {
     private reconnectTimer: NodeJS.Timeout | null = null;
     private keepAliveTimer: NodeJS.Timeout | null = null;
 
-    // Accumulated final tokens for building transcript text
-    private pendingFinalText = '';
-    
     private buffer: Buffer[] = [];
     private isConnecting = false;
 
@@ -55,8 +52,21 @@ export class SonioxStreamingSTT extends EventEmitter {
     // =========================================================================
 
     public setSampleRate(rate: number): void {
+        if (this.sampleRate === rate) return;
         this.sampleRate = rate;
         console.log(`[SonioxStreaming] Sample rate set to ${rate}`);
+
+        if (this.isActive) {
+            console.log('[SonioxStreaming] Sample rate changed while active. Restarting...');
+            // Save in-flight buffer so chunks captured between stop() and the new
+            // WebSocket connect() are not silently discarded (matches Deepgram pattern)
+            const savedBuffer = [...this.buffer];
+            this.stop();
+            this.start();
+            if (savedBuffer.length > 0) {
+                this.buffer = [...savedBuffer, ...this.buffer];
+            }
+        }
     }
 
     public setAudioChannelCount(count: number): void {
@@ -99,6 +109,7 @@ export class SonioxStreamingSTT extends EventEmitter {
 
     public start(): void {
         if (this.isActive) return;
+        this.isActive = true;        // Set immediately so write() buffers audio during WS handshake
         this.shouldReconnect = true;
         this.reconnectAttempts = 0;
         this.connect();
@@ -124,7 +135,6 @@ export class SonioxStreamingSTT extends EventEmitter {
         this.isActive = false;
         this.isConnecting = false;
         this.configSent = false;
-        this.pendingFinalText = '';
         this.buffer = [];
         console.log('[SonioxStreaming] Stopped');
     }
@@ -174,11 +184,19 @@ export class SonioxStreamingSTT extends EventEmitter {
         console.log(`[SonioxStreaming] Connecting (rate=${this.sampleRate}, ch=${this.numChannels})...`);
 
         this.configSent = false;
-        this.pendingFinalText = '';
         this.ws = new WebSocket(SONIOX_WEBSOCKET_URL);
 
         this.ws.on('open', () => {
-            this.isActive = true;
+            // Guard: stop() may have been called while the WS handshake was in flight.
+            // shouldReconnect is set to false by stop() before ws is nulled, so it's a
+            // reliable signal that we should abort here without crashing.
+            if (!this.shouldReconnect || !this.isActive) {
+                this.ws?.close();
+                this.ws = null;
+                this.isConnecting = false;
+                return;
+            }
+
             this.reconnectAttempts = 0;
             console.log('[SonioxStreaming] Connected, sending config...');
 
@@ -198,11 +216,13 @@ export class SonioxStreamingSTT extends EventEmitter {
             }
 
             try {
-                this.ws!.send(JSON.stringify(config));
+                // Use ?. (not !) — stop() could theoretically null this.ws between the
+                // guard above and this send, though the event loop makes it unlikely.
+                this.ws?.send(JSON.stringify(config));
                 this.configSent = true;
                 this.isConnecting = false;
                 console.log('[SonioxStreaming] Config sent');
-                
+
                 // Flush buffer after config is sent
                 while (this.buffer.length > 0) {
                     const chunk = this.buffer.shift();

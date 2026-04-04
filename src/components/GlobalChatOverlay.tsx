@@ -287,7 +287,7 @@ const GlobalChatOverlay: React.FC<GlobalChatOverlayProps> = ({
                 });
 
                 // Call standard chat
-                await window.electronAPI?.streamGeminiChat(question, undefined, undefined, { skipSystemPrompt: false });
+                await window.electronAPI?.streamGeminiChat(question, undefined, undefined, { skipSystemPrompt: false, ignoreKnowledgeMode: true });
             }
 
         } catch (error) {

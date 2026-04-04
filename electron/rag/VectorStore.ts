@@ -282,7 +282,6 @@ export class VectorStore {
         let query = `
             SELECT c.* 
             FROM chunks c
-            JOIN meetings m ON c.meeting_id = m.id
             WHERE c.embedding IS NOT NULL
         `;
         const params: any[] = [];
@@ -291,10 +290,12 @@ export class VectorStore {
             query += ' AND c.meeting_id = ?';
             params.push(meetingId);
         }
-        if (providerName) {
-            query += ' AND m.embedding_provider = ?';
-            params.push(providerName);
-        }
+        // NOTE: We do NOT filter by embedding_provider here — meetings whose
+        // embedding_provider column is NULL (common after legacy imports or if metadata
+        // write was skipped) still have valid embeddings. The dimension check on
+        // line ~308 (byteLength === dim * 4) already safely excludes any chunks whose
+        // embedding dimensions don't match our current query vector, making the SQL
+        // provider filter redundant and harmful for discoverability.
 
         const rows = this.db.prepare(query).all(...params) as any[];
         if (rows.length === 0) return [];
@@ -388,6 +389,40 @@ export class VectorStore {
         return row.count > 0;
     }
 
+    /**
+     * Backfill embedding_provider metadata for meetings that have embedded chunks
+     * but a NULL embedding_provider column.
+     *
+     * This is a one-time migration for meetings that were embedded before the
+     * provider metadata write was introduced (or if the write silently failed).
+     * It is safe to call on every startup — it only touches rows where
+     * embedding_provider IS NULL and the meeting has at least one embedded chunk.
+     *
+     * @param providerName The active embedding provider name (e.g. "local", "openai")
+     * @param dimensions   The provider's embedding dimensions (e.g. 384, 1536)
+     */
+    backfillEmbeddingProviderMetadata(providerName: string, dimensions: number): number {
+        try {
+            // Find meetings that have embedded chunks but no provider metadata
+            const affected = this.db.prepare(`
+                UPDATE meetings
+                SET embedding_provider = ?, embedding_dimensions = ?
+                WHERE embedding_provider IS NULL
+                  AND id IN (
+                      SELECT DISTINCT meeting_id FROM chunks WHERE embedding IS NOT NULL
+                  )
+            `).run(providerName, dimensions);
+
+            if (affected.changes > 0) {
+                console.log(`[VectorStore] Backfilled embedding_provider='${providerName}' for ${affected.changes} meeting(s)`);
+            }
+            return affected.changes;
+        } catch (e) {
+            console.warn('[VectorStore] Failed to backfill embedding_provider metadata:', e);
+            return 0;
+        }
+    }
+
     // ============================================
     // Summary Methods (for global search)
     // ============================================
@@ -476,18 +511,14 @@ export class VectorStore {
         limit: number,
         providerName?: string
     ): Promise<{ meetingId: string; summaryText: string; similarity: number }[]> {
-        let query = `
+        // NOTE: We do NOT filter by embedding_provider — see searchSimilarJSWorker note.
+        // The byte-length dimension check below safely handles provider mismatches.
+        const query = `
             SELECT s.* 
             FROM chunk_summaries s
-            JOIN meetings m ON s.meeting_id = m.id
             WHERE s.embedding IS NOT NULL
         `;
         const params: any[] = [];
-        
-        if (providerName) {
-            query += ' AND m.embedding_provider = ?';
-            params.push(providerName);
-        }
 
         const rows = this.db.prepare(query).all(...params) as any[];
 

@@ -88,6 +88,8 @@ export const AIProvidersSettings: React.FC = () => {
     const [savedStatus, setSavedStatus] = useState<Record<string, boolean>>({});
     const [savingStatus, setSavingStatus] = useState<Record<string, boolean>>({});
     const [hasStoredKey, setHasStoredKey] = useState<Record<string, boolean>>({});
+    // Fast mode is available with a local Groq key OR via the Natively API (server-side Groq pool)
+    const canUseFastMode = !!(hasStoredKey.groq || hasStoredKey.natively);
     const [testStatus, setTestStatus] = useState<Record<string, 'idle' | 'testing' | 'success' | 'error'>>({});
     const [testError, setTestError] = useState<Record<string, string>>({});
 
@@ -109,6 +111,7 @@ export const AIProvidersSettings: React.FC = () => {
     // --- Default Model ---
     const [defaultModel, setDefaultModel] = useState<string>('gemini-3.1-flash-lite-preview');
     const [fastResponseMode, setFastResponseMode] = useState(false);
+    const [credentialsLoaded, setCredentialsLoaded] = useState(false);
 
     // --- Dynamic Model Discovery ---
     const [preferredModels, setPreferredModels] = useState<Record<string, string>>({});
@@ -116,10 +119,11 @@ export const AIProvidersSettings: React.FC = () => {
     // Load Initial Data
     useEffect(() => {
         const loadCredentials = async () => {
-            try {                // @ts-ignore
-                const fastMode = await window.electronAPI?.getGroqFastTextMode();
-                if (fastMode) setFastResponseMode(fastMode.enabled);
-
+            try {
+                // Load credentials FIRST so canUseFastMode is correct before we set fastResponseMode.
+                // If we set fastResponseMode before hasStoredKey is populated, the enforcement
+                // effect below fires with canUseFastMode=false and immediately resets fast mode
+                // to false — writing that reset back to SettingsManager on every startup.
                 // @ts-ignore
                 const creds = await window.electronAPI?.getStoredCredentials?.();
                 if (creds) {
@@ -127,7 +131,8 @@ export const AIProvidersSettings: React.FC = () => {
                         gemini: creds.hasGeminiKey,
                         groq: creds.hasGroqKey,
                         openai: creds.hasOpenaiKey,
-                        claude: creds.hasClaudeKey
+                        claude: creds.hasClaudeKey,
+                        natively: creds.hasNativelyKey || false
                     });
                     // Load preferred models
                     const pm: Record<string, string> = {};
@@ -137,6 +142,15 @@ export const AIProvidersSettings: React.FC = () => {
                     if (creds.claudePreferredModel) pm.claude = creds.claudePreferredModel;
                     setPreferredModels(pm);
                 }
+
+                // Now it's safe to read fast mode — hasStoredKey is already set so
+                // canUseFastMode will be correct when the enforcement effect runs.
+                // @ts-ignore
+                const fastMode = await window.electronAPI?.getGroqFastTextMode();
+                if (fastMode) setFastResponseMode(fastMode.enabled);
+
+                // Mark credentials as fully loaded so the enforcement effect can fire
+                setCredentialsLoaded(true);
 
                 // @ts-ignore
                 const custom = await window.electronAPI?.getCustomProviders();
@@ -156,6 +170,7 @@ export const AIProvidersSettings: React.FC = () => {
 
             } catch (e) {
                 console.error("Failed to load settings:", e);
+                setCredentialsLoaded(true); // Unblock even on error
             }
         };
         loadCredentials();
@@ -171,15 +186,18 @@ export const AIProvidersSettings: React.FC = () => {
         }
     }, []);
 
-    // Effect to enforce fast mode disabled if no Groq key
+    // Effect to enforce fast mode disabled if neither Groq key nor Natively API is configured.
+    // Guard with credentialsLoaded so this never fires during the initial async load phase
+    // (when hasStoredKey is still empty and canUseFastMode is incorrectly false).
     useEffect(() => {
-        if (!hasStoredKey.groq && fastResponseMode) {
+        if (!credentialsLoaded) return;
+        if (!canUseFastMode && fastResponseMode) {
             setFastResponseMode(false);
             localStorage.setItem('natively_groq_fast_text', 'false');
             // @ts-ignore
             window.electronAPI?.setGroqFastTextMode(false);
         }
-    }, [hasStoredKey.groq, fastResponseMode]);
+    }, [credentialsLoaded, canUseFastMode, fastResponseMode]);
 
     // Poll for Ollama status every 3 seconds requesting smart start on mount
     useEffect(() => {
@@ -428,6 +446,11 @@ export const AIProvidersSettings: React.FC = () => {
                         value={defaultModel}
                         options={(() => {
                             const opts: { id: string; name: string }[] = [];
+
+                            if (hasStoredKey.natively) {
+                                opts.push({ id: 'natively', name: 'Natively API' });
+                            }
+
                             for (const [prov, cfg] of Object.entries(STANDARD_CLOUD_MODELS)) {
                                 if (!hasStoredKey[prov as keyof typeof hasStoredKey]) continue;
                                 cfg.ids.forEach((id, i) => opts.push({ id, name: cfg.names[i] }));
@@ -438,7 +461,7 @@ export const AIProvidersSettings: React.FC = () => {
                             }
                             customProviders.forEach(p => opts.push({ id: p.id, name: p.name }));
                             ollamaModels.forEach(m => opts.push({ id: `ollama-${m}`, name: `${m} (Local)` }));
-                            // Ensure current default model always appears
+                            
                             if (defaultModel && !opts.find(o => o.id === defaultModel)) {
                                 opts.unshift({ id: defaultModel, name: prettifyModelId(defaultModel) });
                             }
@@ -454,8 +477,8 @@ export const AIProvidersSettings: React.FC = () => {
 
                 {/* Fast Response Mode */}
                 <div
-                    className={`bg-bg-item-surface rounded-xl p-5 border border-border-subtle flex items-center justify-between ${!hasStoredKey.groq ? 'opacity-50 grayscale' : ''}`}
-                    title={!hasStoredKey.groq ? "Requires Groq API Key to be configured" : ""}
+                    className={`bg-bg-item-surface rounded-xl p-5 border border-border-subtle flex items-center justify-between ${!canUseFastMode ? 'opacity-50 grayscale' : ''}`}
+                    title={!canUseFastMode ? "Requires a Groq API Key or Natively API to be configured" : ""}
                 >
                     <div>
                         <div className="flex items-center gap-2">
@@ -463,14 +486,14 @@ export const AIProvidersSettings: React.FC = () => {
                             <span className="bg-orange-500/10 text-orange-500 text-[9px] font-bold px-1.5 py-0.5 rounded border border-orange-500/20">NEW</span>
                         </div>
                         <p className="text-[10px] text-text-secondary mt-0.5">Super fast responses using Groq Llama 3 for text. Multimodal requests still use your Default Model.</p>
-                        {!hasStoredKey.groq && (
-                            <p className="text-[10px] text-orange-500 mt-0.5 font-medium">Requires a Groq API Key to be configured below.</p>
+                        {!canUseFastMode && (
+                            <p className="text-[10px] text-orange-500 mt-0.5 font-medium">Requires a Groq API Key or Natively API to be configured.</p>
                         )}
                     </div>
                     <div
                         onClick={async () => {
-                            if (!hasStoredKey.groq) {
-                                alert("Please configure a Groq API Key first to enable Fast Response Mode.");
+                            if (!canUseFastMode) {
+                                alert("Please configure a Groq API Key or Natively API first to enable Fast Response Mode.");
                                 return;
                             }
                             const newState = !fastResponseMode;
@@ -479,7 +502,7 @@ export const AIProvidersSettings: React.FC = () => {
                             // @ts-ignore
                             await window.electronAPI?.setGroqFastTextMode(newState);
                         }}
-                        className={`w-11 h-6 rounded-full relative transition-colors ${!hasStoredKey.groq ? 'cursor-not-allowed bg-bg-toggle-switch' : fastResponseMode ? 'bg-orange-500' : 'bg-bg-toggle-switch border border-border-muted'}`}
+                        className={`w-11 h-6 rounded-full relative transition-colors ${!canUseFastMode ? 'cursor-not-allowed bg-bg-toggle-switch' : fastResponseMode ? 'bg-orange-500' : 'bg-bg-toggle-switch border border-border-muted'}`}
                     >
                         <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${fastResponseMode ? 'translate-x-5' : 'translate-x-0'}`} />
                     </div>

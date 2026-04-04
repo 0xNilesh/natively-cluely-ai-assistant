@@ -17,6 +17,8 @@ export class GoogleSTT extends EventEmitter {
     private stream: any = null; // Stream type is complex in google-cloud libs
     private isStreaming = false;
     private isActive = false;
+    private label = 'default';
+    private writeCount = 0;
 
     // Config
     private encoding = 'LINEAR16' as const;
@@ -25,17 +27,18 @@ export class GoogleSTT extends EventEmitter {
     private languageCode = 'en-US';
     private alternativeLanguageCodes: string[] = ['en-IN', 'en-GB']; // Default fallbacks
 
-    constructor() {
+    constructor(label?: string) {
         super();
+        if (label) this.label = label;
         // ... (credentials setup) ...
 
         // Note: In production, credentials are set by main.ts via process.env.GOOGLE_APPLICATION_CREDENTIALS
         // or passed explicitly to setCredentials(). We do not load .env files here to avoid ASAR path issues.
         const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
         if (!credentialsPath) {
-            console.error('[GoogleSTT] Missing GOOGLE_APPLICATION_CREDENTIALS in environment. Checked CWD:', process.cwd());
+            console.error(`[GoogleSTT/${this.label}] Missing GOOGLE_APPLICATION_CREDENTIALS in environment. Checked CWD:`, process.cwd());
         } else {
-            console.log(`[GoogleSTT] Using credentials from: ${credentialsPath}`);
+            console.log(`[GoogleSTT/${this.label}] Using credentials from: ${credentialsPath}`);
         }
 
         this.client = new SpeechClient({
@@ -44,7 +47,7 @@ export class GoogleSTT extends EventEmitter {
     }
 
     public setCredentials(keyFilePath: string): void {
-        console.log(`[GoogleSTT] Updating credentials to: ${keyFilePath}`);
+        console.log(`[GoogleSTT/${this.label}] Updating credentials to: ${keyFilePath}`);
         process.env.GOOGLE_APPLICATION_CREDENTIALS = keyFilePath;
         this.client = new SpeechClient({
             keyFilename: keyFilePath
@@ -53,10 +56,10 @@ export class GoogleSTT extends EventEmitter {
 
     public setSampleRate(rate: number): void {
         if (this.sampleRateHertz === rate) return;
-        console.log(`[GoogleSTT] Updating Sample Rate to: ${rate}Hz`);
+        console.log(`[GoogleSTT/${this.label}] Updating Sample Rate to: ${rate}Hz`);
         this.sampleRateHertz = rate;
         if (this.isStreaming || this.isActive) {
-            console.warn('[GoogleSTT] Config changed while active. Restarting stream...');
+            console.warn(`[GoogleSTT/${this.label}] Config changed while active. Restarting stream...`);
             this.stop();
             this.start();
         }
@@ -73,10 +76,10 @@ export class GoogleSTT extends EventEmitter {
 
     public setAudioChannelCount(count: number): void {
         if (this.audioChannelCount === count) return;
-        console.log(`[GoogleSTT] Updating Channel Count to: ${count}`);
+        console.log(`[GoogleSTT/${this.label}] Updating Channel Count to: ${count}`);
         this.audioChannelCount = count;
         if (this.isStreaming || this.isActive) {
-            console.warn('[GoogleSTT] Config changed while active. Restarting stream...');
+            console.warn(`[GoogleSTT/${this.label}] Config changed while active. Restarting stream...`);
             this.stop();
             this.start();
         }
@@ -93,11 +96,11 @@ export class GoogleSTT extends EventEmitter {
         this.pendingLanguageChange = setTimeout(() => {
             const config = RECOGNITION_LANGUAGES[key];
             if (!config) {
-                console.warn(`[GoogleSTT] Unknown language key: ${key}`);
+                console.warn(`[GoogleSTT/${this.label}] Unknown language key: ${key}`);
                 return;
             }
 
-            console.log(`[GoogleSTT] Updating recognition language to: ${key} (${config.bcp47})`);
+            console.log(`[GoogleSTT/${this.label}] Updating recognition language to: ${key} (${config.bcp47})`);
 
             // Update state
             this.languageCode = config.bcp47;
@@ -109,14 +112,14 @@ export class GoogleSTT extends EventEmitter {
                 this.alternativeLanguageCodes = [];
             }
 
-            console.log('[GoogleSTT] Primary:', this.languageCode);
+            console.log(`[GoogleSTT/${this.label}] Primary:`, this.languageCode);
             if (this.alternativeLanguageCodes.length > 0) {
-                console.log('[GoogleSTT] Alternates:', this.alternativeLanguageCodes.join(', '));
+                console.log(`[GoogleSTT/${this.label}] Alternates:`, this.alternativeLanguageCodes.join(', '));
             }
 
             // Restart if active
             if (this.isStreaming || this.isActive) {
-                console.log('[GoogleSTT] Language changed while active. Restarting stream...');
+                console.log(`[GoogleSTT/${this.label}] Language changed while active. Restarting stream...`);
                 this.stop();
                 this.start();
             }
@@ -128,17 +131,24 @@ export class GoogleSTT extends EventEmitter {
     public start(): void {
         if (this.isActive) return;
         this.isActive = true;
+        this.writeCount = 0;
 
-        console.log('[GoogleSTT] Starting recognition stream...');
+        console.log(`[GoogleSTT/${this.label}] Starting recognition stream (rate=${this.sampleRateHertz}Hz, ch=${this.audioChannelCount})...`);
         this.startStream();
     }
 
     public stop(): void {
         if (!this.isActive) return;
 
-        console.log('[GoogleSTT] Stopping stream...');
+        console.log(`[GoogleSTT/${this.label}] Stopping stream (wrote ${this.writeCount} chunks total)...`);
         this.isActive = false;
         this.isStreaming = false;
+
+        if (this.proactiveRestartTimer) {
+            clearTimeout(this.proactiveRestartTimer);
+            this.proactiveRestartTimer = null;
+        }
+
         if (this.stream) {
             this.stream.end();
             this.stream.destroy();
@@ -150,17 +160,29 @@ export class GoogleSTT extends EventEmitter {
     private isConnecting = false;
     private lastConnectAttempt = 0;
 
+    // Google's streamingRecognize hard-kills any stream after 305 seconds.
+    // We proactively restart at 4:30 (270s) to prevent the forced close from
+    // causing a 1-second gap in transcription during long interviews.
+    private proactiveRestartTimer: NodeJS.Timeout | null = null;
+    private static readonly PROACTIVE_RESTART_MS = 270_000; // 4 min 30 sec
+
     public write(audioData: Buffer): void {
-        if (!this.isActive) return;
+        if (!this.isActive) {
+            // Only log occasionally to avoid spam
+            if (this.writeCount === 0) console.warn(`[GoogleSTT/${this.label}] write() called but isActive=false — data dropped`);
+            return;
+        }
+
+        this.writeCount++;
 
         if (!this.isStreaming || !this.stream) {
             // Buffer if we are in connecting state, just started, or closed
             this.buffer.push(audioData);
             if (this.buffer.length > 500) this.buffer.shift(); // Cap buffer size
-            
+
             if (!this.isConnecting) {
                 if (Date.now() - this.lastConnectAttempt > 1000) {
-                    console.log(`[GoogleSTT] Stream not ready. Lazy connecting on new audio...`);
+                    console.log(`[GoogleSTT/${this.label}] Stream not ready (write #${this.writeCount}). Lazy connecting on new audio...`);
                     this.startStream();
                 }
             }
@@ -173,10 +195,10 @@ export class GoogleSTT extends EventEmitter {
             this.stream = null;
             this.buffer.push(audioData);
             if (this.buffer.length > 500) this.buffer.shift(); // Cap buffer size
-            
+
             if (!this.isConnecting) {
                 if (Date.now() - this.lastConnectAttempt > 1000) {
-                    console.log(`[GoogleSTT] Stream destroyed. Lazy reconnecting...`);
+                    console.log(`[GoogleSTT/${this.label}] Stream destroyed (write #${this.writeCount}). Lazy reconnecting...`);
                     this.startStream();
                 }
             }
@@ -184,20 +206,18 @@ export class GoogleSTT extends EventEmitter {
         }
 
         try {
-            // Debug log every ~50th write to avoid spam
-            if (Math.random() < 0.02) {
-                console.log(`[GoogleSTT] Writing ${audioData.length} bytes to stream`);
+            // Log first 5 writes always, then every ~50th
+            if (this.writeCount <= 5 || Math.random() < 0.02) {
+                console.log(`[GoogleSTT/${this.label}] Writing ${audioData.length} bytes to stream (write #${this.writeCount}, isStreaming=${this.isStreaming})`);
             }
 
-            if (this.stream.command && this.stream.command.writable) {
-                this.stream.write(audioData);
-            } else if (this.stream.writable) {
+            if (this.stream.writable) {
                 this.stream.write(audioData);
             } else {
-                console.warn('[GoogleSTT] Stream not writable!');
+                console.warn(`[GoogleSTT/${this.label}] Stream not writable! (write #${this.writeCount})`);
             }
         } catch (err) {
-            console.error('[GoogleSTT] Safe write failed:', err);
+            console.error(`[GoogleSTT/${this.label}] Safe write failed:`, err);
             this.isStreaming = false;
         }
     }
@@ -206,12 +226,17 @@ export class GoogleSTT extends EventEmitter {
         if (!this.stream) return;
 
         while (this.buffer.length > 0) {
+            if (!this.stream.writable) {
+                console.warn(`[GoogleSTT/${this.label}] flushBuffer: stream not writable — ${this.buffer.length} chunks re-queued`);
+                break; // Leave remaining chunks in buffer for next stream
+            }
             const data = this.buffer.shift();
             if (data) {
                 try {
                     this.stream.write(data);
                 } catch (e) {
-                    console.error('[GoogleSTT] Failed to flush buffer chunk:', e);
+                    console.error(`[GoogleSTT/${this.label}] Failed to flush buffer chunk:`, e);
+                    break;
                 }
             }
         }
@@ -221,6 +246,8 @@ export class GoogleSTT extends EventEmitter {
         this.lastConnectAttempt = Date.now();
         this.isStreaming = true;
         this.isConnecting = true;
+
+        console.log(`[GoogleSTT/${this.label}] Creating gRPC stream (rate=${this.sampleRateHertz}Hz, ch=${this.audioChannelCount}, lang=${this.languageCode})...`);
 
         this.stream = this.client
             .streamingRecognize({
@@ -237,26 +264,25 @@ export class GoogleSTT extends EventEmitter {
                 interimResults: true,
             })
             .on('error', (err: Error) => {
-                console.error('[GoogleSTT] Stream error:', err);
+                console.error(`[GoogleSTT/${this.label}] Stream error:`, err);
                 this.emit('error', err);
                 this.isConnecting = false;
                 this.isStreaming = false;
                 this.stream = null;
             })
             .on('end', () => {
-                console.log('[GoogleSTT] Stream ended server-side (idle timeout)');
+                console.log(`[GoogleSTT/${this.label}] Stream ended server-side (idle timeout)`);
                 this.isConnecting = false;
                 this.isStreaming = false;
                 this.stream = null;
             })
             .on('close', () => {
-                console.log('[GoogleSTT] Stream closed server-side');
+                console.log(`[GoogleSTT/${this.label}] Stream closed server-side`);
                 this.isConnecting = false;
                 this.isStreaming = false;
                 this.stream = null;
             })
             .on('data', (data: any) => {
-                // ... (existing data handler)
                 if (data.results[0] && data.results[0].alternatives[0]) {
                     const result = data.results[0];
                     const alt = result.alternatives[0];
@@ -264,6 +290,7 @@ export class GoogleSTT extends EventEmitter {
                     const isFinal = result.isFinal;
 
                     if (transcript) {
+                        console.log(`[GoogleSTT/${this.label}] Transcript (${isFinal ? 'final' : 'interim'}): "${transcript.substring(0, 60)}..."`);
                         this.emit('transcript', {
                             text: transcript,
                             isFinal,
@@ -273,12 +300,28 @@ export class GoogleSTT extends EventEmitter {
                 }
             });
 
-        // Initialize writeable check or wait for 'open'? 
-        // gRPC streams are usually writeable immediately.
-        // We can flush immediately after creation.
+        // gRPC streams are writable immediately — no handshake needed.
+        const bufferedCount = this.buffer.length;
         this.isConnecting = false;
         this.flushBuffer();
 
-        console.log('[GoogleSTT] Stream created. Waiting for events...');
+        console.log(`[GoogleSTT/${this.label}] Stream created. Flushed ${bufferedCount} buffered chunks. Waiting for events...`);
+
+        // Schedule proactive restart before Google's 305-second hard limit.
+        // Without this, the server closes the stream at 305s causing up to 1s of
+        // lost audio until the lazy reconnect in write() fires.
+        if (this.proactiveRestartTimer) clearTimeout(this.proactiveRestartTimer);
+        this.proactiveRestartTimer = setTimeout(() => {
+            this.proactiveRestartTimer = null;
+            if (!this.isActive) return;
+            console.log(`[GoogleSTT/${this.label}] Proactive stream restart at 4:30 to preempt Google's 305s limit`);
+            if (this.stream) {
+                this.stream.end();
+                this.stream.destroy();
+                this.stream = null;
+            }
+            this.isStreaming = false;
+            this.startStream();
+        }, GoogleSTT.PROACTIVE_RESTART_MS);
     }
 }

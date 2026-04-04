@@ -222,7 +222,10 @@ export class IntelligenceEngine extends EventEmitter {
     async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[]): Promise<string | null> {
         const now = Date.now();
 
-        if (now - this.lastTriggerTime < this.triggerCooldown) {
+        // Bypass cooldown when the user explicitly attached images (capture-and-process intent).
+        // The cooldown exists to debounce auto-triggers, not explicit shortcuts with context.
+        const hasImages = imagePaths && imagePaths.length > 0;
+        if (!hasImages && now - this.lastTriggerTime < this.triggerCooldown) {
             return null;
         }
 

@@ -374,6 +374,11 @@ export class WindowHelper {
   }
 
   public hideMainWindow(): void {
+    // Set opacity to 0 immediately so the window vanishes without triggering
+    // the macOS hide animation (same pattern as switchToLauncher / switchToOverlay).
+    // This prevents the brief black/white frame flash before screenshots.
+    this.launcherWindow?.setOpacity(0);
+    this.overlayWindow?.setOpacity(0);
     this.launcherWindow?.hide()
     this.overlayWindow?.hide()
     this.isWindowVisible = false
@@ -386,13 +391,21 @@ export class WindowHelper {
 
     const passthrough = this.appState.getOverlayMousePassthrough();
     if (passthrough) {
-      // forward: true — pointer events are still delivered to the OS layer beneath
+      // forward: true — pointer events are still delivered to the OS layer beneath.
+      // NOTE: We intentionally do NOT call setFocusable(false) here.
+      //
+      // Rationale: setIgnoreMouseEvents() alone is sufficient for transparent
+      // mouse behaviour.  Setting focusable=false when the overlay is the only
+      // visible window makes macOS treat the app as having NO active windows.
+      // In that state, macOS may stop delivering Carbon/IOKit global hotkey
+      // events to the process — silently breaking every globalShortcut binding.
+      // Keeping the window focusable costs nothing: in passthrough mode the
+      // user is in another app and will not accidentally focus the overlay.
       this.overlayWindow.setIgnoreMouseEvents(true, { forward: true });
-      // Focusable must stay false while in passthrough so keyboard focus can't land here
-      this.overlayWindow.setFocusable(false);
       console.log('[WindowHelper] Overlay mouse passthrough ON');
     } else {
       this.overlayWindow.setIgnoreMouseEvents(false);
+      // Restore full interactivity when passthrough is turned off.
       this.overlayWindow.setFocusable(true);
       console.log('[WindowHelper] Overlay mouse passthrough OFF');
     }
@@ -401,13 +414,28 @@ export class WindowHelper {
   // Show overlay directly without going through full switchToOverlay flow.
   // Used by IPC handlers to show the overlay independently.
   public showOverlay(): void {
-    if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
-      // Always use showInactive when passthrough is on — never steal focus
-      if (this.appState.getOverlayMousePassthrough()) {
-        this.overlayWindow.showInactive();
-      } else {
-        this.overlayWindow.showInactive();
-      }
+    if (!this.overlayWindow || this.overlayWindow.isDestroyed()) return;
+
+    // Restore opacity in case it was zeroed by hideMainWindow() before a screenshot.
+    this.overlayWindow.setOpacity(1);
+
+    // Re-assert z-order on Windows before showing — same DWM demotion risk as
+    // switchToOverlay(). Must come before show()/showInactive() so the window
+    // lands at the correct level on first paint (issue #136).
+    if (process.platform === 'win32') {
+      this.overlayWindow.setAlwaysOnTop(true, 'floating');
+    }
+
+    if (this.appState.getOverlayMousePassthrough()) {
+      // In passthrough/stealth mode: appear on screen without stealing OS focus.
+      // The underlying app (Zoom, browser, etc.) must keep focus.
+      this.overlayWindow.showInactive();
+    } else {
+      // Normal interactive mode: show and focus so the user can click/type.
+      this.overlayWindow.showInactive();
+      // Bring to front without a full app-activate (avoids dock bounce on macOS).
+      // setAlwaysOnTop is already set at creation; a focus() call alone is safe.
+      this.overlayWindow.focus();
     }
   }
 
@@ -478,6 +506,7 @@ export class WindowHelper {
 
       this.overlayWindow.setBounds({ x, y, width: 600, height: targetHeight });
 
+      // Restore opacity before showing (it may have been zeroed by hideMainWindow).
       if (process.platform === 'win32' && this.contentProtection) {
         // Opacity Shield: Show at 0 opacity first to prevent frame leak
         this.overlayWindow.setOpacity(0);
@@ -489,18 +518,27 @@ export class WindowHelper {
         this.opacityTimeout = setTimeout(() => {
           if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
             this.overlayWindow.setOpacity(1);
+            // Re-assert z-order on Windows — DWM can silently demote the HWND after hide/show
+            this.overlayWindow.setAlwaysOnTop(true, 'floating');
             if (!inactive) this.overlayWindow.focus();
-            // Note: do NOT call setAlwaysOnTop here — it triggers NSApp activation on macOS
           }
         }, 60);
       } else {
+        // Restore opacity (may have been zeroed pre-screenshot by hideMainWindow)
+        this.overlayWindow.setOpacity(1);
         this.overlayWindow.setContentProtection(this.contentProtection);
+        // Re-assert z-order BEFORE show on Windows — DWM processes setAlwaysOnTop
+        // synchronously, so calling it before show() ensures the window lands at the
+        // correct z-level on first paint. Calling it after focus() would leave a brief
+        // window where the HWND is focused at the wrong z-level (issue #136).
+        // Skipped on macOS — calling setAlwaysOnTop triggers [NSApp activate] which
+        // steals focus from Zoom/browser even when showInactive() was used.
+        if (process.platform === 'win32') {
+          this.overlayWindow.setAlwaysOnTop(true, 'floating');
+        }
         if (inactive) this.overlayWindow.showInactive(); else this.overlayWindow.show();
         // Only grab focus for explicit user-initiated shows (not shortcut/ghost shows)
         if (!inactive) this.overlayWindow.focus();
-        // Do NOT re-assert setAlwaysOnTop on every show — it was set at creation time and
-        // persists across hide/show cycles. Calling it again triggers [NSApp activate] on
-        // macOS, stealing focus from Zoom/browser even when showInactive() was used.
       }
       this.isWindowVisible = true;
     }
@@ -532,6 +570,8 @@ export class WindowHelper {
           }
         }, 60);
       } else {
+        // Restore opacity (may have been zeroed pre-screenshot by hideMainWindow)
+        this.launcherWindow.setOpacity(1);
         this.launcherWindow.setContentProtection(this.contentProtection);
         if (inactive) this.launcherWindow.showInactive(); else this.launcherWindow.show();
         if (!inactive) this.launcherWindow.focus();

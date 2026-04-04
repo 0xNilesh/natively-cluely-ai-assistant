@@ -1,6 +1,6 @@
 {
   "name": "natively",
-  "version": "2.0.8",
+  "version": "2.2.0",
   "main": "dist-electron/electron/main.js",
   "description": "Natively is a meeting notes app that uses AI to generate notes from your meetings.",
   "scripts": {
@@ -76,7 +76,11 @@
       ],
       "icon": "assets/natively.icns",
       "identity": null,
-      "hardenedRuntime": true
+      "hardenedRuntime": false,
+      "extendInfo": {
+        "NSScreenCaptureUsageDescription": "Natively needs Screen Recording permission to capture system audio for meeting transcription.",
+        "NSMicrophoneUsageDescription": "Natively needs microphone access to transcribe your voice during meetings."
+      }
     },
     "win": {
       "target": [
@@ -176,6 +180,7 @@
     "@elevenlabs/elevenlabs-js": "^2.39.0",
     "@google-cloud/speech": "^7.2.1",
     "@google/genai": "^1.44.0",
+    "@google/stitch-sdk": "^0.0.3",
     "@grpc/grpc-js": "^1.14.3",
     "@grpc/proto-loader": "^0.8.0",
     "@radix-ui/react-dialog": "^1.1.2",

@@ -46,6 +46,11 @@ export class KeybindManager {
     private onUpdateCallbacks: (() => void)[] = [];
     private onShortcutTriggeredCallbacks: ((actionId: string) => void)[] = [];
     private activeMode: 'launcher' | 'overlay' = 'launcher';
+    private healthCheckTimer: NodeJS.Timeout | null = null;
+    // How often to poll that OS-registered shortcuts are still alive (ms).
+    // 10 s is aggressive enough to recover within one poll cycle after a
+    // passthrough toggle, sleep/wake, or workspace switch.
+    private static readonly HEALTH_CHECK_INTERVAL_MS = 10_000;
 
     public setMode(mode: 'launcher' | 'overlay') {
         if (this.activeMode === mode) return;
@@ -57,12 +62,20 @@ export class KeybindManager {
     private shouldRegister(actionId: string): boolean {
         if (this.activeMode === 'overlay') return true;
 
-        // In launcher mode, only register specific shortcuts
+        // In launcher mode, register visibility + movement shortcuts
         if (actionId === 'general:toggle-visibility') return true;
         if (actionId === 'general:toggle-mouse-passthrough') return true;
+        if (actionId.startsWith('window:move-')) return true;
+
+        // Screenshot & screen-analyze shortcuts must work globally in BOTH modes.
+        // Without these, Cmd+H / Cmd+Shift+H / Cmd+Shift+Enter do nothing in
+        // launcher mode because globalShortcut.register() is never called for them.
+        // Also fixes the silent rebind failure: re-registration after setKeybind()
+        // hit the same gate and dropped the newly bound accelerator too.
         if (actionId === 'general:take-screenshot') return true;
         if (actionId === 'general:selective-screenshot') return true;
-        if (actionId.startsWith('window:move-')) return true;
+        if (actionId === 'general:capture-and-process') return true;
+
         return false;
     }
 
@@ -238,6 +251,12 @@ export class KeybindManager {
                         console.log(`[KeybindManager] Registered global shortcut: ${acc} -> ${kb.id}`);
                     } else {
                         console.warn(`[KeybindManager] Failed to register global shortcut (likely in use by OS): ${acc}`);
+                        // Notify renderer so the UI can surface a warning to the user (issue #136)
+                        BrowserWindow.getAllWindows().forEach(win => {
+                            if (!win.isDestroyed()) {
+                                win.webContents.send('keybinds:registration-failed', { id: kb.id, accelerator: acc });
+                            }
+                        });
                     }
                 } catch (e) {
                     console.error(`[KeybindManager] Exception while registering global shortcut ${acc}:`, e);
@@ -246,6 +265,72 @@ export class KeybindManager {
         });
 
         this.updateMenu();
+
+        // (Re-)start the health-check loop so it always reflects the current
+        // registered set after any full re-registration.
+        this.startHealthCheck();
+    }
+
+    /**
+     * Surgically re-registers any global shortcuts the OS silently dropped.
+     *
+     * Unlike registerGlobalShortcuts() this does NOT call unregisterAll() first,
+     * so there is never a window where shortcuts are momentarily absent.  It is
+     * safe to call from the periodic health-check timer or right after a window
+     * interaction-policy change (e.g. passthrough toggle).
+     */
+    public revalidateShortcuts(): void {
+        let lost = 0;
+        let recovered = 0;
+
+        this.keybinds.forEach(kb => {
+            if (!kb.isGlobal || !kb.accelerator || kb.accelerator.trim() === '') return;
+            if (!this.shouldRegister(kb.id)) return;
+
+            const acc = kb.accelerator.trim();
+            if (globalShortcut.isRegistered(acc)) return; // still alive — nothing to do
+
+            lost++;
+            try {
+                globalShortcut.register(acc, () => {
+                    this.onShortcutTriggeredCallbacks.forEach(cb => cb(kb.id));
+                });
+                if (globalShortcut.isRegistered(acc)) {
+                    recovered++;
+                    console.warn(`[KeybindManager] Recovered lost shortcut: ${acc} -> ${kb.id}`);
+                } else {
+                    console.error(`[KeybindManager] Could not recover shortcut ${acc} -> ${kb.id} (OS conflict?)`);
+                }
+            } catch (e) {
+                console.error(`[KeybindManager] Exception re-registering shortcut ${acc}:`, e);
+            }
+        });
+
+        if (lost > 0) {
+            console.warn(`[KeybindManager] Health check: ${lost} shortcut(s) were dropped by OS, ${recovered} recovered.`);
+        }
+    }
+
+    /**
+     * Starts (or restarts) the periodic shortcut health-check timer.
+     * Called automatically at the end of registerGlobalShortcuts() so the timer
+     * always tracks the most recently registered set.
+     */
+    private startHealthCheck(): void {
+        this.stopHealthCheck();
+        this.healthCheckTimer = setInterval(() => {
+            this.revalidateShortcuts();
+        }, KeybindManager.HEALTH_CHECK_INTERVAL_MS);
+        // Allow the Node.js process to exit even if this timer is still running.
+        if (this.healthCheckTimer.unref) this.healthCheckTimer.unref();
+    }
+
+    /** Clears the health-check interval (called before a full re-registration). */
+    private stopHealthCheck(): void {
+        if (this.healthCheckTimer) {
+            clearInterval(this.healthCheckTimer);
+            this.healthCheckTimer = null;
+        }
     }
 
     public updateMenu() {
