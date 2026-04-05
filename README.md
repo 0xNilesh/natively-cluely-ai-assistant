@@ -38,7 +38,7 @@
 [![License](https://img.shields.io/badge/License-AGPL--3.0-blue?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows-blueviolet?style=flat-square)](https://github.com/evinjohnn/natively-cluely-ai-assistant/releases)
 [![Downloads](https://img.shields.io/github/downloads/evinjohnn/natively-cluely-ai-assistant/total?style=flat-square&color=success)](https://github.com/evinjohnn/natively-cluely-ai-assistant/releases)
-![Repo Views](https://img.shields.io/badge/Views-169.5k-orange?style=flat-square)
+![Repo Views](https://img.shields.io/badge/Views-187.5k-orange?style=flat-square)
 [![Stars](https://img.shields.io/github/stars/evinjohnn/natively-cluely-ai-assistant?style=flat-square&color=gold)](https://github.com/evinjohnn/natively-cluely-ai-assistant)
 ![Status](https://img.shields.io/badge/Status-active-success?style=flat-square)
 [![X Community](https://img.shields.io/badge/Community-black?style=flat-square&logo=x&logoColor=white)](https://x.com/i/communities/2031398735515693507)
@@ -245,6 +245,36 @@ While other tools act as simple API wrappers, Natively is a complete, native int
 [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Support-FFDD00?style=flat-square&logo=buy-me-a-coffee&logoColor=black)](https://www.buymeacoffee.com/evinjohn)
 
 </div>
+
+---
+
+## Natively API (Hosted Tier)
+
+**Stop managing four separate services. One key. Zero configuration.**
+
+Are you managing separate accounts for your AI reasoning, live transcription, fast inference, and web search? Juggling multiple API keys, rate limits, and invoices across completely different categories of tools is unnecessary overhead. Natively API replaces all of those categories with **one flat subscription**.
+
+### 4 Categories → 1 Key
+Most people spend 20 minutes getting their API keys set up across different platforms, only to hit rate limits or unexpected bills on per-token usage. 
+
+**Your current unbundled stack:**
+- **AI Intelligence (GPT/Claude/Gemini):** per-token billing and usage anxiety
+- **Lightning-Fast Inference (Groq/Llama):** strict rate limits to monitor
+- **Real-Time Transcription (Deepgram/Google STT):** separate key + quota
+- **Web Search & Research (Tavily/Perplexity):** yet another subscription
+
+**Replaced by Natively API:**
+- **AI chat, transcription & web search** — all included
+- **One flat subscription.** Zero surprise bills. Starts at $7/mo.
+- **Single key.** Zero rotation. Zero configuration.
+
+**Don't start the long way.** Skip the 20-minute manual setup. One Natively subscription skips all of it — AI, transcription, and web search are ready immediately.
+
+<p align="center">
+  <a href="https://checkout.dodopayments.com/buy/pdt_0NbFixGmD8CSeawb5qvVl">
+    <img src="https://img.shields.io/badge/Get_Natively_API-Subscribe_Now-F97316?style=for-the-badge&logo=fastapi&logoColor=white" />
+  </a>
+</p>
 
 ---
 
