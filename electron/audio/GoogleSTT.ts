@@ -94,27 +94,32 @@ export class GoogleSTT extends EventEmitter {
         }
 
         this.pendingLanguageChange = setTimeout(() => {
-            const config = RECOGNITION_LANGUAGES[key];
-            if (!config) {
-                console.warn(`[GoogleSTT/${this.label}] Unknown language key: ${key}`);
-                return;
-            }
-
-            console.log(`[GoogleSTT/${this.label}] Updating recognition language to: ${key} (${config.bcp47})`);
-
-            // Update state
-            this.languageCode = config.bcp47;
-            
-            // Handle variants (English specifically)
-            if ('alternates' in config) {
-                this.alternativeLanguageCodes = (config as EnglishVariant).alternates;
+            if (key === 'auto') {
+                // Google STT v1 supports up to 3 alternativeLanguageCodes.
+                // Use en-US as primary with the most common languages as alternates.
+                this.languageCode = 'en-US';
+                this.alternativeLanguageCodes = ['fr-FR', 'es-ES', 'de-DE'];
+                console.log(`[GoogleSTT/${this.label}] Language set to auto-detect (en-US + fr/es/de alternates)`);
             } else {
-                this.alternativeLanguageCodes = [];
-            }
+                const config = RECOGNITION_LANGUAGES[key];
+                if (!config) {
+                    console.warn(`[GoogleSTT/${this.label}] Unknown language key: ${key}`);
+                    return;
+                }
 
-            console.log(`[GoogleSTT/${this.label}] Primary:`, this.languageCode);
-            if (this.alternativeLanguageCodes.length > 0) {
-                console.log(`[GoogleSTT/${this.label}] Alternates:`, this.alternativeLanguageCodes.join(', '));
+                console.log(`[GoogleSTT/${this.label}] Updating recognition language to: ${key} (${config.bcp47})`);
+                this.languageCode = config.bcp47;
+
+                if ('alternates' in config) {
+                    this.alternativeLanguageCodes = (config as EnglishVariant).alternates;
+                } else {
+                    this.alternativeLanguageCodes = [];
+                }
+
+                console.log(`[GoogleSTT/${this.label}] Primary:`, this.languageCode);
+                if (this.alternativeLanguageCodes.length > 0) {
+                    console.log(`[GoogleSTT/${this.label}] Alternates:`, this.alternativeLanguageCodes.join(', '));
+                }
             }
 
             // Restart if active

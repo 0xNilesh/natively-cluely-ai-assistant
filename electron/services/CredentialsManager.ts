@@ -160,7 +160,7 @@ export class CredentialsManager {
     }
 
     public getAiResponseLanguage(): string {
-        return this.credentials.aiResponseLanguage || 'English';
+        return this.credentials.aiResponseLanguage || 'auto';
     }
     public getDefaultModel(): string {
         return this.credentials.defaultModel || 'gemini-3.1-flash-lite-preview';

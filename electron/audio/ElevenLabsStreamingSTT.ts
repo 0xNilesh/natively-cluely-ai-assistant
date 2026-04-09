@@ -56,20 +56,16 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
     /** No-op - channel count is expected to be mono by ElevenLabs Scribe */
     public setAudioChannelCount(_count: number): void {}
 
-    /** Recognition language - maps Natively key to ISO-639-1 for ElevenLabs */
+    /** Recognition language - maps Natively key to ISO-639-1 for ElevenLabs, or 'auto' to omit code */
     public setRecognitionLanguage(key: string): void {
-        const config = RECOGNITION_LANGUAGES[key];
-        if (config) {
-            const newCode = config.iso639;
-            if (this.languageCode !== newCode) {
-                console.log(`[ElevenLabsStreaming] Language changed: ${this.languageCode} -> ${newCode}`);
-                this.languageCode = newCode;
-                
-                if (this.isActive) {
-                    console.log('[ElevenLabsStreaming] Restarting session to apply new language...');
-                    this.stop();
-                    this.start();
-                }
+        const newCode = key === 'auto' ? '' : (RECOGNITION_LANGUAGES[key]?.iso639 ?? this.languageCode);
+        if (this.languageCode !== newCode) {
+            console.log(`[ElevenLabsStreaming] Language changed: ${this.languageCode || '(auto)'} -> ${newCode || '(auto)'}`);
+            this.languageCode = newCode;
+            if (this.isActive) {
+                console.log('[ElevenLabsStreaming] Restarting session to apply new language...');
+                this.stop();
+                this.start();
             }
         }
     }
@@ -205,10 +201,11 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
         // raw WebSocket URL with parameters
         let url = `${ELEVENLABS_WS_URL}?model_id=scribe_v2_realtime&include_timestamps=true&sample_rate=${this.targetSampleRate}`;
         
-        // Add language hints to prevent regional language hallucinations
+        // Always enable language detection metadata; only pin to a specific code when one is set
         if (this.languageCode) {
-            url += `&language_code=${this.languageCode}&include_language_detection=true`;
+            url += `&language_code=${this.languageCode}`;
         }
+        url += `&include_language_detection=true`;
         
         console.log(`[ElevenLabsStreaming] Connecting with URL: ${url.replace(this.apiKey, '***')}`);
 

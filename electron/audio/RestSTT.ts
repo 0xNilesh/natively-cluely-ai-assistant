@@ -32,7 +32,7 @@ type ProviderConfigFactory = (apiKey: string, region?: string, languageKey?: str
 
 const PROVIDER_CONFIGS: Record<RestSttProvider, ProviderConfigFactory> = {
     groq: (apiKey, region, languageKey) => {
-        const lang = languageKey ? RECOGNITION_LANGUAGES[languageKey]?.iso639 : undefined;
+        const lang = (languageKey && languageKey !== 'auto') ? RECOGNITION_LANGUAGES[languageKey]?.iso639 : undefined;
         return {
             endpoint: 'https://api.groq.com/openai/v1/audio/transcriptions',
             model: 'whisper-large-v3-turbo',
@@ -50,7 +50,7 @@ const PROVIDER_CONFIGS: Record<RestSttProvider, ProviderConfigFactory> = {
         };
     },
     openai: (apiKey, region, languageKey) => {
-        const lang = languageKey ? RECOGNITION_LANGUAGES[languageKey]?.iso639 : undefined;
+        const lang = (languageKey && languageKey !== 'auto') ? RECOGNITION_LANGUAGES[languageKey]?.iso639 : undefined;
         return {
             endpoint: 'https://api.openai.com/v1/audio/transcriptions',
             model: 'whisper-1',
@@ -66,7 +66,7 @@ const PROVIDER_CONFIGS: Record<RestSttProvider, ProviderConfigFactory> = {
         };
     },
     elevenlabs: (apiKey, region, languageKey) => {
-        const lang = languageKey ? RECOGNITION_LANGUAGES[languageKey]?.iso639 : undefined;
+        const lang = (languageKey && languageKey !== 'auto') ? RECOGNITION_LANGUAGES[languageKey]?.iso639 : undefined;
         return {
             endpoint: 'https://api.elevenlabs.io/v1/speech-to-text',
             model: 'scribe_v2',
@@ -82,7 +82,7 @@ const PROVIDER_CONFIGS: Record<RestSttProvider, ProviderConfigFactory> = {
         };
     },
     azure: (apiKey, region = 'eastus', languageKey) => {
-        const lang = languageKey ? RECOGNITION_LANGUAGES[languageKey]?.bcp47 : undefined;
+        const lang = (languageKey && languageKey !== 'auto') ? RECOGNITION_LANGUAGES[languageKey]?.bcp47 : undefined;
         const finalLang = lang || 'en-US';
         return {
             endpoint: `https://${region}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=${finalLang}`,
@@ -95,7 +95,7 @@ const PROVIDER_CONFIGS: Record<RestSttProvider, ProviderConfigFactory> = {
         };
     },
     ibmwatson: (apiKey, region = 'us-south', languageKey) => {
-        const lang = languageKey ? RECOGNITION_LANGUAGES[languageKey]?.bcp47 : undefined;
+        const lang = (languageKey && languageKey !== 'auto') ? RECOGNITION_LANGUAGES[languageKey]?.bcp47 : undefined;
         const finalLang = lang || 'en-US';
         return {
             endpoint: `https://api.${region}.speech-to-text.watson.cloud.ibm.com/v1/recognize?language=${finalLang}`,

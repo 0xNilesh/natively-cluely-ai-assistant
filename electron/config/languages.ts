@@ -61,6 +61,7 @@ export const ENGLISH_VARIANTS: Record<string, EnglishVariant> = {
 };
 
 export const RECOGNITION_LANGUAGES: Record<string, LanguageOption> = {
+    'auto': { label: 'Auto Detect', code: 'auto', bcp47: 'auto', iso639: 'auto', group: 'Auto' },
     ...ENGLISH_VARIANTS,
     'indonesian': { label: 'Indonesian', code: 'indonesian', bcp47: 'id-ID', iso639: 'id', group: 'Indonesian' },
     'russian': { label: 'Russian', code: 'russian', bcp47: 'ru-RU', iso639: 'ru', group: 'Russian' },
@@ -76,6 +77,7 @@ export const RECOGNITION_LANGUAGES: Record<string, LanguageOption> = {
 };
 
 export const AI_RESPONSE_LANGUAGES = [
+    { label: 'Auto (Detect)', code: 'auto' },
     { label: 'English', code: 'English' },
     { label: 'Indonesian', code: 'Indonesian' },
     { label: 'Russian', code: 'Russian' },

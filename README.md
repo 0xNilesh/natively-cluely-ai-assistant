@@ -281,6 +281,36 @@ Most people spend 20 minutes getting their API keys set up across different plat
 
 ---
 
+## Natively API (Hosted Tier)
+
+**Stop managing four separate services. One key. Zero configuration.**
+
+Are you managing separate accounts for your AI reasoning, live transcription, fast inference, and web search? Juggling multiple API keys, rate limits, and invoices across completely different categories of tools is unnecessary overhead. Natively API replaces all of those categories with **one flat subscription**.
+
+### 4 Categories → 1 Key
+Most people spend 20 minutes getting their API keys set up across different platforms, only to hit rate limits or unexpected bills on per-token usage. 
+
+**Your current unbundled stack:**
+- **AI Intelligence (GPT/Claude/Gemini):** per-token billing and usage anxiety
+- **Lightning-Fast Inference (Groq/Llama):** strict rate limits to monitor
+- **Real-Time Transcription (Deepgram/Google STT):** separate key + quota
+- **Web Search & Research (Tavily/Perplexity):** yet another subscription
+
+**Replaced by Natively API:**
+- **AI chat, transcription & web search** — all included
+- **One flat subscription.** Zero surprise bills. Starts at $7/mo.
+- **Single key.** Zero rotation. Zero configuration.
+
+**Don't start the long way.** Skip the 20-minute manual setup. One Natively subscription skips all of it — AI, transcription, and web search are ready immediately.
+
+<p align="center">
+  <a href="https://checkout.dodopayments.com/buy/pdt_0NbFixGmD8CSeawb5qvVl">
+    <img src="https://img.shields.io/badge/Get_Natively_API-Subscribe_Now-F97316?style=for-the-badge&logo=fastapi&logoColor=white" />
+  </a>
+</p>
+
+---
+
 ## Natively Pro
 
 While Natively is **free and open-source forever**, we also offer a **Pro Edition** designed specifically for power users and job seekers. Purchasing a Pro license gives you an edge in the job market, all while directly supporting the continued development of the open-source Natively core!
