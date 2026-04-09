@@ -24,6 +24,12 @@ change.md
 # nativelyapi is a separate git repo — exclude from parent repo tracking
 /nativelyapi
 
+# Local premium dev copy — never commit to public repo
+/premiudm
+
+# Generated migration patches — private, not for public repo
+*.patch
+
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
