@@ -1,5 +1,12 @@
 # Logs
 logs
+.env
+/.env
+Sales20260405-60-494j8t.csv
+/Sales20260405-60-494j8t.csv
+
+env
+/env
 *.log
 npm-debug.log*
 yarn-debug.log*

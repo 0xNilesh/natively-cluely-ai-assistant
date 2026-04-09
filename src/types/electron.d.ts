@@ -116,6 +116,7 @@ export interface ElectronAPI {
   setAiResponseLanguage: (language: string) => Promise<{ success: boolean; error?: string }>
   getSttLanguage: () => Promise<string>
   getAiResponseLanguage: () => Promise<string>
+  onSttLanguageAutoDetected: (callback: (bcp47: string) => void) => () => void
 
   getNativeAudioStatus: () => Promise<{ connected: boolean }>
 

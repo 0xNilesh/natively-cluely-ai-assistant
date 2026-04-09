@@ -17,10 +17,11 @@ const nullAdCampaigns = (
   _isAppReady: boolean,
   _appStartTime?: number,
   _lastMeetingEndTime?: number | null,
-  _isProcessingMeeting?: boolean
+  _isProcessingMeeting?: boolean,
+  _hasNativelyApi?: boolean
 ) => ({
   activeAd: null as string | null,
-  dismissAd: () => {},
+  dismissAd: (_campaignId?: string) => {},
 });
 
 // ─── Glob-import premium modules (empty {} when premium/ is absent) ──

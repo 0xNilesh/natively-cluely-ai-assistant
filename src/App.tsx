@@ -114,6 +114,9 @@ const App: React.FC = () => {
   // Re-index State
   const [incompatibleWarning, setIncompatibleWarning] = useState<{count: number; oldProvider: string; newProvider: string} | null>(null);
   
+  // API check
+  const [hasNativelyApi, setHasNativelyApi] = useState<boolean>(false);
+
   const isAppReady = !isSettingsWindow && !isOverlayWindow && !isModelSelectorWindow && !showStartup && !isSettingsOpen && isLauncherMainView;
   const { activeAd, dismissAd } = useAdCampaigns(
     isPremiumActive, 
@@ -121,7 +124,8 @@ const App: React.FC = () => {
     isAppReady,
     appStartTime,
     lastMeetingEndTime,
-    isProcessingMeeting
+    isProcessingMeeting,
+    hasNativelyApi
   );
 
   useEffect(() => {
@@ -136,6 +140,11 @@ const App: React.FC = () => {
     // Both methods fail-open on network errors — offline users are never locked out.
     const premiumCheck = window.electronAPI?.licenseCheckPremiumAsync ?? window.electronAPI?.licenseCheckPremium;
     premiumCheck?.().then(setIsPremiumActive).catch(() => {});
+
+    // Also check for Natively API key
+    window.electronAPI?.getStoredCredentials?.()
+      .then((creds) => setHasNativelyApi(!!creds?.hasNativelyKey))
+      .catch(() => {});
 
     // Listen for meeting processing completion to trigger post-meeting ads
     const removeMeetingsListener = window.electronAPI?.onMeetingsUpdated?.(() => {
@@ -425,6 +434,8 @@ const App: React.FC = () => {
       <NativelyQuotaBanner />
       {isLauncherMainView && !isSettingsOpen && (
         <NativelyApiPromoToaster
+          isOpen={activeAd === 'natively_api'}
+          onDismiss={() => dismissAd('natively_api')}
           onOpenSettings={(tab: string) => {
             setSettingsInitialTab(tab);
             setIsSettingsOpen(true);

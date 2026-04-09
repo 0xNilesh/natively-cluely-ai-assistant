@@ -821,7 +821,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       const key = CredentialsManager.getInstance().getNativelyApiKey();
       if (!key) return { ok: false, error: 'no_key' };
 
-      const res = await fetch('https://natively-api-production.up.railway.app/v1/usage', {
+      const res = await fetch('https://api.natively.software/v1/usage', {
         headers: { 'x-natively-key': key },
         signal: AbortSignal.timeout(8000),
       });

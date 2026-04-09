@@ -32,14 +32,12 @@ export class WindowHelper {
   private contentProtection: boolean = false
   private opacityTimeout: NodeJS.Timeout | null = null
 
-  // Initialize with explicit number type and 0 value
-  private screenWidth: number = 0
-  private screenHeight: number = 0
+  // Constants
+  private static readonly OVERLAY_DEFAULT_WIDTH = 600;
+  private static readonly OVERLAY_MIN_HEIGHT = 216;
 
   // Movement variables (apply to active window)
   private step: number = 20
-  private currentX: number = 0
-  private currentY: number = 0
 
   constructor(appState: AppState) {
     this.appState = appState
@@ -104,8 +102,9 @@ export class WindowHelper {
     if (!this.overlayWindow || this.overlayWindow.isDestroyed()) return
     console.log('[WindowHelper] setOverlayDimensions:', width, height);
 
-    const [currentX, currentY] = this.overlayWindow.getPosition()
     const currentBounds = this.overlayWindow.getBounds()
+    const currentX = currentBounds.x
+    const currentY = currentBounds.y
     const workArea = this.getDisplayWorkArea(currentBounds)
     const maxAllowedWidth = Math.floor(workArea.width * 0.9)
     const maxAllowedHeight = Math.floor(workArea.height * 0.9)
@@ -126,8 +125,6 @@ export class WindowHelper {
 
     const primaryDisplay = screen.getPrimaryDisplay()
     const workArea = primaryDisplay.workArea
-    this.screenWidth = workArea.width
-    this.screenHeight = workArea.height
 
     // Fixed dimensions per user request
     const width = 1200;
@@ -137,7 +134,7 @@ export class WindowHelper {
     const x = Math.round(workArea.x + (workArea.width - width) / 2);
     // Ensure y is at least workArea.y (don't go offscreen top)
     const topMargin = Math.round(workArea.height * 0.05);
-    const y = Math.round(workArea.x + topMargin);
+    const y = Math.round(workArea.y + topMargin);
 
     // --- 1. Create Launcher Window ---
     const isMac = process.platform === "darwin";
@@ -228,9 +225,20 @@ export class WindowHelper {
     // }
 
     // --- 2. Create Overlay Window (Hidden initially) ---
+    // Always start centered on the primary display so the OS (macOS NSUserDefaults /
+    // Windows DWM) cannot restore the previous session's cached window position.
+    // The in-memory `overlayBounds` is already null here, so `switchToOverlay()`
+    // will also fall back to centered logic — but providing explicit x/y in the
+    // constructor is the only reliable guard against OS-level position persistence.
+    const overlayDefaultX = Math.floor(workArea.x + (workArea.width - WindowHelper.OVERLAY_DEFAULT_WIDTH) / 2);
+    // Use original vertical offset calculation that positions the overlay higher
+    const overlayDefaultY = Math.floor(workArea.y + (workArea.height - WindowHelper.OVERLAY_DEFAULT_WIDTH) / 2);
+
     const overlaySettings: Electron.BrowserWindowConstructorOptions = {
-      width: 600,
+      width: WindowHelper.OVERLAY_DEFAULT_WIDTH,
       height: 1,
+      x: overlayDefaultX,
+      y: overlayDefaultY,
       minWidth: 300,
       minHeight: 1,
       webPreferences: {
@@ -380,10 +388,17 @@ export class WindowHelper {
   public getOverlayWindow(): BrowserWindow | null { return this.overlayWindow }
   public getCurrentWindowMode(): 'launcher' | 'overlay' { return this.currentWindowMode }
 
+  // Clears the remembered overlay position so the next switchToOverlay() call
+  // opens at the default centered position (called on new meeting start).
+  public resetOverlayPosition(): void {
+    this.overlayBounds = null;
+    console.log('[WindowHelper] Overlay position reset to default for next meeting.');
+  }
+
   public getLastOverlayBounds(): Electron.Rectangle | null {
+    // If no in-memory bounds exist, return null to signify no user-initiated movement.
     if (this.overlayBounds) return { ...this.overlayBounds };
-    if (!this.overlayWindow || this.overlayWindow.isDestroyed()) return null;
-    return this.overlayWindow.getBounds();
+    return null;
   }
 
   public getLastOverlayDisplayId(): number | null {
@@ -527,7 +542,7 @@ export class WindowHelper {
       const savedBounds = this.overlayBounds
         ? {
             ...this.overlayBounds,
-            height: Math.max(this.overlayBounds.height, 216)
+            height: Math.max(this.overlayBounds.height, WindowHelper.OVERLAY_MIN_HEIGHT)
           }
         : null;
       const workArea = this.getDisplayWorkArea(savedBounds ?? currentBounds);
@@ -541,10 +556,10 @@ export class WindowHelper {
             height: Math.min(savedBounds.height, maxAllowedHeight)
           }
         : {
-            x: Math.floor(workArea.x + (workArea.width - 600) / 2),
-            y: Math.floor(workArea.y + (workArea.height - 600) / 2),
-            width: 600,
-            height: Math.max(Math.min(currentBounds.height, maxAllowedHeight), 216)
+            x: Math.floor(workArea.x + (workArea.width - WindowHelper.OVERLAY_DEFAULT_WIDTH) / 2),
+            y: Math.floor(workArea.y + (workArea.height - WindowHelper.OVERLAY_DEFAULT_WIDTH) / 2),
+            width: WindowHelper.OVERLAY_DEFAULT_WIDTH,
+            height: Math.max(Math.min(currentBounds.height, maxAllowedHeight), WindowHelper.OVERLAY_MIN_HEIGHT)
           };
 
       this.overlayWindow.setBounds(targetBounds);
@@ -645,9 +660,6 @@ export class WindowHelper {
 
     const [x, y] = win.getPosition();
     win.setPosition(x + dx, y + dy);
-
-    this.currentX = x + dx;
-    this.currentY = y + dy;
   }
 
   public moveWindowRight(): void { this.moveActiveWindow(this.step, 0) }

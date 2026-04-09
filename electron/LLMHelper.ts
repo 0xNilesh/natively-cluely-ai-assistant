@@ -56,7 +56,7 @@ export class LLMHelper {
   private activeCurlProvider: CurlProvider | null = null;
   private groqFastTextMode: boolean = false;
   private knowledgeOrchestrator: any = null;
-  private aiResponseLanguage: string = 'English';
+  private aiResponseLanguage: string = 'auto';
   private sttLanguage: string = 'english-us';
   private nativelyKey: string | null = null;
 
@@ -773,8 +773,23 @@ ANSWER DIRECTLY:`;
    *   3. Closing reminder at the bottom (double-lock)
    */
   private injectLanguageInstruction(systemPrompt: string): string {
+    // ── AUTO mode ──────────────────────────────────────────────────────────────
+    // Detect the language the user is writing/speaking in and reply in that same
+    // language. Supports seamless code-switching across turns (e.g. the user can
+    // switch from English to Hindi mid-conversation and the AI follows).
+    if (!this.aiResponseLanguage || this.aiResponseLanguage === 'auto') {
+      const autoHeader = `[LANGUAGE INSTRUCTION — HIGHEST PRIORITY]
+Detect the language of the user's most recent message and ALWAYS respond in that exact same language.
+If the user writes in Hindi, respond in Hindi. If in Spanish, respond in Spanish. If in English, respond in English.
+If the language is ambiguous, default to English.
+You may mix scripts naturally (e.g. code stays in English even when the explanation is in another language).
+[END LANGUAGE INSTRUCTION]\n\n`;
+      return `${autoHeader}${systemPrompt}`;
+    }
+
+    // ── FIXED language mode ────────────────────────────────────────────────────
     // Fast-path: no injection needed when English is selected (native default)
-    if (!this.aiResponseLanguage || this.aiResponseLanguage === 'English') {
+    if (this.aiResponseLanguage === 'English') {
       return systemPrompt;
     }
 
@@ -1207,7 +1222,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     }
     if (!nativelyKey) throw new Error('Natively API key not set');
 
-    const endpointUrl = 'https://natively-api-production.up.railway.app/v1/chat';
+    const endpointUrl = 'https://api.natively.software/v1/chat';
     const headers: any = { 'x-natively-key': nativelyKey, 'Content-Type': 'application/json' };
 
     const body: any = { messages: [{ role: 'user', content: userMessage }] };
@@ -1218,19 +1233,38 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
     // Send images as a structured array so the server can build proper Gemini inlineData parts.
     // Embedding base64 in the text content would be truncated at 4000 chars and treated as text.
+    //
+    // Compress before sending: retina screenshots are 2-5 MB PNG; the Natively API body limit
+    // is 4 MB. Resize to max 1920px (above the 1470px logical resolution of a MacBook Air, so
+    // no detail is lost) and encode as JPEG 85% — typically 200-250 KB per image.
+    // 4 screenshots × ~278KB base64 = ~1.1 MB, well within the 4 MB server limit.
     if (imagePaths?.length) {
       const images: { mime_type: string; data: string }[] = [];
       for (const p of imagePaths) {
         if (fs.existsSync(p)) {
-          const imageData = await fs.promises.readFile(p);
-          images.push({ mime_type: 'image/png', data: imageData.toString('base64') });
+          try {
+            const compressed = await sharp(p)
+              .resize(1920, 1920, { fit: 'inside', withoutEnlargement: true })
+              .jpeg({ quality: 85 })
+              .toBuffer();
+            images.push({ mime_type: 'image/jpeg', data: compressed.toString('base64') });
+          } catch (compressErr: any) {
+            // Fallback: send raw if sharp fails (e.g. unsupported format)
+            console.warn('[LLMHelper] Image compression failed, sending raw:', compressErr.message);
+            const imageData = await fs.promises.readFile(p);
+            if (imageData.length > 500 * 1024) {
+              console.warn('[LLMHelper] Raw fallback image too large to send, skipping:', p);
+              continue;
+            }
+            images.push({ mime_type: 'image/png', data: imageData.toString('base64') });
+          }
         }
       }
       if (images.length) body.images = images;
     }
     if (systemPrompt) body.system = systemPrompt;
     if (this.aiResponseLanguage && this.aiResponseLanguage !== 'English') {
-      body.language = this.aiResponseLanguage;
+      body.language = this.aiResponseLanguage; // 'auto' is forwarded — server handles it
     }
 
     const response = await fetch(endpointUrl, {
@@ -2259,7 +2293,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     if (this.groqFastTextMode)                                  body.fast_mode = true;
     if (systemPrompt)                                           body.system    = systemPrompt;
     if (this.aiResponseLanguage && this.aiResponseLanguage !== 'English') {
-      body.language = this.aiResponseLanguage;
+      body.language = this.aiResponseLanguage; // 'auto' is forwarded — server handles it
     }
 
     // Attach images — the server routes image requests to the appropriate provider
@@ -2276,7 +2310,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
     // 60s timeout covers worst-case: max-token Gemini Pro response streamed over a slow connection.
     // This is intentionally longer than the non-streaming 25s timeout.
-    const response = await fetch('https://natively-api-production.up.railway.app/v1/chat', {
+    const response = await fetch('https://api.natively.software/v1/chat', {
       method:  'POST',
       headers: {
         'x-natively-key': nativelyKey,

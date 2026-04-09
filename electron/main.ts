@@ -927,6 +927,18 @@ export class AppState {
       console.error(`[Main] STT (${speaker}) Error:`, err);
     });
 
+    // Auto language detection: NativelyProSTT emits 'languageDetected' when the
+    // backend resolves the language from the first audio batch. Notify the renderer
+    // so the settings UI can show what was detected.
+    if (stt instanceof NativelyProSTT) {
+      stt.on('languageDetected', (bcp47: string) => {
+        console.log(`[Main] STT language auto-detected (${speaker}): ${bcp47}`);
+        const helper = this.getWindowHelper();
+        helper.getMainWindow()?.webContents.send('stt-language-auto-detected', bcp47);
+        helper.getLauncherWindow()?.webContents.send('stt-language-auto-detected', bcp47);
+      });
+    }
+
     return stt;
   }
 
@@ -1284,6 +1296,10 @@ export class AppState {
 
     // Check Screen Recording permission required for system audio capture
     // (CoreAudio Global Process Tap + ScreenCaptureKit both need this).
+    // NOTE: The 'not-determined' TCC dialog is triggered once at app startup
+    // (in initializeApp) so it never pops up mid-meeting here. We only act on
+    // explicit 'denied' — in that case warn the user but let the meeting continue
+    // with microphone-only transcription.
     if (process.platform === 'darwin') {
       const screenStatus = getMacScreenCaptureStatus();
       console.log(`[Main] macOS screen recording permission status: ${screenStatus}`);
@@ -1294,32 +1310,21 @@ export class AppState {
         console.warn('[Main]', message);
         this.broadcast('system-audio-permission-denied', message);
         shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');
-      } else if (screenStatus === 'not-determined') {
-        // Permission not yet requested — proactively trigger the TCC dialog via
-        // desktopCapturer BEFORE the audio pipeline starts in the background thread.
-        // This ensures the user sees the dialog in the foreground and the SCK/CoreAudio
-        // backend gets a granted permission rather than a timed-out or denied one.
-        console.log('[Main] Screen recording not-determined. Triggering TCC dialog via desktopCapturer...');
-        try {
-          await desktopCapturer.getSources({ types: ['screen'] });
-          const afterStatus = getMacScreenCaptureStatus();
-          console.log(`[Main] Screen recording status after TCC prompt: ${afterStatus}`);
-          if (afterStatus === 'denied') {
-            const message = 'Screen Recording permission denied. System audio will not be captured. To fix: System Settings → Privacy & Security → Screen Recording → enable Natively.';
-            console.warn('[Main]', message);
-            this.broadcast('system-audio-permission-denied', message);
-          }
-        } catch (e) {
-          console.warn('[Main] desktopCapturer.getSources() failed (permission dialog may not have appeared):', e);
-        }
       }
+      // 'not-determined': Handled at startup. SCK/CoreAudio will trigger the TCC
+      // dialog itself when it first attempts to access screen content.
     }
 
     this.isMeetingActive = true;
-    this.broadcastMeetingState();
+    this.broadcastMeetingState()
     if (metadata) {
       this.intelligenceManager.setMeetingMetadata(metadata);
     }
+
+    // Reset overlay position to default center so each new meeting starts
+    // with the overlay in a predictable centered position, regardless of where
+    // the user moved it during the previous meeting session.
+    this.windowHelper.resetOverlayPosition();
 
     // Emit session reset to clear UI state immediately
     this.getWindowHelper().getOverlayWindow()?.webContents.send('session-reset');
@@ -1623,9 +1628,14 @@ export class AppState {
     console.log(`[AppState] Setting recognition language to: ${key}`);
     const { CredentialsManager } = require('./services/CredentialsManager');
     CredentialsManager.getInstance().setSttLanguage(key);
-    this.googleSTT?.setRecognitionLanguage(key);
-    this.googleSTT_User?.setRecognitionLanguage(key);
-    this.processingHelper.getLLMHelper().setSttLanguage(key);
+
+    // 'auto' is only meaningful for NativelyProSTT — other providers fall back to en-US.
+    const sttProvider = CredentialsManager.getInstance().getSttProvider();
+    const effectiveKey = (key === 'auto' && sttProvider !== 'natively') ? 'english-us' : key;
+
+    this.googleSTT?.setRecognitionLanguage(effectiveKey);
+    this.googleSTT_User?.setRecognitionLanguage(effectiveKey);
+    this.processingHelper.getLLMHelper().setSttLanguage(effectiveKey);
   }
 
   public static getInstance(): AppState {
@@ -1866,10 +1876,14 @@ export class AppState {
 
     try {
       this.hideWindowsForScreenshot(session);
-      // macOS compositor needs more time to fully remove the window from the
-      // render tree before the next frame is composited — 50ms is not enough
-      // on slower machines and causes a black frame (issue #133).
-      await new Promise(resolve => setTimeout(resolve, process.platform === 'darwin' ? 150 : 50));
+      // setOpacity(0) makes the window invisible to the compositor immediately
+      // (within the current frame). hide() removes it from the event dispatch
+      // tree synchronously. One compositor frame flush (~16ms) is enough for
+      // macOS to stop including the window in the next capture frame. We wait
+      // 80ms to give the GPU render server one full v-sync cycle + overhead,
+      // which consistently avoids the black-frame artifact without the
+      // excessive 150ms latency the old value imposed.
+      await new Promise(resolve => setTimeout(resolve, process.platform === 'darwin' ? 80 : 40));
       return await capture(session);
     } finally {
       try {
@@ -2491,6 +2505,52 @@ async function initializeApp() {
 
   // Pre-create settings window in background for faster first open
   appState.settingsWindowHelper.preloadWindow()
+
+  // One-time macOS screen recording permission prompt.
+  //
+  // We must fire this AFTER createWindow() so that:
+  //   1. The Natively launcher window is visible and focused when the TCC dialog
+  //      appears — macOS anchors the dialog to the frontmost app window on Ventura+.
+  //      Without a visible window the dialog can appear behind other apps (Sequoia).
+  //   2. In stealth/undetectable mode the dock icon is hidden, but the window is
+  //      still visible — the dialog still has a surface to attach to.
+  //
+  // The 800ms delay lets the launcher's ready-to-show animation complete so the
+  // window is fully composited before the system sheet appears above it.
+  //
+  // TCC caches the decision permanently after the first response — this block
+  // runs exactly ONCE on the first launch of each unique packaged binary.
+  // On every subsequent launch the status is 'granted' or 'denied', and we skip.
+  if (process.platform === 'darwin') {
+    setTimeout(async () => {
+      try {
+        const screenStatus = systemPreferences.getMediaAccessStatus('screen');
+        if (screenStatus === 'not-determined') {
+          console.log('[Init] Screen recording permission not-determined — triggering one-time TCC dialog after window is ready...');
+          // Minimal thumbnail: we only want the TCC side-effect, not actual image data.
+          await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 1, height: 1 } });
+          const afterStatus = systemPreferences.getMediaAccessStatus('screen');
+          console.log(`[Init] Screen recording status after startup TCC prompt: ${afterStatus}`);
+          if (afterStatus === 'denied') {
+            // Notify all open windows so the renderer can show a non-blocking banner.
+            const { BrowserWindow } = require('electron');
+            BrowserWindow.getAllWindows().forEach((win: Electron.BrowserWindow) => {
+              if (!win.isDestroyed()) {
+                win.webContents.send('system-audio-permission-denied',
+                  'Screen Recording was denied. Enable it in System Settings > Privacy & Security > Screen Recording, then restart Natively.');
+              }
+            });
+          }
+        } else {
+          console.log(`[Init] Screen recording permission already resolved at startup: ${screenStatus}`);
+        }
+      } catch (e) {
+        // Log the real OS error so it appears in natively_debug.log for support diagnosis.
+        // We do NOT re-throw — a missing screen-capture permission is non-fatal at launch.
+        console.warn('[Init] Startup screen recording permission check failed. Screenshots and system audio may not work. Error:', e);
+      }
+    }, 800);
+  }
 
   // Initialize CalendarManager
   try {

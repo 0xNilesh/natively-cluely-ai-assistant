@@ -286,7 +286,8 @@ export class OpenAIStreamingSTT extends EventEmitter {
             }, 5_000);
 
             // Configure the transcription session
-            const lang = this.languageKey
+            // 'auto' key → empty string so Whisper/gpt-4o-transcribe auto-detects the language
+            const lang = (this.languageKey && this.languageKey !== 'auto')
                 ? (RECOGNITION_LANGUAGES[this.languageKey]?.iso639 ?? '')
                 : '';
 
@@ -674,7 +675,7 @@ export class OpenAIStreamingSTT extends EventEmitter {
         });
         form.append('model', 'whisper-1');
 
-        const lang = this.languageKey
+        const lang = (this.languageKey && this.languageKey !== 'auto')
             ? (RECOGNITION_LANGUAGES[this.languageKey]?.iso639 ?? '')
             : '';
         if (lang) form.append('language', lang);

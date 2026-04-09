@@ -466,6 +466,15 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     }, []);
 
     useEffect(() => {
+        if (window.electronAPI?.onSttLanguageAutoDetected) {
+            const unsubscribe = window.electronAPI.onSttLanguageAutoDetected((bcp47: string) => {
+                setAutoDetectedLanguage(bcp47);
+            });
+            return () => unsubscribe();
+        }
+    }, []);
+
+    useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
             if (themeDropdownRef.current && !themeDropdownRef.current.contains(event.target as Node)) {
                 setIsThemeDropdownOpen(false);
@@ -493,6 +502,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     const [recognitionLanguage, setRecognitionLanguage] = useState('');
     const [selectedSttGroup, setSelectedSttGroup] = useState('');
     const [availableLanguages, setAvailableLanguages] = useState<Record<string, any>>({});
+    const [autoDetectedLanguage, setAutoDetectedLanguage] = useState<string | null>(null);
 
     // AI Response Language
     const [aiResponseLanguage, setAiResponseLanguage] = useState('English');
@@ -688,8 +698,10 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
 
             if (window.electronAPI?.getAiResponseLanguages) {
                 const aiLangs = await window.electronAPI.getAiResponseLanguages();
-                // Sort: English first, then alphabetical
+                // Sort: Auto first, English second, then alphabetical
                 const sortedAiLangs = [...aiLangs].sort((a, b) => {
+                    if (a.code === 'auto') return -1;
+                    if (b.code === 'auto') return 1;
                     if (a.label === 'English') return -1;
                     if (b.label === 'English') return 1;
                     return a.label.localeCompare(b.label);
@@ -697,7 +709,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                 setAvailableAiLanguages(sortedAiLangs);
 
                 const storedAi = await window.electronAPI.getAiResponseLanguage();
-                setAiResponseLanguage(storedAi || 'English');
+                setAiResponseLanguage(storedAi || 'auto');
             }
         };
         loadLanguages();
@@ -705,6 +717,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
 
     const handleLanguageChange = async (key: string) => {
         setRecognitionLanguage(key);
+        setAutoDetectedLanguage(null);  // always reset — new session may detect a different language
         if (availableLanguages[key]) {
             setSelectedSttGroup(availableLanguages[key].group);
         }
@@ -725,6 +738,8 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     // Helper to get unique groups
     const languageGroups = Array.from(new Set(Object.values(availableLanguages).map((l: any) => l.group)))
         .sort((a, b) => {
+            if (a === 'Auto') return -1;
+            if (b === 'Auto') return 1;
             if (a === 'English') return -1;
             if (b === 'English') return 1;
             return a.localeCompare(b);
@@ -1498,7 +1513,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                     </div>
                                                 </div>
 
-                                                {/* AI Response Language */}
+                                                    {/* AI Response Language */}
                                                 <div className="flex items-center justify-between px-4 py-3">
                                                     <div className="flex items-center gap-4">
                                                         <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle flex items-center justify-center text-text-tertiary">
@@ -1506,17 +1521,22 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                         </div>
                                                         <div>
                                                             <h3 className="text-sm font-bold text-text-primary">AI Response Language</h3>
-                                                            <p className="text-xs text-text-secondary mt-0.5">Language for AI suggestions and notes</p>
+                                                            <p className="text-xs text-text-secondary mt-0.5">
+                                                                {aiResponseLanguage === 'auto'
+                                                                    ? 'Mirrors user\'s language automatically'
+                                                                    : 'Language for AI suggestions and notes'
+                                                                }
+                                                            </p>
                                                         </div>
                                                     </div>
 
                                                     <div className="relative" ref={aiLangDropdownRef}>
                                                         <button
                                                             onClick={() => setIsAiLangDropdownOpen(!isAiLangDropdownOpen)}
-                                                            className="bg-bg-component hover:bg-bg-elevated border border-border-subtle text-text-primary pl-4 pr-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-2 min-w-[110px] justify-between"
+                                                            className="bg-bg-component hover:bg-bg-elevated border border-border-subtle text-text-primary px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-2 min-w-[110px] justify-between"
                                                         >
-                                                            <span className="capitalize text-ellipsis overflow-hidden whitespace-nowrap">
-                                                                {aiResponseLanguage}
+                                                            <span className="capitalize text-ellipsis overflow-hidden whitespace-nowrap flex items-center gap-1">
+                                                                {aiResponseLanguage === 'auto' ? 'Auto' : aiResponseLanguage}
                                                             </span>
                                                             <ChevronDown size={12} className={`shrink-0 transition-transform ${isAiLangDropdownOpen ? 'rotate-180' : ''}`} />
                                                         </button>
@@ -1533,7 +1553,11 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                                         }}
                                                                         className={`w-full text-left px-2 py-1.5 rounded-md text-xs flex items-center gap-2 transition-colors ${aiResponseLanguage === option.code ? 'text-text-primary bg-bg-item-active/50' : 'text-text-secondary hover:bg-bg-input hover:text-text-primary'}`}
                                                                     >
-                                                                        <span className="font-medium">{option.label}</span>
+                                                                        {option.code === 'auto' ? (
+                                                                            <span className="font-medium">Auto</span>
+                                                                        ) : (
+                                                                            <span className="font-medium">{option.label}</span>
+                                                                        )}
                                                                     </button>
                                                                 ))}
                                                             </div>
@@ -3015,7 +3039,17 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                             <div className="flex gap-2 items-center mt-2 px-1">
                                                 <Info size={14} className="text-text-secondary shrink-0" />
                                                 <p className="text-xs text-text-secondary">
-                                                    Select the primary language being spoken in the meeting.
+                                                    {recognitionLanguage === 'auto'
+                                                        ? autoDetectedLanguage
+                                                            ? (() => {
+                                                                const label = Object.values(availableLanguages).find((l: any) =>
+                                                                    l.bcp47 === autoDetectedLanguage || l.iso639 === autoDetectedLanguage
+                                                                )?.label as string | undefined;
+                                                                return `Auto mode — detected: ${label ?? autoDetectedLanguage}`;
+                                                              })()
+                                                            : 'Auto mode — language will be detected from the first few seconds of audio.'
+                                                        : 'Select the primary language being spoken in the meeting.'
+                                                    }
                                                 </p>
                                             </div>
                                         </div>

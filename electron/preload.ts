@@ -93,6 +93,7 @@ interface ElectronAPI {
   setAiResponseLanguage: (language: string) => Promise<{ success: boolean; error?: string }>
   getSttLanguage: () => Promise<string>
   getAiResponseLanguage: () => Promise<string>
+  onSttLanguageAutoDetected: (callback: (bcp47: string) => void) => () => void
 
   // Intelligence Mode IPC
   generateAssist: () => Promise<{ insight: string | null }>
@@ -585,6 +586,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
   setAiResponseLanguage: (language: string) => ipcRenderer.invoke("set-ai-response-language", language),
   getSttLanguage: () => ipcRenderer.invoke("get-stt-language"),
   getAiResponseLanguage: () => ipcRenderer.invoke("get-ai-response-language"),
+  onSttLanguageAutoDetected: (callback: (bcp47: string) => void) => {
+    const subscription = (_: any, bcp47: string) => callback(bcp47);
+    ipcRenderer.on('stt-language-auto-detected', subscription);
+    return () => { ipcRenderer.removeListener('stt-language-auto-detected', subscription); };
+  },
 
   // Intelligence Mode IPC
   generateAssist: () => ipcRenderer.invoke("generate-assist"),

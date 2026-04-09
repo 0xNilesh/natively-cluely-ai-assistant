@@ -27,15 +27,19 @@ export class NativelyProSTT extends EventEmitter {
     private buffer: Buffer[] = [];
 
     // Language state — updated via setRecognitionLanguage()
-    private languageBcp47       = 'en-US';
+    private languageBcp47          = 'en-US';
     private languageAlternates: string[] = [];
+    // The key the caller last configured (e.g. 'auto', 'english-us').
+    // Preserved so stop() can reset languageBcp47 back to the configured value,
+    // ensuring the next start() sends 'auto' again rather than a stale detected language.
+    private configuredLanguageKey  = 'en-US';
 
     private reconnectAttempts = 0;
     private readonly MAX_RECONNECT   = 5;
     private readonly RECONNECT_BASE_MS = 1500;
     private reconnectTimer: NodeJS.Timeout | null = null;
 
-    private readonly BACKEND_URL = 'wss://natively-api-production.up.railway.app/v1/transcribe';
+    private readonly BACKEND_URL = 'wss://api.natively.software/v1/transcribe';
 
     constructor(apiKey: string, channel: 'system' | 'mic' = 'system') {
         super();
@@ -60,19 +64,26 @@ export class NativelyProSTT extends EventEmitter {
      * If the stream is already active, reconnect so the new language takes effect.
      */
     public setRecognitionLanguage(key: string): void {
-        const config = RECOGNITION_LANGUAGES[key];
-        if (!config) {
-            console.warn(`[NativelyProSTT] Unknown language key: ${key}`);
-            return;
+        this.configuredLanguageKey = key;  // remember for stop() reset
+
+        // 'auto' is a sentinel — send it as-is so the backend does parallel batch detection.
+        if (key === 'auto') {
+            this.languageBcp47      = 'auto';
+            this.languageAlternates = [];
+            console.log('[NativelyProSTT] Language set to auto-detect mode');
+        } else {
+            const config = RECOGNITION_LANGUAGES[key];
+            if (!config) {
+                console.warn(`[NativelyProSTT] Unknown language key: ${key}`);
+                return;
+            }
+            this.languageBcp47      = config.bcp47;
+            this.languageAlternates = 'alternates' in config
+                ? (config as EnglishVariant).alternates
+                : [];
+            console.log(`[NativelyProSTT] Language set: ${key} → ${this.languageBcp47}`,
+                this.languageAlternates.length ? `(alts: ${this.languageAlternates.join(', ')})` : '');
         }
-
-        this.languageBcp47       = config.bcp47;
-        this.languageAlternates  = 'alternates' in config
-            ? (config as EnglishVariant).alternates
-            : [];
-
-        console.log(`[NativelyProSTT] Language set: ${key} → ${this.languageBcp47}`,
-            this.languageAlternates.length ? `(alts: ${this.languageAlternates.join(', ')})` : '');
 
         // Reconnect with new language if already running.
         // Set intentionalClose=true so the ws.on('close') handler does NOT
@@ -103,9 +114,18 @@ export class NativelyProSTT extends EventEmitter {
     }
 
     public stop(): void {
-        this.isActive       = false;
-        this._chunksSent    = 0;
+        this.isActive         = false;
+        this._chunksSent      = 0;
         this.intentionalClose = false;  // Reset so a subsequent start() can reconnect normally
+
+        // Restore the configured language so the next start() uses the right handshake value.
+        // Without this, a language_detected reconnect would leave languageBcp47 = 'fr-FR'
+        // and the next meeting would start with French pinned instead of 'auto'.
+        if (this.configuredLanguageKey === 'auto') {
+            this.languageBcp47     = 'auto';
+            this.languageAlternates = [];
+        }
+
         if (this.reconnectTimer) {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;
@@ -199,6 +219,24 @@ export class NativelyProSTT extends EventEmitter {
                     this.reconnectAttempts = 0;
                     console.log(`[NativelyProSTT] Connected via ${msg.provider}`);
                     this.flushBuffer();
+                    return;
+                }
+
+                // Server detected language from the first audio batch (auto mode).
+                // Reconnect the stream with the detected BCP-47 code so transcripts
+                // are routed through the correct language model from here on.
+                if (msg.language_detected) {
+                    const detected: string = msg.language_detected;
+                    console.log(`[NativelyProSTT] Auto-detected language: ${detected}`);
+                    this.languageBcp47      = detected;
+                    this.languageAlternates = [];
+                    this.reconnectAttempts  = 0;  // fresh session — reset backoff counter
+                    this.emit('languageDetected', detected);
+                    if (this.isActive && this.ws) {
+                        this.intentionalClose = true;
+                        this.closeUpstream();
+                        setTimeout(() => { if (this.isActive) this.connect(); }, 250);
+                    }
                     return;
                 }
 
