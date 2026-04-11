@@ -2717,7 +2717,10 @@ export function initializeIpcHandlers(appState: AppState): void {
         const nativelyKey = cm.getNativelyApiKey();
         if (nativelyKey) {
           const { NativelySearchProvider } = require('../premium/electron/knowledge/NativelySearchProvider');
-          engine.setSearchProvider(new NativelySearchProvider(nativelyKey));
+          // Pass the real trial token when key is the __trial__ sentinel so the
+          // server can authenticate via x-trial-token instead of the invalid key.
+          const trialToken = nativelyKey === '__trial__' ? cm.getTrialToken() : undefined;
+          engine.setSearchProvider(new NativelySearchProvider(nativelyKey, trialToken ?? undefined));
           console.log('[IPC] Company research: using Natively API search (no Tavily key configured)');
         }
       }

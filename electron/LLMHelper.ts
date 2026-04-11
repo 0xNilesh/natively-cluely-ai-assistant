@@ -1232,7 +1232,17 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     if (!nativelyKey) throw new Error('Natively API key not set');
 
     const endpointUrl = 'https://api.natively.software/v1/chat';
-    const headers: any = { 'x-natively-key': nativelyKey, 'Content-Type': 'application/json' };
+    // When the key is the trial sentinel, authenticate with the real trial token
+    // instead — the server validates x-trial-token, not __trial__ as an API key.
+    const headers: any = { 'Content-Type': 'application/json' };
+    if (nativelyKey === '__trial__') {
+      const { CredentialsManager } = require('./services/CredentialsManager');
+      const trialToken = CredentialsManager.getInstance().getTrialToken();
+      if (!trialToken) throw new Error('Trial token not found');
+      headers['x-trial-token'] = trialToken;
+    } else {
+      headers['x-natively-key'] = nativelyKey;
+    }
 
     const body: any = { messages: [{ role: 'user', content: userMessage }] };
 
@@ -2317,15 +2327,25 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       if (images.length) body.images = images;
     }
 
+    // When the key is the trial sentinel, authenticate with the real trial token.
+    const streamHeaders: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Accept':       'text/event-stream',
+    };
+    if (nativelyKey === '__trial__') {
+      const { CredentialsManager } = require('./services/CredentialsManager');
+      const trialToken = CredentialsManager.getInstance().getTrialToken();
+      if (!trialToken) throw new Error('Trial token not found');
+      streamHeaders['x-trial-token'] = trialToken;
+    } else {
+      streamHeaders['x-natively-key'] = nativelyKey;
+    }
+
     // 60s timeout covers worst-case: max-token Gemini Pro response streamed over a slow connection.
     // This is intentionally longer than the non-streaming 25s timeout.
     const response = await fetch('https://api.natively.software/v1/chat', {
       method:  'POST',
-      headers: {
-        'x-natively-key': nativelyKey,
-        'Content-Type':   'application/json',
-        'Accept':         'text/event-stream',
-      },
+      headers: streamHeaders,
       body:   JSON.stringify(body),
       signal: AbortSignal.timeout(60_000),
     });

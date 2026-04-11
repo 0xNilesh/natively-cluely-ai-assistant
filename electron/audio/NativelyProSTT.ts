@@ -172,15 +172,27 @@ export class NativelyProSTT extends EventEmitter {
         this.ws.on('open', () => {
             if (!this.isActive) { this.ws?.close(); return; }
 
-            // Send auth + config handshake as first message
-            this.ws!.send(JSON.stringify({
-                key:                 this.apiKey,
+            // Build auth + config handshake.
+            // When the key is the trial sentinel, swap it for the real trial token
+            // in the trial_token field — the server validates that separately.
+            const baseFrame: Record<string, unknown> = {
                 sample_rate:         this.sampleRate,
                 language:            this.languageBcp47,
                 language_alternates: this.languageAlternates,
                 audio_channels:      this.audioChannels,
                 channel:             this.channel,
-            }));
+            };
+            if (this.apiKey === '__trial__') {
+                try {
+                    const { CredentialsManager } = require('../services/CredentialsManager');
+                    const trialToken = CredentialsManager.getInstance().getTrialToken();
+                    if (trialToken) baseFrame.trial_token = trialToken;
+                } catch { /* CredentialsManager unavailable — connection will be rejected by server */ }
+            } else {
+                baseFrame.key = this.apiKey;
+            }
+
+            this.ws!.send(JSON.stringify(baseFrame));
         });
 
         this.ws.on('message', (data: WebSocket.Data) => {

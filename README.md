@@ -1,4 +1,5 @@
 # [Sponsored by Recall AI - API for desktop recording](https://docs.recall.ai/docs/desktop-sdk?utm_source=github&utm_medium=sponsorship&utm_campaign=evinjohnn-natively-ai-assistant)
+
 If you’re looking for a hosted desktop recording API, consider checking out [Recall.ai](https://docs.recall.ai/docs/desktop-sdk?utm_source=github&utm_medium=sponsorship&utm_campaign=evinjohnn-natively-ai-assistant), an API that records Zoom, Google Meet, Microsoft Teams, in-person meetings, and more.
 
 <div align="center">
@@ -262,41 +263,56 @@ Are you managing separate accounts for your AI reasoning, live transcription, fa
 Most people spend 20 minutes getting their API keys set up across different platforms, only to hit rate limits or unexpected bills on per-token usage.
 
 **Your current unbundled stack:**
+
 - **AI Intelligence (GPT/Claude/Gemini):** per-token billing and usage anxiety
 - **Lightning-Fast Inference (Groq/Llama):** strict rate limits to monitor
 - **Real-Time Transcription (Deepgram/Google STT):** separate key + quota
 - **Web Search & Research (Tavily/Perplexity):** yet another subscription
 
 **Replaced by Natively API:**
+
 - **AI chat, transcription & web search** — all included
-- **One flat subscription.** Zero surprise bills. Starts at $8/mo.
+- **One flat subscription.** Zero surprise bills. Starts at $7/mo.
 - **Single key.** Zero rotation. Zero configuration.
-
-### Plans
-
-| Plan | Price | AI Requests | Transcription | Web Search | Natively Pro App |
-| :--- | :---: | :---------: | :-----------: | :--------: | :--------------: |
-| **Standard** | $8/mo | 500 | 200 min | 20 | ❌ |
-| **Pro** | $15/mo | 1,000 | 500 min | 100 | ✅ |
-| **Max** | $25/mo | 2,000 | 1,000 min | 200 | ✅ |
-| **Ultra** | $35/mo | 3,000 | 2,000 min | 300 | ✅ |
-
-> Pro, Max, and Ultra plans include **Natively Pro** — full desktop app with resume awareness, company research, and salary negotiation — bundled at no extra cost.
 
 **Don't start the long way.** Skip the 20-minute manual setup. One Natively subscription skips all of it — AI, transcription, and web search are ready immediately.
 
 <p align="center">
   <a href="https://checkout.dodopayments.com/buy/pdt_0NbFixGmD8CSeawb5qvVl">
-    <img src="https://img.shields.io/badge/Standard-$8%2Fmo-6B7280?style=for-the-badge" />
+    <img src="https://img.shields.io/badge/Get_Natively_API-Subscribe_Now-F97316?style=for-the-badge&logo=fastapi&logoColor=white" />
   </a>
-  <a href="https://checkout.dodopayments.com/buy/pdt_0NcM6Aw0IWdspbsgUeCLA">
-    <img src="https://img.shields.io/badge/Pro-$15%2Fmo-8B5CF6?style=for-the-badge" />
-  </a>
-  <a href="https://checkout.dodopayments.com/buy/pdt_0NcM7JElX4Af6LNVFS1Yf">
-    <img src="https://img.shields.io/badge/Max-$25%2Fmo-3B82F6?style=for-the-badge" />
-  </a>
-  <a href="https://checkout.dodopayments.com/buy/pdt_0NcM7rC2kAb69TFKsZnUU">
-    <img src="https://img.shields.io/badge/Ultra-$35%2Fmo-F97316?style=for-the-badge" />
+</p>
+
+---
+
+## Natively API (Hosted Tier)
+
+**Stop managing four separate services. One key. Zero configuration.**
+
+Are you managing separate accounts for your AI reasoning, live transcription, fast inference, and web search? Juggling multiple API keys, rate limits, and invoices across completely different categories of tools is unnecessary overhead. Natively API replaces all of those categories with **one flat subscription**.
+
+### 4 Categories → 1 Key
+
+Most people spend 20 minutes getting their API keys set up across different platforms, only to hit rate limits or unexpected bills on per-token usage.
+
+**Your current unbundled stack:**
+
+- **AI Intelligence (GPT/Claude/Gemini):** per-token billing and usage anxiety
+- **Lightning-Fast Inference (Groq/Llama):** strict rate limits to monitor
+- **Real-Time Transcription (Deepgram/Google STT):** separate key + quota
+- **Web Search & Research (Tavily/Perplexity):** yet another subscription
+
+**Replaced by Natively API:**
+
+- **AI chat, transcription & web search** — all included
+- **One flat subscription.** Zero surprise bills. Starts at $7/mo.
+- **Single key.** Zero rotation. Zero configuration.
+
+**Don't start the long way.** Skip the 20-minute manual setup. One Natively subscription skips all of it — AI, transcription, and web search are ready immediately.
+
+<p align="center">
+  <a href="https://checkout.dodopayments.com/buy/pdt_0NbFixGmD8CSeawb5qvVl">
+    <img src="https://img.shields.io/badge/Get_Natively_API-Subscribe_Now-F97316?style=for-the-badge&logo=fastapi&logoColor=white" />
   </a>
 </p>
 

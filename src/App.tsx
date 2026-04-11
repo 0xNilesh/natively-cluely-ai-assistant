@@ -145,12 +145,9 @@ const App: React.FC = () => {
     hasNativelyApi
   );
 
-  // Preview shortcuts — Ctrl/Cmd+Shift+1-5 force-show any ad card instantly.
-  // Registered here (not in the hook) so they work in both dev and prod builds,
-  // and so the toasters render regardless of isLauncherMainView / isSettingsOpen.
+  // Preview shortcuts — Ctrl/Cmd+Shift+1-5 force-show any ad card.
   // Uses e.code so Shift doesn't remap the digit to a symbol ('!' etc.).
   useEffect(() => {
-    if (isOverlayWindow || isSettingsWindow || isModelSelectorWindow) return;
     const CODE_MAP: Record<string, string> = {
       'Digit1': 'max_ultra_upgrade',
       'Digit2': 'promo',
@@ -165,9 +162,9 @@ const App: React.FC = () => {
       e.preventDefault();
       previewAd(ad as any);
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [previewAd, isOverlayWindow, isSettingsWindow, isModelSelectorWindow]);
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [previewAd]);
 
   useEffect(() => {
     // Clean up old local storage
@@ -542,6 +539,36 @@ const App: React.FC = () => {
       <UpdateBanner />
       <SupportToaster />
       <NativelyQuotaBanner />
+
+      {/* ── DEV ad preview toolbar ───────────────────────────────────────
+          Floating buttons in the bottom-right corner. Click to instantly
+          show any ad card without keyboard shortcuts or cooldowns.
+          Remove before shipping. */}
+      <div style={{
+        position: 'fixed', bottom: 12, right: 12, zIndex: 99999,
+        display: 'flex', flexDirection: 'column', gap: 4,
+        fontFamily: 'monospace', fontSize: 10,
+      }}>
+        {([
+          ['max_ultra_upgrade', '#F59E0B'],
+          ['promo',             '#8B5CF6'],
+          ['natively_api',      '#3B82F6'],
+          ['profile',           '#10B981'],
+          ['jd',                '#EC4899'],
+        ] as const).map(([id, color]) => (
+          <button
+            key={id}
+            onClick={() => previewAd(id as any)}
+            style={{
+              padding: '3px 8px', borderRadius: 6, border: `1px solid ${color}55`,
+              background: `${color}22`, color, cursor: 'pointer',
+              letterSpacing: '0.05em', fontFamily: 'monospace', fontSize: 10,
+            }}
+          >
+            {id}
+          </button>
+        ))}
+      </div>
 
       {/* Free trial countdown banner — only in launcher window while trial is active */}
       {(isLauncherWindow || isDefault) && activeTrial && (
