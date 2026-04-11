@@ -222,6 +222,16 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         return () => unsub?.();
     }, []);
 
+    // Screen Recording Permission Warning Banner
+    const [systemAudioWarning, setSystemAudioWarning] = useState<string | null>(null);
+    useEffect(() => {
+        const unsub = window.electronAPI?.onSystemAudioPermissionDenied?.((message: string) => {
+            setSystemAudioWarning(message);
+            setIsExpanded(true); // Force overlay open so user sees the warning
+        });
+        return () => unsub?.();
+    }, []);
+
     // Auto-resize Window
     useLayoutEffect(() => {
         if (!contentRef.current) return;
@@ -1916,6 +1926,39 @@ Provide only the answer, nothing else.`;
 
 
 
+                            {/* System Audio Permission Warning Banner */}
+                            {systemAudioWarning && (
+                                <div className="flex items-center justify-between mx-4 mt-3 mb-1 px-3.5 py-2.5 bg-yellow-500/10 border border-yellow-500/20 rounded-[12px] shadow-sm relative no-drag group/warning">
+                                    <div className="flex flex-col gap-1 pr-3">
+                                        <div className="flex items-center gap-2 text-[12.5px] text-yellow-600 dark:text-yellow-400/90 font-medium leading-tight">
+                                            <div className="shrink-0 p-1 bg-yellow-500/20 rounded-full">
+                                                <svg className="w-3.5 h-3.5 text-yellow-600 dark:text-yellow-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                                                </svg>
+                                            </div>
+                                            <span>Screen Recording Permission Denied</span>
+                                        </div>
+                                        <p className="text-[11px] text-yellow-600/70 dark:text-yellow-400/60 leading-snug pl-[26px]">
+                                            {systemAudioWarning}
+                                        </p>
+                                    </div>
+                                    <div className="flex items-center gap-2 shrink-0">
+                                        <button 
+                                            onClick={() => { window.electronAPI.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'); }}
+                                            className="px-3 py-1.5 rounded-lg bg-yellow-500/15 hover:bg-yellow-500/25 text-yellow-700 dark:text-yellow-500 text-[11px] font-semibold transition-all active:scale-95 border border-yellow-500/20 shadow-sm"
+                                        >
+                                            Open Settings
+                                        </button>
+                                        <button 
+                                            onClick={() => setSystemAudioWarning(null)}
+                                            className="p-1.5 rounded-full hover:bg-black/5 dark:hover:bg-white/10 text-yellow-600/50 hover:text-yellow-700 dark:text-yellow-500/50 dark:hover:text-yellow-400 transition-colors absolute top-1 right-1 opacity-0 group-hover/warning:opacity-100"
+                                            title="Dismiss"
+                                        >
+                                            <X className="w-3 h-3" />
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
 
                             {/* Rolling Transcript Bar - Single-line interviewer speech */}
                             {(rollingTranscript || isInterviewerSpeaking) && showTranscript && (

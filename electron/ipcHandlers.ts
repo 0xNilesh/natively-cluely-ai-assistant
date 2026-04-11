@@ -17,6 +17,31 @@ export function initializeIpcHandlers(appState: AppState): void {
     ipcMain.handle(channel, listener);
   };
 
+  /**
+   * Returns true if the user has an active premium license OR an unexpired free trial.
+   * Used to gate profile intelligence features (resume upload, JD upload, company research, etc.).
+   */
+  const isProOrTrialActive = (): boolean => {
+    // 1. Full premium license (Dodo / Gumroad / Natively API subscription)
+    try {
+      const { LicenseManager } = require('../premium/electron/services/LicenseManager');
+      if (LicenseManager.getInstance().isPremium()) return true;
+    } catch { /* premium module not available */ }
+
+    // 2. Active free trial (token present and not expired)
+    try {
+      const { CredentialsManager } = require('./services/CredentialsManager');
+      const cm = CredentialsManager.getInstance();
+      const token = cm.getTrialToken();
+      if (!token) return false;
+      const expiresAt = cm.getTrialExpiresAt();
+      if (!expiresAt) return false;
+      return new Date(expiresAt).getTime() > Date.now();
+    } catch {
+      return false;
+    }
+  };
+
   // --- NEW Test Helper ---
   safeHandle("test-release-fetch", async () => {
     try {
@@ -64,6 +89,15 @@ export function initializeIpcHandlers(appState: AppState): void {
       return LicenseManager.getInstance().isPremium();
     } catch {
       return false;
+    }
+  });
+
+  safeHandle("license:get-details", async () => {
+    try {
+      const { LicenseManager } = require('../premium/electron/services/LicenseManager');
+      return LicenseManager.getInstance().getLicenseDetails();
+    } catch {
+      return { isPremium: false };
     }
   });
   // Async variant: performs Dodo server-side revocation check on startup.
@@ -780,6 +814,10 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
+  // ── Usage cache (60-second TTL, keyed by API key) ──────────────────────────
+  const _usageCache = new Map<string, { data: any; ts: number }>();
+  const USAGE_CACHE_TTL_MS = 60_000;
+
   safeHandle("set-natively-api-key", async (_, apiKey: string) => {
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
@@ -808,18 +846,69 @@ export function initializeIpcHandlers(appState: AppState): void {
         await appState.reconfigureSttProvider();
       }
 
+      // Auto-activate Natively Pro for pro/max/ultra API plans.
+      // Skips silently if the user already has a Gumroad/Dodo lifetime license.
+      if (apiKey) {
+        try {
+          const { LicenseManager } = require('../premium/electron/services/LicenseManager');
+          const result = await LicenseManager.getInstance().activateWithApiKey(apiKey);
+          if (result.success) {
+            console.log('[IPC] set-natively-api-key: Pro auto-activated via API plan.');
+            // Notify all windows so the license UI refreshes immediately
+            BrowserWindow.getAllWindows().forEach(win => {
+              if (!win.isDestroyed()) win.webContents.send('license-status-changed', { isPremium: true });
+            });
+          } else if (result.skipped) {
+            console.log('[IPC] set-natively-api-key: existing Gumroad/Dodo license preserved — Pro not overwritten.');
+          } else {
+            console.log('[IPC] set-natively-api-key: Pro not activated —', result.error);
+          }
+        } catch (e: any) {
+          // LicenseManager not available in this build — non-fatal
+          console.warn('[IPC] set-natively-api-key: LicenseManager unavailable for Pro auto-activation:', e?.message);
+        }
+      } else {
+        // API key was cleared — deactivate any natively_api Pro license so premium is revoked.
+        try {
+          const { LicenseManager } = require('../premium/electron/services/LicenseManager');
+          const lm = LicenseManager.getInstance();
+          // Only deactivate if the stored license is from a natively_api subscription.
+          // Never touch Gumroad/Dodo lifetime licenses here.
+          const details = lm.getLicenseDetails();
+          if (details.isPremium && details.provider === 'natively_api') {
+            await lm.deactivate();
+            console.log('[IPC] set-natively-api-key: key cleared — natively_api Pro license deactivated.');
+            BrowserWindow.getAllWindows().forEach(win => {
+              if (!win.isDestroyed()) win.webContents.send('license-status-changed', { isPremium: false });
+            });
+          }
+        } catch (e: any) {
+          console.warn('[IPC] set-natively-api-key: LicenseManager unavailable for Pro deactivation on key clear:', e?.message);
+        }
+      }
+
       return { success: true };
     } catch (error: any) {
       console.error("Error saving Natively API key:", error);
       return { success: false, error: error.message };
+    } finally {
+      // Always bust the cache when the key changes so the next usage fetch is fresh
+      _usageCache?.clear();
     }
   });
+
 
   safeHandle("get-natively-usage", async () => {
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
       const key = CredentialsManager.getInstance().getNativelyApiKey();
       if (!key) return { ok: false, error: 'no_key' };
+
+      // Return cached value if it's still fresh
+      const cached = _usageCache.get(key);
+      if (cached && Date.now() - cached.ts < USAGE_CACHE_TTL_MS) {
+        return cached.data;
+      }
 
       const res = await fetch('https://api.natively.software/v1/usage', {
         headers: { 'x-natively-key': key },
@@ -830,9 +919,248 @@ export function initializeIpcHandlers(appState: AppState): void {
         return { ok: false, error: body.error || 'request_failed', status: res.status };
       }
       const data = await res.json() as any;
-      return { ok: true, ...data };
+      const result = { ok: true, ...data };
+
+      // Cache the successful response
+      _usageCache.set(key, { data: result, ts: Date.now() });
+      return result;
     } catch (error: any) {
       return { ok: false, error: error.message || 'network_error' };
+    }
+  });
+
+  // Allow other handlers to force-invalidate the usage cache (e.g. after key change)
+  safeHandle("invalidate-natively-usage-cache", () => {
+    _usageCache.clear();
+    return { ok: true };
+  });
+
+  // ── Free Trial IPC ───────────────────────────────────────────────────────────
+
+  // Start or resume a free trial. Fetches HWID, calls server, persists token locally.
+  safeHandle("trial:start", async () => {
+    try {
+      const { CredentialsManager } = require('./services/CredentialsManager');
+      const cm = CredentialsManager.getInstance();
+
+      // Get hardware ID for HWID-binding
+      let hwid = 'unavailable';
+      try {
+        const { LicenseManager } = require('../premium/electron/services/LicenseManager');
+        hwid = LicenseManager.getInstance().getHardwareId() || 'unavailable';
+      } catch { /* LicenseManager not available — fall back */ }
+
+      const res = await fetch('https://api.natively.software/v1/trial/start', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ hwid }),
+        signal:  AbortSignal.timeout(10_000),
+      });
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({})) as any;
+        return { ok: false, error: body.error || 'request_failed', status: res.status };
+      }
+
+      const data = await res.json() as any;
+
+      if (data.ok && data.trial_token && !data.expired) {
+        cm.setTrialToken(data.trial_token, data.expires_at, data.started_at);
+
+        // Auto-configure natively as the model + STT provider during trial
+        const prevSttProvider = cm.getSttProvider();
+        cm.setNativelyApiKey('__trial__');   // sentinel — activates natively model routing
+        const newSttProvider = cm.getSttProvider();
+        if (newSttProvider !== prevSttProvider) {
+          await appState.reconfigureSttProvider();
+        }
+        const llmHelper = appState.processingHelper?.getLLMHelper?.();
+        if (llmHelper) llmHelper.setNativelyKey('__trial__');
+      }
+
+      return { ok: true, ...data };
+    } catch (error: any) {
+      console.error('[IPC] trial:start failed:', error);
+      return { ok: false, error: error.message || 'network_error' };
+    }
+  });
+
+  // Poll the server for live trial status (remaining time + usage counters).
+  safeHandle("trial:status", async () => {
+    try {
+      const { CredentialsManager } = require('./services/CredentialsManager');
+      const token = CredentialsManager.getInstance().getTrialToken();
+      if (!token) return { ok: false, error: 'no_trial_token' };
+
+      const res = await fetch('https://api.natively.software/v1/trial/status', {
+        headers: { 'x-trial-token': token },
+        signal:  AbortSignal.timeout(8_000),
+      });
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({})) as any;
+        return { ok: false, error: body.error || 'request_failed', status: res.status };
+      }
+
+      return await res.json();
+    } catch (error: any) {
+      return { ok: false, error: error.message || 'network_error' };
+    }
+  });
+
+  // Return local trial state from credentials (no network call — safe for startup check).
+  safeHandle("trial:get-local", async () => {
+    try {
+      const { CredentialsManager } = require('./services/CredentialsManager');
+      const cm    = CredentialsManager.getInstance();
+      const token = cm.getTrialToken();
+      if (!token) return { hasToken: false };
+      return {
+        hasToken:    true,
+        trialToken:  token,
+        expiresAt:   cm.getTrialExpiresAt(),
+        startedAt:   cm.getTrialStartedAt(),
+        expired:     cm.getTrialExpiresAt()
+                       ? new Date(cm.getTrialExpiresAt()!).getTime() < Date.now()
+                       : false,
+      };
+    } catch {
+      return { hasToken: false };
+    }
+  });
+
+  // Record the user's post-trial choice in analytics and clean up local state.
+  safeHandle("trial:convert", async (_, choice: string) => {
+    try {
+      const { CredentialsManager } = require('./services/CredentialsManager');
+      const token = CredentialsManager.getInstance().getTrialToken();
+      if (!token) return { ok: true };  // no token to report
+
+      await fetch('https://api.natively.software/v1/trial/convert', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', 'x-trial-token': token },
+        body:    JSON.stringify({ choice }),
+        signal:  AbortSignal.timeout(5_000),
+      }).catch(() => {});  // fire-and-forget — don't block local cleanup on network failure
+
+      return { ok: true };
+    } catch {
+      return { ok: true };
+    }
+  });
+
+  // End trial via BYOK path: wipe Pro-ingested data, clear trial token + natively key.
+  safeHandle("trial:end-byok", async () => {
+    try {
+      const { CredentialsManager } = require('./services/CredentialsManager');
+      const cm = CredentialsManager.getInstance();
+
+      // 1. Fire-and-forget analytics (non-blocking)
+      const token = cm.getTrialToken();
+      if (token) {
+        fetch('https://api.natively.software/v1/trial/convert', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json', 'x-trial-token': token },
+          body:    JSON.stringify({ choice: 'byok' }),
+          signal:  AbortSignal.timeout(4_000),
+        }).catch(() => {});
+      }
+
+      // 2. Clear trial token
+      cm.clearTrialToken();
+
+      // 3. Clear the trial sentinel key + revert model / STT to open defaults
+      cm.setNativelyApiKey('');
+      const llmHelper = appState.processingHelper?.getLLMHelper?.();
+      if (llmHelper) llmHelper.setNativelyKey(null);
+      await appState.reconfigureSttProvider();
+
+      // 4. Deactivate Pro license (removes license.enc)
+      try {
+        const { LicenseManager } = require('../premium/electron/services/LicenseManager');
+        await LicenseManager.getInstance().deactivate();
+      } catch { /* LicenseManager not available in this build */ }
+
+      // 5. Disable knowledge mode + wipe orchestrator in-memory caches for resume/JD
+      try {
+        const orchestrator = appState.getKnowledgeOrchestrator();
+        if (orchestrator) {
+          orchestrator.setKnowledgeMode(false);
+          const { DocType } = require('../premium/electron/knowledge/types');
+          orchestrator.deleteDocumentsByType(DocType.RESUME);
+          orchestrator.deleteDocumentsByType(DocType.JD);
+        }
+      } catch { /* ignore */ }
+
+      // 6. Wipe Pro-specific cached data from local SQLite
+      //    Targets: company dossiers, knowledge docs (+ cascades), resume nodes, user profile
+      //    NOT wiped: meetings, transcripts, chunks (user's own recordings)
+      try {
+        const sqliteDb = DatabaseManager.getInstance().getDb();
+        if (sqliteDb) {
+          sqliteDb.exec(`
+            DELETE FROM company_dossiers;
+            DELETE FROM knowledge_documents;
+            DELETE FROM resume_nodes;
+            DELETE FROM user_profile;
+          `);
+          console.log('[IPC] trial:end-byok: Pro data wiped from SQLite');
+        }
+      } catch (dbErr: any) {
+        console.warn('[IPC] trial:end-byok: SQLite wipe partial error:', dbErr.message);
+      }
+
+      // 7. Notify all windows to refresh license + model state
+      BrowserWindow.getAllWindows().forEach(win => {
+        if (!win.isDestroyed()) {
+          win.webContents.send('license-status-changed', { isPremium: false });
+          win.webContents.send('trial-ended', { choice: 'byok' });
+        }
+      });
+
+      return { success: true };
+    } catch (error: any) {
+      console.error('[IPC] trial:end-byok error:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  // Wipe only Pro profile data (resume + JD + company dossiers) without clearing
+  // trial token or natively key. Called automatically when trial expires so that
+  // profile intelligence data can't linger in SQLite after the trial window closes.
+  safeHandle("trial:wipe-profile-data", async () => {
+    try {
+      // 1. Disable knowledge mode + wipe orchestrator in-memory caches
+      try {
+        const orchestrator = appState.getKnowledgeOrchestrator();
+        if (orchestrator) {
+          orchestrator.setKnowledgeMode(false);
+          const { DocType } = require('../premium/electron/knowledge/types');
+          orchestrator.deleteDocumentsByType(DocType.RESUME);
+          orchestrator.deleteDocumentsByType(DocType.JD);
+        }
+      } catch { /* ignore — orchestrator may not be initialised */ }
+
+      // 2. Wipe Pro-specific SQLite tables
+      //    NOT wiped: meetings, transcripts, audio chunks (user's own recordings)
+      try {
+        const sqliteDb = DatabaseManager.getInstance().getDb();
+        if (sqliteDb) {
+          sqliteDb.exec(`
+            DELETE FROM company_dossiers;
+            DELETE FROM knowledge_documents;
+            DELETE FROM resume_nodes;
+            DELETE FROM user_profile;
+          `);
+        }
+      } catch (dbErr: any) {
+        console.warn('[IPC] trial:wipe-profile-data: SQLite wipe partial error:', dbErr.message);
+      }
+
+      return { success: true };
+    } catch (error: any) {
+      console.error('[IPC] trial:wipe-profile-data error:', error);
+      return { success: false, error: error.message };
     }
   });
 
@@ -1215,16 +1543,17 @@ export function initializeIpcHandlers(appState: AppState): void {
     console.log(`[IPC] Received test - stt - connection request for provider: ${provider} `);
     try {
       if (provider === 'deepgram') {
-        // Test Deepgram via WebSocket connection
         const WebSocket = require('ws');
+        const token = apiKey.trim();
         return await new Promise<{ success: boolean; error?: string }>((resolve) => {
-          const url = 'wss://api.deepgram.com/v1/listen?model=nova-3&encoding=linear16&sample_rate=16000&channels=1';
+          const url = 'wss://api.deepgram.com/v1/listen?model=nova-2&encoding=linear16&sample_rate=16000&channels=1';
           const ws = new WebSocket(url, {
-            headers: { Authorization: `Token ${apiKey} ` },
+            headers: { Authorization: `Token ${token}` },
           });
 
           const timeout = setTimeout(() => {
             ws.close();
+            console.error('[IPC] Deepgram test failed: Connection timed out');
             resolve({ success: false, error: 'Connection timed out' });
           }, 15000);
 
@@ -1235,8 +1564,21 @@ export function initializeIpcHandlers(appState: AppState): void {
             resolve({ success: true });
           });
 
+          ws.on('unexpected-response', (request: any, response: any) => {
+            clearTimeout(timeout);
+            const status = response.statusCode;
+            let body = '';
+            response.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+            response.on('end', () => {
+              const errMsg = `Unexpected server response: ${status} - ${body}`;
+              console.error(`[IPC] Deepgram test failed: ${errMsg}`);
+              resolve({ success: false, error: errMsg });
+            });
+          });
+
           ws.on('error', (err: any) => {
             clearTimeout(timeout);
+            console.error(`[IPC] Deepgram test error: ${err.message}`);
             resolve({ success: false, error: err.message || 'Connection failed' });
           });
         });
@@ -1664,6 +2006,12 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle("open-external", async (event, url: string) => {
     try {
+      // For macOS System Settings, URL() parsing might act differently or we can just check string prefix
+      if (url.startsWith('x-apple.systempreferences:')) {
+        await shell.openExternal(url);
+        return;
+      }
+      
       const parsed = new URL(url);
       if (['http:', 'https:', 'mailto:'].includes(parsed.protocol)) {
         await shell.openExternal(url);
@@ -2206,9 +2554,8 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle("profile:upload-resume", async (_, filePath: string) => {
     try {
-      // Premium gate: require active license for profile features
-      const { LicenseManager } = require('../premium/electron/services/LicenseManager');
-      if (!LicenseManager.getInstance().isPremium()) {
+      // Premium gate: require active license or free trial for profile features
+      if (!isProOrTrialActive()) {
         return { success: false, error: 'Pro license required. Please activate a license key to use Profile Intelligence features.' };
       }
       console.log(`[IPC] profile:upload-resume called with: ${filePath}`);
@@ -2247,12 +2594,9 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle("profile:set-mode", async (_, enabled: boolean) => {
     try {
-      // Premium gate: only allow enabling profile mode with active license
-      if (enabled) {
-        const { LicenseManager } = require('../premium/electron/services/LicenseManager');
-        if (!LicenseManager.getInstance().isPremium()) {
-          return { success: false, error: 'Pro license required. Please activate a license key to use Profile Intelligence features.' };
-        }
+      // Premium gate: only allow enabling profile mode with active license or free trial
+      if (enabled && !isProOrTrialActive()) {
+        return { success: false, error: 'Pro license required. Please activate a license key to use Profile Intelligence features.' };
       }
       const orchestrator = appState.getKnowledgeOrchestrator();
       if (!orchestrator) {
@@ -2319,8 +2663,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle("profile:upload-jd", async (_, filePath: string) => {
     try {
       // Premium gate
-      const { LicenseManager } = require('../premium/electron/services/LicenseManager');
-      if (!LicenseManager.getInstance().isPremium()) {
+      if (!isProOrTrialActive()) {
         return { success: false, error: 'Pro license required. Please activate a license key to use Profile Intelligence features.' };
       }
       console.log(`[IPC] profile:upload-jd called with: ${filePath}`);
@@ -2354,8 +2697,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle("profile:research-company", async (_, companyName: string) => {
     try {
       // Premium gate
-      const { LicenseManager } = require('../premium/electron/services/LicenseManager');
-      if (!LicenseManager.getInstance().isPremium()) {
+      if (!isProOrTrialActive()) {
         return { success: false, error: 'Pro license required. Please activate a license key to use Profile Intelligence features.' };
       }
       const orchestrator = appState.getKnowledgeOrchestrator();
@@ -2405,8 +2747,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle("profile:generate-negotiation", async (_, force: boolean = false) => {
     try {
       // Premium gate
-      const { LicenseManager } = require('../premium/electron/services/LicenseManager');
-      if (!LicenseManager.getInstance().isPremium()) {
+      if (!isProOrTrialActive()) {
         return { success: false, error: 'Pro license required. Please activate a license key to use Profile Intelligence features.' };
       }
       const orchestrator = appState.getKnowledgeOrchestrator();
@@ -2491,5 +2832,25 @@ export function initializeIpcHandlers(appState: AppState): void {
     });
     return;
   });
+
+  // ── Permissions ──────────────────────────────────────────────
+  safeHandle("permissions:check", async () => {
+    if (process.platform === 'darwin') {
+      const mic    = systemPreferences.getMediaAccessStatus('microphone')
+      const screen = systemPreferences.getMediaAccessStatus('screen')
+      return { microphone: mic, screen, platform: 'darwin' }
+    }
+    // Windows/Linux: no TCC — permissions handled by OS at install/first-use time
+    return { microphone: 'granted', screen: 'granted', platform: process.platform }
+  })
+
+  safeHandle("permissions:request-mic", async () => {
+    if (process.platform !== 'darwin') return true
+    try {
+      return await systemPreferences.askForMediaAccess('microphone')
+    } catch {
+      return false
+    }
+  })
 }
 

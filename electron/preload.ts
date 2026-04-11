@@ -62,6 +62,13 @@ interface ElectronAPI {
   setNativelyApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
   getNativelyUsage: () => Promise<{ ok: boolean; plan?: string; quota?: { transcription: { used: number; limit: number; remaining: number }; ai: { used: number; limit: number; remaining: number }; search: { used: number; limit: number; remaining: number }; resets_at: string }; member_since?: string; error?: string; status?: number }>
   getStoredCredentials: () => Promise<{ hasGeminiKey: boolean; hasGroqKey: boolean; hasOpenaiKey: boolean; hasClaudeKey: boolean; hasNativelyKey: boolean; googleServiceAccountPath: string | null; sttProvider: string; hasSttGroqKey: boolean; hasSttOpenaiKey: boolean; hasDeepgramKey: boolean; hasElevenLabsKey: boolean; hasAzureKey: boolean; azureRegion: string; hasIbmWatsonKey: boolean; ibmWatsonRegion: string; hasSonioxKey: boolean }>
+  // Free Trial
+  startTrial:     () => Promise<{ ok: boolean; trial_token?: string; started_at?: string; expires_at?: string; expired?: boolean; already_used?: boolean; converted_to?: string | null; usage?: { ai: number; stt_seconds: number; search: number }; limits?: { duration_ms: number; ai_requests: number; stt_minutes: number; search_requests: number }; error?: string; status?: number }>
+  getTrialStatus: () => Promise<{ ok: boolean; expired?: boolean; remaining_ms?: number; started_at?: string; expires_at?: string; converted_to?: string | null; usage?: { ai: number; stt_seconds: number; search: number }; limits?: object; error?: string }>
+  getLocalTrial:  () => Promise<{ hasToken: boolean; trialToken?: string; expiresAt?: string; startedAt?: string; expired?: boolean }>
+  convertTrial:   (choice: string) => Promise<{ ok: boolean }>
+  endTrialByok:   () => Promise<{ success: boolean; error?: string }>
+  onTrialEnded:   (cb: (data: { choice: string }) => void) => () => void
 
   // STT Provider Management
   setSttProvider: (provider: 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively') => Promise<{ success: boolean; error?: string }>
@@ -94,6 +101,7 @@ interface ElectronAPI {
   getSttLanguage: () => Promise<string>
   getAiResponseLanguage: () => Promise<string>
   onSttLanguageAutoDetected: (callback: (bcp47: string) => void) => () => void
+  onSystemAudioPermissionDenied: (callback: (message: string) => void) => () => void
 
   // Intelligence Mode IPC
   generateAssist: () => Promise<{ insight: string | null }>
@@ -511,6 +519,23 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getNativelyUsage: () => ipcRenderer.invoke("get-natively-usage"),
   getStoredCredentials: () => ipcRenderer.invoke("get-stored-credentials"),
 
+  // Permissions
+  checkPermissions:    () => ipcRenderer.invoke("permissions:check"),
+  requestMicPermission: () => ipcRenderer.invoke("permissions:request-mic"),
+
+  // Free Trial
+  startTrial:       () => ipcRenderer.invoke("trial:start"),
+  getTrialStatus:   () => ipcRenderer.invoke("trial:status"),
+  getLocalTrial:    () => ipcRenderer.invoke("trial:get-local"),
+  convertTrial:     (choice: string) => ipcRenderer.invoke("trial:convert", choice),
+  endTrialByok:        () => ipcRenderer.invoke("trial:end-byok"),
+  wipeTrialProfileData: () => ipcRenderer.invoke("trial:wipe-profile-data"),
+  onTrialEnded:     (cb: (data: { choice: string }) => void) => {
+    const sub = (_: any, data: any) => cb(data);
+    ipcRenderer.on('trial-ended', sub);
+    return () => ipcRenderer.removeListener('trial-ended', sub);
+  },
+
   // STT Provider Management
   setSttProvider: (provider: 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively') => ipcRenderer.invoke("set-stt-provider", provider),
   getSttProvider: () => ipcRenderer.invoke("get-stt-provider"),
@@ -590,6 +615,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
     const subscription = (_: any, bcp47: string) => callback(bcp47);
     ipcRenderer.on('stt-language-auto-detected', subscription);
     return () => { ipcRenderer.removeListener('stt-language-auto-detected', subscription); };
+  },
+  onSystemAudioPermissionDenied: (callback: (message: string) => void) => {
+    const subscription = (_: any, message: string) => callback(message);
+    ipcRenderer.on('system-audio-permission-denied', subscription);
+    return () => { ipcRenderer.removeListener('system-audio-permission-denied', subscription); };
   },
 
   // Intelligence Mode IPC
@@ -1034,9 +1064,17 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // License Management
   licenseActivate: (key: string) => ipcRenderer.invoke('license:activate', key),
   licenseCheckPremium: () => ipcRenderer.invoke('license:check-premium'),
+  licenseGetDetails: () => ipcRenderer.invoke('license:get-details'),
   licenseCheckPremiumAsync: () => ipcRenderer.invoke('license:check-premium-async'),
   licenseDeactivate: () => ipcRenderer.invoke('license:deactivate'),
   licenseGetHardwareId: () => ipcRenderer.invoke('license:get-hardware-id'),
+  onLicenseStatusChanged: (callback: (data: { isPremium: boolean, plan?: string }) => void) => {
+    const subscription = (_: any, data: { isPremium: boolean, plan?: string }) => callback(data);
+    ipcRenderer.on('license-status-changed', subscription);
+    return () => {
+      ipcRenderer.removeListener('license-status-changed', subscription);
+    };
+  },
 
   // Overlay Opacity (Stealth Mode)
   setOverlayOpacity: (opacity: number) => ipcRenderer.invoke('set-overlay-opacity', opacity),

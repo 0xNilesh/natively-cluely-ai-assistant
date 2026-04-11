@@ -1304,12 +1304,15 @@ export class AppState {
       const screenStatus = getMacScreenCaptureStatus();
       console.log(`[Main] macOS screen recording permission status: ${screenStatus}`);
       if (screenStatus === 'denied') {
-        // Permission was explicitly denied — open System Settings and warn the user.
-        // We don't throw here: meeting continues with microphone-only transcription.
+        // Permission was explicitly denied — warn the user via the UI but do NOT
+        // auto-open System Settings. Forcing that window open every meeting start
+        // is extremely disruptive, especially when mic transcription is still working.
+        // The UI will show a non-blocking banner; the user can fix it deliberately.
         const message = 'Screen Recording permission denied. System audio will not be captured. To fix: System Settings → Privacy & Security → Screen Recording → enable Natively.';
         console.warn('[Main]', message);
         this.broadcast('system-audio-permission-denied', message);
-        shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');
+        // NOTE: Do NOT call shell.openExternal() here — it hijacks focus on every meeting
+        // start. The UI banner (system-audio-permission-denied IPC event) handles this.
       }
       // 'not-determined': Handled at startup. SCK/CoreAudio will trigger the TCC
       // dialog itself when it first attempts to access screen content.
@@ -2525,29 +2528,45 @@ async function initializeApp() {
     setTimeout(async () => {
       try {
         const screenStatus = systemPreferences.getMediaAccessStatus('screen');
+        console.log(`[Init] Screen recording permission status at startup: ${screenStatus}`);
+
         if (screenStatus === 'not-determined') {
-          console.log('[Init] Screen recording permission not-determined — triggering one-time TCC dialog after window is ready...');
-          // Minimal thumbnail: we only want the TCC side-effect, not actual image data.
-          await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 1, height: 1 } });
-          const afterStatus = systemPreferences.getMediaAccessStatus('screen');
-          console.log(`[Init] Screen recording status after startup TCC prompt: ${afterStatus}`);
-          if (afterStatus === 'denied') {
-            // Notify all open windows so the renderer can show a non-blocking banner.
-            const { BrowserWindow } = require('electron');
-            BrowserWindow.getAllWindows().forEach((win: Electron.BrowserWindow) => {
-              if (!win.isDestroyed()) {
-                win.webContents.send('system-audio-permission-denied',
-                  'Screen Recording was denied. Enable it in System Settings > Privacy & Security > Screen Recording, then restart Natively.');
-              }
-            });
+          // First launch: trigger the one-time TCC dialog by making a minimal
+          // desktopCapturer call. macOS will show the permission sheet anchored
+          // to our window. The user's response is stored permanently in the TCC
+          // database — we do NOT check status immediately after because the dialog
+          // is still open; the status will be read correctly next time `startMeeting`
+          // is called (which is the correct gate for system audio access).
+          console.log('[Init] Screen recording not-determined — showing one-time TCC dialog...');
+          try {
+            await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 1, height: 1 } });
+          } catch (e) {
+            // On some Electron builds getSources throws when permission is pending —
+            // that's fine; the TCC dialog has still been triggered.
+            console.log('[Init] getSources threw (expected during TCC pending state):', (e as Error).message);
           }
+          // NOTE: Do NOT read afterStatus here — TCC response is async (dialog still open).
+          // startMeeting() reads the status when the user actually tries to use audio.
+
+        } else if (screenStatus === 'denied') {
+          // Returning user who previously denied — show the banner immediately at startup
+          // so they know system audio won't work before they even start a meeting.
+          console.warn('[Init] Screen recording was previously denied — notifying UI banner.');
+          const { BrowserWindow } = require('electron');
+          BrowserWindow.getAllWindows().forEach((win: Electron.BrowserWindow) => {
+            if (!win.isDestroyed()) {
+              win.webContents.send(
+                'system-audio-permission-denied',
+                'Screen Recording is disabled. System audio capture will not work. Click "Open Settings" to enable it, then restart Natively.'
+              );
+            }
+          });
         } else {
-          console.log(`[Init] Screen recording permission already resolved at startup: ${screenStatus}`);
+          // 'granted' or 'restricted' — nothing to do.
+          console.log(`[Init] Screen recording permission already resolved: ${screenStatus}`);
         }
       } catch (e) {
-        // Log the real OS error so it appears in natively_debug.log for support diagnosis.
-        // We do NOT re-throw — a missing screen-capture permission is non-fatal at launch.
-        console.warn('[Init] Startup screen recording permission check failed. Screenshots and system audio may not work. Error:', e);
+        console.warn('[Init] Startup screen recording permission check failed:', e);
       }
     }, 800);
   }

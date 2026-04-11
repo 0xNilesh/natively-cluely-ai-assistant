@@ -363,9 +363,10 @@ interface SettingsOverlayProps {
     isOpen: boolean;
     onClose: () => void;
     initialTab?: string;
+    isTrialActive?: boolean;
 }
 
-const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, initialTab = 'general' }) => {
+const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, initialTab = 'general', isTrialActive = false }) => {
     const isLight = useResolvedTheme() === 'light';
     const [activeTab, setActiveTab] = useState(initialTab);
     
@@ -410,6 +411,9 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     const [profileData, setProfileData] = useState<any>(null);
     const [isPremiumModalOpen, setIsPremiumModalOpen] = useState(false);
     const [isPremium, setIsPremium] = useState(false);
+    const [premiumPlan, setPremiumPlan] = useState<string>('');
+    // Trial users get the same profile access as premium users for the duration of the trial
+    const hasProfileAccess = isPremium || isTrialActive;
     const [jdUploading, setJdUploading] = useState(false);
     const [jdError, setJdError] = useState('');
     const [companyResearching, setCompanyResearching] = useState(false);
@@ -428,7 +432,14 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     // Sync with global state changes
     useEffect(() => {
         if (isOpen) {
-            window.electronAPI?.licenseCheckPremium?.().then(setIsPremium).catch(() => { });
+            if (window.electronAPI?.licenseGetDetails) {
+                window.electronAPI.licenseGetDetails().then((details) => {
+                    setIsPremium(details.isPremium);
+                    if (details.plan) setPremiumPlan(details.plan);
+                }).catch(() => { });
+            } else {
+                window.electronAPI?.licenseCheckPremium?.().then(setIsPremium).catch(() => { });
+            }
             
             // Fetch true initial state from main process
             window.electronAPI?.getUndetectable?.().then(setIsUndetectable).catch(() => { });
@@ -437,6 +448,26 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
             window.electronAPI?.getVerboseLogging?.().then(setVerboseLogging).catch(() => { });
         }
     }, [isOpen]);
+
+    useEffect(() => {
+        if (window.electronAPI?.onLicenseStatusChanged) {
+            return window.electronAPI.onLicenseStatusChanged((data) => {
+                if (data.isPremium) {
+                    if (window.electronAPI.licenseGetDetails) {
+                        window.electronAPI.licenseGetDetails().then((details) => {
+                            setIsPremium(details.isPremium);
+                            if (details.plan) setPremiumPlan(details.plan);
+                        }).catch(() => { });
+                    } else {
+                        setIsPremium(true);
+                    }
+                } else {
+                    setIsPremium(false);
+                    setPremiumPlan('');
+                }
+            });
+        }
+    }, []);
 
     useEffect(() => {
         if (window.electronAPI?.onUndetectableChanged) {
@@ -1743,16 +1774,28 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                             <div className="flex items-center gap-2">
                                                 <h3 className="text-sm font-bold text-text-primary">Professional Identity</h3>
                                                 <span className="bg-yellow-500/10 text-yellow-500 text-[9px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wide">BETA</span>
+                                                {isPremium && premiumPlan && (
+                                                    <span className="bg-[#FACC15]/10 text-[#FACC15] border border-[#FACC15]/20 text-[9px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wide ml-1">
+                                                        {premiumPlan.toUpperCase()} PLAN
+                                                    </span>
+                                                )}
+                                                {isTrialActive && !isPremium && (
+                                                    <span className="bg-violet-500/10 text-violet-400 border border-violet-500/20 text-[9px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wide ml-1">
+                                                        FREE TRIAL
+                                                    </span>
+                                                )}
                                             </div>
                                             <button
                                                 onClick={() => setIsPremiumModalOpen(true)}
                                                 className={`text-[11px] font-semibold flex items-center gap-1.5 transition-all duration-200 px-2.5 py-1 rounded-full border shadow-[0_0_10px_rgba(250,204,21,0.2)] hover:shadow-[0_0_15px_rgba(250,204,21,0.3)] ${isPremium
                                                     ? (isLight ? 'bg-bg-component text-text-primary border-border-subtle hover:bg-bg-item-surface' : 'bg-zinc-800 text-white border-white/10 hover:bg-zinc-700')
+                                                    : isTrialActive
+                                                    ? 'bg-violet-500/15 text-violet-300 border-violet-500/30 hover:bg-violet-500/25 active:scale-[0.98]'
                                                     : 'bg-[#FACC15] text-black border-transparent hover:bg-[#FDE047] active:scale-[0.98]'
                                                     }`}
                                             >
-                                                {isPremium ? <CheckCircle size={12} className="text-green-400" /> : <Sparkles size={12} className="text-black/80" />}
-                                                {isPremium ? 'Manage Pro' : 'Unlock Pro'}
+                                                {isPremium ? <CheckCircle size={12} className="text-green-400" /> : isTrialActive ? <Sparkles size={12} className="text-violet-400" /> : <Sparkles size={12} className="text-black/80" />}
+                                                {isPremium ? 'Manage Pro' : isTrialActive ? 'Upgrade' : 'Unlock Pro'}
                                             </button>
                                         </div>
                                         <p className="text-xs text-text-secondary mb-2">
@@ -1801,11 +1844,11 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                         )}
 
                                                         {/* High-fidelity Toggle */}
-                                                        <div className={`flex items-center gap-2 bg-bg-input px-3 py-1.5 rounded-full border border-border-subtle ${!isPremium ? 'opacity-40 cursor-not-allowed' : ''}`} title={!isPremium ? 'Requires Pro license' : ''}>
+                                                        <div className={`flex items-center gap-2 bg-bg-input px-3 py-1.5 rounded-full border border-border-subtle ${!hasProfileAccess ? 'opacity-40 cursor-not-allowed' : ''}`} title={!hasProfileAccess ? 'Requires Pro license' : ''}>
                                                             <span className="text-xs font-medium text-text-secondary">Persona Engine</span>
                                                             <div
                                                                 onClick={async () => {
-                                                                    if (!profileStatus.hasProfile || !isPremium) return;
+                                                                    if (!profileStatus.hasProfile || !hasProfileAccess) return;
                                                                     const newState = !profileStatus.profileMode;
                                                                     try {
                                                                         await window.electronAPI?.profileSetMode?.(newState);
@@ -1814,9 +1857,9 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                                         console.error('Failed to toggle profile mode:', e);
                                                                     }
                                                                 }}
-                                                                className={`w-9 h-5 rounded-full relative transition-colors ${(!profileStatus.hasProfile || !isPremium) ? 'opacity-40 cursor-not-allowed bg-bg-toggle-switch' : profileStatus.profileMode ? 'bg-accent-primary' : 'bg-bg-toggle-switch border border-border-muted'}`}
+                                                                className={`w-9 h-5 rounded-full relative transition-colors ${(!profileStatus.hasProfile || !hasProfileAccess) ? 'opacity-40 cursor-not-allowed bg-bg-toggle-switch' : profileStatus.profileMode ? 'bg-accent-primary' : 'bg-bg-toggle-switch border border-border-muted'}`}
                                                             >
-                                                                <div className={`absolute top-1 left-1 w-3 h-3 rounded-full bg-white transition-transform ${profileStatus.profileMode && isPremium ? 'translate-x-4' : 'translate-x-0'}`} />
+                                                                <div className={`absolute top-1 left-1 w-3 h-3 rounded-full bg-white transition-transform ${profileStatus.profileMode && hasProfileAccess ? 'translate-x-4' : 'translate-x-0'}`} />
                                                             </div>
                                                         </div>
                                                     </div>

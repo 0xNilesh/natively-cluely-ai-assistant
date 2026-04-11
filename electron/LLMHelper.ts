@@ -725,6 +725,15 @@ ANSWER DIRECTLY:`;
     try {
       if (this.useOllama) {
         return await this.callOllama(systemPrompt);
+      } else if (this.customProvider || this.activeCurlProvider) {
+        // Pass basePrompt (pre-language-injection) as systemPromptOverride so streamChat
+        // calls injectLanguageInstruction exactly once. lastQuestion is the clean user message.
+        // ignoreKnowledgeMode=true: this is a live suggestion, not a knowledge/profile query.
+        let fullResponse = '';
+        for await (const chunk of this.streamChat(lastQuestion, undefined, undefined, basePrompt, true)) {
+          fullResponse += chunk;
+        }
+        return this.processResponse(fullResponse);
       } else if (this.client) {
         const text = await this.generateWithFlash([{ text: systemPrompt }]);
         return this.processResponse(text);
@@ -3172,9 +3181,11 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   /**
    * Robust Meeting Summary Generation
    * Strategy:
-   * 1. Groq (if context text < 100k tokens approx)
-   * 2. Gemini Flash (Retry 2x)
-   * 3. Gemini Pro (Retry 5x)
+   * 0. Custom / cURL Provider (if user selected one — always takes priority)
+   * 1. Natively API (if configured)
+   * 2. Groq (if context text < 100k tokens approx)
+   * 3. Gemini Flash (Retry 2x)
+   * 4. Gemini Pro (Retry 5x)
    */
   public async generateMeetingSummary(systemPrompt: string, context: string, groqSystemPrompt?: string): Promise<string> {
     console.log(`[LLMHelper] generateMeetingSummary called. Context length: ${context.length}`);
@@ -3183,6 +3194,30 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     const estimateTokens = (text: string) => Math.ceil(text.length / 4);
     const tokenCount = estimateTokens(context);
     console.log(`[LLMHelper] Estimated tokens: ${tokenCount}`);
+
+    // ATTEMPT 0: Custom Provider (highest priority — user explicitly chose this)
+    if (this.customProvider || this.activeCurlProvider) {
+      try {
+        console.log(`[LLMHelper] Attempting custom provider for summary...`);
+        // Collect the async generator into a Promise so withTimeout works.
+        // ignoreKnowledgeMode=true: meeting summaries must never go through the
+        // profile/knowledge intercept — it would corrupt the output.
+        const collectChunks = async (): Promise<string> => {
+          let result = '';
+          for await (const chunk of this.streamChat(`Context:\n${context}`, undefined, undefined, systemPrompt, true)) {
+            result += chunk;
+          }
+          return result;
+        };
+        const text = await this.withTimeout(collectChunks(), 60000, 'Custom Provider Summary');
+        if (text.trim().length > 0) {
+          console.log(`[LLMHelper] ✅ Custom provider summary generated successfully.`);
+          return this.processResponse(text);
+        }
+      } catch (e: any) {
+        console.warn(`[LLMHelper] ⚠️ Custom provider summary failed: ${e.message}. Falling back...`);
+      }
+    }
 
     // ATTEMPT 1: Natively API (if configured — first in chain)
     if (this.hasNatively()) {

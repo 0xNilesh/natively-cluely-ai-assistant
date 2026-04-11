@@ -292,24 +292,31 @@ export class OpenAIStreamingSTT extends EventEmitter {
                 : '';
 
             this.ws!.send(JSON.stringify({
-                type: 'transcription_session.update',
+                type: 'session.update',
                 session: {
-                    input_audio_format: 'pcm16',
-                    input_audio_transcription: {
-                        model,
-                        prompt: '',
-                        language: lang || '',
-                    },
-                    // Server VAD — offload voice activity detection entirely to the server
-                    turn_detection: {
-                        type:                'server_vad',
-                        threshold:           0.5,
-                        prefix_padding_ms:   300,
-                        silence_duration_ms: 500,
-                    },
-                    // Server-side noise reduction
-                    input_audio_noise_reduction: {
-                        type: 'near_field',
+                    audio: {
+                        input: {
+                            format: {
+                                type: 'audio/pcm',
+                                rate: WS_SAMPLE_RATE,
+                            },
+                            transcription: {
+                                model,
+                                prompt: '',
+                                language: lang || '',
+                            },
+                            // Server VAD — offload voice activity detection entirely to the server
+                            turn_detection: {
+                                type:                'server_vad',
+                                threshold:           0.5,
+                                prefix_padding_ms:   300,
+                                silence_duration_ms: 500,
+                            },
+                            // Server-side noise reduction
+                            noise_reduction: {
+                                type: 'near_field',
+                            },
+                        },
                     },
                 },
             }));

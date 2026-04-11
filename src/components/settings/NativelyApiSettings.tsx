@@ -1,10 +1,12 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
     CheckCircle, AlertCircle,
     Mic, Brain, Search, Shield, Loader2,
-    RefreshCw, CalendarClock, Trash2, ArrowUpRight, Info
+    RefreshCw, CalendarClock, Trash2, ArrowUpRight, Info,
+    Zap, Clock, Sparkles
 } from 'lucide-react';
 import { NativelyLogoMark } from '../NativelyLogoMark';
+import { FreeTrialModal } from '../trial/FreeTrialModal';
 
 // ─── Types ───────────────────────────────────────────────────
 interface QuotaBucket { used: number; limit: number; remaining: number; }
@@ -19,7 +21,10 @@ interface UsageData {
     };
 }
 
-const PLAN_URL = 'https://checkout.dodopayments.com/buy/pdt_0NbFixGmD8CSeawb5qvVl';
+const PLAN_STANDARD_URL = 'https://checkout.dodopayments.com/buy/pdt_0NbFixGmD8CSeawb5qvVl';
+const PLAN_PRO_URL      = 'https://checkout.dodopayments.com/buy/pdt_0NcM6Aw0IWdspbsgUeCLA';
+const PLAN_MAX_URL      = 'https://checkout.dodopayments.com/buy/pdt_0NcM7JElX4Af6LNVFS1Yf';
+const PLAN_ULTRA_URL    = 'https://checkout.dodopayments.com/buy/pdt_0NcM7rC2kAb69TFKsZnUU';
 
 // ─── Quota bar ───────────────────────────────────────────────
 function QuotaBar({ label, icon: Icon, bucket, barColor }: {
@@ -51,6 +56,58 @@ function QuotaBar({ label, icon: Icon, bucket, barColor }: {
     );
 }
 
+// ─── Trial countdown (live, ticks every 500ms) ───────────────
+function TrialCountdown({ expiresAt }: { expiresAt: string }) {
+    const [remaining, setRemaining] = useState(() =>
+        Math.max(0, new Date(expiresAt).getTime() - Date.now())
+    );
+    useEffect(() => {
+        const id = setInterval(() => {
+            setRemaining(Math.max(0, new Date(expiresAt).getTime() - Date.now()));
+        }, 500);
+        return () => clearInterval(id);
+    }, [expiresAt]);
+    const totalSec = Math.ceil(remaining / 1000);
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
+    const isWarning = remaining < 2 * 60 * 1000;
+    return (
+        <div className={`flex items-center gap-1 ${isWarning ? 'text-amber-400' : 'text-text-tertiary'}`}>
+            <Clock size={11} strokeWidth={2} />
+            <span className="text-[11px] font-mono font-semibold tabular-nums">
+                {remaining === 0 ? 'Ended' : `${m}:${s.toString().padStart(2, '0')}`}
+            </span>
+        </div>
+    );
+}
+
+// ─── Trial usage pill ─────────────────────────────────────────
+function TrialUsagePill({
+    icon: Icon, used, limit, label, unit,
+}: { icon: React.ElementType; used: number; limit: number; label: string; unit: string }) {
+    const pct    = Math.min(100, (used / limit) * 100);
+    const isHigh = pct >= 80;
+    return (
+        <div className="bg-bg-input rounded-[10px] px-3 py-2.5 space-y-2 border border-border-subtle">
+            <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
+                    <Icon size={12} strokeWidth={2} className={isHigh ? 'text-amber-400' : 'text-text-tertiary'} />
+                    <span className="text-[10.5px] text-text-secondary font-medium">{label}</span>
+                </div>
+                <span className={`text-[12px] tabular-nums font-bold ${isHigh ? 'text-amber-400' : 'text-text-primary'}`}>
+                    {used}<span className="text-[10px] font-medium text-text-tertiary">/{limit}{unit}</span>
+                </span>
+            </div>
+            <div className="h-[4px] w-full bg-bg-surface rounded-full overflow-hidden">
+                <div
+                    className={`h-full rounded-full transition-all duration-500 ${isHigh ? 'bg-amber-400' : 'bg-violet-500/70'}`}
+                    style={{ width: `${pct}%` }}
+                />
+            </div>
+        </div>
+    );
+}
+
 // ─── Card wrapper ────────────────────────────────────────────
 function Card({ children, className = '' }: { children: React.ReactNode; className?: string }) {
     return (
@@ -71,6 +128,22 @@ export const NativelyApiSettings: React.FC = () => {
     const [usageData,      setUsageData]      = useState<UsageData | null>(null);
     const [usageError,     setUsageError]     = useState<string | null>(null);
     const [isLoadingUsage, setIsLoadingUsage] = useState(false);
+
+    // ── Free Trial state ──────────────────────────────────────
+    const [trialState, setTrialState] = useState<{
+        active:    boolean;
+        expired:   boolean;
+        expiresAt: string;
+        startedAt: string;
+        usage:     { ai: number; stt_seconds: number; search: number };
+    } | null>(null);
+    // True while getLocalTrial is in flight — prevents the "start trial" card
+    // from flashing before we know whether a trial token exists.
+    const [isCheckingTrial, setIsCheckingTrial] = useState(true);
+    const [trialLoading,    setTrialLoading]    = useState(false);
+    const [trialError,      setTrialError]      = useState<string | null>(null);
+    const [showTrialModal,  setShowTrialModal]  = useState(false);
+    const trialPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
     useEffect(() => {
         (async () => {
@@ -105,6 +178,103 @@ export const NativelyApiSettings: React.FC = () => {
 
     useEffect(() => { if (isSaved && !isLoading) fetchUsage(); }, [isSaved, isLoading, fetchUsage]);
 
+    // ── Trial init + polling ──────────────────────────────────
+    const refreshTrial = useCallback(async () => {
+        const res = await window.electronAPI?.getTrialStatus?.();
+        if (!res?.ok) return;
+        setTrialState({
+            active:    !(res.expired ?? false),
+            expired:   res.expired   ?? false,
+            expiresAt: res.expires_at ?? '',
+            startedAt: res.started_at ?? '',
+            usage:     res.usage      ?? { ai: 0, stt_seconds: 0, search: 0 },
+        });
+        if (res.expired) {
+            setShowTrialModal(true);
+            if (trialPollRef.current) { clearInterval(trialPollRef.current); trialPollRef.current = null; }
+        }
+    }, []);
+
+    useEffect(() => {
+        // On mount: read local trial token (no network) to determine initial render state,
+        // then fetch live usage from server. Setting trialState from local data first
+        // prevents the "start trial" card from flashing while the server call is in flight.
+        (async () => {
+            try {
+                const local = await window.electronAPI?.getLocalTrial?.();
+                if (!local?.hasToken) return;
+
+                if (local.expired) {
+                    // Token exists but expired locally — show modal immediately, confirm via server
+                    setTrialState({ active: false, expired: true, expiresAt: local.expiresAt ?? '', startedAt: local.startedAt ?? '', usage: { ai: 0, stt_seconds: 0, search: 0 } });
+                    setShowTrialModal(true);
+                    refreshTrial(); // updates usage counters in the modal
+                    return;
+                }
+
+                // Set optimistic active state immediately from local data so the correct
+                // card renders before the server responds (prevents start-card flash).
+                // Usage counters start at 0 and are replaced by refreshTrial below.
+                setTrialState({ active: true, expired: false, expiresAt: local.expiresAt ?? '', startedAt: local.startedAt ?? '', usage: { ai: 0, stt_seconds: 0, search: 0 } });
+
+                // Fetch live usage + start 15s polling (was 30s — halved so counters
+                // feel more responsive during an active session).
+                refreshTrial();
+                trialPollRef.current = setInterval(refreshTrial, 15_000);
+            } finally {
+                setIsCheckingTrial(false);
+            }
+        })();
+        return () => { if (trialPollRef.current) clearInterval(trialPollRef.current); };
+    }, [refreshTrial]);
+
+    const handleStartTrial = async () => {
+        setTrialLoading(true);
+        setTrialError(null);
+        try {
+            const res = await window.electronAPI?.startTrial?.();
+            if (!res?.ok) {
+                if (res?.error === 'trial_ip_limit' || res?.error === 'trial_start_rate_limited') {
+                    setTrialState({ active: false, expired: true, expiresAt: '', startedAt: '', usage: { ai: 0, stt_seconds: 0, search: 0 } });
+                    return;
+                }
+                const msg = res?.error === 'invalid_hwid'
+                    ? 'Could not read device ID. Restart the app and try again.'
+                    : res?.error || 'Could not start trial. Try again.';
+                setTrialError(msg);
+                return;
+            }
+            if (res.already_used && res.expired) {
+                setTrialState({ active: false, expired: true, expiresAt: '', startedAt: '', usage: { ai: 0, stt_seconds: 0, search: 0 } });
+                return;
+            }
+            setTrialState({
+                active:    !(res.expired ?? false),
+                expired:   res.expired   ?? false,
+                expiresAt: res.expires_at ?? '',
+                startedAt: res.started_at ?? '',
+                usage:     res.usage      ?? { ai: 0, stt_seconds: 0, search: 0 },
+            });
+            if (!res.expired) {
+                trialPollRef.current = setInterval(refreshTrial, 30_000);
+            }
+        } catch (e: any) {
+            setTrialError(e.message || 'Network error');
+        } finally {
+            setTrialLoading(false);
+        }
+    };
+
+    const handleByok = async () => {
+        // Only wipe — modal transitions to DoneState, then onDone closes it
+        await window.electronAPI?.endTrialByok?.();
+    };
+
+    const handleTrialDone = () => {
+        setTrialState(null);
+        setShowTrialModal(false);
+    };
+
     const handleSave = async () => {
         if (!apiKey.trim() || apiKey.includes('•')) return;
         setIsSaving(true); setError(null);
@@ -133,6 +303,121 @@ export const NativelyApiSettings: React.FC = () => {
     const planLabel = usageData?.plan ? usageData.plan.charAt(0).toUpperCase() + usageData.plan.slice(1) : null;
     const fmtDate   = (iso: string) => { try { return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }); } catch { return iso; } };
 
+    const PlansCard = (
+        <Card>
+            <div className="px-5 pt-5 pb-2">
+                <div className="flex items-center justify-between mb-4">
+                    <p className="text-[10px] font-semibold text-text-tertiary uppercase tracking-widest">Choose a Plan</p>
+                    <span className="text-[10px] text-text-tertiary">Pro, Max &amp; Ultra include Natively Pro app</span>
+                </div>
+
+                {/* Plan rows */}
+                <div className="space-y-2 pb-3">
+                    {([
+                        {
+                            name: 'Standard',
+                            price: '$8',
+                            url: PLAN_STANDARD_URL,
+                            color: 'text-slate-400',
+                            bg: 'bg-slate-500/10',
+                            border: 'border-slate-500/20',
+                            btnBg: 'bg-slate-700 hover:bg-slate-600',
+                            includesPro: false,
+                            features: ['500 AI req / mo', '200 min STT', '20 searches'],
+                        },
+                        {
+                            name: 'Pro',
+                            price: '$15',
+                            url: PLAN_PRO_URL,
+                            color: 'text-violet-400',
+                            bg: 'bg-violet-500/10',
+                            border: 'border-violet-500/20',
+                            btnBg: 'bg-violet-600 hover:bg-violet-500',
+                            includesPro: true,
+                            features: ['1,000 AI req / mo', '500 min STT', '100 searches'],
+                        },
+                        {
+                            name: 'Max',
+                            price: '$25',
+                            url: PLAN_MAX_URL,
+                            color: 'text-blue-400',
+                            bg: 'bg-blue-500/10',
+                            border: 'border-blue-500/20',
+                            btnBg: 'bg-blue-600 hover:bg-blue-500',
+                            includesPro: true,
+                            features: ['2,000 AI req / mo', '1,000 min STT', '200 searches'],
+                        },
+                        {
+                            name: 'Ultra',
+                            price: '$35',
+                            url: PLAN_ULTRA_URL,
+                            color: 'text-orange-400',
+                            bg: 'bg-orange-500/10',
+                            border: 'border-orange-500/20',
+                            btnBg: 'bg-orange-600 hover:bg-orange-500',
+                            includesPro: true,
+                            features: ['3,000 AI req / mo', '2,000 min STT', '300 searches'],
+                        },
+                    ] as const).map((plan) => (
+                        <div
+                            key={plan.name}
+                            className={`flex items-center gap-3 px-3.5 py-3 rounded-xl border ${plan.bg} ${plan.border}`}
+                        >
+                            {/* Name + features */}
+                            <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 mb-1">
+                                    <span className={`text-[13px] font-semibold ${plan.color}`}>{plan.name}</span>
+                                    {plan.includesPro && (
+                                        <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/20 text-emerald-400 tracking-wide">
+                                            + Pro App
+                                        </span>
+                                    )}
+                                </div>
+                                <p className="text-[10px] text-text-tertiary leading-relaxed">
+                                    {plan.features.join(' · ')}
+                                </p>
+                            </div>
+                            {/* Price + button */}
+                            <div className="flex items-center gap-2.5 shrink-0">
+                                <span className="text-[13px] font-semibold text-text-primary tabular-nums">{plan.price}<span className="text-[10px] font-normal text-text-tertiary">/mo</span></span>
+                                {(() => {
+                                    const currentPlan = usageData?.plan?.toLowerCase();
+                                    const rowPlan     = plan.name.toLowerCase();
+                                    // 'starter' is the legacy name for the $8 Standard plan
+                                    const isActive =
+                                        currentPlan === rowPlan ||
+                                        (rowPlan === 'standard' && currentPlan === 'starter');
+                                    return isActive ? (
+                                    <div className="px-3 py-1.5 rounded-lg text-[11px] font-semibold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20">
+                                        Active
+                                    </div>
+                                ) : (
+                                    <button
+                                        onClick={() => openExternal(plan.url)}
+                                        className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold text-white ${plan.btnBg} transition-all duration-150 flex items-center gap-1 cursor-pointer active:scale-[0.98]`}
+                                    >
+                                        Get <ArrowUpRight size={10} strokeWidth={2.5} />
+                                    </button>
+                                );
+                                })()}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+
+                {/* AI quota note */}
+                <div className="flex items-start gap-2 mb-4 px-3 py-2.5 bg-bg-input rounded-xl border border-border-subtle">
+                    <Info size={11} className="text-text-tertiary shrink-0 mt-[1px]" strokeWidth={2} />
+                    <p className="text-[11px] text-text-tertiary leading-relaxed">
+                        AI requests include chat replies, meeting title &amp; summary generation, and embeddings — not just manual messages.
+                    </p>
+                </div>
+            </div>
+        </Card>
+    );
+
+    const showTopPlans = !isLoading && !isSaved && !isCheckingTrial && trialState?.expired === true && trialState?.active === false;
+
     return (
         <div className="space-y-4 animated fadeIn">
 
@@ -153,6 +438,137 @@ export const NativelyApiSettings: React.FC = () => {
                     </div>
                 )}
             </div>
+
+            {/* ── Free Trial Modal (post-trial) ─────────────── */}
+            {showTrialModal && trialState && (
+                <FreeTrialModal
+                    usage={trialState.usage}
+                    onByok={handleByok}
+                    onDone={handleTrialDone}
+                />
+            )}
+
+            {/* ── Active trial status card ──────────────────── */}
+            {trialState?.active && (() => {
+                const sttMin = (trialState.usage.stt_seconds / 60).toFixed(1);
+                return (
+                    <Card className="shadow-sm border-violet-500/25">
+                        <div className="px-5 pt-5 pb-5 space-y-4">
+                            {/* Header — same layout as "Try Natively API free" start card */}
+                            <div className="flex items-start gap-3.5">
+                                <div className="w-10 h-10 rounded-[11px] bg-violet-500/10 border border-violet-500/20 flex items-center justify-center shrink-0">
+                                    <NativelyLogoMark size={18} className="text-violet-400" />
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                    <div className="flex items-center justify-between">
+                                        <p className="text-[13.5px] font-semibold text-text-primary tracking-tight">Free Trial Active</p>
+                                        <TrialCountdown expiresAt={trialState.expiresAt} />
+                                    </div>
+                                    <p className="text-[10.5px] text-text-tertiary mt-1">
+                                        {trialState.usage.ai} AI · {sttMin} min STT · {trialState.usage.search} searches used
+                                    </p>
+                                </div>
+                            </div>
+
+                            {/* Usage pills */}
+                            <div className="grid grid-cols-3 gap-2">
+                                <TrialUsagePill icon={Zap}    used={trialState.usage.ai}  limit={10}  label="AI"     unit="" />
+                                <TrialUsagePill icon={Mic}    used={Math.round(trialState.usage.stt_seconds / 60)} limit={10} label="STT"    unit="m" />
+                                <TrialUsagePill icon={Search} used={trialState.usage.search} limit={2}  label="Search" unit="" />
+                            </div>
+
+                            {/* CTA */}
+                            <button
+                                onClick={() => setShowTrialModal(true)}
+                                className="w-full flex items-center justify-center gap-2 py-2.5 rounded-[9px] text-[12.5px] font-semibold bg-violet-600 hover:bg-violet-500 text-white shadow-[0_1px_3px_rgba(0,0,0,0.1)] transition-all active:scale-[0.98] cursor-pointer"
+                            >
+                                <ArrowUpRight size={13} strokeWidth={2.3} />
+                                Keep the momentum going
+                            </button>
+                        </div>
+                    </Card>
+                );
+            })()}
+
+            {/* ── Free trial start card (no key, no active trial) ── */}
+            {!isLoading && !isSaved && !isCheckingTrial && (!trialState || (trialState.expired && !trialState.active)) && (() => {
+                const isClaimed = trialState?.expired === true;
+                
+                if (isClaimed) {
+                    return PlansCard;
+                }
+
+                return (
+                    <Card className="shadow-sm">
+                        <div className="px-5 pt-5 pb-4 flex flex-col items-center justify-center text-center">
+                            {/* Apple Promo Icon */}
+                            <div className="w-[42px] h-[42px] mb-3 rounded-[12px] bg-bg-input border border-border-subtle shadow-[inset_0_1px_rgba(255,255,255,0.06),0_2px_8px_rgba(0,0,0,0.04)] flex items-center justify-center relative overflow-hidden">
+                                <NativelyLogoMark size={20} className={isClaimed ? "text-text-tertiary" : "text-text-primary drop-shadow-sm"} />
+                            </div>
+                            
+                            <h3 className="text-[14.5px] font-bold text-text-primary tracking-tight mb-1">Natively API. Try it free.</h3>
+                            <p className="text-[12px] text-text-secondary leading-snug px-4 mb-4">
+                                Experience managed text-to-speech, AI models, and real-time research without a subscription.
+                            </p>
+
+                            {/* Clean limits grid container */}
+                            <div className="flex items-center justify-center gap-3.5 mb-5 text-[11.5px] font-medium text-text-primary bg-bg-input px-3.5 py-2 rounded-[8px] border border-border-subtle shadow-[inset_0_1px_rgba(255,255,255,0.02)]">
+                                <div className="flex flex-col items-center gap-1">
+                                    <Clock size={14} strokeWidth={2} className="text-blue-500" />
+                                    <span>10 min</span>
+                                </div>
+                                <div className="w-px h-5 bg-border-subtle/80" />
+                                <div className="flex flex-col items-center gap-1">
+                                    <Brain size={14} strokeWidth={2} className="text-violet-500" />
+                                    <span>10 reqs</span>
+                                </div>
+                                <div className="w-px h-5 bg-border-subtle/80" />
+                                <div className="flex flex-col items-center gap-1">
+                                    <Mic size={14} strokeWidth={2} className="text-emerald-500" />
+                                    <span>10m STT</span>
+                                </div>
+                                <div className="w-px h-5 bg-border-subtle/80" />
+                                <div className="flex flex-col items-center gap-1">
+                                    <Search size={14} strokeWidth={2} className="text-orange-500" />
+                                    <span>2 searches</span>
+                                </div>
+                            </div>
+
+                            <button
+                                onClick={handleStartTrial}
+                                disabled={trialLoading || isClaimed}
+                                className={`w-full max-w-[240px] flex items-center justify-center gap-2 py-2 rounded-full text-[13px] font-bold shadow-[0_1px_3px_rgba(0,0,0,0.1)] transition-all ${
+                                    isClaimed 
+                                    ? 'bg-bg-input text-text-tertiary border border-border-subtle cursor-not-allowed'
+                                    : 'bg-text-primary hover:bg-text-primary/90 text-bg-base active:scale-[0.98]'
+                                }`}
+                            >
+                                {trialLoading ? <><Loader2 size={13} className="animate-spin" /> Starting trial…</>
+                                : isClaimed ? 'Trial Already Claimed'
+                                : 'Start 10-Minute Free Trial'}
+                            </button>
+
+                            {/* Error Handling */}
+                            {trialError && !isClaimed && (
+                                <div className="flex items-center gap-1.5 px-3 py-2 mt-3 bg-red-500/10 border border-red-500/20 rounded-[8px]">
+                                    <AlertCircle size={13} className="text-red-500 shrink-0" strokeWidth={2} />
+                                    <p className="text-[11.5px] text-red-500 font-medium">{trialError}</p>
+                                </div>
+                            )}
+
+                            <p className="text-[10.5px] text-text-tertiary font-medium mt-3">
+                                No account needed — bound to this device.
+                            </p>
+                            
+                            <div className="w-[30px] h-px bg-border-subtle my-3" />
+                            
+                            <p className="text-[11px] text-text-secondary font-medium">
+                                Already have an API key? Enter it below.
+                            </p>
+                        </div>
+                    </Card>
+                );
+            })()}
 
             {/* ── API Key card ─────────────────────────────────── */}
             <Card>
@@ -236,7 +652,7 @@ export const NativelyApiSettings: React.FC = () => {
                     <p className="text-[11px] text-text-secondary leading-relaxed text-center">
                         Don't have a key?{' '}
                         <span
-                            onClick={() => openExternal(PLAN_URL)}
+                            onClick={() => openExternal(PLAN_STANDARD_URL)}
                             className="text-blue-400 hover:text-blue-300 cursor-pointer transition-colors duration-150"
                         >
                             Subscribe to get one
@@ -315,72 +731,8 @@ export const NativelyApiSettings: React.FC = () => {
                 </Card>
             )}
 
-            {/* ── Plan card ────────────────────────────────────── */}
-            <Card>
-                <div className="px-5 pt-5 pb-4">
-                    <div className="flex items-start justify-between mb-5">
-                        <div className="flex items-center gap-3">
-                            <div className="w-9 h-9 rounded-xl bg-amber-500/15 border border-amber-500/20 flex items-center justify-center shrink-0">
-                                <NativelyLogoMark size={18} className="text-amber-400" />
-                            </div>
-                            <div>
-                                <p className="text-[13px] font-semibold text-text-primary">Natively Standard</p>
-                                <p className="text-[11px] text-text-tertiary mt-0.5">Managed, no per-user key setup</p>
-                            </div>
-                        </div>
-                        <div className="flex items-baseline gap-0.5 shrink-0 ml-4">
-                            <span className="text-[14px] font-medium text-text-tertiary line-through opacity-70 mr-1">$15</span>
-                            <span className="text-[22px] font-semibold text-text-primary tracking-tight">$7</span>
-                            <span className="text-[12px] text-text-tertiary">/mo</span>
-                        </div>
-                    </div>
-
-                    {/* Feature grid */}
-                    <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 mb-5">
-                        {([
-                            { icon: Mic,    label: '200 min transcription / mo' },
-                            { icon: Brain,  label: '500 AI requests / mo'       },
-                            { icon: Search, label: '20 web searches / mo'        },
-                            { icon: Shield, label: 'No key management'           },
-                        ] as const).map(({ icon: Icon, label }) => (
-                            <div key={label} className="flex items-center gap-2">
-                                <div className="w-5 h-5 rounded-md bg-bg-input border border-border-subtle flex items-center justify-center shrink-0">
-                                    <Icon size={11} className="text-text-tertiary" strokeWidth={1.75} />
-                                </div>
-                                <span className="text-[11px] text-text-secondary leading-tight">{label}</span>
-                            </div>
-                        ))}
-                    </div>
-
-                    {/* AI quota note */}
-                    <div className="flex items-start gap-2 mb-5 px-3 py-2.5 bg-bg-input rounded-xl border border-border-subtle">
-                        <Info size={11} className="text-text-tertiary shrink-0 mt-[1px]" strokeWidth={2} />
-                        <p className="text-[11px] text-text-tertiary leading-relaxed">
-                            AI requests include chat replies, meeting title & summary generation, and embeddings — not just manual messages.
-                        </p>
-                    </div>
-
-                    {isSaved ? (
-                        <div className="w-full py-2.5 rounded-xl text-[13px] font-semibold
-                            bg-emerald-500/10 border border-emerald-500/20 text-emerald-400
-                            flex items-center justify-center gap-1.5">
-                            <CheckCircle size={13} strokeWidth={2} />
-                            Subscribed
-                        </div>
-                    ) : (
-                        <button
-                            onClick={() => openExternal(PLAN_URL)}
-                            className="w-full py-2.5 rounded-xl text-[13px] font-semibold text-white
-                                bg-blue-600 hover:bg-blue-500 active:scale-[0.99]
-                                shadow-sm shadow-blue-900/30
-                                transition-all duration-150 flex items-center justify-center gap-1.5 cursor-pointer"
-                        >
-                            Subscribe
-                            <ArrowUpRight size={13} strokeWidth={2.5} />
-                        </button>
-                    )}
-                </div>
-            </Card>
+            {/* ── Plans ────────────────────────────────────────── */}
+            {!showTopPlans && PlansCard}
 
             {/* ── How it works ─────────────────────────────────── */}
             <Card>

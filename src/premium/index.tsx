@@ -12,7 +12,7 @@ import React from 'react';
 const NullComponent: React.FC<any> = () => null;
 
 const nullAdCampaigns = (
-  _isPremium: boolean,
+  _planDetails: { isPremium: boolean; plan?: string; provider?: string },
   _hasProfile: boolean,
   _isAppReady: boolean,
   _appStartTime?: number,
@@ -61,6 +61,10 @@ const _nativelyApiPromo = import.meta.glob<any>(
   '../../premium/src/NativelyApiPromoToaster.tsx',
   { eager: true }
 );
+const _maxUltraUpgradeToaster = import.meta.glob<any>(
+  '../../premium/src/MaxUltraUpgradeToaster.tsx',
+  { eager: true }
+);
 
 // ─── Helper ──────────────────────────────────────────────────────────
 function get<T>(mods: Record<string, any>, name: string, fallback: T): T {
@@ -95,3 +99,6 @@ export const NegotiationCoachingCard: React.FC<any> =
 
 export const NativelyApiPromoToaster: React.FC<any> =
   get(_nativelyApiPromo, 'NativelyApiPromoToaster', NullComponent);
+
+export const MaxUltraUpgradeToaster: React.FC<any> =
+  get(_maxUltraUpgradeToaster, 'MaxUltraUpgradeToaster', NullComponent);
