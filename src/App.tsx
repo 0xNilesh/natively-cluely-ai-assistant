@@ -135,7 +135,7 @@ const App: React.FC = () => {
   const [showTrialExpiredModal, setShowTrialExpiredModal] = useState(false);
 
   const isAppReady = !isSettingsWindow && !isOverlayWindow && !isModelSelectorWindow && !showStartup && !isSettingsOpen && isLauncherMainView;
-  const { activeAd, dismissAd } = useAdCampaigns(
+  const { activeAd, dismissAd, previewAd } = useAdCampaigns(
     planDetails,
     hasProfile,
     isAppReady,
@@ -144,6 +144,30 @@ const App: React.FC = () => {
     isProcessingMeeting,
     hasNativelyApi
   );
+
+  // Preview shortcuts — Ctrl/Cmd+Shift+1-5 force-show any ad card instantly.
+  // Registered here (not in the hook) so they work in both dev and prod builds,
+  // and so the toasters render regardless of isLauncherMainView / isSettingsOpen.
+  // Uses e.code so Shift doesn't remap the digit to a symbol ('!' etc.).
+  useEffect(() => {
+    if (isOverlayWindow || isSettingsWindow || isModelSelectorWindow) return;
+    const CODE_MAP: Record<string, string> = {
+      'Digit1': 'max_ultra_upgrade',
+      'Digit2': 'promo',
+      'Digit3': 'natively_api',
+      'Digit4': 'profile',
+      'Digit5': 'jd',
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || !e.shiftKey) return;
+      const ad = CODE_MAP[e.code];
+      if (!ad) return;
+      e.preventDefault();
+      previewAd(ad as any);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [previewAd, isOverlayWindow, isSettingsWindow, isModelSelectorWindow]);
 
   useEffect(() => {
     // Clean up old local storage
@@ -579,7 +603,9 @@ const App: React.FC = () => {
           }}
         />
       )}
-      {isLauncherMainView && !isSettingsOpen && (
+      {/* Ad toasters — render whenever activeAd is set (isLauncherMainView guard bypassed
+          when triggered via preview shortcut so the card always surfaces) */}
+      {(isLauncherMainView || !!activeAd) && !isSettingsOpen && (
         <NativelyApiPromoToaster
           isOpen={activeAd === 'natively_api'}
           onDismiss={() => dismissAd('natively_api')}
@@ -589,23 +615,23 @@ const App: React.FC = () => {
           }}
         />
       )}
-      {isLauncherMainView && !isSettingsOpen && (
+      {(isLauncherMainView || !!activeAd) && (
         <>
-          <ProfileFeatureToaster 
-            isOpen={activeAd === 'profile'} 
+          <ProfileFeatureToaster
+            isOpen={activeAd === 'profile'}
             onDismiss={dismissAd}
             onSetupProfile={() => {
               setSettingsInitialTab('profile');
               setIsSettingsOpen(true);
-            }} 
+            }}
           />
-          <JDAwarenessToaster 
-            isOpen={activeAd === 'jd'} 
+          <JDAwarenessToaster
+            isOpen={activeAd === 'jd'}
             onDismiss={dismissAd}
             onSetupJD={() => {
               setSettingsInitialTab('profile');
               setIsSettingsOpen(true);
-            }} 
+            }}
           />
           <PremiumPromoToaster
             isOpen={activeAd === 'promo'}

@@ -22,6 +22,7 @@ const nullAdCampaigns = (
 ) => ({
   activeAd: null as string | null,
   dismissAd: (_campaignId?: string) => {},
+  previewAd: (_ad: any) => {},
 });
 
 // ─── Glob-import premium modules (empty {} when premium/ is absent) ──
