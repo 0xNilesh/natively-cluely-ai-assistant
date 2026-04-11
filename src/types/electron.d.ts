@@ -134,6 +134,7 @@ export interface ElectronAPI {
   getSttLanguage: () => Promise<string>
   getAiResponseLanguage: () => Promise<string>
   onSttLanguageAutoDetected: (callback: (bcp47: string) => void) => () => void
+  onSystemAudioPermissionDenied: (callback: (message: string) => void) => () => void
 
   getNativeAudioStatus: () => Promise<{ connected: boolean }>
 
@@ -329,6 +330,8 @@ export interface ElectronAPI {
   // Verbose / Debug Logging
   getVerboseLogging: () => Promise<boolean>;
   setVerboseLogging: (enabled: boolean) => Promise<{ success: boolean }>;
+  getLogFilePath: () => Promise<string | null>;
+  openLogFile: () => Promise<{ success: boolean; error?: string }>;
 
   // Arch
   getArch: () => Promise<string>;

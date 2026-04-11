@@ -1,7 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import {
     Github, Twitter, Shield, Cpu, Database,
-    Heart, Linkedin, Instagram, Mail, MicOff, Star, Bug, Globe, Sparkles, Zap
+    Heart, Linkedin, Instagram, Mail, MicOff, Star, Bug, Globe, Sparkles, Zap, Camera
 } from 'lucide-react';
 import evinProfile from '../assets/evin.png';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
@@ -64,31 +64,17 @@ export const AboutSection: React.FC<AboutSectionProps> = () => {
 
             {/* What's New Section */}
             <div>
-                <h4 className="text-xs font-bold text-text-tertiary uppercase tracking-wider mb-2 px-1">What's New</h4>
+                <h4 className="text-xs font-bold text-text-tertiary uppercase tracking-wider mb-2 px-1">What's New in v2.4</h4>
                 <div className="bg-bg-item-surface rounded-xl border border-border-subtle overflow-hidden">
                     <div className="p-3 border-b border-border-subtle bg-bg-card/50">
                         <div className="flex items-start gap-4">
-                            <div className="w-10 h-10 rounded-lg bg-indigo-500/10 flex items-center justify-center text-indigo-400 shrink-0">
-                                <Globe size={20} />
+                            <div className="w-10 h-10 rounded-lg bg-violet-500/10 flex items-center justify-center text-violet-400 shrink-0">
+                                <Sparkles size={20} />
                             </div>
                             <div>
-                                <h5 className="text-sm font-bold text-text-primary mb-1">Auto Language Detection</h5>
+                                <h5 className="text-sm font-bold text-text-primary mb-1">10-Minute Free Trial</h5>
                                 <p className="text-xs text-text-secondary leading-relaxed">
-                                    Natively and Natively API now automatically detect the spoken language in real-time, instantly adjusting transcripts and AI language mirroring without manual configuration.
-                                </p>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div className="p-3 border-b border-border-subtle bg-bg-card/50">
-                        <div className="flex items-start gap-4">
-                            <div className="w-10 h-10 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-400 shrink-0">
-                                <Database size={20} />
-                            </div>
-                            <div>
-                                <h5 className="text-sm font-bold text-text-primary mb-1">Multi-Screenshot Context</h5>
-                                <p className="text-xs text-text-secondary leading-relaxed">
-                                    Ask questions across multiple screens simultaneously. Automatic local image compression now enables lightning-fast analysis of multiple complex interactions.
+                                    Try Natively before committing. New users get a full-featured 10-minute trial including AI queries, live transcription, and web search — no credit card required.
                                 </p>
                             </div>
                         </div>
@@ -100,9 +86,9 @@ export const AboutSection: React.FC<AboutSectionProps> = () => {
                                 <Shield size={20} />
                             </div>
                             <div>
-                                <h5 className="text-sm font-bold text-text-primary mb-1">Zero-Downtime Pipeline</h5>
+                                <h5 className="text-sm font-bold text-text-primary mb-1">Guided Permissions Setup</h5>
                                 <p className="text-xs text-text-secondary leading-relaxed">
-                                    Natively API handles provider failures invisibly. If a speech or AI provider goes down or rate-limits, your session instantly fails over to a backup without losing a single word.
+                                    A smart first-launch card walks you through granting screen recording and microphone access, with live status re-checks after you visit System Settings.
                                 </p>
                             </div>
                         </div>
@@ -110,13 +96,13 @@ export const AboutSection: React.FC<AboutSectionProps> = () => {
 
                     <div className="p-3 border-b border-border-subtle bg-bg-card/50">
                         <div className="flex items-start gap-4">
-                            <div className="w-10 h-10 rounded-lg bg-violet-500/10 flex items-center justify-center text-violet-400 shrink-0">
-                                <Sparkles size={20} />
+                            <div className="w-10 h-10 rounded-lg bg-blue-500/10 flex items-center justify-center text-blue-400 shrink-0">
+                                <Camera size={20} />
                             </div>
                             <div>
-                                <h5 className="text-sm font-bold text-text-primary mb-1">Live Negotiation Coaching</h5>
+                                <h5 className="text-sm font-bold text-text-primary mb-1">Reliable Screenshot Capture</h5>
                                 <p className="text-xs text-text-secondary leading-relaxed">
-                                    Real-time salary negotiation advisor that tracks offer phases, extracts compensation amounts, and streams tactical guidance during live recruiter calls.
+                                    Screenshots now consistently appear in the message bar during active meetings. Cmd+H and Shift+H global shortcuts work correctly in all scenarios.
                                 </p>
                             </div>
                         </div>
@@ -124,13 +110,13 @@ export const AboutSection: React.FC<AboutSectionProps> = () => {
 
                     <div className="p-3 bg-bg-card/50">
                         <div className="flex items-start gap-4">
-                            <div className="w-10 h-10 rounded-lg bg-pink-500/10 flex items-center justify-center text-pink-400 shrink-0">
+                            <div className="w-10 h-10 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-400 shrink-0">
                                 <Zap size={20} />
                             </div>
                             <div>
-                                <h5 className="text-sm font-bold text-text-primary mb-1">Code Hint Mode</h5>
+                                <h5 className="text-sm font-bold text-text-primary mb-1">Custom Provider Notes & Summaries</h5>
                                 <p className="text-xs text-text-secondary leading-relaxed">
-                                    Context-aware senior-reviewer hints streamed from your screen. Intelligently ages stale questions across multi-round sessions without doing the work for you.
+                                    Custom and cURL LLM providers now power meeting note generation, session summaries, and AI suggestions — not just live chat responses.
                                 </p>
                             </div>
                         </div>

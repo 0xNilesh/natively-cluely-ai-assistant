@@ -2326,6 +2326,8 @@ export class AppState {
     setVerboseLoggingFlag(enabled);
     SettingsManager.getInstance().set('verboseLogging', enabled);
     console.log(`[AppState] verboseLogging set to ${enabled}`);
+    // Notify all renderer windows so they can start/stop forwarding their console output
+    this.broadcast('verbose-logging-changed', enabled);
   }
 
   public setDisguise(mode: 'terminal' | 'settings' | 'activity' | 'none'): void {

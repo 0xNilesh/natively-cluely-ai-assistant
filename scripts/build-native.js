@@ -27,6 +27,14 @@ function runCommand(command, extraEnv = {}) {
 // Resolve the actual clang runtime lib path (Xcode version changes across machines).
 // Rust's cross-compilation toolchain embeds a stale version number; we override with LIBRARY_PATH.
 function getClangLibPath() {
+  // Prefer clang -print-resource-dir — works with both Xcode.app and Command Line Tools.
+  try {
+    const resourceDir = execSync('clang -print-resource-dir', { encoding: 'utf8' }).trim();
+    const candidate = path.join(resourceDir, 'lib', 'darwin');
+    if (fs.existsSync(candidate)) return candidate;
+  } catch {}
+
+  // Fallback: scan Xcode.app toolchain (original behaviour)
   try {
     const clangBase = '/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang';
     const versions = fs.readdirSync(clangBase).filter(d => /^\d/.test(d)).sort();
@@ -34,6 +42,7 @@ function getClangLibPath() {
       return path.join(clangBase, versions[versions.length - 1], 'lib', 'darwin');
     }
   } catch {}
+
   return null;
 }
 

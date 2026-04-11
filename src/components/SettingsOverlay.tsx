@@ -427,6 +427,8 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     const [negotiationGenerating, setNegotiationGenerating] = useState(false);
     const [negotiationError, setNegotiationError] = useState('');
     const [verboseLogging, setVerboseLogging] = useState(false);
+    const [showVerboseToast, setShowVerboseToast] = useState(false);
+    const verboseToastTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
     // Close dropdown when clicking outside
     // Sync with global state changes
@@ -448,6 +450,14 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
             window.electronAPI?.getVerboseLogging?.().then(setVerboseLogging).catch(() => { });
         }
     }, [isOpen]);
+
+    useEffect(() => {
+        if (!showVerboseToast) return;
+        verboseToastTimerRef.current = setTimeout(() => setShowVerboseToast(false), 5200);
+        return () => {
+            if (verboseToastTimerRef.current) clearTimeout(verboseToastTimerRef.current);
+        };
+    }, [showVerboseToast]);
 
     useEffect(() => {
         if (window.electronAPI?.onLicenseStatusChanged) {
@@ -1477,7 +1487,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                         </div>
                                                         <div>
                                                             <h3 className="text-sm font-bold text-text-primary">Verbose debug logging</h3>
-                                                            <p className="text-xs text-text-secondary mt-0.5">Print detailed audio, STT, and pipeline diagnostics to the terminal</p>
+                                                            <p className="text-xs text-text-secondary mt-0.5">Print detailed audio, STT, and pipeline diagnostics</p>
                                                         </div>
                                                     </div>
                                                     <div
@@ -1485,12 +1495,51 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                             const newState = !verboseLogging;
                                                             setVerboseLogging(newState);
                                                             window.electronAPI?.setVerboseLogging?.(newState);
+                                                            if (newState) {
+                                                                setShowVerboseToast(true);
+                                                            }
                                                         }}
-                                                        className={`w-11 h-6 rounded-full relative transition-colors ${verboseLogging ? 'bg-amber-500' : 'bg-bg-toggle-switch border border-border-muted'}`}
+                                                        className={`w-11 h-6 rounded-full relative transition-colors cursor-pointer ${verboseLogging ? 'bg-amber-500' : 'bg-bg-toggle-switch border border-border-muted'}`}
                                                     >
                                                         <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white transition-transform ${verboseLogging ? 'translate-x-5' : 'translate-x-0'}`} />
                                                     </div>
                                                 </div>
+
+                                                {/* Verbose logging toast */}
+                                                <AnimatePresence>
+                                                    {showVerboseToast && (
+                                                        <motion.div
+                                                            key="verbose-toast"
+                                                            initial={{ opacity: 0, y: -6, height: 0 }}
+                                                            animate={{ opacity: 1, y: 0, height: 'auto' }}
+                                                            exit={{ opacity: 0, y: -4, height: 0 }}
+                                                            transition={{ duration: 0.2, ease: [0.2, 0, 0, 1] }}
+                                                            className="mx-4 mb-1 overflow-hidden"
+                                                        >
+                                                            <div className="flex items-center justify-between gap-3 px-3 py-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20">
+                                                                <div className="flex items-center gap-2.5 min-w-0">
+                                                                    <Terminal size={14} className="text-amber-400 shrink-0" />
+                                                                    <p className="text-xs text-amber-200/80 leading-snug truncate">
+                                                                        Logs → <span className="font-mono text-amber-300">~/Documents/natively_debug.log</span>
+                                                                    </p>
+                                                                </div>
+                                                                <button
+                                                                    onClick={() => window.electronAPI?.openLogFile?.()}
+                                                                    className="shrink-0 text-[11px] font-medium text-amber-400 hover:text-amber-300 transition-colors px-2 py-0.5 rounded-md bg-amber-500/15 hover:bg-amber-500/25"
+                                                                >
+                                                                    Open
+                                                                </button>
+                                                            </div>
+                                                            {/* 5-second drain bar */}
+                                                            <motion.div
+                                                                className="h-[2px] bg-amber-500/40 rounded-b-xl"
+                                                                initial={{ scaleX: 1, originX: 0 }}
+                                                                animate={{ scaleX: 0 }}
+                                                                transition={{ duration: 5, ease: 'linear', delay: 0.2 }}
+                                                            />
+                                                        </motion.div>
+                                                    )}
+                                                </AnimatePresence>
 
                                                 {/* Interviewer Transcript */}
                                                 <div className="flex items-center justify-between px-4 py-3">

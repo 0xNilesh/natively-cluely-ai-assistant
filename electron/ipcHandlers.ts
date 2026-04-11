@@ -632,6 +632,36 @@ export function initializeIpcHandlers(appState: AppState): void {
     return { success: true };
   });
 
+  safeHandle("get-log-file-path", async () => {
+    try {
+      return path.join(app.getPath('documents'), 'natively_debug.log');
+    } catch {
+      return null;
+    }
+  });
+
+  safeHandle("open-log-file", async () => {
+    try {
+      const logPath = path.join(app.getPath('documents'), 'natively_debug.log');
+      // Ensure the file exists before opening
+      if (!fs.existsSync(logPath)) {
+        fs.writeFileSync(logPath, '');
+      }
+      await shell.openPath(logPath);
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  // Fire-and-forget: renderer forwards its console output to the main-process log file.
+  // Only written when verbose logging is enabled.
+  ipcMain.on("forward-log-to-file", (_event, level: string, msg: string) => {
+    if (!appState.getVerboseLogging()) return;
+    const tag = level === 'error' ? '[RENDERER-ERROR]' : level === 'warn' ? '[RENDERER-WARN]' : '[RENDERER]';
+    console.log(`${tag} ${msg}`);
+  });
+
   safeHandle("get-arch", async () => {
     return process.arch;
   });
