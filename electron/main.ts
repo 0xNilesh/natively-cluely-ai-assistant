@@ -104,6 +104,14 @@ async function ensureMacMicrophoneAccess(context: string): Promise<boolean> {
  */
 function getMacScreenCaptureStatus(): 'granted' | 'denied' | 'not-determined' | 'restricted' {
   if (process.platform !== 'darwin') return 'granted';
+  
+  // In development mode, macOS TCC often falsely reports 'denied' for the electron binary 
+  // even if the user has granted permission to their Terminal app.
+  if (!app.isPackaged) {
+    console.log('[Main] Ignoring screen capture permission check in development mode');
+    return 'granted';
+  }
+
   try {
     return systemPreferences.getMediaAccessStatus('screen') as
       'granted' | 'denied' | 'not-determined' | 'restricted';
@@ -2529,6 +2537,11 @@ async function initializeApp() {
       try {
         const screenStatus = systemPreferences.getMediaAccessStatus('screen');
         console.log(`[Init] Screen recording permission status at startup: ${screenStatus}`);
+
+        if (!app.isPackaged) {
+          console.log('[Init] Ignoring screen recording permission check in development mode');
+          return;
+        }
 
         if (screenStatus === 'not-determined') {
           // First launch: trigger the one-time TCC dialog by making a minimal
