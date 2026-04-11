@@ -306,9 +306,16 @@ export const NativelyApiSettings: React.FC = () => {
     const PlansCard = (
         <Card>
             <div className="px-5 pt-5 pb-2">
-                <div className="flex items-center justify-between mb-4">
-                    <p className="text-[10px] font-semibold text-text-tertiary uppercase tracking-widest">Choose a Plan</p>
-                    <span className="text-[10px] text-text-tertiary">Pro, Max &amp; Ultra include Natively Pro app</span>
+                <div className="flex flex-col gap-2.5 mb-4">
+                    <div className="flex items-center justify-between">
+                        <p className="text-[10px] font-semibold text-text-tertiary uppercase tracking-widest">Choose a Plan</p>
+                        <span className="text-[10px] text-text-tertiary">Pro, Max &amp; Ultra include Natively Pro app</span>
+                    </div>
+                    <div className="w-full flex items-center justify-center py-2 bg-violet-500/10 border border-violet-500/20 rounded-[10px]">
+                        <span className="text-[11.5px] font-medium text-violet-400/90">
+                            Use code <span className="font-bold text-violet-400">EARLY50</span> for 50% off
+                        </span>
+                    </div>
                 </div>
 
                 {/* Plan rows */}
@@ -416,7 +423,6 @@ export const NativelyApiSettings: React.FC = () => {
         </Card>
     );
 
-    const showTopPlans = !isLoading && !isSaved && !isCheckingTrial && trialState?.expired === true && trialState?.active === false;
 
     return (
         <div className="space-y-4 animated fadeIn">
@@ -495,7 +501,7 @@ export const NativelyApiSettings: React.FC = () => {
                 const isClaimed = trialState?.expired === true;
                 
                 if (isClaimed) {
-                    return PlansCard;
+                    return null;
                 }
 
                 return (
@@ -569,6 +575,9 @@ export const NativelyApiSettings: React.FC = () => {
                     </Card>
                 );
             })()}
+
+            {/* ── Plans ────────────────────────────────────────── */}
+            {!isSaved && PlansCard}
 
             {/* ── API Key card ─────────────────────────────────── */}
             <Card>
@@ -732,7 +741,7 @@ export const NativelyApiSettings: React.FC = () => {
             )}
 
             {/* ── Plans ────────────────────────────────────────── */}
-            {!showTopPlans && PlansCard}
+            {isSaved && PlansCard}
 
             {/* ── How it works ─────────────────────────────────── */}
             <Card>

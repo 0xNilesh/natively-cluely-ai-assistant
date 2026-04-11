@@ -310,25 +310,21 @@ export class AppState {
           // Adapted from public PR #113 — verify premium interaction
           this.toggleOverlayMousePassthrough();
         } else if (actionId === 'general:take-screenshot') {
-          const screenshotPath = await this.takeScreenshot(false);
-          const preview = await this.getImagePreview(screenshotPath);
+          // Route to renderer via global-shortcut so the renderer handles the
+          // screenshot through the IPC invoke path (request/response guarantee).
+          // The old pattern — main takes screenshot → fires screenshot-taken event →
+          // renderer listener catches it — was unreliable in overlay mode because the
+          // fire-and-forget event could be missed if the listener registration had any
+          // timing gap. The invoke path used by generalHandlers.takeScreenshot() is
+          // already proven to work for UI-button screenshots; reuse it here.
           const mainWindow = this.getMainWindow();
-          if (mainWindow) {
-            mainWindow.webContents.send("screenshot-taken", {
-              path: screenshotPath,
-              preview
-            });
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('global-shortcut', { action: 'takeScreenshot' });
           }
         } else if (actionId === 'general:selective-screenshot') {
-          const screenshotPath = await this.takeSelectiveScreenshot(false);
-          const preview = await this.getImagePreview(screenshotPath);
           const mainWindow = this.getMainWindow();
-          if (mainWindow) {
-            // preload.ts maps 'screenshot-attached' to onScreenshotAttached
-            mainWindow.webContents.send("screenshot-attached", {
-              path: screenshotPath,
-              preview
-            });
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('global-shortcut', { action: 'selectiveScreenshot' });
           }
         } else if (actionId === 'general:capture-and-process') {
           // Single-trigger: capture current screen then immediately request AI analysis
@@ -1194,11 +1190,12 @@ export class AppState {
       this.googleSTT_User = null;
     }
 
-    // Reinitialize the pipeline (will pick up the new provider from CredentialsManager)
-    this.setupSystemAudioPipeline();
-
-    // Restart audio captures and new STT instances if a meeting is active
+    // Only reinitialize the pipeline when a meeting is already active.
+    // Outside a meeting, defer pipeline creation to startMeeting() so we never
+    // eagerly construct a MicrophoneCapture (which calls build_input_stream on
+    // macOS and immediately triggers the orange mic indicator even without .play()).
     if (this.isMeetingActive) {
+      this.setupSystemAudioPipeline();
       this.systemAudioCapture?.start();
       this.microphoneCapture?.start();
       this.googleSTT?.start();

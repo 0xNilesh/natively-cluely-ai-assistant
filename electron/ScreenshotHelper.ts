@@ -30,6 +30,9 @@ const shellExecAsync = util.promisify(execShell);
  */
 function assertScreenRecordingPermission(): void {
   if (process.platform !== 'darwin') return;
+  // In development mode, bypass the permission check so screenshots work without
+  // needing the app to be in the TCC whitelist (same policy as the startup check in main.ts).
+  if (!app.isPackaged) return;
   const status = systemPreferences.getMediaAccessStatus('screen');
   switch (status) {
     case 'granted':

@@ -703,17 +703,24 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
                 text: `❌ Error (${data.mode}): ${data.error}`
             }]);
         }));
-        // Screenshot taken - attach to chat input instead of auto-analyzing
-        cleanups.push(window.electronAPI.onScreenshotTaken(handleScreenshotAttach));
-
-        // Selective Screenshot (Latent Context)
-        if (window.electronAPI.onScreenshotAttached) {
-            cleanups.push(window.electronAPI.onScreenshotAttached(handleScreenshotAttach));
-        }
-
-
         return () => cleanups.forEach(fn => fn());
     }, [isExpanded]);
+
+    // Stable mount-only effect for screenshot listeners.
+    // These MUST NOT be inside the [isExpanded] effect — when a screenshot is
+    // taken, `switchToOverlay` fires `ensure-expanded` which can flip isExpanded
+    // from false→true, triggering the [isExpanded] effect cleanup. If `screenshot-taken`
+    // arrives during that teardown gap the event is silently dropped (same issue
+    // as clarify streaming listeners below). handleScreenshotAttach only uses stable
+    // useState setters so a mount-only closure is safe here.
+    useEffect(() => {
+        const cleanupTaken = window.electronAPI.onScreenshotTaken(handleScreenshotAttach);
+        const cleanupAttached = window.electronAPI.onScreenshotAttached?.(handleScreenshotAttach);
+        return () => {
+            cleanupTaken?.();
+            cleanupAttached?.();
+        };
+    }, []);
 
     // Stable mount-only effect for clarify streaming listeners.
     // These MUST NOT be inside the [isExpanded] effect — if the user
@@ -1912,6 +1919,8 @@ Provide only the answer, nothing else.`;
             else if (action === 'scrollDown') scrollContainerRef.current?.scrollBy({ top: 100, behavior: 'smooth' });
             else if (action === 'processScreenshots') generalHandlers.processScreenshots();
             else if (action === 'resetCancel') generalHandlers.resetCancel();
+            else if (action === 'takeScreenshot') generalHandlers.takeScreenshot();
+            else if (action === 'selectiveScreenshot') generalHandlers.selectiveScreenshot();
             
             // Safety reset if it didn't trigger an expansion
             setTimeout(() => { isStealthRef.current = false; }, 500);

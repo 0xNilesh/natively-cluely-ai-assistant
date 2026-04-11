@@ -540,35 +540,7 @@ const App: React.FC = () => {
       <SupportToaster />
       <NativelyQuotaBanner />
 
-      {/* ── DEV ad preview toolbar ───────────────────────────────────────
-          Floating buttons in the bottom-right corner. Click to instantly
-          show any ad card without keyboard shortcuts or cooldowns.
-          Remove before shipping. */}
-      <div style={{
-        position: 'fixed', bottom: 12, right: 12, zIndex: 99999,
-        display: 'flex', flexDirection: 'column', gap: 4,
-        fontFamily: 'monospace', fontSize: 10,
-      }}>
-        {([
-          ['max_ultra_upgrade', '#F59E0B'],
-          ['promo',             '#8B5CF6'],
-          ['natively_api',      '#3B82F6'],
-          ['profile',           '#10B981'],
-          ['jd',                '#EC4899'],
-        ] as const).map(([id, color]) => (
-          <button
-            key={id}
-            onClick={() => previewAd(id as any)}
-            style={{
-              padding: '3px 8px', borderRadius: 6, border: `1px solid ${color}55`,
-              background: `${color}22`, color, cursor: 'pointer',
-              letterSpacing: '0.05em', fontFamily: 'monospace', fontSize: 10,
-            }}
-          >
-            {id}
-          </button>
-        ))}
-      </div>
+
 
       {/* Free trial countdown banner — only in launcher window while trial is active */}
       {(isLauncherWindow || isDefault) && activeTrial && (
