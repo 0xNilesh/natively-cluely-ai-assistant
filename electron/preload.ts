@@ -542,7 +542,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
 
   // STT Provider Management
-  setSttProvider: (provider: 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively') => ipcRenderer.invoke("set-stt-provider", provider),
+  setSttProvider: (provider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively') => ipcRenderer.invoke("set-stt-provider", provider),
   getSttProvider: () => ipcRenderer.invoke("get-stt-provider"),
   setGroqSttApiKey: (apiKey: string) => ipcRenderer.invoke("set-groq-stt-api-key", apiKey),
   setOpenAiSttApiKey: (apiKey: string) => ipcRenderer.invoke("set-openai-stt-api-key", apiKey),

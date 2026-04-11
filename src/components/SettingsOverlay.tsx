@@ -935,7 +935,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
             }
         });
         return () => unsubscribe();
-    }, [isOpen]);
+    }, []); // mount-once: isOpen is checked inside the callback
 
     const handleSttProviderChange = async (provider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively') => {
         setSttProvider(provider);

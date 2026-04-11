@@ -235,17 +235,20 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
     // PR #173: STT not configured warning — shown when provider is 'none' during a meeting
     const [sttNotConfigured, setSttNotConfigured] = useState(false);
     useEffect(() => {
+        let mounted = true;
         // Check current STT config on mount
         window.electronAPI?.getSttProvider?.().then((provider: string) => {
-            setSttNotConfigured(provider === 'none');
+            if (mounted) setSttNotConfigured(provider === 'none');
         }).catch(() => {});
 
         // Listen for live config changes (e.g. user saves a key in Settings while meeting is active)
-        if (!window.electronAPI?.onSttConfigChanged) return;
-        const unsub = window.electronAPI.onSttConfigChanged((data: { configured: boolean; provider: string }) => {
-            setSttNotConfigured(!data.configured);
+        const unsub = window.electronAPI?.onSttConfigChanged?.((data: { configured: boolean; provider: string }) => {
+            if (mounted) setSttNotConfigured(!data.configured);
         });
-        return () => unsub();
+        return () => {
+            mounted = false;
+            unsub?.();
+        };
     }, []);
 
     // Auto-resize Window

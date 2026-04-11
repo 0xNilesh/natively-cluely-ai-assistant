@@ -982,10 +982,9 @@ export class AppState {
         this.systemAudioCapture.on('speech_ended', () => {
           this.googleSTT?.notifySpeechEnded?.();
         });
-        this.systemAudioCapture.on('error', (err: Error) => {
-          console.error('[Main] SystemAudioCapture Error:', err);
-        });
-        // PR #173: Wire audio recovery handler so mid-session device failures auto-restart
+        // PR #173: Wire audio recovery handler — handles both logging and auto-restart.
+        // NOTE: Do NOT add a separate 'error' listener here; setupAudioRecoveryHandler
+        // registers its own which logs + recovers. Dual listeners would double-fire.
         this.setupAudioRecoveryHandler();
       }
 
@@ -1078,9 +1077,9 @@ export class AppState {
       this.systemAudioCapture.on('speech_ended', () => {
         this.googleSTT?.notifySpeechEnded?.();
       });
-      this.systemAudioCapture.on('error', (err: Error) => {
-        console.error('[Main] SystemAudioCapture Error:', err);
-      });
+      // PR #173: Re-wire recovery handler on the new capture instance after device reconfigure.
+      // Without this, audio recovery is lost whenever the user changes their output device.
+      this.setupAudioRecoveryHandler();
       console.log('[Main] SystemAudioCapture initialized.');
     } catch (err) {
       console.warn('[Main] Failed to initialize SystemAudioCapture with preferred ID. Falling back to default.', err);
@@ -1105,9 +1104,8 @@ export class AppState {
         this.systemAudioCapture.on('speech_ended', () => {
           this.googleSTT?.notifySpeechEnded?.();
         });
-        this.systemAudioCapture.on('error', (err: Error) => {
-          console.error('[Main] SystemAudioCapture (Default) Error:', err);
-        });
+        // PR #173: Recovery handler on fallback path too
+        this.setupAudioRecoveryHandler();
       } catch (err2) {
         console.error('[Main] Failed to initialize SystemAudioCapture (Default):', err2);
       }
