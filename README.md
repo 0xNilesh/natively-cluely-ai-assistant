@@ -68,7 +68,7 @@ If you’re looking for a hosted desktop recording API, consider checking out [R
 
 <br/>
 
-**<span style="color: #f97316">🔥 49.4k views</span>** &nbsp;·&nbsp; **<span style="color: #22c55e">💸 $0 vs $149/mo rivals</span>** &nbsp;·&nbsp; **<span style="color: #3b82f6">⚡ <500ms latency</span>** &nbsp;·&nbsp; **<span style="color: #a855f7">🛡️ 0 data breaches</span>**
+**<span style="color: #ef4444">👥 9,000+ Users</span>** &nbsp;·&nbsp; **<span style="color: #f97316">🔥 700+ DAU</span>** &nbsp;·&nbsp; **<span style="color: #22c55e">💸 $0 vs $149/mo rivals</span>** &nbsp;·&nbsp; **<span style="color: #3b82f6">⚡ <500ms latency</span>** &nbsp;·&nbsp; **<span style="color: #a855f7">🛡️ 0 data breaches</span>**
 
 </div>
 
@@ -108,7 +108,7 @@ Natively works as a **free, undetectable AI coding interview assistant** for sta
 
 ## 3 things you should know before choosing an interview AI
 
-1. **Cluely** had a data breach in mid-2025 that exposed 83,000 users' personal info, transcripts, and screenshots — Natively stores everything locally with limited basic telemetry and has never had a breach.
+1. **Cluely** had a data breach in mid-2025 that exposed 83,000 users' personal info, transcripts, and screenshots — Natively stores everything locally by default with limited anonymous telemetry and has never had a breach.
 2. **Final Round AI** costs $149/month and its taskbar icon is visible to proctoring software — Natively is free, open-source, and has a battle-tested undetectable stealth mode.
 3. **LockedIn AI** charges $55–70/month and locks you into their cloud LLM with no local option — Natively lets you use any model (GPT, Claude, Gemini, Llama) or go fully offline with Ollama.
 
@@ -172,7 +172,7 @@ The UI is intentionally familiar — if you've used Cluely, there's zero learnin
 
 Cluely's mid-2025 data breach exposed personal information, full interview transcripts, and screenshots of 83,000 users. Every word spoken during an interview was stored on their servers — and then leaked. They charge $20/month for this privilege.
 
-Natively has no backend, no servers, and limited telemetry (basic GA4 install tracking, zero user data). Your transcripts, API keys, and screenshots never leave your machine. The entire codebase is open-source (AGPL-3.0) and auditable. Zero breaches, zero data collection — that is the only acceptable standard for a tool that listens to your interviews.
+By default, Natively stores everything on your local machine, with only limited anonymous telemetry (basic GA4 install tracking, zero personal data). Your transcripts, API keys, and screenshots never leave your machine when using your own keys. The entire codebase is open-source (AGPL-3.0) and auditable. Zero breaches — that is the only acceptable standard for a tool that listens to your interviews.
 
 ### vs LockedIn AI — $70/month for cloud lock-in
 
@@ -226,6 +226,22 @@ Parakeet AI offers basic live meeting assistance but has no persistent memory, n
 
 ---
 
+## What Users Are Saying
+
+> "This is a fantastic piece of software and you should definitely keep up the great work! This is exactly what I was looking for. I started out trying the open-source version, and because it worked so well, I decided to go ahead and buy the full premium license."  
+> — **Oskar Krzak** (⭐⭐⭐⭐⭐ via Gumroad)
+
+> "Natively is significantly faster than Cluely when it comes to response time and screen analysis. The latency is practically non-existent."  
+> — **Premium User**
+
+> "Just wanted to say thanks! Natively helped me completely crack the first two rounds of my Software Engineering interviews. The responses were incredibly fast and accurate."  
+> — **Private Email Feedback**
+
+> "Used the free version of Natively for my interviews and just landed a massive summer internship. It took all the stress out of the live coding and behavioral rounds!"  
+> — **Private Email Feedback**
+
+---
+
 ## Why Natively?
 
 While other tools act as simple API wrappers, Natively is a complete, native intelligence system designed specifically for high-stakes meetings and interviews.
@@ -236,7 +252,7 @@ While other tools act as simple API wrappers, Natively is a complete, native int
 - **Rolling Context:** We don't just transcribe; we maintain a "memory window" of the conversation for smarter answers.
 - **Local RAG Memory:** We embed your meetings locally using SQLite vector search so you can ask, "What did John say about the API last week?"
 - **Rich Dashboard:** A full UI to manage, search, and export your history—not just a floating window.
-- **Fully Offline Capable:** Don't trust the cloud? Run Natively 100% offline using local Ollama models with limited basic telemetry.
+- **Fully Offline Capable:** Don't trust the cloud? Run Natively 100% offline using local Ollama models with limited anonymous telemetry.
 
 ---
 
@@ -258,9 +274,11 @@ While other tools act as simple API wrappers, Natively is a complete, native int
 
 Are you managing separate accounts for your AI reasoning, live transcription, fast inference, and web search? Juggling multiple API keys, rate limits, and invoices across completely different categories of tools is unnecessary overhead. Natively API replaces all of those categories with **one flat subscription**.
 
-### 4 Categories → 1 Key
+Under the hood, Natively API connects you to the absolute best models for the optimal user experience:
+- **Backend AI Models**: Claude, OpenAI, Gemini, and Groq.
+- **Premium STT Models**: Google Chirp 2/3, ElevenLabs Scribe v2, and Deepgram Nova-3.
 
-Most people spend 20 minutes getting their API keys set up across different platforms, only to hit rate limits or unexpected bills on per-token usage.
+### 4 Categories → 1 Key
 
 **Your current unbundled stack:**
 
@@ -272,47 +290,33 @@ Most people spend 20 minutes getting their API keys set up across different plat
 **Replaced by Natively API:**
 
 - **AI chat, transcription & web search** — all included
-- **One flat subscription.** Zero surprise bills. Starts at $7/mo.
+- **One flat subscription.** Zero surprise bills. Starts at $8/mo.
 - **Single key.** Zero rotation. Zero configuration.
+
+### API Plan Comparison
+
+| Feature | Standard ($8/mo) | Pro ($15/mo) | Max ($25/mo) | Ultra ($35/mo) |
+| :--- | :--- | :--- | :--- | :--- |
+| **All-in-One Cloud AI Access** | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes |
+| **Real-Time Transcription** | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes |
+| **Included Natively Pro Desktop App** | ❌ No | ✅ Yes | ✅ Yes | ✅ Yes |
+| **Premium Support** | ❌ No | ✅ Yes | ✅ Yes | ✅ Yes |
+| **Higher Monthly Quotas** | ❌ No | ✅ Yes | ✅ Yes | ✅ Yes |
 
 **Don't start the long way.** Skip the 20-minute manual setup. One Natively subscription skips all of it — AI, transcription, and web search are ready immediately.
 
 <p align="center">
   <a href="https://checkout.dodopayments.com/buy/pdt_0NbFixGmD8CSeawb5qvVl">
-    <img src="https://img.shields.io/badge/Get_Natively_API-Subscribe_Now-F97316?style=for-the-badge&logo=fastapi&logoColor=white" />
+    <img src="https://img.shields.io/badge/Standard_Plan-Subscribe_Now-94a3b8?style=for-the-badge&logo=fastapi&logoColor=white" />
   </a>
-</p>
-
----
-
-## Natively API (Hosted Tier)
-
-**Stop managing four separate services. One key. Zero configuration.**
-
-Are you managing separate accounts for your AI reasoning, live transcription, fast inference, and web search? Juggling multiple API keys, rate limits, and invoices across completely different categories of tools is unnecessary overhead. Natively API replaces all of those categories with **one flat subscription**.
-
-### 4 Categories → 1 Key
-
-Most people spend 20 minutes getting their API keys set up across different platforms, only to hit rate limits or unexpected bills on per-token usage.
-
-**Your current unbundled stack:**
-
-- **AI Intelligence (GPT/Claude/Gemini):** per-token billing and usage anxiety
-- **Lightning-Fast Inference (Groq/Llama):** strict rate limits to monitor
-- **Real-Time Transcription (Deepgram/Google STT):** separate key + quota
-- **Web Search & Research (Tavily/Perplexity):** yet another subscription
-
-**Replaced by Natively API:**
-
-- **AI chat, transcription & web search** — all included
-- **One flat subscription.** Zero surprise bills. Starts at $7/mo.
-- **Single key.** Zero rotation. Zero configuration.
-
-**Don't start the long way.** Skip the 20-minute manual setup. One Natively subscription skips all of it — AI, transcription, and web search are ready immediately.
-
-<p align="center">
-  <a href="https://checkout.dodopayments.com/buy/pdt_0NbFixGmD8CSeawb5qvVl">
-    <img src="https://img.shields.io/badge/Get_Natively_API-Subscribe_Now-F97316?style=for-the-badge&logo=fastapi&logoColor=white" />
+  <a href="https://checkout.dodopayments.com/buy/pdt_0NcM6Aw0IWdspbsgUeCLA">
+    <img src="https://img.shields.io/badge/Pro_Plan-Subscribe_Now-8b5cf6?style=for-the-badge&logo=fastapi&logoColor=white" />
+  </a>
+  <a href="https://checkout.dodopayments.com/buy/pdt_0NcM7JElX4Af6LNVFS1Yf">
+    <img src="https://img.shields.io/badge/Max_Plan-Subscribe_Now-6366f1?style=for-the-badge&logo=fastapi&logoColor=white" />
+  </a>
+  <a href="https://checkout.dodopayments.com/buy/pdt_0NcM7rC2kAb69TFKsZnUU">
+    <img src="https://img.shields.io/badge/Ultra_Plan-Subscribe_Now-fbbf24?style=for-the-badge&logo=fastapi&logoColor=white" />
   </a>
 </p>
 
@@ -320,7 +324,7 @@ Most people spend 20 minutes getting their API keys set up across different plat
 
 ## Natively Pro
 
-While Natively is **free and open-source forever**, we also offer a **Pro Edition** designed specifically for power users and job seekers. Purchasing a Pro license gives you an edge in the job market, all while directly supporting the continued development of the open-source Natively core!
+While Natively is **free and open-source forever**, we also offer a **Pro Edition** (available as **Lifetime or Yearly** subscriptions) designed specifically for power users and job seekers. Purchasing a Pro license gives you an edge in the job market, all while directly supporting the continued development of the open-source Natively core!
 
 ### Free vs Pro Feature Comparison
 
@@ -339,28 +343,29 @@ While Natively is **free and open-source forever**, we also offer a **Pro Editio
 | **Priority Feature Access & Support**               |      ❌       |      ✅      |
 
 <p align="center">
-  <a href="https://evynignatious.gumroad.com/l/natively">
-    <img src="https://img.shields.io/badge/Get_Natively_Pro-Unlock_Premium-FF3366?style=for-the-badge&logo=gumroad&logoColor=white" />
+  <a href="https://checkout.dodopayments.com/buy/pdt_0NbHo6EnXlNPqNcZ14OTi">
+    <img src="https://img.shields.io/badge/Lifetime_License-Unlock_Premium-facc15?style=for-the-badge&logo=fastapi&logoColor=black" />
+  </a>
+  <a href="https://checkout.dodopayments.com/buy/pdt_0NcM4QBwy0CDcPV9CXaNP">
+    <img src="https://img.shields.io/badge/Yearly_License-Unlock_Premium-black?style=for-the-badge&logo=fastapi&logoColor=white" />
   </a>
 </p>
 
 ---
 
-### What's New in v2.0.9
+### What's New in v2.4.0
 
-Version 2.0.9 delivers the Natively API tier, fixes the root-cause audio transcription bug, hardens stealth and shortcuts, and integrates numerous community PRs.
+Version 2.4.0 introduces major feature upgrades, architectural overhauls, and robust stability fixes:
 
-- **Fixed Audio Transcription**: Resolved the root-cause zero-transcription bug — Deepgram was receiving raw PCM without `encoding=linear16` in the WebSocket URL, causing an immediate `upstream_closed` loop with no output.
-- **Natively API Integration**: New hosted STT + AI tier. Activate with an API key to route transcription through Deepgram/Google and AI calls through the Natively API server, with an inline usage dashboard (quota bars, plan badge, reset date).
-- **Dual-Channel STT**: System audio and microphone now connect to the Natively API simultaneously using per-channel session keys (`system` / `mic`), eliminating `concurrent_session_blocked` errors.
-- **LLM Resilience & Fallbacks**: 60 s / 3-retry wrapper for OpenAI and 90 s / 3-retry wrapper for Claude; Natively API falls back to Gemini on failure; `streamChat` chain now tries Natively first across all call sites.
-- **STT Over-Billing Fixed**: Removed duplicate mic-channel billing (was doubling every session); added 30 s minimum threshold for short reconnect sessions; replaced `Math.ceil` with `Math.round` for fairer rounding.
-- **Screen Recording Permission Flow**: Proactive TCC dialog via `desktopCapturer.getSources()` before the audio pipeline starts; clear error when permission is `denied` or `restricted` instead of silent black frames.
-- **Dodo Payments Integration**: Webhook processing with HMAC-SHA256 verification, 24 h idempotent replay guard, `subscription.on_hold` / `subscription.failed` handling, and correct plan detection via product-ID env vars.
-- **STT Key Pre-Population**: Settings panel now correctly restores saved STT provider keys (Groq, OpenAI, Deepgram, ElevenLabs, Azure, IBM, Soniox) across provider switches.
-- **GoogleSTT Proactive Restart**: Pre-emptive stream restart at 4 min 30 s avoids the hard 5-minute gRPC limit, eliminating the 1-second transcription gap in long sessions.
-- **REST STT Upload Size**: Audio resampled to 16 kHz mono before upload — ~6× smaller files, reliably under the Groq/OpenAI 25 MB limit.
-- **Integrated Several PRs**: napi-rs v3 migration for native audio, Windows header layout fix, platform-aware shortcut symbols in About section, TypeScript type-safety fixes across `electron.d.ts`, `preload.ts`, and `ipcHandlers.ts`.
+- **10-Minute Free Trial**: A new free trial system lets you experience Natively API with built-in HWID+IP anti-abuse protections and seamless upgrade paths.
+- **Tavily Search Integration**: Replaced standard search with Tavily Search API for deep company research and robust context gathering.
+- **Guided Permissions Setup**: A polished, proactive macOS/Windows permissions flow ensures screen recording and microphone access is easily granted.
+- **Reliable Screenshot Capture**: Hardened and completely stable multi-screenshot capture with single-trigger `Cmd+Shift+Enter` analysis.
+- **Custom Provider Notes & Summaries**: Custom cURL endpoints and custom API integrations now natively support automatic meeting summaries and custom AI behaviors without breaking the prompt injection strategy.
+- **Two-Stage Silence Processing**: Combined adaptive RMS threshold with WebRTC ML VAD for unparalleled microphone background noise rejection.
+- **Dynamic AI Model Selection**: Smoothly select real-time models dynamically from OpenAI, Anthropic, Gemini, Groq, and Ollama.
+- **Zero-Copy ABI Transfers**: Rust pipeline refactored to stream audio buffers with true zero-allocation natively, eliminating garbage collection freezes and ensuring constant <500ms latency.
+- **Robust Webhook Billing**: Hardened API subsciptions webhook verifications and payment processing to properly coordinate Standard, Pro, Max, and Ultra API plans.
 
 ---
 
@@ -371,9 +376,10 @@ Version 2.0.9 delivers the Natively API tier, fixes the root-cause audio transcr
 - [Demo](#demo)
 - [Full comparison](#full-comparison-natively-vs-cluely-vs-final-round-ai-vs-lockedin-ai-vs-interview-coder)
 - [Why Natively wins](#why-natively-wins)
+- [What Users Are Saying](#what-users-are-saying)
 - [Why Natively?](#why-natively)
 - [Natively Pro](#natively-pro)
-- [What's New in v2.0.9](#whats-new-in-v209)
+- [What's New in v2.4.0](#whats-new-in-v240)
 - [Privacy & Security](#privacy--security-core-design-principle)
 - [Installation](#installation-developers--contributors)
 - [AI Providers](#ai-providers)
@@ -420,7 +426,7 @@ All while remaining **invisible, fast, and privacy-first**.
 - Bring Your Own Keys (BYOK)
 - Local AI option (Ollama)
 - All data stored locally
-- Limited telemetry (basic GA4 counts)
+- Limited anonymous telemetry (basic GA4 counts)
 - No user data tracking
 - No hidden uploads
 
@@ -848,7 +854,7 @@ Yes. Natively uses a Rust-based system audio capture that works universally acro
 
 #### Is my data safe?
 
-Natively is built on **Privacy-by-Design**. All transcripts, vector embeddings (Local RAG), and keys are stored locally on your machine. We have no backend and collect only limited basic telemetry (no user data).
+Natively is built on **Privacy-by-Design**. By default, all transcripts, vector embeddings (Local RAG), and keys are stored locally on your machine. We collect only limited anonymous telemetry (no personal user data).
 
 #### Can I use it for technical interviews?
 
