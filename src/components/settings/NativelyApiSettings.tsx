@@ -546,7 +546,7 @@ export const NativelyApiSettings: React.FC = () => {
                                 className={`w-full max-w-[240px] flex items-center justify-center gap-2 py-2 rounded-full text-[13px] font-bold shadow-[0_1px_3px_rgba(0,0,0,0.1)] transition-all ${
                                     isClaimed 
                                     ? 'bg-bg-input text-text-tertiary border border-border-subtle cursor-not-allowed'
-                                    : 'bg-text-primary hover:bg-text-primary/90 text-bg-base active:scale-[0.98]'
+                                    : 'bg-text-primary hover:bg-text-primary/90 text-bg-primary active:scale-[0.98]'
                                 }`}
                             >
                                 {trialLoading ? <><Loader2 size={13} className="animate-spin" /> Starting trial…</>
@@ -646,10 +646,10 @@ export const NativelyApiSettings: React.FC = () => {
                         onClick={handleSave}
                         disabled={isSaving || !isDirty}
                         className={`w-full py-2.5 rounded-xl text-[13px] font-medium transition-all duration-150 select-none
-                            ${isSaving         ? 'bg-blue-900/30 border border-blue-800/30 text-blue-400/40 cursor-wait'
+                            ${isSaving         ? 'bg-accent-primary/10 border border-accent-primary/20 text-accent-primary/40 cursor-wait'
                             : justSaved        ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 cursor-pointer'
-                            : !isDirty         ? 'bg-blue-900/30 border border-blue-800/30 text-blue-400/40 cursor-default'
-                            :                   'bg-blue-600 hover:bg-blue-500 text-white shadow-sm shadow-blue-900/30 active:scale-[0.99] cursor-pointer'
+                            : !isDirty         ? 'bg-bg-input border border-border-subtle text-text-tertiary/40 cursor-default'
+                            :                   'bg-accent-primary hover:opacity-90 text-white shadow-sm active:scale-[0.99] cursor-pointer'
                             }`}
                     >
                         {isSaving   ? <span className="flex items-center justify-center gap-2"><Loader2 size={13} className="animate-spin" />Saving…</span>

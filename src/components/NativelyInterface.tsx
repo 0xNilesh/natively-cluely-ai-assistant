@@ -21,6 +21,7 @@ import {
     Zap,
     Edit3,
     SlidersHorizontal,
+    LayoutGrid,
     Ghost,
     Link,
     Code,
@@ -126,6 +127,21 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         const stored = localStorage.getItem('natively_hideChatHidesWidget');
         return stored ? stored === 'true' : true;
     });
+
+    // Active mode name (shown as a badge near the Modes button)
+    const [activeModeLabel, setActiveModeLabel] = useState<string | null>(null);
+
+    useEffect(() => {
+        // Load initial active mode name
+        window.electronAPI?.modesGetActive?.()
+            .then((mode: { name: string } | null) => setActiveModeLabel(mode?.name ?? null))
+            .catch(() => {});
+        // Live-update whenever mode is activated/deactivated
+        const unsub = window.electronAPI?.onModeChanged?.((data: { id: string | null; name: string | null }) => {
+            setActiveModeLabel(data.name);
+        });
+        return () => unsub?.();
+    }, []);
 
     // Model Selection State
     const [currentModel, setCurrentModel] = useState<string>('gemini-3-flash-preview');
@@ -2304,6 +2320,34 @@ Provide only the answer, nothing else.`;
                                                 <SlidersHorizontal className="w-3.5 h-3.5" />
                                             </button>
                                         </div>
+
+                                        {/* Modes button + active mode badge */}
+                                        <button
+                                            onClick={() => window.electronAPI?.openSettingsTab?.('modes')}
+                                            title={activeModeLabel ? `Mode: ${activeModeLabel}` : 'Modes'}
+                                            className="flex items-center gap-1.5 rounded-lg interaction-base interaction-press overlay-icon-surface overlay-icon-surface-hover overlay-text-interactive"
+                                            style={{ ...appearance.iconStyle, padding: activeModeLabel ? '0 8px' : undefined, height: 28 }}
+                                        >
+<svg width={14} height={14} viewBox="0 0 16 16" fill="none" className="shrink-0" style={{ display: 'block' }}>
+                                                <rect x="0.75" y="0.75" width="6" height="6" rx="1.75" fill="currentColor"/>
+                                                <rect x="9.25" y="0.75" width="6" height="6" rx="1.75" fill="currentColor"/>
+                                                <rect x="0.75" y="9.25" width="6" height="6" rx="1.75" fill="currentColor"/>
+                                                <rect x="9.75" y="9.75" width="5" height="5" rx="1.25" fill="none" stroke="currentColor" strokeWidth="1"/>
+                                            </svg>
+                                            {activeModeLabel && (
+                                                <span style={{
+                                                    fontSize: 11,
+                                                    fontWeight: 600,
+                                                    maxWidth: 80,
+                                                    overflow: 'hidden',
+                                                    textOverflow: 'ellipsis',
+                                                    whiteSpace: 'nowrap',
+                                                    opacity: 0.85,
+                                                }}>
+                                                    {activeModeLabel}
+                                                </span>
+                                            )}
+                                        </button>
 
                                         <div className="w-px h-3 mx-1" style={appearance.dividerStyle} />
 

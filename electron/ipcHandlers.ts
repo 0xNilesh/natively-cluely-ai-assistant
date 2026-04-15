@@ -74,7 +74,13 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle("license:activate", async (event, key: string) => {
     try {
       const { LicenseManager } = require('../premium/electron/services/LicenseManager');
-      return await LicenseManager.getInstance().activateLicense(key);
+      const result = await LicenseManager.getInstance().activateLicense(key);
+      if (result?.success) {
+        BrowserWindow.getAllWindows().forEach(win => {
+          if (!win.isDestroyed()) win.webContents.send('license-status-changed', { isPremium: true });
+        });
+      }
+      return result;
     } catch (err: any) {
       // Only show generic message if the premium module itself is missing.
       // activateLicense() returns {success:false, error} for all expected failures
@@ -125,6 +131,10 @@ export function initializeIpcHandlers(appState: AppState): void {
           console.log('[IPC] Knowledge mode auto-disabled due to license deactivation');
         }
       } catch (e) { /* ignore */ }
+      // Notify all windows so the license UI (ProGate, settings) refreshes immediately
+      BrowserWindow.getAllWindows().forEach(win => {
+        if (!win.isDestroyed()) win.webContents.send('license-status-changed', { isPremium: false });
+      });
     } catch { /* LicenseManager not available */ }
     return { success: true };
   });
@@ -568,6 +578,16 @@ export function initializeIpcHandlers(appState: AppState): void {
   // Settings Window
   safeHandle("toggle-settings-window", (event, { x, y } = {}) => {
     appState.settingsWindowHelper.toggleWindow(x, y)
+  })
+
+  // Open the launcher's SettingsOverlay on a specific tab (callable from any window)
+  safeHandle("settings:open-tab", (_, tab: string) => {
+    const launcherWin = appState.getWindowHelper().getLauncherWindow();
+    if (launcherWin && !launcherWin.isDestroyed()) {
+      launcherWin.webContents.send('settings:open-tab', tab);
+      launcherWin.show();
+      launcherWin.focus();
+    }
   })
 
   safeHandle("close-settings-window", () => {
@@ -2869,6 +2889,38 @@ export function initializeIpcHandlers(appState: AppState): void {
   });
 
   // ==========================================
+  // Profile Custom Notes
+  // ==========================================
+
+  safeHandle("profile:get-notes", async () => {
+    try {
+      const content = DatabaseManager.getInstance().getCustomNotes();
+      return { success: true, content };
+    } catch (error: any) {
+      return { success: false, content: '', error: error.message };
+    }
+  });
+
+  safeHandle("profile:save-notes", async (_, content: string) => {
+    try {
+      // Enforce a max length of 4000 chars to prevent prompt bloat
+      const trimmed = typeof content === 'string' ? content.slice(0, 4000) : '';
+      DatabaseManager.getInstance().saveCustomNotes(trimmed);
+
+      // Propagate to orchestrator (premium path) and LLMHelper (all-provider path)
+      const orchestrator = appState.getKnowledgeOrchestrator();
+      if (orchestrator?.setCustomNotes) orchestrator.setCustomNotes(trimmed);
+
+      const llmHelper = appState.processingHelper?.getLLMHelper?.();
+      if (llmHelper?.setCustomNotes) llmHelper.setCustomNotes(trimmed);
+
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error.message };
+    }
+  });
+
+  // ==========================================
   // Tavily Search API Credentials
   // ==========================================
 
@@ -2920,5 +2972,213 @@ export function initializeIpcHandlers(appState: AppState): void {
       return false
     }
   })
+
+  // ==========================================
+  // Modes IPC Handlers
+  // ==========================================
+
+  safeHandle("modes:get-all", async () => {
+    try {
+      const { ModesManager } = require('./services/ModesManager');
+      const mgr = ModesManager.getInstance();
+      const modes = mgr.getModes();
+      // Attach reference file counts
+      return modes.map((m: any) => ({
+        ...m,
+        referenceFileCount: mgr.getReferenceFiles(m.id).length,
+      }));
+    } catch (e: any) {
+      console.error('[IPC] modes:get-all error:', e);
+      return [];
+    }
+  });
+
+  safeHandle("modes:get-active", async () => {
+    try {
+      const { ModesManager } = require('./services/ModesManager');
+      return ModesManager.getInstance().getActiveMode();
+    } catch (e: any) {
+      console.error('[IPC] modes:get-active error:', e);
+      return null;
+    }
+  });
+
+  safeHandle("modes:create", async (_, params: { name: string; templateType: string }) => {
+    try {
+      if (!isProOrTrialActive()) return { success: false, error: 'pro_required' };
+      const { ModesManager } = require('./services/ModesManager');
+      const mode = ModesManager.getInstance().createMode({
+        name: params.name,
+        templateType: params.templateType as any,
+      });
+      return { success: true, mode };
+    } catch (e: any) {
+      console.error('[IPC] modes:create error:', e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle("modes:update", async (_, id: string, updates: { name?: string; templateType?: string; customContext?: string }) => {
+    try {
+      const { ModesManager } = require('./services/ModesManager');
+      ModesManager.getInstance().updateMode(id, updates);
+      return { success: true };
+    } catch (e: any) {
+      console.error('[IPC] modes:update error:', e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle("modes:delete", async (_, id: string) => {
+    try {
+      if (!isProOrTrialActive()) return { success: false, error: 'pro_required' };
+      const { ModesManager } = require('./services/ModesManager');
+      ModesManager.getInstance().deleteMode(id);
+      return { success: true };
+    } catch (e: any) {
+      console.error('[IPC] modes:delete error:', e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle("modes:set-active", async (_, id: string | null) => {
+    try {
+      // Allow clearing (null) or setting general mode without pro; all other modes require pro
+      if (id !== null) {
+        const { ModesManager } = require('./services/ModesManager');
+        const targetMode = ModesManager.getInstance().getModes().find((m: any) => m.id === id);
+        if (targetMode && targetMode.templateType !== 'general' && !isProOrTrialActive()) {
+          return { success: false, error: 'pro_required' };
+        }
+      }
+      const { ModesManager } = require('./services/ModesManager');
+      ModesManager.getInstance().setActiveMode(id);
+      // Broadcast mode change to all windows so indicators update immediately
+      const activeName = id ? (ModesManager.getInstance().getActiveMode()?.name ?? null) : null;
+      BrowserWindow.getAllWindows().forEach(win => {
+        if (!win.isDestroyed()) win.webContents.send('mode-changed', { id, name: activeName });
+      });
+      return { success: true };
+    } catch (e: any) {
+      console.error('[IPC] modes:set-active error:', e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle("modes:get-reference-files", async (_, modeId: string) => {
+    try {
+      const { ModesManager } = require('./services/ModesManager');
+      return ModesManager.getInstance().getReferenceFiles(modeId);
+    } catch (e: any) {
+      console.error('[IPC] modes:get-reference-files error:', e);
+      return [];
+    }
+  });
+
+  safeHandle("modes:upload-reference-file", async (_, modeId: string) => {
+    try {
+      const result = await dialog.showOpenDialog({
+        properties: ['openFile'],
+        filters: [
+          { name: 'Text & Documents', extensions: ['txt', 'md', 'pdf', 'docx', 'doc'] },
+          { name: 'All Files', extensions: ['*'] },
+        ],
+      });
+      if (result.canceled || !result.filePaths.length) {
+        return { success: false, cancelled: true };
+      }
+      const filePath = result.filePaths[0];
+      const fileName = path.basename(filePath);
+      const ext = path.extname(filePath).toLowerCase();
+
+      let content = '';
+      if (ext === '.pdf') {
+        const pdfParse = require('pdf-parse');
+        const buffer = fs.readFileSync(filePath);
+        const data = await pdfParse(buffer);
+        content = data.text;
+      } else if (ext === '.docx' || ext === '.doc') {
+        const mammoth = require('mammoth');
+        const result2 = await mammoth.extractRawText({ path: filePath });
+        content = result2.value;
+      } else {
+        content = fs.readFileSync(filePath, 'utf8');
+      }
+
+      const { ModesManager } = require('./services/ModesManager');
+      const file = ModesManager.getInstance().addReferenceFile({ modeId, fileName, content });
+      return { success: true, file };
+    } catch (e: any) {
+      console.error('[IPC] modes:upload-reference-file error:', e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle("modes:delete-reference-file", async (_, id: string) => {
+    try {
+      const { ModesManager } = require('./services/ModesManager');
+      ModesManager.getInstance().deleteReferenceFile(id);
+      return { success: true };
+    } catch (e: any) {
+      console.error('[IPC] modes:delete-reference-file error:', e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  // ── Note Sections ──────────────────────────────────────────────
+
+  safeHandle("modes:get-note-sections", async (_, modeId: string) => {
+    try {
+      const { ModesManager } = require('./services/ModesManager');
+      return ModesManager.getInstance().getNoteSections(modeId);
+    } catch (e: any) {
+      console.error('[IPC] modes:get-note-sections error:', e);
+      return [];
+    }
+  });
+
+  safeHandle("modes:add-note-section", async (_, modeId: string, title: string, description: string) => {
+    try {
+      const { ModesManager } = require('./services/ModesManager');
+      const section = ModesManager.getInstance().addNoteSection({ modeId, title, description });
+      return { success: true, section };
+    } catch (e: any) {
+      console.error('[IPC] modes:add-note-section error:', e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle("modes:update-note-section", async (_, id: string, updates: { title?: string; description?: string }) => {
+    try {
+      const { ModesManager } = require('./services/ModesManager');
+      ModesManager.getInstance().updateNoteSection(id, updates);
+      return { success: true };
+    } catch (e: any) {
+      console.error('[IPC] modes:update-note-section error:', e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle("modes:delete-note-section", async (_, id: string) => {
+    try {
+      const { ModesManager } = require('./services/ModesManager');
+      ModesManager.getInstance().deleteNoteSection(id);
+      return { success: true };
+    } catch (e: any) {
+      console.error('[IPC] modes:delete-note-section error:', e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle("modes:remove-all-note-sections", async (_, modeId: string) => {
+    try {
+      const { ModesManager } = require('./services/ModesManager');
+      ModesManager.getInstance().removeAllNoteSections(modeId);
+      return { success: true };
+    } catch (e: any) {
+      console.error('[IPC] modes:remove-all-note-sections error:', e);
+      return { success: false, error: e.message };
+    }
+  });
 }
 

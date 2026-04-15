@@ -25,7 +25,7 @@ change.md
 /nativelyapi
 
 # Local premium dev copy — never commit to public repo
-/premiudm
+/premium
 
 # Generated migration patches — private, not for public repo
 *.patch

@@ -56,6 +56,7 @@ export class LLMHelper {
   private activeCurlProvider: CurlProvider | null = null;
   private groqFastTextMode: boolean = false;
   private knowledgeOrchestrator: any = null;
+  private customNotes: string = '';
   private aiResponseLanguage: string = 'auto';
   private sttLanguage: string = 'english-us';
   private nativelyKey: string | null = null;
@@ -699,27 +700,48 @@ CRITICAL RULES:
    * @returns Suggested response for the user
    */
   public async generateSuggestion(context: string, lastQuestion: string): Promise<string> {
-    const basePrompt = `You are an expert interview coach. Based on the conversation transcript, provide a concise, natural response the user could say.
+    // Load active mode system prompt and context block (reference files + custom context)
+    let activeModePrompt = '';
+    let modeContextBlock = '';
+    try {
+      const { ModesManager } = require('./services/ModesManager');
+      const modesMgr = ModesManager.getInstance();
+      activeModePrompt = modesMgr.getActiveModeSystemPromptSuffix() ?? '';
+      modeContextBlock = modesMgr.buildActiveModeContextBlock() ?? '';
+    } catch (_) {}
+
+    // Prepend mode context block (reference files, custom context) to the transcript context
+    const enrichedContext = modeContextBlock
+      ? `${modeContextBlock}\n\n${context}`
+      : context;
+
+    // Inject custom user notes into every suggestion when present
+    const customNotesBlock = this.customNotes?.trim()
+      ? `\n\n<user_context>\n${this.customNotes.trim()}\n</user_context>\nUse this context naturally if relevant. Never quote it verbatim.`
+      : '';
+
+    const basePrompt = activeModePrompt
+      ? `${HARD_SYSTEM_PROMPT}\n\n## ACTIVE MODE\n${activeModePrompt}${customNotesBlock}`
+      : `You are an expert conversation coach. Based on the transcript, provide a concise, natural response the user could say.
 
 RULES:
 - Be direct and conversational
-- Keep responses under 3 sentences unless complexity requires more  
+- Keep responses under 3 sentences unless complexity requires more
 - Focus on answering the specific question asked
 - If it's a technical question, provide a clear, structured answer
 - Do NOT preface with "You could say" or similar - just give the answer directly
 - If unsure, answer briefly and confidently anyway.
-- Never hedge.
-- Never say "it depends".
+- Never hedge. Never say "it depends".${customNotesBlock}
 
 CONVERSATION SO FAR:
-${context}
+${enrichedContext}
 
-LATEST QUESTION FROM INTERVIEWER:
+LATEST QUESTION:
 ${lastQuestion}
 
 ANSWER DIRECTLY:`;
 
-    // Apply language instruction so this path honurs the user's language setting
+    // Apply language instruction so this path honours the user's language setting
     const systemPrompt = this.injectLanguageInstruction(basePrompt);
 
     try {
@@ -728,9 +750,10 @@ ANSWER DIRECTLY:`;
       } else if (this.customProvider || this.activeCurlProvider) {
         // Pass basePrompt (pre-language-injection) as systemPromptOverride so streamChat
         // calls injectLanguageInstruction exactly once. lastQuestion is the clean user message.
+        // enrichedContext carries the mode reference files + custom context.
         // ignoreKnowledgeMode=true: this is a live suggestion, not a knowledge/profile query.
         let fullResponse = '';
-        for await (const chunk of this.streamChat(lastQuestion, undefined, undefined, basePrompt, true)) {
+        for await (const chunk of this.streamChat(lastQuestion, undefined, enrichedContext, basePrompt, true)) {
           fullResponse += chunk;
         }
         return this.processResponse(fullResponse);
@@ -748,6 +771,10 @@ ANSWER DIRECTLY:`;
   public setKnowledgeOrchestrator(orchestrator: any): void {
     this.knowledgeOrchestrator = orchestrator;
     console.log('[LLMHelper] KnowledgeOrchestrator attached');
+  }
+
+  public setCustomNotes(notes: string): void {
+    this.customNotes = notes;
   }
 
   public getKnowledgeOrchestrator(): any {
@@ -2112,6 +2139,30 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       } catch (knowledgeError: any) {
         console.warn('[LLMHelper] Knowledge mode (stream) processing failed, falling back:', knowledgeError.message);
       }
+    }
+
+    // ============================================================
+    // ACTIVE MODE INJECTION (Context + System Prompt Suffix)
+    // ============================================================
+    try {
+      const { ModesManager } = require('./services/ModesManager');
+      const modesMgr = ModesManager.getInstance();
+      const modePromptSuffix = modesMgr.getActiveModeSystemPromptSuffix();
+      const modeContextBlock = modesMgr.buildActiveModeContextBlock();
+
+      if (modePromptSuffix) {
+        // Mode prompt supplements the base prompt — preserves KO profile intelligence if already set
+        const baseForMode = systemPromptOverride || HARD_SYSTEM_PROMPT;
+        systemPromptOverride = `${baseForMode}\n\n## ACTIVE MODE\n${modePromptSuffix}`;
+      }
+
+      if (modeContextBlock) {
+        context = context
+          ? `${modeContextBlock}\n\n${context}`
+          : modeContextBlock;
+      }
+    } catch (_modeErr) {
+      // Non-fatal — modes manager may not be initialized yet
     }
 
     // Preparation
