@@ -16,7 +16,7 @@ import { RECOGNITION_LANGUAGES } from '../config/languages';
 const RECONNECT_BASE_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 30000;
 const RECONNECT_MAX_ATTEMPTS = 10;
-const KEEPALIVE_INTERVAL_MS = 5000;
+const KEEPALIVE_INTERVAL_MS = 1000;
 
 export class DeepgramStreamingSTT extends EventEmitter {
     private apiKey: string;
@@ -26,13 +26,14 @@ export class DeepgramStreamingSTT extends EventEmitter {
 
     private sampleRate = 16000;
     private numChannels = 1;
-    private languageCode: string | null = 'en'; // null = auto-detect via detect_language=true
+    private languageCode: string | null = 'en'; // null = multilingual streaming via language=multi
 
     private reconnectAttempts = 0;
     private reconnectTimer: NodeJS.Timeout | null = null;
     private keepAliveTimer: NodeJS.Timeout | null = null;
     private buffer: Buffer[] = [];
     private isConnecting = false;
+    private connectionGen = 0; // incremented each connect(); handlers ignore stale gens
 
     constructor(apiKey: string) {
         super();
@@ -80,7 +81,7 @@ export class DeepgramStreamingSTT extends EventEmitter {
 
         if (key === 'auto') {
             this.languageCode = null;
-            console.log('[DeepgramStreaming] Language set to auto-detect (detect_language=true)');
+            console.log('[DeepgramStreaming] Language set to multilingual streaming (language=multi)');
             restartIfActive();
             return;
         }
@@ -143,8 +144,11 @@ export class DeepgramStreamingSTT extends EventEmitter {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
             this.buffer.push(chunk);
             if (this.buffer.length > 500) this.buffer.shift(); // Cap buffer size
-            
-            if (!this.isConnecting && this.shouldReconnect && !this.reconnectTimer) {
+
+            // Don't spawn a new connection if one is already in-flight (CONNECTING or isConnecting flag).
+            const alreadyConnecting = this.isConnecting ||
+                (this.ws !== null && this.ws.readyState === WebSocket.CONNECTING);
+            if (!alreadyConnecting && this.shouldReconnect && !this.reconnectTimer) {
                 console.log('[DeepgramStreaming] WS not ready. Lazy connecting on new audio...');
                 this.connect();
             }
@@ -161,9 +165,12 @@ export class DeepgramStreamingSTT extends EventEmitter {
     private connect(): void {
         if (this.isConnecting) return;
         this.isConnecting = true;
+        const gen = ++this.connectionGen;
 
+        // detect_language=true is not supported for streaming (pre-recorded only).
+        // For multilingual streaming, use language=multi (Nova-3 multilingual codeswitching).
         const langParam = this.languageCode === null
-            ? '&detect_language=true'
+            ? '&language=multi'
             : `&language=${this.languageCode}`;
 
         const url =
@@ -179,37 +186,43 @@ export class DeepgramStreamingSTT extends EventEmitter {
 
         console.log(`[DeepgramStreaming] Connecting (rate=${this.sampleRate}, ch=${this.numChannels})...`);
 
-        this.ws = new WebSocket(url, {
-            headers: {
-                Authorization: `Token ${this.apiKey}`,
-            },
+        const ws = new WebSocket(url, {
+            headers: { Authorization: `Token ${this.apiKey}` },
         });
+        this.ws = ws;
 
-        this.ws.on('open', () => {
+        ws.on('open', () => {
+            if (gen !== this.connectionGen) { ws.close(); return; } // stale connection
             this.isActive = true;
             this.isConnecting = false;
             this.reconnectAttempts = 0;
             console.log('[DeepgramStreaming] Connected');
 
-            // Send buffered audio
+            // Flush any audio buffered during the WebSocket handshake (~500ms)
             while (this.buffer.length > 0) {
                 const chunk = this.buffer.shift();
-                if (chunk && this.ws?.readyState === WebSocket.OPEN) {
-                    this.ws.send(chunk);
+                if (chunk && ws.readyState === WebSocket.OPEN) {
+                    ws.send(chunk);
                 }
             }
 
-            // Start keep-alive pings
             this.startKeepAlive();
         });
 
-        this.ws.on('message', (data: WebSocket.Data) => {
+        ws.on('message', (data: WebSocket.Data) => {
+            if (gen !== this.connectionGen) return; // stale
             try {
                 const msg = JSON.parse(data.toString());
 
                 // Deepgram response structure:
                 // { type: "Results", channel: { alternatives: [{ transcript, confidence }] }, is_final }
-                if (msg.type !== 'Results') return;
+                if (msg.type !== 'Results') {
+                    // Log non-Results messages (errors, metadata, etc.) to aid debugging
+                    if (msg.type !== 'Metadata' && msg.type !== 'SpeechStarted' && msg.type !== 'UtteranceEnd') {
+                        console.log(`[DeepgramStreaming] Non-results message (type=${msg.type}):`, JSON.stringify(msg).substring(0, 200));
+                    }
+                    return;
+                }
 
                 const transcript = msg.channel?.alternatives?.[0]?.transcript;
                 if (!transcript) return;
@@ -224,18 +237,20 @@ export class DeepgramStreamingSTT extends EventEmitter {
             }
         });
 
-        this.ws.on('error', (err: Error) => {
+        ws.on('error', (err: Error) => {
+            if (gen !== this.connectionGen) return; // stale
+            if (err.message === 'WebSocket was closed before the connection was established') return;
             console.error('[DeepgramStreaming] WebSocket error:', err.message);
             this.emit('error', err);
         });
 
-        this.ws.on('close', (code: number, reason: Buffer) => {
-            // Do not force isActive=false; let write() trigger reconnect if isActive is still true
+        ws.on('close', (code: number, reason: Buffer) => {
+            if (gen !== this.connectionGen) return; // stale — don't touch shared state
             this.isConnecting = false;
             this.clearKeepAlive();
-            console.log(`[DeepgramStreaming] Closed (code=${code}, reason=${reason.toString()})`);
+            const reasonStr = reason?.length > 0 ? reason.toString() : '(empty)';
+            console.log(`[DeepgramStreaming] Closed (code=${code}, reason=${reasonStr}, rate=${this.sampleRate}, lang=${this.languageCode})`);
 
-            // Auto-reconnect on unexpected close (excluding silence timeout 1000)
             if (this.shouldReconnect && code !== 1000) {
                 this.scheduleReconnect();
             }

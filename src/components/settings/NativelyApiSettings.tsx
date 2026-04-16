@@ -182,6 +182,9 @@ export const NativelyApiSettings: React.FC = () => {
     const refreshTrial = useCallback(async () => {
         const res = await window.electronAPI?.getTrialStatus?.();
         if (!res?.ok) return;
+
+        localStorage.setItem('natively_trial_claimed', 'true');
+
         setTrialState({
             active:    !(res.expired ?? false),
             expired:   res.expired   ?? false,
@@ -203,6 +206,8 @@ export const NativelyApiSettings: React.FC = () => {
             try {
                 const local = await window.electronAPI?.getLocalTrial?.();
                 if (!local?.hasToken) return;
+
+                localStorage.setItem('natively_trial_claimed', 'true');
 
                 if (local.expired) {
                     // Token exists but expired locally — show modal immediately, confirm via server
@@ -235,6 +240,7 @@ export const NativelyApiSettings: React.FC = () => {
             const res = await window.electronAPI?.startTrial?.();
             if (!res?.ok) {
                 if (res?.error === 'trial_ip_limit' || res?.error === 'trial_start_rate_limited') {
+                    localStorage.setItem('natively_trial_claimed', 'true');
                     setTrialState({ active: false, expired: true, expiresAt: '', startedAt: '', usage: { ai: 0, stt_seconds: 0, search: 0 } });
                     return;
                 }
@@ -244,6 +250,9 @@ export const NativelyApiSettings: React.FC = () => {
                 setTrialError(msg);
                 return;
             }
+
+            localStorage.setItem('natively_trial_claimed', 'true');
+
             if (res.already_used && res.expired) {
                 setTrialState({ active: false, expired: true, expiresAt: '', startedAt: '', usage: { ai: 0, stt_seconds: 0, search: 0 } });
                 return;
@@ -498,7 +507,7 @@ export const NativelyApiSettings: React.FC = () => {
 
             {/* ── Free trial start card (no key, no active trial) ── */}
             {!isLoading && !isSaved && !isCheckingTrial && (!trialState || (trialState.expired && !trialState.active)) && (() => {
-                const isClaimed = trialState?.expired === true;
+                const isClaimed = trialState?.expired === true || localStorage.getItem('natively_trial_claimed') === 'true';
                 
                 if (isClaimed) {
                     return null;
@@ -646,10 +655,10 @@ export const NativelyApiSettings: React.FC = () => {
                         onClick={handleSave}
                         disabled={isSaving || !isDirty}
                         className={`w-full py-2.5 rounded-xl text-[13px] font-medium transition-all duration-150 select-none
-                            ${isSaving         ? 'bg-accent-primary/10 border border-accent-primary/20 text-accent-primary/40 cursor-wait'
+                            ${isSaving         ? 'bg-button-primary-disabled-bg border border-button-primary-disabled-border text-button-primary-disabled-text cursor-wait'
                             : justSaved        ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 cursor-pointer'
-                            : !isDirty         ? 'bg-bg-input border border-border-subtle text-text-tertiary/40 cursor-default'
-                            :                   'bg-accent-primary hover:opacity-90 text-white shadow-sm active:scale-[0.99] cursor-pointer'
+                            : !isDirty         ? 'bg-button-primary-disabled-bg border border-button-primary-disabled-border text-button-primary-disabled-text cursor-default'
+                            :                   'bg-button-primary-bg hover:bg-button-primary-hover text-white shadow-sm active:scale-[0.99] cursor-pointer'
                             }`}
                     >
                         {isSaving   ? <span className="flex items-center justify-center gap-2"><Loader2 size={13} className="animate-spin" />Saving…</span>

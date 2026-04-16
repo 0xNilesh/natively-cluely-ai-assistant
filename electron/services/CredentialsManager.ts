@@ -112,7 +112,17 @@ export class CredentialsManager {
     }
 
     public getSttProvider(): 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' {
-        return this.credentials.sttProvider || 'none';
+        const provider = this.credentials.sttProvider || 'none';
+        // Self-heal: if provider is 'none' but a Natively key exists, the user is in a
+        // broken state (key cleared then re-entered via a path that skipped auto-promote,
+        // or credentials restored from backup). Silently restore to 'natively' so STT works.
+        if (provider === 'none' && this.credentials.nativelyApiKey) {
+            this.credentials.sttProvider = 'natively';
+            this.saveCredentials();
+            console.log('[CredentialsManager] Self-healed sttProvider: none→natively (Natively key present)');
+            return 'natively';
+        }
+        return provider;
     }
 
     public getDeepgramApiKey(): string | undefined {

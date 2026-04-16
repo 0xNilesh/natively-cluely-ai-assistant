@@ -166,7 +166,22 @@ export class ModesManager {
     // ── Modes ─────────────────────────────────────────────────────
 
     public getModes(): Mode[] {
-        return DatabaseManager.getInstance().getModes().map(rowToMode);
+        const modes = DatabaseManager.getInstance().getModes().map(rowToMode);
+        
+        // Auto-seed the un-deletable General mode if it doesn't exist
+        if (!modes.some(m => m.templateType === 'general')) {
+            const generalMode = this.createMode({ name: 'General', templateType: 'general' });
+            modes.push(generalMode);
+        }
+        
+        // Always enforce 'general' at the very top of the list
+        modes.sort((a, b) => {
+            if (a.templateType === 'general') return -1;
+            if (b.templateType === 'general') return 1;
+            return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(); // oldest first or whatever default
+        });
+        
+        return modes;
     }
 
     public getActiveMode(): Mode | null {

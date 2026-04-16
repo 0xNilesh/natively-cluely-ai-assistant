@@ -432,11 +432,11 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onO
                         title="Modes"
                         className={`p-2 text-text-secondary hover:text-text-primary transition-all duration-300 ${isLight ? 'hover:drop-shadow-[0_0_6px_rgba(0,0,0,0.25)]' : 'hover:drop-shadow-[0_0_8px_rgba(255,255,255,0.5)]'}`}
                     >
-<svg width={17} height={17} viewBox="0 0 16 16" fill="none">
-                            <rect x="0.75" y="0.75" width="6" height="6" rx="1.75" fill="currentColor"/>
-                            <rect x="9.25" y="0.75" width="6" height="6" rx="1.75" fill="currentColor"/>
-                            <rect x="0.75" y="9.25" width="6" height="6" rx="1.75" fill="currentColor"/>
-                            <rect x="9.75" y="9.75" width="5" height="5" rx="1.25" fill="none" stroke="currentColor" strokeWidth="1"/>
+                        <svg width={18} height={18} viewBox="0 0 14 14" fill="none">
+                            <rect x="1" y="1" width="5.5" height="5.5" rx="1.5" fill="currentColor" opacity="0.9"/>
+                            <rect x="7.5" y="1" width="5.5" height="5.5" rx="1.5" fill="currentColor" opacity="0.9"/>
+                            <rect x="1" y="7.5" width="5.5" height="5.5" rx="1.5" fill="currentColor" opacity="0.9"/>
+                            <rect x="7.5" y="7.5" width="5.5" height="5.5" rx="1.5" fill="currentColor" opacity="0.35"/>
                         </svg>
                     </button>
                     <button

@@ -2321,35 +2321,7 @@ Provide only the answer, nothing else.`;
                                             </button>
                                         </div>
 
-                                        {/* Modes button + active mode badge */}
-                                        <button
-                                            onClick={() => window.electronAPI?.openSettingsTab?.('modes')}
-                                            title={activeModeLabel ? `Mode: ${activeModeLabel}` : 'Modes'}
-                                            className="flex items-center gap-1.5 rounded-lg interaction-base interaction-press overlay-icon-surface overlay-icon-surface-hover overlay-text-interactive"
-                                            style={{ ...appearance.iconStyle, padding: activeModeLabel ? '0 8px' : undefined, height: 28 }}
-                                        >
-<svg width={14} height={14} viewBox="0 0 16 16" fill="none" className="shrink-0" style={{ display: 'block' }}>
-                                                <rect x="0.75" y="0.75" width="6" height="6" rx="1.75" fill="currentColor"/>
-                                                <rect x="9.25" y="0.75" width="6" height="6" rx="1.75" fill="currentColor"/>
-                                                <rect x="0.75" y="9.25" width="6" height="6" rx="1.75" fill="currentColor"/>
-                                                <rect x="9.75" y="9.75" width="5" height="5" rx="1.25" fill="none" stroke="currentColor" strokeWidth="1"/>
-                                            </svg>
-                                            {activeModeLabel && (
-                                                <span style={{
-                                                    fontSize: 11,
-                                                    fontWeight: 600,
-                                                    maxWidth: 80,
-                                                    overflow: 'hidden',
-                                                    textOverflow: 'ellipsis',
-                                                    whiteSpace: 'nowrap',
-                                                    opacity: 0.85,
-                                                }}>
-                                                    {activeModeLabel}
-                                                </span>
-                                            )}
-                                        </button>
 
-                                        <div className="w-px h-3 mx-1" style={appearance.dividerStyle} />
 
                                         {/* Mouse Passthrough Toggle */}
                                         <div className="relative">
