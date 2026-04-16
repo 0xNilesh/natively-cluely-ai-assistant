@@ -1184,7 +1184,26 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       });
     }
 
-    // Priority 7: Natively API — used when no other provider is available, or as final fallback
+    // Priority 7: Custom / cURL providers (OpenRouter etc.)
+    if (this.customProvider) {
+      providers.push({
+        name: `Custom Provider (${this.customProvider.name})`,
+        execute: () => this.executeCustomProvider(
+          this.customProvider!.curlCommand,
+          message,
+          '',
+          message,
+          ''
+        )
+      });
+    } else if (this.activeCurlProvider) {
+      providers.push({
+        name: `cURL Provider (${this.activeCurlProvider.name})`,
+        execute: () => this.chatWithCurl(message)
+      });
+    }
+
+    // Priority 8: Natively API — used when no other provider is available, or as final fallback
     const nativelyKeyForStructured = this.nativelyKey || (() => {
       try { return require('./services/CredentialsManager').CredentialsManager.getInstance().getNativelyApiKey() || null; } catch { return null; }
     })();
@@ -1196,7 +1215,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     }
 
     if (providers.length === 0) {
-      throw new Error('No reasoning model available. Please configure an OpenAI, Claude, Gemini, Groq, or Natively API key.');
+      throw new Error('No reasoning model available. Please configure an API key (OpenAI, Claude, Gemini, Groq, Natively) or a custom provider.');
     }
 
     const MAX_ROTATIONS = 3;

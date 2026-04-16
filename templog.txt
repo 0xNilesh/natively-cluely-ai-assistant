@@ -1,0 +1,553 @@
+ 1920B, googleSTT=active
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [NativelyProSTT:system] Sent chunk #2800 (1920B) to server
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [SystemAudioCapture] Chunk #3200: 1920 bytes from Rust
+[1] [NativelyProSTT:system] Sent chunk #3000 (1920B) to server
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [SystemAudioCapture] Chunk #3400: 1920 bytes from Rust
+[1] [NativelyProSTT:system] Sent chunk #3200 (1920B) to server
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [NativelyProSTT:mic] Sent chunk #800 (1920B) to server
+[1] [Main] (Reconfigured) SystemAudio->STT: chunk #3500, 1920B, googleSTT=active
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [Main] Ending Meeting...
+[1] [SystemAudioCapture] Stopping capture...
+[1] [SystemAudioCapture] DSP thread stopped.
+[1] [MicrophoneCapture] Stopping capture...
+[1] [MicrophoneCapture] DSP thread stopped.
+[1] [Microphone] Stream paused
+[1] [MeetingPersistence] Stopping meeting and queueing save...
+[1] [SessionTracker] Force-saving pending interim transcript: Off your mask.
+[1] [LLMHelper] generateMeetingSummary called. Context length: 396
+[1] [LLMHelper] Estimated tokens: 99
+[1] [LLMHelper] Attempting Natively API for summary...
+[1] [DatabaseManager] Successfully saved meeting 8dacf14b-0ad6-46b1-9e6e-1b51421616e2
+[1] [Main] Reverting model to default: natively
+[1] [LLMHelper] Switched to Cloud Model: natively
+[1] [LiveRAGIndexer] Stopping for meeting live-meeting-current
+[1] [LiveRAGIndexer] Stopped for meeting live-meeting-current
+[1] [Main] Live RAG indexing stopped.
+[1] [RAGManager] Processing meeting 8dacf14b-0ad6-46b1-9e6e-1b51421616e2 with 7 segments
+[1] [RAGManager] Preprocessed to 3 cleaned segments
+[1] [RAGManager] Created 1 chunks
+[1] [EmbeddingPipeline] Queued 1 chunks + 1 summary for meeting 8dacf14b-0ad6-46b1-9e6e-1b51421616e2
+[1] [AppState] RAG processed meeting 8dacf14b-0ad6-46b1-9e6e-1b51421616e2: 1 chunks
+[1] [Main] JIT RAG provisional chunks cleaned up.
+[1] [WindowHelper] Switching to LAUNCHER (inactive: false)
+[1] [KeybindManager] Mode changed to: launcher. Refreshing global shortcuts.
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+B -> general:toggle-visibility
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+B -> general:toggle-mouse-passthrough
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+Enter -> general:capture-and-process
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+H -> general:take-screenshot
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+H -> general:selective-screenshot
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+Up -> window:move-up
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+Down -> window:move-down
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+Left -> window:move-left
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+Right -> window:move-right
+[1] [KeybindManager] Application menu updated
+[1] [NativelyProSTT] Connection closed (code 1000)
+[1] [NativelyProSTT] Connection closed (code 1000)
+[1] [EmbeddingPipeline] Embedded chunk 36719 via gemini
+[1] [EmbeddingPipeline] No summary for meeting 8dacf14b-0ad6-46b1-9e6e-1b51421616e2, skipping
+[1] [EmbeddingPipeline] Queue empty
+[1] [LLMHelper] ✅ Natively API summary generated successfully.
+[1] [MeetingPersistence] Active mode: "Technical Interview" (technical-interview), sections: 5 (custom DB)
+[1] [MeetingPersistence] Using mode-specific prompt with sections: [
+[1]   'Problems covered',
+[1]   'Concepts tested',
+[1]   'What went well',
+[1]   'Areas to study',
+[1]   'Action items'
+[1] ]
+[1] [LLMHelper] generateMeetingSummary called. Context length: 396
+[1] [LLMHelper] Estimated tokens: 99
+[1] [LLMHelper] Attempting Natively API for summary...
+[1] [LLMHelper] ✅ Natively API summary generated successfully.
+[1] [MeetingPersistence] Raw LLM summary response (first 500 chars): {
+[1]   "overview": "The session concluded abruptly with no technical evaluation or problem-solving tasks performed.",
+[1]   "sections": {
+[1]     "Problems covered": [],
+[1]     "Concepts tested": [],
+[1]     "What went well": [],
+[1]     "Areas to study": [],
+[1]     "Action items": []
+[1]   }
+[1] }
+[1] [MeetingPersistence] Parsed mode sections: [
+[1]   'Problems covered(0)',
+[1]   'Concepts tested(0)',
+[1]   'What went well(0)',
+[1]   'Areas to study(0)',
+[1]   'Action items(0)'
+[1] ]
+[1] [DatabaseManager] Successfully saved meeting 8dacf14b-0ad6-46b1-9e6e-1b51421616e2
+
+ *  History restored 
+
+evin@head natively-cluely-ai-assistant % npm start 
+
+> natively@2.4.0 start
+> npm run app:dev
+
+
+> natively@2.4.0 app:dev
+> concurrently "npm run dev -- --port 5180 --strictPort" "wait-on http://localhost:5180 && npm run electron:dev"
+
+[0] 
+[0] > natively@2.4.0 dev
+[0] > vite --port 5180 --strictPort
+[0] 
+[0] 
+[0]   VITE v5.4.21  ready in 145 ms
+[0] 
+[0]   ➜  Local:   http://localhost:5180/
+[0]   ➜  Network: use --host to expose
+[1] 
+[1] > natively@2.4.0 electron:dev
+[1] > npm run build:electron && cross-env NODE_ENV=development electron .
+[1] 
+[1] 
+[1] > natively@2.4.0 build:electron
+[1] > node scripts/build-electron.js
+[1] 
+[1] [build-electron] Done in 55ms
+[1] [nativeModuleLoader] Could not load from /Users/evin/natively-cluely-ai-assistant/node_modules/electron/dist/Electron.app/Contents/Resources/app.asar.unpacked/native-module/index.darwin-arm64.node: Cannot find module '/Users/evin/natively-cluely-ai-assistant/node_modules/electron/dist/Electron.app/Contents/Resources/app.asar.unpacked/native-module/index.darwin-arm64.node'
+[1] Require stack:
+[1] - /Users/evin/natively-cluely-ai-assistant/dist-electron/electron/audio/nativeModuleLoader.js
+[1] - /Users/evin/natively-cluely-ai-assistant/dist-electron/electron/audio/AudioDevices.js
+[1] - /Users/evin/natively-cluely-ai-assistant/dist-electron/electron/ipcHandlers.js
+[1] - /Users/evin/natively-cluely-ai-assistant/dist-electron/electron/main.js
+[1] [nativeModuleLoader] Loaded index.darwin-arm64.node from: /Users/evin/natively-cluely-ai-assistant/native-module/index.darwin-arm64.node
+[1] [WindowHelper] isEnvDev: true, isPackaged: false, inAppBundle: true
+[1] [dotenv@17.3.1] injecting env (28) from .env -- tip: 🛠️  run anywhere with `dotenvx run -- yourcommand`
+[1] [dotenv@17.3.1] injecting env (0) from .env -- tip: ⚙️  specify custom .env file path with { path: '/custom/path/.env' }
+[1] [SettingsManager] Settings loaded successfully: {"isUndetectable":false,"disguiseMode":"none","uiOpacity":1,"verboseLogging":false,"actionButtonMode":"recap","updateChannel":"stable","groqFastTextMode":true,"knowledgeMode":true}
+[1] [SettingsManager] Settings loaded
+[1] [CredentialsManager] Loaded encrypted credentials
+[1] [CredentialsManager] Initialized
+[1] [AppState] Initialized with isUndetectable=false, disguiseMode=none, verboseLogging=false
+[1] [ModelVersionManager] Loaded persisted state from disk
+[1] [SettingsWindowHelper] Setting content protection to: false
+[1] [ModelSelectorWindowHelper] Setting content protection to: false
+[1] [CropperWindowHelper] Creating cropper window with multi-monitor bounds: { x: 0, y: 0, width: 2650, height: 956 }
+[1] [CropperWindowHelper] Window created. Actual bounds: { x: 0, y: 0, width: 2650, height: 956 }
+[1] [CropperWindowHelper] Expected bounds: {x:0, y:0, width:2650, height:956}
+[1] [IntelligenceEngine] Initializing LLMs with LLMHelper
+[1] [LLMHelper] Groq Fast Text Mode: true
+[1] [AppState] Fast mode restored from settings
+[1] [DatabaseManager] Initializing database at /Users/evin/Library/Application Support/natively/natively.db
+[1] [DatabaseManager] Directory exists: /Users/evin/Library/Application Support/natively
+[1] [DatabaseManager] Directory contents: [
+[1]   '.com.github.Electron.YGMqXY',
+[1]   '.com.github.Electron.ou56Sc',
+[1]   '.com.github.Electron.x7a2zf',
+[1]   '.updaterId',
+[1]   'Cache',
+[1]   'Code Cache',
+[1]   'Cookies',
+[1]   'Cookies-journal',
+[1]   'DawnGraphiteCache',
+[1]   'DawnWebGPUCache',
+[1]   'GPUCache',
+[1]   'IndexedDB',
+[1]   'Local Storage',
+[1]   'Network Persistent State',
+[1]   'Preferences',
+[1]   'Service Worker',
+[1]   'Session Storage',
+[1]   'Shared Dictionary',
+[1]   'SharedStorage',
+[1]   'SingletonCookie',
+[1]   'SingletonLock',
+[1]   'SingletonSocket',
+[1]   'TransportSecurity',
+[1]   'Trust Tokens',
+[1]   'Trust Tokens-journal',
+[1]   'WebStorage',
+[1]   'blob_storage',
+[1]   'credentials.enc',
+[1]   'extra_screenshots',
+[1]   'install_id.txt',
+[1]   'install_ping_sent.txt',
+[1]   'keybinds.json',
+[1]   'license.enc',
+[1]   'meetings.json',
+[1]   'model_versions.json',
+[1]   'natively-preferences-secure.json',
+[1]   'natively.db',
+[1]   'screenshots',
+[1]   'settings.json',
+[1]   'theme-config.json',
+[1]   'window-state.json'
+[1] ]
+[1] [DatabaseManager] Found existing DB. Size: 11460608 bytes
+[1] [DatabaseManager] sqlite-vec extension loaded successfully
+[1] [DatabaseManager] Current schema version: 14
+[1] [DatabaseManager] Migrations completed.
+[1] [VectorStore] Using native sqlite-vec for vector search
+[1] [EmbeddingPipeline] Initializing with config: {
+[1]   openaiKey: undefined,
+[1]   geminiKey: 'AIzaSyDHPA71Q5JRANq4xkvxQFsOVNSDp3w8tfQ',
+[1]   ollamaUrl: 'http://localhost:11434'
+[1] }
+[1] [AppState] RAGManager initialized
+[1] [KnowledgeDB] Schema initialized successfully
+[1] [KnowledgeOrchestrator] Cache refreshed: 34 total nodes across all docs
+[1] [LLMHelper] KnowledgeOrchestrator attached
+[1] [KnowledgeOrchestrator] Knowledge mode ENABLED
+[1] [AppState] Knowledge mode restored from settings
+[1] [AppState] KnowledgeOrchestrator initialized
+[1] [AutoUpdater] Channel: latest
+[1] [ProcessingHelper] Loading stored Natively API Key from CredentialsManager
+[1] [LLMHelper] Natively key set
+[1] [IntelligenceEngine] Initializing LLMs with LLMHelper
+[1] [ProcessingHelper] Initializing RAGManager embeddings with available keys
+[1] [EmbeddingPipeline] Config unchanged or no new keys — skipping re-initialization
+[1] [ProcessingHelper] Retrying pending embeddings...
+[1] [EmbeddingPipeline] No provider, skipping queue processing
+[1] [ModelVersionManager] Next scheduled discovery in ~11 days
+[1] [ModelVersionManager] 📅 Background scheduler started (every ~14 days)
+[1] [ProcessingHelper] Loading stored Default Model: natively
+[1] [LLMHelper] Switched to Cloud Model: natively
+[1] [LLMHelper] STT Language set to: auto
+[1] [LLMHelper] AI Response Language set to: auto
+[1] [AppState] Applying disguise: none (Natively) on darwin
+[1] [OllamaManager] Checking if Ollama is already running...
+[1] [InstallPingManager] Install ping already sent, skipping
+[1] [Init] Loading stored Google Service Account path
+[1] [AppState] Updating Google Credentials to: /Users/evin/googlesec/service-account.json
+[1] App is ready
+[1] [WindowHelper] Icon Path: /Users/evin/natively-cluely-ai-assistant/assets/natively.icns
+[1] [WindowHelper] Start URL: http://localhost:5180
+[1] [WindowHelper] BrowserWindow created successfully
+[1] [Tray] Using template icon: /Users/evin/natively-cluely-ai-assistant/assets/iconTemplate.png
+[1] [Main] updateTrayMenu called. Screenshot Accelerator: CommandOrControl+H
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+B -> general:toggle-visibility
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+B -> general:toggle-mouse-passthrough
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+Enter -> general:capture-and-process
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+H -> general:take-screenshot
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+H -> general:selective-screenshot
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+Up -> window:move-up
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+Down -> window:move-down
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+Left -> window:move-left
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+Right -> window:move-right
+[1] [KeybindManager] Application menu updated
+[1] [SettingsWindowHelper] Creating Settings Window with Content Protection: false
+[1] [CalendarManager] Google OAuth credentials are using defaults. Calendar features will not work until valid credentials are provided via env vars.
+[1] [Main] CalendarManager initialized
+[1] [MeetingPersistence] Checking for unprocessed meetings...
+[1] [MeetingPersistence] No unprocessed meetings found.
+[1] [ModelVersionManager] Current Model Tiers:
+[1]   --- Vision ---
+[1]   openai: T1=gpt-5.3-chat-latest | T2/T3=gpt-5.3-chat-latest
+[1]   gemini_flash: T1=gemini-3.1-flash-lite-preview | T2/T3=gemini-3.1-flash-lite-preview
+[1]   claude: T1=claude-sonnet-4-6 | T2/T3=claude-sonnet-4-6
+[1]   gemini_pro: T1=gemini-3.1-pro-preview | T2/T3=gemini-3.1-pro-preview
+[1]   groq_llama: T1=meta-llama/llama-4-scout-17b-16e-instruct | T2/T3=meta-llama/llama-4-scout-17b-16e-instruct
+[1]   --- Text ---
+[1]   text_groq: T1=llama-3.3-70b-versatile | T2/T3=llama-3.3-70b-versatile
+[1]   text_openai: T1=gpt-5.3-chat-latest | T2/T3=gpt-5.3-chat-latest
+[1]   text_claude: T1=claude-sonnet-4-6 | T2/T3=claude-sonnet-4-6
+[1]   text_gemini_flash: T1=gemini-3.1-flash-lite-preview | T2/T3=gemini-3.1-flash-lite-preview
+[1]   text_gemini_pro: T1=gemini-3.1-pro-preview | T2/T3=gemini-3.1-pro-preview
+[1]   Last discovery: 2026-04-13T15:44:36.587Z
+[1]   Discovery interval: 14 days
+[1] [OllamaManager] Ollama is already running. App will not manage its lifecycle.
+[1] [AppState] Ollama model ready, re-evaluating RAG pipeline provider
+[1] [EmbeddingPipeline] Config unchanged or no new keys — skipping re-initialization
+[1] [IntentClassifier] Loading zero-shot classifier (mobilebert-uncased-mnli)...
+[1] [EmbeddingPipeline] Local fallback provider ready (384d)
+[1] [IntentClassifier] Zero-shot classifier loaded successfully.
+[1] [Init] Screen recording permission status at startup: granted
+[1] [Init] Ignoring screen recording permission check in development mode
+[1] [CropperWindowHelper] URL loaded successfully (attempt 1)
+[1] [WindowHelper] Switching to LAUNCHER (inactive: false)
+[1] [WindowHelper] loadURL success
+[1] [PostProcessor] Running deterministic post-processing...
+[1] [PostProcessor] Total experience: 0.4 years
+[1] [PostProcessor] Skills mapped: 17
+[1] [WindowHelper] Switching to LAUNCHER (inactive: false)
+[1] [WindowHelper] Switching to LAUNCHER (inactive: false)
+[1] [WindowHelper] setOverlayDimensions: 600 214
+[1] [WindowHelper] setOverlayDimensions: 600 214
+[1] [WindowHelper] setOverlayDimensions: 600 214
+[1] [LLMHelper] Switched to Cloud Model: natively
+[1] [LLMHelper] Switched to Cloud Model: natively
+[1] [EmbeddingProviderResolver] Selected provider: gemini (768d)
+[1] [EmbeddingPipeline] Ready with provider: gemini (768d)
+[1] [WindowHelper] setOverlayDimensions: 600 214
+[1] [DatabaseManager] Demo meeting already exists, skipping seed.
+[1] [DatabaseManager] Demo meeting already exists, skipping seed.
+[1] [AutoUpdater] Development mode: Skipping auto check (use manual button)
+[1] [Main] Starting Meeting... {
+[1]   audio: {
+[1]     inputDeviceId: 'MacBook Air Microphone',
+[1]     outputDeviceId: 'BuiltInSpeakerDevice'
+[1]   }
+[1] }
+[1] [Main] macOS microphone permission before meeting start: granted
+[1] [Main] Ignoring screen capture permission check in development mode
+[1] [Main] macOS screen recording permission status: granted
+[1] [WindowHelper] Overlay position reset to default for next meeting.
+[1] [Main] Reconfiguring Audio: Input=MacBook Air Microphone, Output=BuiltInSpeakerDevice
+[1] [Main] Initializing SystemAudioCapture...
+[1] [SystemAudioCapture] Initialized (lazy). Device ID: BuiltInSpeakerDevice
+[1] [Main] SystemAudioCapture rate: 48000Hz
+[1] [Main] SystemAudioCapture initialized.
+[1] [Main] Initializing MicrophoneCapture...
+[1] [MicrophoneCapture] Initialized wrapper. Device ID: MacBook Air Microphone
+[1] [MicrophoneCapture] Creating native monitor (Eager Init)...
+[1] [Microphone] Using requested input device: MacBook Air Microphone
+[1] [Microphone] Device: MacBook Air Microphone, Rate: 48000Hz, Channels: 1, Format: F32
+[1] [MicrophoneCapture] Initialized. Device: Some("MacBook Air Microphone"), Rate: 48000Hz
+[1] [Main] MicrophoneCapture rate: 48000Hz
+[1] [Main] MicrophoneCapture initialized.
+[1] [Main] Creating interviewer STT provider: natively
+[1] [NativelyProSTT] Language set to auto-detect mode
+[1] [Main] Creating user STT provider: natively
+[1] [NativelyProSTT] Language set to auto-detect mode
+[1] [NativelyProSTT:system] Sample rate configured to 48000Hz
+[1] [NativelyProSTT:mic] Sample rate configured to 48000Hz
+[1] [SystemAudioCapture] Creating native monitor (lazy init)...
+[1] [SystemAudioCapture] Created (device: Some("BuiltInSpeakerDevice"))
+[1] [SystemAudioCapture] Starting native capture...
+[1] [SystemAudioCapture] Background init starting...
+[1] [SpeakerInput] Initializing CoreAudio Tap backend...
+[1] [CoreAudioTap] Target device UID: BuiltInSpeakerDevice
+[1] [NativelyProSTT] Connecting (attempt 1)...
+[1] [MicrophoneCapture] Starting native capture...
+[1] [Microphone] Stream started
+[1] [NativelyProSTT:mic] Staggering connection 2998ms (concurrent key collision prevention)
+[1] [SilenceSuppressor] Created: threshold=100 (adaptive), hangover=500ms, keepalive=100ms, native_rate=48000Hz, decimation=3.00x, use_vad=true, VAD_mode=Quality
+[1] [MicrophoneCapture] DSP thread started (VAD + suppression active, rate=48000Hz, chunk=960)
+[1] [CoreAudioTap] Tap created: Ok(Retained(String(<CFString 0x12c011218b0 [0x200b437a0]>{contents = "4FFCB60E-1F7B-4C22-A278-732B37292C52"})))
+[1] [CoreAudioTap] Format: 48000Hz, 1ch
+[1] [LiveRAGIndexer] Started for meeting live-meeting-current
+[1] [Main] Audio pipeline started successfully.
+[1] [WindowHelper] Switching to OVERLAY (inactive: false)
+[1] [KeybindManager] Mode changed to: overlay. Refreshing global shortcuts.
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+B -> general:toggle-visibility
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+B -> general:toggle-mouse-passthrough
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Enter -> general:process-screenshots
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+Enter -> general:capture-and-process
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+R -> general:reset-cancel
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+H -> general:take-screenshot
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+H -> general:selective-screenshot
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+1 -> chat:whatToAnswer
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+2 -> chat:clarify
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+4 -> chat:dynamicAction4
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+3 -> chat:followUp
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+5 -> chat:answer
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+6 -> chat:codeHint
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+7 -> chat:brainstorm
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Up -> chat:scrollUp
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Down -> chat:scrollDown
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+Up -> window:move-up
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+Down -> window:move-down
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+Left -> window:move-left
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+Right -> window:move-right
+[1] [KeybindManager] Application menu updated
+[1] [CoreAudioTap] Aggregate device started successfully
+[1] [SpeakerInput] CoreAudio Tap backend initialized.
+[1] [SystemAudioCapture] Background init complete. Initial Rate: 48000Hz. DSP starting.
+[1] [SilenceSuppressor] Created: threshold=30 (adaptive), hangover=600ms, keepalive=100ms, native_rate=48000Hz, decimation=3.00x, use_vad=false, VAD_mode=Quality
+[1] [WindowHelper] setOverlayDimensions: 600 214
+[1] [NativelyProSTT:mic] Buffering chunk (buffer=1, isConnected=false, ws=null)
+[1] [NativelyProSTT:mic] Buffering chunk (buffer=2, isConnected=false, ws=null)
+[1] [NativelyProSTT:mic] Buffering chunk (buffer=3, isConnected=false, ws=null)
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [SystemAudioCapture] Chunk #1: 1920 bytes from Rust
+[1] [Main] (Reconfigured) SystemAudio->STT: chunk #1, 1920B, googleSTT=active
+[1] [NativelyProSTT:system] Buffering chunk (buffer=1, isConnected=false, ws=OPEN)
+[1] [SystemAudioCapture] Chunk #2: 1920 bytes from Rust
+[1] [Main] (Reconfigured) SystemAudio->STT: chunk #2, 1920B, googleSTT=active
+[1] [NativelyProSTT:system] Buffering chunk (buffer=2, isConnected=false, ws=OPEN)
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [SystemAudioCapture] Chunk #3: 1920 bytes from Rust
+[1] [Main] (Reconfigured) SystemAudio->STT: chunk #3, 1920B, googleSTT=active
+[1] [NativelyProSTT:system] Buffering chunk (buffer=3, isConnected=false, ws=OPEN)
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [NativelyProSTT:system] Server msg: {"status":"connected","provider":"deepgram","quota":{"used":16,"limit":500,"remaining":484}}
+[1] [NativelyProSTT] Connected via deepgram
+[1] [NativelyProSTT:system] Sent chunk #1 (1920B) to server
+[1] [NativelyProSTT:system] Sent chunk #2 (1920B) to server
+[1] [NativelyProSTT:system] Sent chunk #3 (1920B) to server
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [NativelyProSTT:system] Sent chunk #4 (1920B) to server
+[1] [NativelyProSTT:system] Sent chunk #5 (1920B) to server
+[1] [NativelyProSTT:mic] Buffering chunk (buffer=100, isConnected=false, ws=null)
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [NativelyProSTT] Connecting (attempt 1)...
+[1] [WindowHelper] setOverlayDimensions: 600 242
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [NativelyProSTT:mic] Buffering chunk (buffer=200, isConnected=false, ws=CONNECTING)
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [NativelyProSTT:mic] Server msg: {"status":"connected","provider":"deepgram","quota":{"used":16,"limit":500,"remaining":484}}
+[1] [NativelyProSTT] Connected via deepgram
+[1] [NativelyProSTT:mic] Sent chunk #1 (1920B) to server
+[1] [NativelyProSTT:mic] Sent chunk #2 (1920B) to server
+[1] [NativelyProSTT:mic] Sent chunk #3 (1920B) to server
+[1] [NativelyProSTT:mic] Sent chunk #4 (1920B) to server
+[1] [NativelyProSTT:mic] Sent chunk #5 (1920B) to server
+[1] [NativelyProSTT:system] Server msg: {"language_detected":"tr-TR"}
+[1] [NativelyProSTT] Auto-detected language: tr-TR
+[1] [Main] STT language auto-detected (interviewer): tr-TR
+[1] [NativelyProSTT:system] Buffering chunk (buffer=1, isConnected=false, ws=null)
+[1] [NativelyProSTT:system] Buffering chunk (buffer=2, isConnected=false, ws=null)
+[1] [NativelyProSTT:system] Buffering chunk (buffer=3, isConnected=false, ws=null)
+[1] [NativelyProSTT:system] Staggering connection 754ms (concurrent key collision prevention)
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [SystemAudioCapture] Chunk #200: 1920 bytes from Rust
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [NativelyProSTT] Connection closed (code 1000)
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [NativelyProSTT] Connecting (attempt 1)...
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [NativelyProSTT:system] Buffering chunk (buffer=100, isConnected=false, ws=OPEN)
+[1] [NativelyProSTT:system] Server msg: {"status":"connected","provider":"deepgram","quota":{"used":16,"limit":500,"remaining":484}}
+[1] [NativelyProSTT] Connected via deepgram
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [NativelyProSTT:mic] Server msg: {"language_detected":"en-US"}
+[1] [NativelyProSTT] Auto-detected language: en-US
+[1] [Main] STT language auto-detected (user): en-US
+[1] [NativelyProSTT:mic] Buffering chunk (buffer=1, isConnected=false, ws=null)
+[1] [NativelyProSTT:mic] Buffering chunk (buffer=2, isConnected=false, ws=null)
+[1] [NativelyProSTT:mic] Buffering chunk (buffer=3, isConnected=false, ws=null)
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [NativelyProSTT:mic] Server msg: {"status":"connected","provider":"deepgram","quota":{"used":16,"limit":500,"remaining":484}}
+[1] [NativelyProSTT] Connected via deepgram
+[1] [NativelyProSTT:mic] Staggering connection 1048ms (concurrent key collision prevention)
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [NativelyProSTT:system] Sent chunk #200 (1920B) to server
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [NativelyProSTT] Connection closed (code 1000)
+[1] [NativelyProSTT] Connecting (attempt 1)...
+[1] [SystemAudioCapture] Chunk #400: 1920 bytes from Rust
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [NativelyProSTT:mic] Buffering chunk (buffer=100, isConnected=false, ws=CONNECTING)
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [NativelyProSTT:mic] Server msg: {"status":"connected","provider":"deepgram","quota":{"used":16,"limit":500,"remaining":484}}
+[1] [NativelyProSTT] Connected via deepgram
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [Main] (Reconfigured) SystemAudio->STT: chunk #500, 1920B, googleSTT=active
+[1] [NativelyProSTT:mic] Sent chunk #200 (1920B) to server
+[1] [NativelyProSTT:system] Sent chunk #400 (1920B) to server
+[1] [NativelyProSTT:mic] Server msg: {"text":"Hello?","full_text":"Hello?","is_final":true,"confidence":0.8652344}
+[1] [SystemAudioCapture] Chunk #600: 1920 bytes from Rust
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [NativelyProSTT:mic] Server msg: {"text":"Hello?","full_text":"Hello? Hello?","is_final":true,"confidence":0.9182129}
+[1] [NativelyProSTT:system] Sent chunk #600 (1920B) to server
+[1] [SystemAudioCapture] Chunk #800: 1920 bytes from Rust
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [NativelyProSTT:mic] Sent chunk #400 (1920B) to server
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [NativelyProSTT:system] Sent chunk #800 (1920B) to server
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [SystemAudioCapture] Chunk #1000: 1920 bytes from Rust
+[1] [Main] (Reconfigured) SystemAudio->STT: chunk #1000, 1920B, googleSTT=active
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [NativelyProSTT:system] Sent chunk #1000 (1920B) to server
+[1] [NativelyProSTT:mic] Sent chunk #600 (1920B) to server
+[1] [SystemAudioCapture] Chunk #1200: 1920 bytes from Rust
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [NativelyProSTT:system] Sent chunk #1200 (1920B) to server
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [SystemAudioCapture] Chunk #1400: 1920 bytes from Rust
+[1] [Main] (Reconfigured) SystemAudio->STT: chunk #1500, 1920B, googleSTT=active
+[1] [NativelyProSTT:system] Sent chunk #1400 (1920B) to server
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [SystemAudioCapture] Chunk #1600: 1920 bytes from Rust
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [NativelyProSTT:system] Sent chunk #1600 (1920B) to server
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [SystemAudioCapture] Chunk #1800: 1920 bytes from Rust
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [NativelyProSTT:system] Sent chunk #1800 (1920B) to server
+[1] [NativelyProSTT:mic] Sent chunk #800 (1920B) to server
+[1] [SystemAudioCapture] Chunk #2000: 1920 bytes from Rust
+[1] [Main] (Reconfigured) SystemAudio->STT: chunk #2000, 1920B, googleSTT=active
+[1] [MicrophoneCapture] Emitting chunk: 1920 bytes to JS
+[1] [Main] Ending Meeting...
+[1] [SystemAudioCapture] Stopping capture...
+[1] [SystemAudioCapture] DSP thread stopped.
+[1] [MicrophoneCapture] Stopping capture...
+[1] [MicrophoneCapture] DSP thread stopped.
+[1] [Microphone] Stream paused
+[1] [MeetingPersistence] Stopping meeting and queueing save...
+[1] [SessionTracker] Force-saving pending interim transcript: I'll laser every fucking one of you.
+[1] [LLMHelper] generateMeetingSummary called. Context length: 77
+[1] [LLMHelper] Estimated tokens: 20
+[1] [LLMHelper] Attempting Natively API for summary...
+[1] [DatabaseManager] Successfully saved meeting c416ce2f-aa8f-4575-9db7-4e58c4e98c4e
+[1] [Main] Reverting model to default: natively
+[1] [LLMHelper] Switched to Cloud Model: natively
+[1] [LiveRAGIndexer] Stopping for meeting live-meeting-current
+[1] [LiveRAGIndexer] Stopped for meeting live-meeting-current
+[1] [Main] Live RAG indexing stopped.
+[1] [RAGManager] Processing meeting c416ce2f-aa8f-4575-9db7-4e58c4e98c4e with 3 segments
+[1] [RAGManager] Preprocessed to 1 cleaned segments
+[1] [RAGManager] Created 1 chunks
+[1] [EmbeddingPipeline] Queued 1 chunks + 1 summary for meeting c416ce2f-aa8f-4575-9db7-4e58c4e98c4e
+[1] [AppState] RAG processed meeting c416ce2f-aa8f-4575-9db7-4e58c4e98c4e: 1 chunks
+[1] [Main] JIT RAG provisional chunks cleaned up.
+[1] [WindowHelper] Switching to LAUNCHER (inactive: false)
+[1] [KeybindManager] Mode changed to: launcher. Refreshing global shortcuts.
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+B -> general:toggle-visibility
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+B -> general:toggle-mouse-passthrough
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+Enter -> general:capture-and-process
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+H -> general:take-screenshot
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+H -> general:selective-screenshot
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+Up -> window:move-up
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+Down -> window:move-down
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+Left -> window:move-left
+[1] [KeybindManager] Registered global shortcut: CommandOrControl+Shift+Right -> window:move-right
+[1] [KeybindManager] Application menu updated
+[1] [NativelyProSTT] Connection closed (code 1000)
+[1] [NativelyProSTT] Connection closed (code 1000)
+[1] [DatabaseManager] Ensured vec0 tables for dim=768
+[1] [EmbeddingPipeline] Embedded chunk 36720 via gemini
+[1] [EmbeddingPipeline] No summary for meeting c416ce2f-aa8f-4575-9db7-4e58c4e98c4e, skipping
+[1] [EmbeddingPipeline] Queue empty
+[1] [LLMHelper] ✅ Natively API summary generated successfully.
+[1] [MeetingPersistence] Active mode: "Technical Interview" (technical-interview), sections: 5 (custom DB)
+[1] [MeetingPersistence] Using mode-specific prompt with sections: [
+[1]   'Problems covered',
+[1]   'Concepts tested',
+[1]   'What went well',
+[1]   'Areas to study',
+[1]   'Action items'
+[1] ]
+[1] [LLMHelper] generateMeetingSummary called. Context length: 77
+[1] [LLMHelper] Estimated tokens: 20
+[1] [LLMHelper] Attempting Natively API for summary...

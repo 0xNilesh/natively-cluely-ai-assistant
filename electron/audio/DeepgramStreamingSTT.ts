@@ -16,7 +16,10 @@ import { RECOGNITION_LANGUAGES } from '../config/languages';
 const RECONNECT_BASE_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 30000;
 const RECONNECT_MAX_ATTEMPTS = 10;
-const KEEPALIVE_INTERVAL_MS = 1000;
+// Minimum gap between connection attempts for the same API key.
+// Two instances connecting simultaneously with the same key can cause a server-side
+// race (especially on accounts with low concurrency limits) that manifests as 1006.
+const STAGGER_INTERVAL_MS = 3000;
 
 export class DeepgramStreamingSTT extends EventEmitter {
     private apiKey: string;
@@ -30,10 +33,12 @@ export class DeepgramStreamingSTT extends EventEmitter {
 
     private reconnectAttempts = 0;
     private reconnectTimer: NodeJS.Timeout | null = null;
-    private keepAliveTimer: NodeJS.Timeout | null = null;
     private buffer: Buffer[] = [];
     private isConnecting = false;
     private connectionGen = 0; // incremented each connect(); handlers ignore stale gens
+
+    // Static: stagger concurrent connections with the same API key.
+    private static readonly nextSlotByKey = new Map<string, number>();
 
     constructor(apiKey: string) {
         super();
@@ -117,14 +122,18 @@ export class DeepgramStreamingSTT extends EventEmitter {
 
         if (this.ws) {
             try {
-                // Send Deepgram's graceful close message
+                // Send Deepgram's graceful close message only when connection is fully open
                 if (this.ws.readyState === WebSocket.OPEN) {
                     this.ws.send(JSON.stringify({ type: 'CloseStream' }));
+                    this.ws.close();
+                } else {
+                    // terminate() is safe on CONNECTING/CLOSING sockets;
+                    // close() on CONNECTING throws 'WebSocket was closed before connection was established'
+                    this.ws.terminate();
                 }
             } catch {
-                // Ignore send errors during shutdown
+                // Ignore errors during shutdown
             }
-            this.ws.close();
             this.ws = null;
         }
 
@@ -155,15 +164,38 @@ export class DeepgramStreamingSTT extends EventEmitter {
             return;
         }
 
-        this.ws.send(chunk);
+        this.ws.send(chunk, (err) => {
+            if (err) console.error('[DeepgramStreaming] Send error:', err.message);
+        });
     }
 
     // =========================================================================
     // WebSocket Connection
     // =========================================================================
 
-    private connect(): void {
+    private connect(skipStagger = false): void {
         if (this.isConnecting) return;
+
+        if (!skipStagger) {
+            // Stagger concurrent connections with the same API key.
+            // Two instances connecting simultaneously can hit server-side concurrency
+            // limits (or key-rotation races in a proxy), manifesting as 1006 with empty reason.
+            const now = Date.now();
+            const reserved = DeepgramStreamingSTT.nextSlotByKey.get(this.apiKey) ?? 0;
+            const staggerMs = Math.max(0, reserved - now);
+            DeepgramStreamingSTT.nextSlotByKey.set(this.apiKey, Math.max(now, reserved) + STAGGER_INTERVAL_MS);
+
+            if (staggerMs > 0) {
+                this.isConnecting = true; // Hold the slot while staggering
+                console.log(`[DeepgramStreaming] Staggering connection ${staggerMs}ms (key ...${this.apiKey.slice(-4)})`);
+                setTimeout(() => {
+                    this.isConnecting = false;
+                    if (this.shouldReconnect || this.isActive) this.connect(true);
+                }, staggerMs);
+                return;
+            }
+        }
+
         this.isConnecting = true;
         const gen = ++this.connectionGen;
 
@@ -184,29 +216,50 @@ export class DeepgramStreamingSTT extends EventEmitter {
             `&interim_results=true` +
             `&keepalive=true`;
 
-        console.log(`[DeepgramStreaming] Connecting (rate=${this.sampleRate}, ch=${this.numChannels})...`);
+        console.log(`[DeepgramStreaming] Connecting (rate=${this.sampleRate}, ch=${this.numChannels}, key=...${this.apiKey.slice(-4)})...`);
 
         const ws = new WebSocket(url, {
             headers: { Authorization: `Token ${this.apiKey}` },
         });
         this.ws = ws;
 
+        // Track stability: only reset reconnectAttempts after 5 s of open connection.
+        // Without this guard, every rapid connect→connected→1006 cycle resets the
+        // counter, making exponential backoff useless (always delays at 1000 ms).
+        let stableTimer: NodeJS.Timeout | null = null;
+
+        ws.on('unexpected-response', (_req: unknown, res: { statusCode: number; statusMessage: string }) => {
+            if (gen !== this.connectionGen) return;
+            console.error(`[DeepgramStreaming] HTTP ${res.statusCode} ${res.statusMessage} — check API key and account status`);
+            this.isConnecting = false;
+            // 'close' will fire after this, which will schedule reconnect
+        });
+
         ws.on('open', () => {
             if (gen !== this.connectionGen) { ws.close(); return; } // stale connection
             this.isActive = true;
             this.isConnecting = false;
-            this.reconnectAttempts = 0;
             console.log('[DeepgramStreaming] Connected');
 
             // Flush any audio buffered during the WebSocket handshake (~500ms)
             while (this.buffer.length > 0) {
                 const chunk = this.buffer.shift();
                 if (chunk && ws.readyState === WebSocket.OPEN) {
-                    ws.send(chunk);
+                    ws.send(chunk, (err) => {
+                        if (err) console.error('[DeepgramStreaming] Buffer flush send error:', err.message);
+                    });
                 }
             }
 
-            this.startKeepAlive();
+            // keepalive=true in the URL handles idle keepalives natively — no interval needed.
+
+            // Only reset backoff counter after a genuinely stable connection
+            stableTimer = setTimeout(() => {
+                stableTimer = null;
+                if (gen === this.connectionGen) {
+                    this.reconnectAttempts = 0;
+                }
+            }, 5000);
         });
 
         ws.on('message', (data: WebSocket.Data) => {
@@ -246,8 +299,8 @@ export class DeepgramStreamingSTT extends EventEmitter {
 
         ws.on('close', (code: number, reason: Buffer) => {
             if (gen !== this.connectionGen) return; // stale — don't touch shared state
+            if (stableTimer) { clearTimeout(stableTimer); stableTimer = null; }
             this.isConnecting = false;
-            this.clearKeepAlive();
             const reasonStr = reason?.length > 0 ? reason.toString() : '(empty)';
             console.log(`[DeepgramStreaming] Closed (code=${code}, reason=${reasonStr}, rate=${this.sampleRate}, lang=${this.languageCode})`);
 
@@ -287,32 +340,13 @@ export class DeepgramStreamingSTT extends EventEmitter {
     }
 
     // =========================================================================
-    // Keep-alive
+    // Timers
     // =========================================================================
-
-    private startKeepAlive(): void {
-        this.clearKeepAlive();
-        this.keepAliveTimer = setInterval(() => {
-            if (this.ws?.readyState === WebSocket.OPEN) {
-                try {
-                    // Send KeepAlive JSON instead of raw ping frame for Deepgram API idle prevention
-                    this.ws.send(JSON.stringify({ type: 'KeepAlive' }));
-                } catch {
-                    // Ignore errors
-                }
-            }
-        }, KEEPALIVE_INTERVAL_MS);
-    }
-
-    private clearKeepAlive(): void {
-        if (this.keepAliveTimer) {
-            clearInterval(this.keepAliveTimer);
-            this.keepAliveTimer = null;
-        }
-    }
+    // Note: keepalive is handled natively by Deepgram via the keepalive=true URL param.
+    // Sending JSON KeepAlive frames every 1s alongside active PCM audio is redundant and
+    // was causing unnecessary message flooding on Deepgram's ingestion path.
 
     private clearTimers(): void {
-        this.clearKeepAlive();
         if (this.reconnectTimer) {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;

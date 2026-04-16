@@ -1670,18 +1670,32 @@ export function initializeIpcHandlers(appState: AppState): void {
       }
 
       if (provider === 'soniox') {
-        // Test Soniox via WebSocket connection
+        // Test Soniox via WebSocket connection.
+        // With a valid key, Soniox accepts the config and then silently waits for audio —
+        // it never sends a response message. With an invalid key it immediately sends an
+        // error message and closes. So the strategy is:
+        //   • If we receive an error message → fail
+        //   • If the connection errors at the WS level → fail
+        //   • If 2.5 s pass after sending the config with no error → success
         const WebSocket = require('ws');
         return await new Promise<{ success: boolean; error?: string }>((resolve) => {
+          let resolved = false;
+          const done = (result: { success: boolean; error?: string }) => {
+            if (resolved) return;
+            resolved = true;
+            try { ws.close(); } catch { }
+            resolve(result);
+          };
+
           const ws = new WebSocket('wss://stt-rt.soniox.com/transcribe-websocket');
 
-          const timeout = setTimeout(() => {
-            ws.close();
-            resolve({ success: false, error: 'Connection timed out' });
-          }, 15000);
+          // Hard connect timeout — server unreachable
+          const connectTimeout = setTimeout(() => {
+            done({ success: false, error: 'Connection timed out' });
+          }, 10000);
 
           ws.on('open', () => {
-            // Send a minimal config to validate the API key
+            clearTimeout(connectTimeout);
             ws.send(JSON.stringify({
               api_key: apiKey,
               model: 'stt-rt-v4',
@@ -1689,26 +1703,32 @@ export function initializeIpcHandlers(appState: AppState): void {
               sample_rate: 16000,
               num_channels: 1,
             }));
+            // Give Soniox 2.5 s to reject the key; silence means the key is valid
+            setTimeout(() => done({ success: true }), 2500);
           });
 
           ws.on('message', (msg: any) => {
-            clearTimeout(timeout);
             try {
               const res = JSON.parse(msg.toString());
               if (res.error_code) {
-                resolve({ success: false, error: `${res.error_code}: ${res.error_message}` });
-              } else {
-                resolve({ success: true });
+                done({ success: false, error: `${res.error_code}: ${res.error_message}` });
               }
+              // Non-error message is unexpected but treat as success
             } catch {
-              resolve({ success: true });
+              // Unparseable message — treat as success
             }
-            ws.close();
           });
 
           ws.on('error', (err: any) => {
-            clearTimeout(timeout);
-            resolve({ success: false, error: err.message || 'Connection failed' });
+            clearTimeout(connectTimeout);
+            done({ success: false, error: err.message || 'Connection failed' });
+          });
+
+          ws.on('close', (code: number) => {
+            // Abnormal close before we resolved means the server rejected us
+            if (!resolved && code !== 1000) {
+              done({ success: false, error: `Server closed connection (code ${code})` });
+            }
           });
         });
       }
