@@ -624,6 +624,7 @@ This runs: Vite build → TypeScript compile → native module build → electro
 - Instant answers as questions are asked
 - **Interim/Final Bridging**: Manual transcript finalization and interim bridging during recordings for higher accuracy.
 - Smart recap and summaries
+- **Dynamic Note Templates**: AI automatically generates structured meeting notes based on your active persona mode (e.g., Tech Interview follow-ups vs Sales action items).
 
 ### Instant Screen & Slide Analysis (OCR) — AI Coding Interview Assistant
 
@@ -635,6 +636,8 @@ This runs: Vite build → TypeScript compile → native module build → electro
 
 ### Premium Profile Intelligence
 
+- **Custom Persona Modes**: Seamlessly switch between built-in personas (Technical Interview, Sales, Recruiting) or create your own custom modes tailored to any conversation.
+- **Reference Files & Custom Context**: Upload PDFs, DOCX files, or type custom instructions to give the AI real-time context on your specific situation.
 - **Job Description & Resume Context**: Natively understands your background and the role you're applying for to provide highly tailored, context-aware answers.
 - **Company Research**: Get instant intelligence and dossiers on the company you are interviewing with.
 - **Negotiation Assistance**: Real-time guidance and strategy during offer and salary negotiations.
@@ -702,12 +705,14 @@ Natively includes a powerful, local-first meeting management system to review, s
 ```mermaid
 timeline
     title Natively Product Roadmap
+    section Recently Completed
+        Personas : ✅ Custom Modes & Templates
+        Trial : ✅ 10-Minute Free Trial
     section Short-term (1-3 mos)
         System Design : Visualization MVP
-        Personas : Basic system (3-5 personas)
         Tokens : Integration POC
     section Medium-term (3-6 mos)
-        Personas : Full library
+        Personas : Persona library expansion
         System Design : Advanced diagram types
         Tokens : Community features
         Platform : Mobile app development
