@@ -681,7 +681,10 @@ export class DatabaseManager {
             const txn = this.db.transaction(() => {
                 this.db!.prepare('UPDATE modes SET is_active = 0').run();
                 if (id) {
-                    this.db!.prepare('UPDATE modes SET is_active = 1 WHERE id = ?').run(id);
+                    const result = this.db!.prepare('UPDATE modes SET is_active = 1 WHERE id = ?').run(id);
+                    if (result.changes === 0) {
+                        console.warn(`[DatabaseManager] setActiveMode: no mode found with id "${id}" — active mode cleared`);
+                    }
                 }
             });
             txn();

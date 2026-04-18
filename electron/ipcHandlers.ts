@@ -42,6 +42,19 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   };
 
+  // Clears the active mode when the pro license is lost so non-general mode prompts
+  // and reference files stop being injected into LLM calls.
+  const clearActiveModeOnLicenseLoss = (): void => {
+    try {
+      const { DatabaseManager } = require('./db/DatabaseManager');
+      DatabaseManager.getInstance().setActiveMode(null);
+      BrowserWindow.getAllWindows().forEach(win => {
+        if (!win.isDestroyed()) win.webContents.send('modes-active-cleared');
+      });
+      console.log('[IPC] Active mode cleared due to license loss');
+    } catch (e) { /* non-fatal */ }
+  };
+
   // --- NEW Test Helper ---
   safeHandle("test-release-fetch", async () => {
     try {
@@ -132,6 +145,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         }
       } catch (e) { /* ignore */ }
       // Notify all windows so the license UI (ProGate, settings) refreshes immediately
+      clearActiveModeOnLicenseLoss();
       BrowserWindow.getAllWindows().forEach(win => {
         if (!win.isDestroyed()) win.webContents.send('license-status-changed', { isPremium: false });
       });
@@ -928,6 +942,7 @@ export function initializeIpcHandlers(appState: AppState): void {
           if (details.isPremium && details.provider === 'natively_api') {
             await lm.deactivate();
             console.log('[IPC] set-natively-api-key: key cleared — natively_api Pro license deactivated.');
+            clearActiveModeOnLicenseLoss();
             BrowserWindow.getAllWindows().forEach(win => {
               if (!win.isDestroyed()) win.webContents.send('license-status-changed', { isPremium: false });
             });
@@ -1064,18 +1079,19 @@ export function initializeIpcHandlers(appState: AppState): void {
       const { CredentialsManager } = require('./services/CredentialsManager');
       const cm    = CredentialsManager.getInstance();
       const token = cm.getTrialToken();
-      if (!token) return { hasToken: false };
+      if (!token) return { hasToken: false, trialClaimed: cm.getTrialClaimed() };
       return {
-        hasToken:    true,
-        trialToken:  token,
-        expiresAt:   cm.getTrialExpiresAt(),
-        startedAt:   cm.getTrialStartedAt(),
-        expired:     cm.getTrialExpiresAt()
-                       ? new Date(cm.getTrialExpiresAt()!).getTime() < Date.now()
-                       : false,
+        hasToken:     true,
+        trialClaimed: true,
+        trialToken:   token,
+        expiresAt:    cm.getTrialExpiresAt(),
+        startedAt:    cm.getTrialStartedAt(),
+        expired:      cm.getTrialExpiresAt()
+                        ? new Date(cm.getTrialExpiresAt()!).getTime() < Date.now()
+                        : false,
       };
     } catch {
-      return { hasToken: false };
+      return { hasToken: false, trialClaimed: false };
     }
   });
 
@@ -1161,6 +1177,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       }
 
       // 7. Notify all windows to refresh license + model state
+      clearActiveModeOnLicenseLoss();
       BrowserWindow.getAllWindows().forEach(win => {
         if (!win.isDestroyed()) {
           win.webContents.send('license-status-changed', { isPremium: false });
@@ -3041,7 +3058,19 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle("modes:update", async (_, id: string, updates: { name?: string; templateType?: string; customContext?: string }) => {
     try {
       const { ModesManager } = require('./services/ModesManager');
-      ModesManager.getInstance().updateMode(id, updates);
+      const mgr = ModesManager.getInstance();
+      // Gate: changing templateType to a non-general template requires pro.
+      // Also gate if the existing mode is already non-general (editing a pro mode requires pro).
+      if (!isProOrTrialActive()) {
+        if (updates.templateType && updates.templateType !== 'general') {
+          return { success: false, error: 'pro_required' };
+        }
+        const existing = mgr.getModes().find((m: any) => m.id === id);
+        if (existing && existing.templateType !== 'general') {
+          return { success: false, error: 'pro_required' };
+        }
+      }
+      mgr.updateMode(id, updates);
       return { success: true };
     } catch (e: any) {
       console.error('[IPC] modes:update error:', e);
@@ -3097,6 +3126,7 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle("modes:upload-reference-file", async (_, modeId: string) => {
     try {
+      if (!isProOrTrialActive()) return { success: false, error: 'pro_required' };
       const result = await dialog.showOpenDialog({
         properties: ['openFile'],
         filters: [
@@ -3136,6 +3166,7 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle("modes:delete-reference-file", async (_, id: string) => {
     try {
+      if (!isProOrTrialActive()) return { success: false, error: 'pro_required' };
       const { ModesManager } = require('./services/ModesManager');
       ModesManager.getInstance().deleteReferenceFile(id);
       return { success: true };
@@ -3159,6 +3190,7 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle("modes:add-note-section", async (_, modeId: string, title: string, description: string) => {
     try {
+      if (!isProOrTrialActive()) return { success: false, error: 'pro_required' };
       const { ModesManager } = require('./services/ModesManager');
       const section = ModesManager.getInstance().addNoteSection({ modeId, title, description });
       return { success: true, section };
@@ -3170,6 +3202,7 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle("modes:update-note-section", async (_, id: string, updates: { title?: string; description?: string }) => {
     try {
+      if (!isProOrTrialActive()) return { success: false, error: 'pro_required' };
       const { ModesManager } = require('./services/ModesManager');
       ModesManager.getInstance().updateNoteSection(id, updates);
       return { success: true };
@@ -3181,6 +3214,7 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle("modes:delete-note-section", async (_, id: string) => {
     try {
+      if (!isProOrTrialActive()) return { success: false, error: 'pro_required' };
       const { ModesManager } = require('./services/ModesManager');
       ModesManager.getInstance().deleteNoteSection(id);
       return { success: true };
@@ -3192,6 +3226,7 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle("modes:remove-all-note-sections", async (_, modeId: string) => {
     try {
+      if (!isProOrTrialActive()) return { success: false, error: 'pro_required' };
       const { ModesManager } = require('./services/ModesManager');
       ModesManager.getInstance().removeAllNoteSections(modeId);
       return { success: true };

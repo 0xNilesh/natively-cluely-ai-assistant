@@ -643,6 +643,8 @@ const App: React.FC = () => {
           onStandard={async () => {
             // Wipe resume + JD (orchestrator caches + SQLite) before checkout opens
             await window.electronAPI?.wipeTrialProfileData?.().catch(() => {});
+            // Revert active mode to none — Standard plan has no modes access
+            await window.electronAPI?.modesSetActive?.(null).catch(() => {});
           }}
           onDone={() => {
             setShowTrialExpiredModal(false);

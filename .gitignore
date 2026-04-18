@@ -204,3 +204,12 @@ planning/live-negotiation/temp/
 
 # IDE
 /.idea/
+
+# Local test and temporary files
+*-test.js
+test-*.js
+test_*.js
+test_*.py
+qa-report.json
+templog*.txt
+dodollm.txt

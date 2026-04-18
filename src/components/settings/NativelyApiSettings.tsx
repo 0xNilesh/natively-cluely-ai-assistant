@@ -205,7 +205,10 @@ export const NativelyApiSettings: React.FC = () => {
         (async () => {
             try {
                 const local = await window.electronAPI?.getLocalTrial?.();
-                if (!local?.hasToken) return;
+                if (!local?.hasToken) {
+                    if (local?.trialClaimed) localStorage.setItem('natively_trial_claimed', 'true');
+                    return;
+                }
 
                 localStorage.setItem('natively_trial_claimed', 'true');
 
@@ -779,6 +782,52 @@ export const NativelyApiSettings: React.FC = () => {
                                 <p className="text-[12px] text-text-secondary leading-relaxed">{text}</p>
                             </div>
                         ))}
+                    </div>
+                </div>
+            </Card>
+
+            {/* ── Refund Policy ────────────────────────────────── */}
+            <Card>
+                <div className="flex items-center gap-3 px-5 pt-5 pb-4">
+                    <div className="w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-500/20 flex items-center justify-center shrink-0">
+                        <Shield size={18} className="text-emerald-400" />
+                    </div>
+                    <div className="min-w-0">
+                        <p className="text-[13px] font-semibold text-text-primary">Refund Policy</p>
+                        <p className="text-[11px] text-text-tertiary leading-snug mt-0.5">
+                            Transparency on our billing and 3-day refund window
+                        </p>
+                    </div>
+                </div>
+
+                <div className="h-px bg-border-subtle mx-5" />
+
+                <div className="px-5 pt-4 pb-4">
+                    <div className="space-y-3">
+                        <div className="flex items-start gap-3">
+                            <div className="w-1.5 h-1.5 rounded-full bg-text-tertiary/40 shrink-0 mt-[6px]" />
+                            <p className="text-[11.5px] text-text-secondary leading-relaxed">
+                                Refunds are available within 3 days of purchase if you have used less than 10% of your monthly quota.
+                            </p>
+                        </div>
+                        <div className="flex items-start gap-3">
+                            <div className="w-1.5 h-1.5 rounded-full bg-text-tertiary/40 shrink-0 mt-[6px]" />
+                            <p className="text-[11.5px] text-text-secondary leading-relaxed">
+                                If you have used more than 10% of your quota, refunds are not available as API costs are incurred immediately on usage.
+                            </p>
+                        </div>
+                        <div className="flex items-start gap-3">
+                            <div className="w-1.5 h-1.5 rounded-full bg-text-tertiary/40 shrink-0 mt-[6px]" />
+                            <p className="text-[11.5px] text-text-secondary leading-relaxed">
+                                No refunds on partial months after the first billing cycle.
+                            </p>
+                        </div>
+                        
+                        <div className="h-px bg-border-subtle mt-4 mb-3" />
+                        
+                        <p className="text-[11.5px] text-text-secondary leading-relaxed">
+                            To request a refund contact <span onClick={() => openExternal('mailto:natively.contact@gmail.com')} className="text-text-primary hover:text-text-secondary underline decoration-border-subtle underline-offset-[3px] cursor-pointer transition-colors">natively.contact@gmail.com</span> with your order ID.
+                        </p>
                     </div>
                 </div>
             </Card>

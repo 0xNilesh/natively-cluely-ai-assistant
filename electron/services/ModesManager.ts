@@ -339,8 +339,9 @@ export class ModesManager {
             const remaining = ModesManager.MAX_TOTAL_CHARS - totalChars;
             if (remaining <= 0) break;
 
+            // Slice first, then append truncation marker so total never exceeds MAX_FILE_CHARS
             const capped = raw.length > ModesManager.MAX_FILE_CHARS
-                ? raw.slice(0, ModesManager.MAX_FILE_CHARS) + '\n[...truncated]'
+                ? raw.slice(0, ModesManager.MAX_FILE_CHARS - 14) + '\n[...truncated]'
                 : raw;
             const used = Math.min(capped.length, remaining);
             const content = capped.slice(0, used);

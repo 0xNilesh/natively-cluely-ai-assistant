@@ -708,7 +708,9 @@ CRITICAL RULES:
       const modesMgr = ModesManager.getInstance();
       activeModePrompt = modesMgr.getActiveModeSystemPromptSuffix() ?? '';
       modeContextBlock = modesMgr.buildActiveModeContextBlock() ?? '';
-    } catch (_) {}
+    } catch (_modeErr: any) {
+      console.warn('[LLMHelper] ModesManager load failed in generateSuggestion (non-fatal):', _modeErr?.message);
+    }
 
     // Prepend mode context block (reference files, custom context) to the transcript context
     const enrichedContext = modeContextBlock
@@ -2176,12 +2178,21 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       }
 
       if (modeContextBlock) {
-        context = context
-          ? `${modeContextBlock}\n\n${context}`
-          : modeContextBlock;
+        // Guard combined context size: KO block + mode block must not exceed 60KB to protect
+        // the token budget for the actual user question.
+        const existingLen = context?.length ?? 0;
+        const COMBINED_CTX_CAP = 60_000;
+        if (existingLen + modeContextBlock.length > COMBINED_CTX_CAP) {
+          const available = Math.max(0, COMBINED_CTX_CAP - existingLen);
+          const trimmed = available > 0 ? modeContextBlock.slice(0, available) + '\n[...mode context truncated]' : '';
+          console.warn(`[LLMHelper] Combined context exceeded ${COMBINED_CTX_CAP} chars — mode context trimmed`);
+          if (trimmed) context = context ? `${trimmed}\n\n${context}` : trimmed;
+        } else {
+          context = context ? `${modeContextBlock}\n\n${context}` : modeContextBlock;
+        }
       }
-    } catch (_modeErr) {
-      // Non-fatal — modes manager may not be initialized yet
+    } catch (_modeErr: any) {
+      console.warn('[LLMHelper] ModesManager injection failed (non-fatal):', _modeErr?.message);
     }
 
     // Preparation
