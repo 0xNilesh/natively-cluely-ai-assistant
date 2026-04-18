@@ -325,7 +325,7 @@ export const NativelyApiSettings: React.FC = () => {
                     </div>
                     <div className="w-full flex items-center justify-center py-2 bg-violet-500/10 border border-violet-500/20 rounded-[10px]">
                         <span className="text-[11.5px] font-medium text-violet-400/90">
-                            Use code <span className="font-bold text-violet-400">EARLY50</span> for 50% off
+                            Use code <span className="font-bold text-violet-400">INSIDER25</span> for 25% off
                         </span>
                     </div>
                 </div>
