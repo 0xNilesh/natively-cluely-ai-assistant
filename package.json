@@ -131,7 +131,7 @@
     "publish": [
       {
         "provider": "github",
-        "owner": "evinjohnn",
+        "owner": "Natively-AI-assistant",
         "repo": "natively-cluely-ai-assistant",
         "releaseType": "release"
       }
