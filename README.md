@@ -331,6 +331,12 @@ Under the hood, Natively API connects you to the absolute best models for the op
 
 While Natively is **free and open-source forever**, we also offer a **Pro Edition** (available as **Lifetime or Yearly** subscriptions) designed specifically for power users and job seekers. Purchasing a Pro license gives you an edge in the job market, all while directly supporting the continued development of the open-source Natively core!
 
+### 🪙 Unlock Natively Pro with $NAT Token
+
+We've launched the official **$NAT token** on Printr! Holders who maintain a specific balance of `$NAT` tokens in their connected wallet automatically unlock access to all **Natively Pro** features.
+
+👉 **[Trade $NAT on Printr](https://app.printr.money/trade/0xba1e50273ec14ca52b3fa64a5054c39470c2835392c6ecd06876f5bccd597d7b)**
+
 ### Free vs Pro Feature Comparison
 
 | Feature                                             | Natively Free | Natively Pro |
