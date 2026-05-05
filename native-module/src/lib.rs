@@ -18,8 +18,9 @@ pub mod microphone;
 pub mod silence_suppression;
 pub mod speaker;
 
-use crate::audio_config::DSP_POLL_MS;
+use crate::audio_config::{CHUNK_BATCH_COUNT, CHUNK_BATCH_TIMEOUT_MS, DSP_POLL_MS};
 use crate::silence_suppression::{FrameAction, SilenceSuppressionConfig, SilenceSuppressor};
+use std::time::Instant;
 
 // ============================================================================
 // HELPERS — i16 slice → zero-copy LE bytes
@@ -38,6 +39,67 @@ use crate::silence_suppression::{FrameAction, SilenceSuppressionConfig, SilenceS
 #[inline]
 fn i16_slice_to_le_bytes(samples: &[i16]) -> Vec<u8> {
     bytemuck::cast_slice::<i16, u8>(samples).to_vec()
+}
+
+/// Coalesces up to `CHUNK_BATCH_COUNT` Send/SendSilence DSP frames into a
+/// single tsfn (V8 boundary) call. Each tsfn invocation traverses the napi
+/// scheduler, allocates a JS Buffer wrapper, and dispatches an event-loop
+/// task — non-trivial overhead per ~1.9 KB chunk. Coalescing 3 frames cuts
+/// boundary crossings 3× while keeping latency below STT framing thresholds
+/// (Google / Soniox / Deepgram all accept 60–100 ms framing).
+///
+/// Flush triggers:
+///   - `frames` == CHUNK_BATCH_COUNT (capacity reached), or
+///   - `(now - first_push_at) > CHUNK_BATCH_TIMEOUT_MS` (timeout for trailing
+///     speech in light traffic), or
+///   - explicit `flush()` (DSP loop exit).
+struct BatchEmitter {
+    buffer: Vec<u8>,
+    frames: usize,
+    first_push_at: Option<Instant>,
+}
+impl BatchEmitter {
+    fn new(estimated_chunk_bytes: usize) -> Self {
+        Self {
+            buffer: Vec::with_capacity(estimated_chunk_bytes * CHUNK_BATCH_COUNT),
+            frames: 0,
+            first_push_at: None,
+        }
+    }
+    fn push(&mut self, bytes: &[u8], tsfn: &ThreadsafeFunction<Buffer>) {
+        if self.first_push_at.is_none() {
+            self.first_push_at = Some(Instant::now());
+        }
+        self.buffer.extend_from_slice(bytes);
+        self.frames += 1;
+        if self.frames >= CHUNK_BATCH_COUNT {
+            self.flush(tsfn);
+        }
+    }
+    fn maybe_flush_timeout(&mut self, tsfn: &ThreadsafeFunction<Buffer>) {
+        if let Some(t) = self.first_push_at {
+            if t.elapsed().as_millis() >= CHUNK_BATCH_TIMEOUT_MS {
+                self.flush(tsfn);
+            }
+        }
+    }
+    fn flush(&mut self, tsfn: &ThreadsafeFunction<Buffer>) {
+        if self.buffer.is_empty() {
+            self.first_push_at = None;
+            self.frames = 0;
+            return;
+        }
+        // Move buffer's contents out into a fresh Vec for the napi Buffer.
+        // Keep the original allocation for the next batch.
+        let take = std::mem::take(&mut self.buffer);
+        self.buffer.reserve(take.capacity());
+        tsfn.call(
+            Ok(Buffer::from(take)),
+            ThreadsafeFunctionCallMode::NonBlocking,
+        );
+        self.frames = 0;
+        self.first_push_at = None;
+    }
 }
 
 // ============================================================================
@@ -167,12 +229,11 @@ impl SystemAudioCapture {
             let chunk_size = (native_rate as usize / 1000) * 20;
             let mut frame_buffer: Vec<i16> = Vec::with_capacity(chunk_size * 4);
             let mut raw_batch: Vec<f32> = Vec::with_capacity(4096);
-            // PERF: pre-allocate the per-chunk scratch buffer once per capture
-            // session so `frame_buffer.drain(..).collect()` (one Vec alloc per
-            // chunk) becomes `frame_scratch.extend(drain(..))` (zero alloc once
-            // capacity is reached). At 50 chunks/sec this saves 50 small Vec
-            // allocations per second per capture.
+            // PERF: pre-allocated frame scratch (avoids per-chunk Vec alloc).
             let mut frame_scratch: Vec<i16> = Vec::with_capacity(chunk_size);
+            // PERF: coalesce up to CHUNK_BATCH_COUNT frames into one tsfn call.
+            // Cuts V8 boundary crossings 3× with no perceptible STT-side latency.
+            let mut emitter = BatchEmitter::new(chunk_size * 2);
 
             loop {
                 if stop_signal.load(Ordering::Relaxed) {
@@ -203,39 +264,40 @@ impl SystemAudioCapture {
                     match action {
                         FrameAction::Send(data) => {
                             let bytes = i16_slice_to_le_bytes(&data);
-                            tsfn.call(
-                                Ok(Buffer::from(bytes)),
-                                ThreadsafeFunctionCallMode::NonBlocking,
-                            );
+                            emitter.push(&bytes, &tsfn);
                         }
                         FrameAction::SendSilence => {
-                            // Send zero-filled buffer to keep streaming APIs alive.
-                            // napi consumes the Vec, so we can't share a static — but
-                            // vec![0u8; N] is memset-fast (SIMD). No optimization win
-                            // available here without unsafe Buffer aliasing.
+                            // Zero-filled bytes to keep streaming APIs alive.
                             let silence = vec![0u8; chunk_size * 2];
-                            tsfn.call(
-                                Ok(Buffer::from(silence)),
-                                ThreadsafeFunctionCallMode::NonBlocking,
-                            );
+                            emitter.push(&silence, &tsfn);
                         }
                         FrameAction::Suppress => {
-                            // Do nothing — bandwidth saving
+                            // Do nothing — bandwidth saving. A pending partial
+                            // batch can age out via the timeout check below.
                         }
                     }
 
-                    // Fire speech_ended callback on the exact transition frame
+                    // Fire speech_ended callback on the exact transition frame.
+                    // Flush any pending batch FIRST so STT sees the trailing audio
+                    // before being told the utterance ended.
                     if speech_ended {
+                        emitter.flush(&tsfn);
                         if let Some(ref se_tsfn) = speech_ended_tsfn {
                             se_tsfn.call(Ok(true), ThreadsafeFunctionCallMode::NonBlocking);
                         }
                     }
                 }
 
+                // Flush partial batch on timeout so trailing speech in light
+                // traffic isn't held up.
+                emitter.maybe_flush_timeout(&tsfn);
+
                 // Keep the sleep small so we quickly read the ring buffer
                 thread::sleep(Duration::from_millis(DSP_POLL_MS));
             }
 
+            // Flush any remaining batched audio before exit.
+            emitter.flush(&tsfn);
             println!("[SystemAudioCapture] DSP thread stopped.");
             // stream is dropped here → SpeakerStream::Drop calls stop_with_ch
         }));
@@ -374,6 +436,8 @@ impl MicrophoneCapture {
             let mut raw_batch: Vec<f32> = Vec::with_capacity(4096);
             // PERF: pre-allocated scratch — see SystemAudioCapture for rationale.
             let mut frame_scratch: Vec<i16> = Vec::with_capacity(chunk_size);
+            // PERF: coalesce up to CHUNK_BATCH_COUNT frames into one tsfn call.
+            let mut emitter = BatchEmitter::new(chunk_size * 2);
 
             println!("[MicrophoneCapture] DSP thread started (VAD + suppression active, rate={}Hz, chunk={})", native_rate, chunk_size);
 
@@ -386,11 +450,13 @@ impl MicrophoneCapture {
                 // reporting, we keep looping so a subsequent device recovery
                 // (e.g. user re-plugged the USB mic) is still observed via the
                 // ringbuf — but main.ts will typically destroy + recreate this
-                // capture on receiving the error.
+                // capture on receiving the error. Flush any batched audio first
+                // so partial trailing speech reaches STT before the error event.
                 if let Ok(mut slot) = err_signal.lock() {
                     if let Some(msg) = slot.take() {
                         let full = format!("[MicrophoneCapture] CPAL error: {}", msg);
                         eprintln!("{}", full);
+                        emitter.flush(&tsfn);
                         tsfn.call(
                             Err(napi::Error::from_reason(full)),
                             ThreadsafeFunctionCallMode::NonBlocking,
@@ -422,34 +488,32 @@ impl MicrophoneCapture {
                     match action {
                         FrameAction::Send(data) => {
                             let bytes = i16_slice_to_le_bytes(&data);
-                            tsfn.call(
-                                Ok(Buffer::from(bytes)),
-                                ThreadsafeFunctionCallMode::NonBlocking,
-                            );
+                            emitter.push(&bytes, &tsfn);
                         }
                         FrameAction::SendSilence => {
                             let silence = vec![0u8; chunk_size * 2];
-                            tsfn.call(
-                                Ok(Buffer::from(silence)),
-                                ThreadsafeFunctionCallMode::NonBlocking,
-                            );
+                            emitter.push(&silence, &tsfn);
                         }
                         FrameAction::Suppress => {
-                            // Do nothing
+                            // Do nothing — partial batch can age out via timeout.
                         }
                     }
 
                     if speech_ended {
+                        emitter.flush(&tsfn);
                         if let Some(ref se_tsfn) = speech_ended_tsfn {
                             se_tsfn.call(Ok(true), ThreadsafeFunctionCallMode::NonBlocking);
                         }
                     }
                 }
 
+                emitter.maybe_flush_timeout(&tsfn);
+
                 // 4. Short sleep
                 thread::sleep(Duration::from_millis(DSP_POLL_MS));
             }
 
+            emitter.flush(&tsfn);
             println!("[MicrophoneCapture] DSP thread stopped.");
         }));
 
