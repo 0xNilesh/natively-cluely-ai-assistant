@@ -100,8 +100,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         const stored = localStorage.getItem('natively_auto_scroll');
         return stored === 'true';
     });
-    const autoScrollRef = useRef(autoScroll);
-    useEffect(() => { autoScrollRef.current = autoScroll; }, [autoScroll]);
 
     // Analytics State
     const requestStartTimeRef = useRef<number | null>(null);
@@ -127,11 +125,13 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
     }, []);
 
     // Auto-scroll to bottom on every messages update when toggle is enabled.
-    // Covers user sends, assistant streaming tokens, and tool/system inserts.
+    // 'auto' (instant) instead of 'smooth' is intentional: streaming tokens fire
+    // this effect tens of times per second; smooth would restart the animation
+    // each time and never reach bottom, producing visible chase/jitter.
     useEffect(() => {
         if (!autoScroll) return;
         if (messages.length === 0) return;
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+        messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
     }, [messages, autoScroll]);
 
     const [rollingTranscript, setRollingTranscript] = useState('');  // For interviewer rolling text bar
@@ -153,6 +153,12 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
     // a transition.
     const stableVisibilityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const pendingVisibilityRef = useRef<boolean | null>(null);
+    // Sticky-bottom across expand/contract. Captured at the start of each
+    // transition: if the chat was scrolled to (or within 8 px of) the bottom,
+    // the rAF loop pins scrollTop to bottom on every spring frame so the
+    // bottom of the conversation stays visually pinned as scrollMaxH grows.
+    // iMessage does the same when its window resizes.
+    const wasAtBottomRef = useRef<boolean>(true);
     // Captures data from onCaptureAndProcess before the React state flush so
     // handleWhatToSay() can access it even in React 18 concurrent mode (where
     // a plain setTimeout(0) may fire before setAttachedContext flushes).
@@ -407,6 +413,20 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
     const startTransition = useCallback((targetWidth: number) => {
         codeExpandedRef.current = targetWidth === SHELL_WIDTH_EXPANDED;
         if (animationControlsRef.current) animationControlsRef.current.stop();
+
+        // iMessage-style sticky bottom. Capture the user's scroll intent now,
+        // before scrollMaxH starts changing. If they were at (or near) the
+        // bottom, we keep them pinned there throughout the spring so growing
+        // viewport height doesn't reveal stale history below the visible chat.
+        // If they were scrolled up to read history, we leave their position
+        // alone — the extra viewport extends downward into empty space, which
+        // is the correct behavior for a reader.
+        const container = scrollContainerRef.current;
+        if (container) {
+            const distanceFromBottom = container.scrollHeight - (container.scrollTop + container.clientHeight);
+            wasAtBottomRef.current = distanceFromBottom <= 8;
+        }
+
         // Symmetric ease-in-out-cubic. Smooth ramp on both ends — no perceived
         // velocity break at the start or finish, which is what makes a width
         // animation read as "buttery" rather than "snappy". The cubic poly
@@ -417,6 +437,15 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
             type: 'tween' as const,
             ease: [0.65, 0, 0.35, 1],
             duration: 0.7,
+            onUpdate: () => {
+                if (!wasAtBottomRef.current) return;
+                const c = scrollContainerRef.current;
+                if (!c) return;
+                // scrollMaxH is derived from shellWidth, so on every tick the
+                // viewport height has just changed. Re-pin to bottom in the
+                // SAME frame — single layout read, single write, no flush.
+                c.scrollTop = c.scrollHeight - c.clientHeight;
+            },
             onComplete: () => { animationControlsRef.current = null; },
         });
     }, [shellWidth, SHELL_WIDTH_EXPANDED]);
@@ -490,11 +519,29 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
 
     // Re-attach scroll listener whenever messages change — the scroll container
     // is conditionally rendered so scrollContainerRef.current is null at mount.
+    //
+    // The visibility check does layout reads (querySelectorAll +
+    // getBoundingClientRect on every code element). Running it synchronously
+    // on every scroll event forces a layout flush mid-scroll-frame, which
+    // shows up as text jitter during fast scrolls. rAF-coalescing it ensures
+    // at most one check per frame and lets the read happen at the natural
+    // post-scroll layout point in the frame lifecycle.
     useEffect(() => {
         const container = scrollContainerRef.current;
         if (!container) return;
-        container.addEventListener('scroll', checkCodeVisibility, { passive: true });
-        return () => container.removeEventListener('scroll', checkCodeVisibility);
+        let rafId: number | null = null;
+        const onScroll = () => {
+            if (rafId !== null) return;
+            rafId = requestAnimationFrame(() => {
+                rafId = null;
+                checkCodeVisibility();
+            });
+        };
+        container.addEventListener('scroll', onScroll, { passive: true });
+        return () => {
+            container.removeEventListener('scroll', onScroll);
+            if (rafId !== null) cancelAnimationFrame(rafId);
+        };
     }, [messages, checkCodeVisibility]);
 
     // Cancel all in-flight async work on unmount.
@@ -1735,7 +1782,11 @@ Provide only the answer, nothing else.`;
                                                     {lang || 'CODE'}
                                                 </span>
                                             </div>
-                                            <div className="bg-transparent">
+                                            {/* No-wrap horizontal scroll: code line layout stays
+                                                stable as the canvas grows/shrinks. Without this,
+                                                wrapped lines re-flow at every spring tick, the
+                                                block height jitters, and content below it shifts. */}
+                                            <div className="bg-transparent overflow-x-auto">
                                                 <SyntaxHighlighter
                                                     language={lang}
                                                     style={codeTheme}
@@ -1748,7 +1799,7 @@ Provide only the answer, nothing else.`;
                                                         padding: '16px',
                                                         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
                                                     }}
-                                                    wrapLongLines={true}
+                                                    wrapLongLines={false}
                                                     showLineNumbers={true}
                                                     lineNumberStyle={{ minWidth: '2.5em', paddingRight: '1.2em', color: codeLineNumberColor, textAlign: 'right', fontSize: '11px' }}
                                                 >
@@ -1890,7 +1941,11 @@ Provide only the answer, nothing else.`;
                                                 </span>
                                             </div>
 
-                                            <div className="bg-transparent">
+                                            {/* No-wrap horizontal scroll: code line layout stays
+                                                stable as the canvas grows/shrinks. Without this,
+                                                wrapped lines re-flow at every spring tick, the
+                                                block height jitters, and content below it shifts. */}
+                                            <div className="bg-transparent overflow-x-auto">
                                                 <SyntaxHighlighter
                                                     language={lang}
                                                     style={codeTheme}
@@ -1903,7 +1958,7 @@ Provide only the answer, nothing else.`;
                                                         padding: '16px',
                                                         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
                                                     }}
-                                                    wrapLongLines={true}
+                                                    wrapLongLines={false}
                                                     showLineNumbers={true}
                                                     lineNumberStyle={{ minWidth: '2.5em', paddingRight: '1.2em', color: codeLineNumberColor, textAlign: 'right', fontSize: '11px' }}
                                                 >
@@ -2506,27 +2561,27 @@ Provide only the answer, nothing else.`;
                             {(messages.length > 0 || isManualRecording || isProcessing) && (
                                 <motion.div ref={scrollContainerRef} className="flex-1 overflow-y-auto p-4 space-y-3 no-drag" style={{ scrollbarWidth: 'none', maxHeight: scrollMaxH }}>
                                     {messages.map((msg) => {
-                                        // Code messages are the reason the shell expands, so they
-                                        // get the full inner width and reflow with the canvas.
-                                        // Text messages live in a fixed-width centered column so
-                                        // their alignment edges and wrap points stay anchored —
-                                        // expand/contract slides only the canvas, never the text.
+                                        // Every row spans the full inner width of the scroll
+                                        // container, which itself rides the shell's animated
+                                        // width. Bubble max-widths are percentages so the text
+                                        // and code grow with the canvas — same as iMessage /
+                                        // Mail when their windows resize. Reflow during the
+                                        // 700 ms tween is gentle (≈0.3 px / frame width delta)
+                                        // and reads as the canvas "breathing", not jitter.
+                                        // The other polish (sticky bottom, stable code line
+                                        // layout via wrapLongLines:false, stability gate that
+                                        // suppresses transitions during scroll) keeps the
+                                        // motion calm.
                                         const isCodeMsg = msg.role === 'system' && (msg.isCode || msg.text.includes('```'));
-                                        const rowClass = isCodeMsg
-                                            ? 'w-full'
-                                            : 'w-full max-w-[568px] mx-auto';
-                                        // Bubble max-widths are pinned to the collapsed-shell math
-                                        // (568 inner × original %) so non-code text never re-wraps
-                                        // when the canvas grows or shrinks.
                                         const bubbleMaxClass = msg.role === 'user'
-                                            ? 'max-w-[410px] px-[13.6px] py-[10.2px]'
+                                            ? 'max-w-[72%] px-[13.6px] py-[10.2px]'
                                             : isCodeMsg
                                                 ? 'max-w-[85%] px-4 py-3'
-                                                : 'max-w-[483px] px-4 py-3';
+                                                : 'max-w-[85%] px-4 py-3';
                                         return (
                                         <div
                                             key={msg.id}
-                                            className={rowClass}
+                                            className="w-full"
                                             {...(isCodeMsg ? { 'data-code-msg': 'true' } : {})}
                                         >
                                         <div className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in-up`}>
