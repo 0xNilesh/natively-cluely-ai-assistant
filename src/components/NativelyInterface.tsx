@@ -72,6 +72,69 @@ interface NativelyInterfaceProps {
     overlayOpacity?: number;
 }
 
+// PERF: HighlightedCode renders a single fenced code block. Hoisted to module
+// scope and wrapped in React.memo so a parent re-render does not re-tokenize
+// existing code blocks. SyntaxHighlighter (Prism) has no internal render
+// bailout — without this, every streaming token re-runs Prism over every code
+// block in history. The customStyle / lineNumberStyle objects are also at
+// module scope so their referential identity stays stable too.
+const HC_CUSTOM_STYLE = {
+    margin: 0,
+    borderRadius: 0,
+    fontSize: '13px',
+    lineHeight: '1.6',
+    background: 'transparent',
+    padding: '16px',
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+} as const;
+
+interface HighlightedCodeProps {
+    code: string;
+    lang: string;
+    isLightTheme: boolean;
+    codeTheme: any;
+    codeBlockClass: string;
+    codeHeaderClass: string;
+    codeHeaderTextClass: string;
+    codeLineNumberColor: string;
+    appearance: any;
+}
+const HighlightedCode = React.memo(function HighlightedCode({
+    code, lang, codeTheme, codeBlockClass, codeHeaderClass, codeHeaderTextClass, codeLineNumberColor, appearance,
+}: HighlightedCodeProps) {
+    return (
+        <div className={`my-3 rounded-xl overflow-hidden border shadow-lg ${codeBlockClass}`} style={appearance.codeBlockStyle}>
+            {/* Minimalist Apple Header */}
+            <div className={`px-3 py-1.5 border-b ${codeHeaderClass}`} style={appearance.codeHeaderStyle}>
+                <span className={`text-[10px] uppercase tracking-widest font-semibold font-mono ${codeHeaderTextClass}`}>
+                    {lang || 'CODE'}
+                </span>
+            </div>
+            {/* No-wrap horizontal scroll: code line layout stays stable as the
+                canvas grows/shrinks. Without this, wrapped lines re-flow at every
+                spring tick, the block height jitters, and content below shifts. */}
+            <div className="bg-transparent overflow-x-auto">
+                <SyntaxHighlighter
+                    language={lang}
+                    style={codeTheme}
+                    customStyle={HC_CUSTOM_STYLE}
+                    wrapLongLines={false}
+                    showLineNumbers={true}
+                    lineNumberStyle={{ minWidth: '2.5em', paddingRight: '1.2em', color: codeLineNumberColor, textAlign: 'right', fontSize: '11px' }}
+                >
+                    {code}
+                </SyntaxHighlighter>
+            </div>
+        </div>
+    );
+}, (prev, next) =>
+    // codeTheme / codeBlockClass / appearance are all theme-derived; checking
+    // appearance (a useMemo'd ref) covers them transitively.
+    prev.code === next.code &&
+    prev.lang === next.lang &&
+    prev.appearance === next.appearance
+);
+
 const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, overlayOpacity = OVERLAY_OPACITY_DEFAULT }) => {
     const isLightTheme = useResolvedTheme() === 'light';
     const [isExpanded, setIsExpanded] = useState(true);
@@ -222,6 +285,41 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
     const quickActionClass = 'overlay-chip-surface overlay-text-interactive';
     const inputClass = `${isLightTheme ? 'focus:ring-black/10' : 'focus:ring-white/10'} overlay-input-surface overlay-input-text`;
     const controlSurfaceClass = 'overlay-control-surface overlay-text-interactive';
+
+    // PERF: hoist the two highest-frequency ReactMarkdown `components` maps to a
+    // single useMemo so their identity is stable across renders. Previously each
+    // <ReactMarkdown components={{...}}> created a fresh object literal on every
+    // render — defeating ReactMarkdown's internal render-bailout. The "standard"
+    // map fires for every plain system text bubble; "codeText" fires for every
+    // text part inside a code-bubble. Together they are the dominant render cost
+    // when answers stream. The other variants (shorten, recap, follow-up,
+    // what_to_answer) appear only in their specific intents and are left inline.
+    const mdComponents = useMemo(() => ({
+        standard: {
+            p: ({ node, ...props }: any) => <p className="mb-2 last:mb-0 whitespace-pre-wrap" {...props} />,
+            strong: ({ node, ...props }: any) => <strong className="font-bold opacity-100 overlay-text-strong" {...props} />,
+            em: ({ node, ...props }: any) => <em className="italic opacity-90 overlay-text-secondary" {...props} />,
+            ul: ({ node, ...props }: any) => <ul className="list-disc ml-4 mb-2 space-y-1" {...props} />,
+            ol: ({ node, ...props }: any) => <ol className="list-decimal ml-4 mb-2 space-y-1" {...props} />,
+            li: ({ node, ...props }: any) => <li className="pl-1" {...props} />,
+            code: ({ node, ...props }: any) => <code className={`overlay-inline-code-surface rounded px-1 py-0.5 text-xs font-mono ${isLightTheme ? 'text-slate-800' : ''}`} {...props} />,
+            a: ({ node, ...props }: any) => <a className="underline hover:opacity-80" target="_blank" rel="noopener noreferrer" {...props} />,
+        },
+        codeText: {
+            p: ({ node, ...props }: any) => <p className="mb-2 last:mb-0 whitespace-pre-wrap" {...props} />,
+            strong: ({ node, ...props }: any) => <strong className="font-bold overlay-text-strong" {...props} />,
+            em: ({ node, ...props }: any) => <em className="italic overlay-text-secondary" {...props} />,
+            ul: ({ node, ...props }: any) => <ul className="list-disc ml-4 mb-2 space-y-1" {...props} />,
+            ol: ({ node, ...props }: any) => <ol className="list-decimal ml-4 mb-2 space-y-1" {...props} />,
+            li: ({ node, ...props }: any) => <li className="pl-1" {...props} />,
+            h1: ({ node, ...props }: any) => <h1 className="text-lg font-bold mb-2 mt-3 overlay-text-strong" {...props} />,
+            h2: ({ node, ...props }: any) => <h2 className="text-base font-bold mb-2 mt-3 overlay-text-strong" {...props} />,
+            h3: ({ node, ...props }: any) => <h3 className="text-sm font-bold mb-1 mt-2 overlay-text-primary" {...props} />,
+            code: ({ node, ...props }: any) => <code className={`overlay-inline-code-surface rounded px-1 py-0.5 text-xs font-mono whitespace-pre-wrap ${isLightTheme ? 'text-violet-700' : 'text-purple-200'}`} {...props} />,
+            blockquote: ({ node, ...props }: any) => <blockquote className={`border-l-2 pl-3 italic my-2 ${isLightTheme ? 'border-violet-500/30 text-slate-600' : 'border-purple-500/50 text-slate-400'}`} {...props} />,
+            a: ({ node, ...props }: any) => <a className={`hover:underline ${isLightTheme ? 'text-blue-600 hover:text-blue-700' : 'text-blue-400 hover:text-blue-300'}`} target="_blank" rel="noopener noreferrer" {...props} />,
+        },
+    }), [isLightTheme]);
 
     // ── Code-expansion spring ────────────────────────────────────────────────
     // Architecture: stable canvas, renderer-only animation.
@@ -558,6 +656,13 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
                 stableVisibilityTimerRef.current = null;
             }
             pendingVisibilityRef.current = null;
+            // PERF: cancel any pending token-flush RAF so we don't try to
+            // setState on an unmounted component.
+            if (tokenBufRef.current.raf !== null) {
+                cancelAnimationFrame(tokenBufRef.current.raf);
+                tokenBufRef.current.raf = null;
+                tokenBufRef.current.text = '';
+            }
         };
     }, []);
     // ────────────────────────────────────────────────────────────────────────
@@ -666,6 +771,86 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         });
     }, []);
 
+    // ── PERF: streaming-token rAF coalescing ─────────────────────────────────
+    // Token streams (LLM answers) used to call setMessages PER TOKEN. Groq
+    // emits ~200–400 tok/s, so a 400-token answer triggered 400 React renders
+    // — each one cloning the messages array and re-rendering every prior row.
+    //
+    // queueToken accumulates incoming tokens for a given intent into a ref-
+    // backed buffer; the FIRST token in a frame schedules a single
+    // requestAnimationFrame that flushes the buffer with one setMessages.
+    // Result: at most ~60 setMessages/sec regardless of token rate.
+    //
+    // flushToken() is called by the "final answer" handlers BEFORE they apply
+    // their own setMessages, so any tokens still pending in the buffer are
+    // committed to the streaming row first — guarantees no token is lost on
+    // stream completion.
+    //
+    // Single-buffer design (not per-intent) is fine because LLM streams never
+    // overlap by intent in this app. If the intent changes mid-stream we
+    // synchronously flush the previous intent's buffer before queuing.
+    const tokenBufRef = useRef<{ intent: string; text: string; raf: number | null }>({ intent: '', text: '', raf: null });
+
+    const queueToken = useCallback((intent: string, token: string) => {
+        const buf = tokenBufRef.current;
+        // If the intent changed, flush the prior buffer immediately so we don't
+        // append text from one stream onto another.
+        if (buf.text && buf.intent !== intent) {
+            const oldIntent = buf.intent;
+            const oldText = buf.text;
+            buf.text = '';
+            if (buf.raf !== null) { cancelAnimationFrame(buf.raf); buf.raf = null; }
+            setMessages(prev => {
+                const lastMsg = prev[prev.length - 1];
+                if (lastMsg && lastMsg.isStreaming && lastMsg.intent === oldIntent) {
+                    const updated = [...prev];
+                    updated[prev.length - 1] = { ...lastMsg, text: lastMsg.text + oldText };
+                    return updated;
+                }
+                return [...prev, { id: Date.now().toString(), role: 'system', text: oldText, intent: oldIntent, isStreaming: true }];
+            });
+        }
+        buf.intent = intent;
+        buf.text += token;
+        if (buf.raf === null) {
+            buf.raf = requestAnimationFrame(() => {
+                buf.raf = null;
+                const text = buf.text;
+                const i = buf.intent;
+                buf.text = '';
+                if (!text) return;
+                setMessages(prev => {
+                    const lastMsg = prev[prev.length - 1];
+                    if (lastMsg && lastMsg.isStreaming && lastMsg.intent === i) {
+                        const updated = [...prev];
+                        updated[prev.length - 1] = { ...lastMsg, text: lastMsg.text + text };
+                        return updated;
+                    }
+                    return [...prev, { id: Date.now().toString(), role: 'system', text, intent: i, isStreaming: true }];
+                });
+            });
+        }
+    }, []);
+
+    const flushToken = useCallback(() => {
+        const buf = tokenBufRef.current;
+        if (buf.raf !== null) { cancelAnimationFrame(buf.raf); buf.raf = null; }
+        if (!buf.text) return;
+        const text = buf.text;
+        const intent = buf.intent;
+        buf.text = '';
+        setMessages(prev => {
+            const lastMsg = prev[prev.length - 1];
+            if (lastMsg && lastMsg.isStreaming && lastMsg.intent === intent) {
+                const updated = [...prev];
+                updated[prev.length - 1] = { ...lastMsg, text: lastMsg.text + text };
+                return updated;
+            }
+            return [...prev, { id: Date.now().toString(), role: 'system', text, intent, isStreaming: true }];
+        });
+    }, []);
+    // ──────────────────────────────────────────────────────────────────────────
+
     // Connect to Native Audio Backend
     useEffect(() => {
         const cleanups: (() => void)[] = [];
@@ -772,9 +957,23 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
             // coaching JSON sentinel, accumulate the raw JSON silently so the Done handler
             // can convert it to the card UI. Without this, the raw JSON leaks into the
             // chat bubble (issue #213).
+            //
+            // PERF: gate the JSON.parse with a cheap prefix check. The sentinel always
+            // arrives as a single token whose JSON form starts with `{"__negotiationCoaching"`.
+            // Without the gate we'd JSON.parse + throw on every regular text token (~400/answer).
+            const tok = data.token;
+            const looksLikeSentinel = tok.length > 24 && tok.charCodeAt(0) === 123 /* { */ && tok.includes('__negotiationCoaching');
             try {
-                const parsed = JSON.parse(data.token);
+                const parsed = looksLikeSentinel ? JSON.parse(tok) : null;
                 if (parsed?.__negotiationCoaching) {
+                    // Discard any pending batched text — sentinel REPLACES the
+                    // streaming row's text, so flushing buffered chars onto it
+                    // would corrupt the JSON the final-answer handler parses.
+                    tokenBufRef.current.text = '';
+                    if (tokenBufRef.current.raf !== null) {
+                        cancelAnimationFrame(tokenBufRef.current.raf);
+                        tokenBufRef.current.raf = null;
+                    }
                     setMessages(prev => {
                         const lastMsg = prev[prev.length - 1];
                         if (lastMsg && lastMsg.isStreaming && lastMsg.intent === 'what_to_answer') {
@@ -796,31 +995,15 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
                 // Not JSON — normal token, fall through.
             }
 
-            setMessages(prev => {
-                const lastMsg = prev[prev.length - 1];
-
-                // If we already have a streaming message for this intent, append
-                if (lastMsg && lastMsg.isStreaming && lastMsg.intent === 'what_to_answer') {
-                    const updated = [...prev];
-                    updated[prev.length - 1] = {
-                        ...lastMsg,
-                        text: lastMsg.text + data.token
-                    };
-                    return updated;
-                }
-
-                // Otherwise, start a new one (First token)
-                return [...prev, {
-                    id: Date.now().toString(),
-                    role: 'system',
-                    text: data.token,
-                    intent: 'what_to_answer',
-                    isStreaming: true
-                }];
-            });
+            // PERF: rAF-coalesce instead of per-token setMessages.
+            queueToken('what_to_answer', data.token);
         }));
 
         cleanups.push(window.electronAPI.onIntelligenceSuggestedAnswer((data) => {
+            // PERF: flush any tokens still pending in the rAF buffer onto the
+            // streaming row BEFORE we apply the final-answer setMessages, so no
+            // tokens are lost on stream completion.
+            flushToken();
             setIsProcessing(false);
 
             // If the final answer is a negotiation coaching JSON sentinel, route it
@@ -881,28 +1064,12 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
 
         // STREAMING: Refinement
         cleanups.push(window.electronAPI.onIntelligenceRefinedAnswerToken((data) => {
-            setMessages(prev => {
-                const lastMsg = prev[prev.length - 1];
-                if (lastMsg && lastMsg.isStreaming && lastMsg.intent === data.intent) {
-                    const updated = [...prev];
-                    updated[prev.length - 1] = {
-                        ...lastMsg,
-                        text: lastMsg.text + data.token
-                    };
-                    return updated;
-                }
-                // New stream start (e.g. user clicked Shorten)
-                return [...prev, {
-                    id: Date.now().toString(),
-                    role: 'system',
-                    text: data.token,
-                    intent: data.intent,
-                    isStreaming: true
-                }];
-            });
+            // PERF: rAF-coalesce per-token state updates.
+            queueToken(data.intent, data.token);
         }));
 
         cleanups.push(window.electronAPI.onIntelligenceRefinedAnswer((data) => {
+            flushToken();
             setIsProcessing(false);
             setMessages(prev => {
                 const lastMsg = prev[prev.length - 1];
@@ -926,27 +1093,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
 
         // STREAMING: Recap
         cleanups.push(window.electronAPI.onIntelligenceRecapToken((data) => {
-            setMessages(prev => {
-                const lastMsg = prev[prev.length - 1];
-                if (lastMsg && lastMsg.isStreaming && lastMsg.intent === 'recap') {
-                    const updated = [...prev];
-                    updated[prev.length - 1] = {
-                        ...lastMsg,
-                        text: lastMsg.text + data.token
-                    };
-                    return updated;
-                }
-                return [...prev, {
-                    id: Date.now().toString(),
-                    role: 'system',
-                    text: data.token,
-                    intent: 'recap',
-                    isStreaming: true
-                }];
-            });
+            queueToken('recap', data.token);
         }));
 
         cleanups.push(window.electronAPI.onIntelligenceRecap((data) => {
+            flushToken();
             setIsProcessing(false);
             setMessages(prev => {
                 const lastMsg = prev[prev.length - 1];
@@ -981,27 +1132,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         // Assuming it's a message for consistency with "Copilot" approach.
 
         cleanups.push(window.electronAPI.onIntelligenceFollowUpQuestionsToken((data) => {
-            setMessages(prev => {
-                const lastMsg = prev[prev.length - 1];
-                if (lastMsg && lastMsg.isStreaming && lastMsg.intent === 'follow_up_questions') {
-                    const updated = [...prev];
-                    updated[prev.length - 1] = {
-                        ...lastMsg,
-                        text: lastMsg.text + data.token
-                    };
-                    return updated;
-                }
-                return [...prev, {
-                    id: Date.now().toString(),
-                    role: 'system',
-                    text: data.token,
-                    intent: 'follow_up_questions',
-                    isStreaming: true
-                }];
-            });
+            queueToken('follow_up_questions', data.token);
         }));
 
         cleanups.push(window.electronAPI.onIntelligenceFollowUpQuestionsUpdate((data) => {
+            flushToken();
             // This event name is slightly different ('update' vs 'answer')
             setIsProcessing(false);
             setMessages(prev => {
@@ -1067,24 +1202,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
     // orphaning the final 'clarify' event and leaving isProcessing=true forever.
     useEffect(() => {
         const cleanupToken = window.electronAPI.onIntelligenceClarifyToken((data) => {
-            setMessages(prev => {
-                const lastMsg = prev[prev.length - 1];
-                if (lastMsg && lastMsg.isStreaming && lastMsg.intent === 'clarify') {
-                    const updated = [...prev];
-                    updated[prev.length - 1] = { ...lastMsg, text: lastMsg.text + data.token };
-                    return updated;
-                }
-                return [...prev, {
-                    id: Date.now().toString(),
-                    role: 'system' as const,
-                    text: data.token,
-                    intent: 'clarify',
-                    isStreaming: true
-                }];
-            });
+            queueToken('clarify', data.token);
         });
 
         const cleanupFinal = window.electronAPI.onIntelligenceClarify((data) => {
+            flushToken();
             setIsProcessing(false);
             setMessages(prev => {
                 const lastMsg = prev[prev.length - 1];
@@ -1775,38 +1897,18 @@ Provide only the answer, nothing else.`;
                                     const lang = match[1] || 'python';
                                     const code = match[2].trim();
                                     return (
-                                        <div key={i} className={`my-3 rounded-xl overflow-hidden border shadow-lg ${codeBlockClass}`} style={appearance.codeBlockStyle}>
-                                            {/* Minimalist Apple Header */}
-                                            <div className={`px-3 py-1.5 border-b ${codeHeaderClass}`} style={appearance.codeHeaderStyle}>
-                                                <span className={`text-[10px] uppercase tracking-widest font-semibold font-mono ${codeHeaderTextClass}`}>
-                                                    {lang || 'CODE'}
-                                                </span>
-                                            </div>
-                                            {/* No-wrap horizontal scroll: code line layout stays
-                                                stable as the canvas grows/shrinks. Without this,
-                                                wrapped lines re-flow at every spring tick, the
-                                                block height jitters, and content below it shifts. */}
-                                            <div className="bg-transparent overflow-x-auto">
-                                                <SyntaxHighlighter
-                                                    language={lang}
-                                                    style={codeTheme}
-                                                    customStyle={{
-                                                        margin: 0,
-                                                        borderRadius: 0,
-                                                        fontSize: '13px',
-                                                        lineHeight: '1.6',
-                                                        background: 'transparent',
-                                                        padding: '16px',
-                                                        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
-                                                    }}
-                                                    wrapLongLines={false}
-                                                    showLineNumbers={true}
-                                                    lineNumberStyle={{ minWidth: '2.5em', paddingRight: '1.2em', color: codeLineNumberColor, textAlign: 'right', fontSize: '11px' }}
-                                                >
-                                                    {code}
-                                                </SyntaxHighlighter>
-                                            </div>
-                                        </div>
+                                        <HighlightedCode
+                                            key={i}
+                                            code={code}
+                                            lang={lang}
+                                            isLightTheme={isLightTheme}
+                                            codeTheme={codeTheme}
+                                            codeBlockClass={codeBlockClass}
+                                            codeHeaderClass={codeHeaderClass}
+                                            codeHeaderTextClass={codeHeaderTextClass}
+                                            codeLineNumberColor={codeLineNumberColor}
+                                            appearance={appearance}
+                                        />
                                     );
                                 }
                             }
@@ -1816,20 +1918,7 @@ Provide only the answer, nothing else.`;
                                     <ReactMarkdown
                                         remarkPlugins={[remarkGfm, remarkMath]}
                                         rehypePlugins={[rehypeKatex]}
-                                        components={{
-                                            p: ({ node, ...props }: any) => <p className="mb-2 last:mb-0 whitespace-pre-wrap" {...props} />,
-                                            strong: ({ node, ...props }: any) => <strong className="font-bold overlay-text-strong" {...props} />,
-                                            em: ({ node, ...props }: any) => <em className="italic overlay-text-secondary" {...props} />,
-                                            ul: ({ node, ...props }: any) => <ul className="list-disc ml-4 mb-2 space-y-1" {...props} />,
-                                            ol: ({ node, ...props }: any) => <ol className="list-decimal ml-4 mb-2 space-y-1" {...props} />,
-                                            li: ({ node, ...props }: any) => <li className="pl-1" {...props} />,
-                                            h1: ({ node, ...props }: any) => <h1 className="text-lg font-bold mb-2 mt-3 overlay-text-strong" {...props} />,
-                                            h2: ({ node, ...props }: any) => <h2 className="text-base font-bold mb-2 mt-3 overlay-text-strong" {...props} />,
-                                            h3: ({ node, ...props }: any) => <h3 className="text-sm font-bold mb-1 mt-2 overlay-text-primary" {...props} />,
-                                            code: ({ node, ...props }: any) => <code className={`overlay-inline-code-surface rounded px-1 py-0.5 text-xs font-mono whitespace-pre-wrap ${isLightTheme ? 'text-violet-700' : 'text-purple-200'}`} {...props} />,
-                                            blockquote: ({ node, ...props }: any) => <blockquote className={`border-l-2 pl-3 italic my-2 ${isLightTheme ? 'border-violet-500/30 text-slate-600' : 'border-purple-500/50 text-slate-400'}`} {...props} />,
-                                            a: ({ node, ...props }: any) => <a className={`hover:underline ${isLightTheme ? 'text-blue-600 hover:text-blue-700' : 'text-blue-400 hover:text-blue-300'}`} target="_blank" rel="noopener noreferrer" {...props} />,
-                                        }}
+                                        components={mdComponents.codeText}
                                     >
                                         {part}
                                     </ReactMarkdown>
@@ -1933,39 +2022,18 @@ Provide only the answer, nothing else.`;
                                     }
 
                                     return (
-                                        <div key={i} className={`my-3 rounded-xl overflow-hidden border shadow-lg ${codeBlockClass}`} style={appearance.codeBlockStyle}>
-                                            {/* Minimalist Apple Header */}
-                                            <div className={`px-3 py-1.5 border-b ${codeHeaderClass}`} style={appearance.codeHeaderStyle}>
-                                                <span className={`text-[10px] uppercase tracking-widest font-semibold font-mono ${codeHeaderTextClass}`}>
-                                                    {lang || 'CODE'}
-                                                </span>
-                                            </div>
-
-                                            {/* No-wrap horizontal scroll: code line layout stays
-                                                stable as the canvas grows/shrinks. Without this,
-                                                wrapped lines re-flow at every spring tick, the
-                                                block height jitters, and content below it shifts. */}
-                                            <div className="bg-transparent overflow-x-auto">
-                                                <SyntaxHighlighter
-                                                    language={lang}
-                                                    style={codeTheme}
-                                                    customStyle={{
-                                                        margin: 0,
-                                                        borderRadius: 0,
-                                                        fontSize: '13px',
-                                                        lineHeight: '1.6',
-                                                        background: 'transparent',
-                                                        padding: '16px',
-                                                        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
-                                                    }}
-                                                    wrapLongLines={false}
-                                                    showLineNumbers={true}
-                                                    lineNumberStyle={{ minWidth: '2.5em', paddingRight: '1.2em', color: codeLineNumberColor, textAlign: 'right', fontSize: '11px' }}
-                                                >
-                                                    {code}
-                                                </SyntaxHighlighter>
-                                            </div>
-                                        </div>
+                                        <HighlightedCode
+                                            key={i}
+                                            code={code}
+                                            lang={lang}
+                                            isLightTheme={isLightTheme}
+                                            codeTheme={codeTheme}
+                                            codeBlockClass={codeBlockClass}
+                                            codeHeaderClass={codeHeaderClass}
+                                            codeHeaderTextClass={codeHeaderTextClass}
+                                            codeLineNumberColor={codeLineNumberColor}
+                                            appearance={appearance}
+                                        />
                                     );
                                 }
                             }
@@ -2001,16 +2069,7 @@ Provide only the answer, nothing else.`;
                 <ReactMarkdown
                     remarkPlugins={[remarkGfm, remarkMath]}
                     rehypePlugins={[rehypeKatex]}
-                    components={{
-                        p: ({ node, ...props }: any) => <p className="mb-2 last:mb-0 whitespace-pre-wrap" {...props} />,
-                        strong: ({ node, ...props }: any) => <strong className="font-bold opacity-100 overlay-text-strong" {...props} />,
-                        em: ({ node, ...props }: any) => <em className="italic opacity-90 overlay-text-secondary" {...props} />,
-                        ul: ({ node, ...props }: any) => <ul className="list-disc ml-4 mb-2 space-y-1" {...props} />,
-                        ol: ({ node, ...props }: any) => <ol className="list-decimal ml-4 mb-2 space-y-1" {...props} />,
-                        li: ({ node, ...props }: any) => <li className="pl-1" {...props} />,
-                        code: ({ node, ...props }: any) => <code className={`overlay-inline-code-surface rounded px-1 py-0.5 text-xs font-mono ${isLightTheme ? 'text-slate-800' : ''}`} {...props} />,
-                        a: ({ node, ...props }: any) => <a className="underline hover:opacity-80" target="_blank" rel="noopener noreferrer" {...props} />,
-                    }}
+                    components={mdComponents.standard}
                 >
                     {msg.text}
                 </ReactMarkdown>
