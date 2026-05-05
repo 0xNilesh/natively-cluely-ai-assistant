@@ -135,6 +135,96 @@ const HighlightedCode = React.memo(function HighlightedCode({
     prev.appearance === next.appearance
 );
 
+// PERF: MessageRow renders one chat-message bubble. Module-scope + React.memo
+// so a parent re-render does NOT re-render every prior message — only the
+// streaming row whose `msg` reference actually changed gets reconciled.
+//
+// The combination of (this memo) + (HighlightedCode memo) + (rAF token
+// coalescing) + (hoisted ReactMarkdown components) eliminates the streaming
+// re-render storm: prior messages stay structurally identical between renders
+// and bail out at this boundary, preserving their entire Markdown / code-block
+// subtrees including expensive Prism tokenization.
+//
+// Stable-identity contract for the comparator to actually fire:
+//   - msg: setMessages always returns a new array, but the per-message OBJECT
+//     identity is preserved for non-changing rows (the streaming-row pattern
+//     does `[...prev]` then mutates only `prev.length - 1`). So === on msg
+//     correctly detects "this row is unchanged."
+//   - appearance: useMemo'd in parent on [overlayOpacity, isLightTheme].
+//   - onCopy / renderMessageText: useCallback'd in parent.
+interface MessageRowProps {
+    msg: Message;
+    isLightTheme: boolean;
+    appearance: any;
+    onCopy: (text: string) => void;
+    renderMessageText: (msg: Message) => React.ReactNode;
+}
+const MessageRow = React.memo(function MessageRow({
+    msg, isLightTheme, appearance, onCopy, renderMessageText,
+}: MessageRowProps) {
+    const isCodeMsg = msg.role === 'system' && (msg.isCode || msg.text.includes('```'));
+    // bubbleMaxClass: user bubbles are tighter; system + code use the same width.
+    const bubbleMaxClass = msg.role === 'user'
+        ? 'max-w-[72%] px-[13.6px] py-[10.2px]'
+        : 'max-w-[85%] px-4 py-3';
+    return (
+        <div
+            className="w-full"
+            {...(isCodeMsg ? { 'data-code-msg': 'true' } : {})}
+        >
+            <div className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in-up`}>
+                <div className={`
+              ${bubbleMaxClass} text-[14px] leading-relaxed relative group whitespace-pre-wrap
+              ${msg.role === 'user'
+                        ? (isLightTheme
+                            ? 'bg-blue-500/10 backdrop-blur-md border border-blue-500/20 text-blue-900 rounded-[20px] rounded-tr-[4px] shadow-sm font-medium'
+                            : 'bg-blue-600/20 backdrop-blur-md border border-blue-500/30 text-blue-100 rounded-[20px] rounded-tr-[4px] shadow-sm font-medium')
+                        : ''
+                    }
+              ${msg.role === 'system'
+                        ? 'overlay-text-primary font-normal'
+                        : ''
+                    }
+              ${msg.role === 'interviewer'
+                        ? 'overlay-text-muted italic pl-0 text-[13px]'
+                        : ''
+                    }
+            `}>
+                    {msg.role === 'interviewer' && (
+                        <div className="flex items-center gap-1.5 mb-1 text-[10px] font-medium uppercase tracking-wider overlay-text-muted">
+                            Interviewer
+                            {msg.isStreaming && <span className="w-1 h-1 bg-green-500 rounded-full animate-pulse" />}
+                        </div>
+                    )}
+                    {msg.role === 'user' && msg.hasScreenshot && (
+                        <div className={`flex items-center gap-1 text-[10px] opacity-70 mb-1 border-b pb-1 ${isLightTheme ? 'border-black/10' : 'border-white/10'}`}>
+                            <Image className="w-2.5 h-2.5" />
+                            <span>Screenshot attached</span>
+                        </div>
+                    )}
+                    {msg.role === 'system' && !msg.isStreaming && (
+                        <button
+                            onClick={() => onCopy(msg.text)}
+                            className="absolute top-2 right-2 p-1.5 rounded-md opacity-0 group-hover:opacity-100 transition-opacity overlay-icon-surface overlay-icon-surface-hover overlay-text-interactive"
+                            title="Copy to clipboard"
+                            style={appearance.iconStyle}
+                        >
+                            <Copy className="w-3.5 h-3.5" />
+                        </button>
+                    )}
+                    {renderMessageText(msg)}
+                </div>
+            </div>
+        </div>
+    );
+}, (prev, next) =>
+    prev.msg === next.msg &&
+    prev.isLightTheme === next.isLightTheme &&
+    prev.appearance === next.appearance &&
+    prev.renderMessageText === next.renderMessageText &&
+    prev.onCopy === next.onCopy
+);
+
 const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, overlayOpacity = OVERLAY_OPACITY_DEFAULT }) => {
     const isLightTheme = useResolvedTheme() === 'light';
     const [isExpanded, setIsExpanded] = useState(true);
@@ -1233,11 +1323,14 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
 
     // Quick Actions - Updated to use new Intelligence APIs
 
-    const handleCopy = (text: string) => {
+    // PERF: useCallback so the reference is stable between renders. MessageRow
+    // (memoized below) receives this as a prop; without a stable identity its
+    // memo comparator would never match and the bailout would not fire.
+    const handleCopy = useCallback((text: string) => {
         navigator.clipboard.writeText(text);
         analytics.trackCopyAnswer();
         // Optional: Trigger a small toast or state change for visual feedback
-    };
+    }, []);
 
     const handleWhatToSay = async () => {
         setIsExpanded(true);
@@ -1860,7 +1953,12 @@ Provide only the answer, nothing else.`;
 
 
 
-    const renderMessageText = (msg: Message) => {
+    // PERF: useCallback so MessageRow's memo comparator can rely on a stable
+    // function identity. Deps are the things the closure actually reads that
+    // can change: theme + memoized markdown components + memoized appearance.
+    // setMessages is a stable React setter and isLightTheme drives both the
+    // other deps so its inclusion is mostly defensive.
+    const renderMessageText = useCallback((msg: Message) => {
         // Negotiation coaching card takes priority
         if (msg.isNegotiationCoaching && msg.negotiationCoachingData) {
             return (
@@ -2075,7 +2173,7 @@ Provide only the answer, nothing else.`;
                 </ReactMarkdown>
             </div>
         );
-    };
+    }, [isLightTheme, mdComponents, appearance]);
 
 
     // We use a ref to hold the latest handlers to avoid re-binding the event listener on every render
@@ -2619,76 +2717,32 @@ Provide only the answer, nothing else.`;
                             {/* Chat History - Only show if there are messages OR active states */}
                             {(messages.length > 0 || isManualRecording || isProcessing) && (
                                 <motion.div ref={scrollContainerRef} className="flex-1 overflow-y-auto p-4 space-y-3 no-drag" style={{ scrollbarWidth: 'none', maxHeight: scrollMaxH }}>
-                                    {messages.map((msg) => {
-                                        // Every row spans the full inner width of the scroll
-                                        // container, which itself rides the shell's animated
-                                        // width. Bubble max-widths are percentages so the text
-                                        // and code grow with the canvas — same as iMessage /
-                                        // Mail when their windows resize. Reflow during the
-                                        // 700 ms tween is gentle (≈0.3 px / frame width delta)
-                                        // and reads as the canvas "breathing", not jitter.
-                                        // The other polish (sticky bottom, stable code line
-                                        // layout via wrapLongLines:false, stability gate that
-                                        // suppresses transitions during scroll) keeps the
-                                        // motion calm.
-                                        const isCodeMsg = msg.role === 'system' && (msg.isCode || msg.text.includes('```'));
-                                        const bubbleMaxClass = msg.role === 'user'
-                                            ? 'max-w-[72%] px-[13.6px] py-[10.2px]'
-                                            : isCodeMsg
-                                                ? 'max-w-[85%] px-4 py-3'
-                                                : 'max-w-[85%] px-4 py-3';
-                                        return (
-                                        <div
+                                    {/* Every row spans the full inner width of the scroll
+                                        container, which itself rides the shell's animated
+                                        width. Bubble max-widths are percentages so the text
+                                        and code grow with the canvas — same as iMessage /
+                                        Mail when their windows resize. Reflow during the
+                                        700 ms tween is gentle (≈0.3 px / frame width delta)
+                                        and reads as the canvas "breathing", not jitter.
+                                        The other polish (sticky bottom, stable code line
+                                        layout via wrapLongLines:false, stability gate that
+                                        suppresses transitions during scroll) keeps the
+                                        motion calm.
+
+                                        Each row is rendered through React.memo'd MessageRow
+                                        so a setMessages on the streaming row does NOT
+                                        re-render every prior message — bailout fires on
+                                        identity equality (msg, theme, callbacks). */}
+                                    {messages.map((msg) => (
+                                        <MessageRow
                                             key={msg.id}
-                                            className="w-full"
-                                            {...(isCodeMsg ? { 'data-code-msg': 'true' } : {})}
-                                        >
-                                        <div className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in-up`}>
-                                            <div className={`
-                      ${bubbleMaxClass} text-[14px] leading-relaxed relative group whitespace-pre-wrap
-                      ${msg.role === 'user'
-                                                    ? (isLightTheme
-                                                        ? 'bg-blue-500/10 backdrop-blur-md border border-blue-500/20 text-blue-900 rounded-[20px] rounded-tr-[4px] shadow-sm font-medium'
-                                                        : 'bg-blue-600/20 backdrop-blur-md border border-blue-500/30 text-blue-100 rounded-[20px] rounded-tr-[4px] shadow-sm font-medium')
-                                                    : ''
-                                                }
-                      ${msg.role === 'system'
-                                                    ? 'overlay-text-primary font-normal'
-                                                    : ''
-                                                }
-                      ${msg.role === 'interviewer'
-                                                    ? 'overlay-text-muted italic pl-0 text-[13px]'
-                                                    : ''
-                                                }
-                    `}>
-                                                {msg.role === 'interviewer' && (
-                                                    <div className="flex items-center gap-1.5 mb-1 text-[10px] font-medium uppercase tracking-wider overlay-text-muted">
-                                                        Interviewer
-                                                        {msg.isStreaming && <span className="w-1 h-1 bg-green-500 rounded-full animate-pulse" />}
-                                                    </div>
-                                                )}
-                                                {msg.role === 'user' && msg.hasScreenshot && (
-                                                    <div className={`flex items-center gap-1 text-[10px] opacity-70 mb-1 border-b pb-1 ${isLightTheme ? 'border-black/10' : 'border-white/10'}`}>
-                                                        <Image className="w-2.5 h-2.5" />
-                                                        <span>Screenshot attached</span>
-                                                    </div>
-                                                )}
-                                                {msg.role === 'system' && !msg.isStreaming && (
-                                                    <button
-                                                        onClick={() => handleCopy(msg.text)}
-                                                        className="absolute top-2 right-2 p-1.5 rounded-md opacity-0 group-hover:opacity-100 transition-opacity overlay-icon-surface overlay-icon-surface-hover overlay-text-interactive"
-                                                        title="Copy to clipboard"
-                                                        style={appearance.iconStyle}
-                                                    >
-                                                        <Copy className="w-3.5 h-3.5" />
-                                                    </button>
-                                                )}
-                                                {renderMessageText(msg)}
-                                            </div>
-                                        </div>
-                                        </div>
-                                        );
-                                    })}
+                                            msg={msg}
+                                            isLightTheme={isLightTheme}
+                                            appearance={appearance}
+                                            onCopy={handleCopy}
+                                            renderMessageText={renderMessageText}
+                                        />
+                                    ))}
 
                                     {/* Active Recording State with Live Transcription */}
                                     {isManualRecording && (
