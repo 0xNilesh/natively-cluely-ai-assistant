@@ -87,12 +87,21 @@ export class SystemAudioCapture extends EventEmitter {
                     return;
                 }
                 if (chunk && chunk.length > 0) {
+                    // POST-STOP GUARD: stop() defers the native monitor.stop() to
+                    // setImmediate, so during that brief window the Rust DSP thread
+                    // is still running and may invoke this callback. Drop chunks at
+                    // the JS boundary so STT.finalize() can see "end of audio" and
+                    // emit trailing finals deterministically.
+                    if (!this.isRecording) return;
                     this.chunkCount++;
                     if (this.chunkCount <= 3 || this.chunkCount % 200 === 0) {
                         console.log(`[SystemAudioCapture] Chunk #${this.chunkCount}: ${chunk.length} bytes from Rust`);
                     }
-                    const buffer = Buffer.from(chunk);
-                    this.emit('data', buffer);
+                    // PERF: napi-rs already returns an owned Node Buffer from Rust's
+                    // Buffer::from(bytes). The previous `Buffer.from(chunk)` was a
+                    // redundant ~1.9KB copy per chunk × 50/sec = ~95KB/sec of GC pressure.
+                    // Downstream (googleSTT.write) does not mutate the buffer.
+                    this.emit('data', chunk);
                 }
             }, (err: Error | null, _ended: boolean) => {
                 // Speech-ended callback from Rust SilenceSuppressor.
@@ -137,7 +146,20 @@ export class SystemAudioCapture extends EventEmitter {
     }
 
     /**
-     * Stop capturing
+     * Stop capturing.
+     *
+     * PERF: The native `monitor.stop()` is a synchronous Rust call that waits for
+     * the DSP thread to join AND tears down platform audio handles (CoreAudio
+     * Tap / SCK / WASAPI). On Windows this can block 100–300ms. We flip
+     * `isRecording = false` synchronously so the rest of the JS world sees the
+     * stopped state immediately, then run the native stop on the next tick of
+     * the libuv event loop. The Electron main process returns to the IPC caller
+     * (renderer's "Stop" button) without waiting on the native teardown.
+     *
+     * Safety: once `isRecording = false`, no more `'data'` events will be wired
+     * (the JS-side guard short-circuits) and the native callback is a no-op
+     * after the Rust side flips its own atomic. So deferring the native stop is
+     * race-free with respect to this object's external contract.
      */
     public stop(): void {
         if (!this.isRecording) return;
@@ -147,17 +169,19 @@ export class SystemAudioCapture extends EventEmitter {
         for (const t of this.sampleRatePollTimers) clearTimeout(t);
         this.sampleRatePollTimers = [];
 
-        console.log('[SystemAudioCapture] Stopping capture...');
-        try {
-            this.monitor?.stop();
-        } catch (e) {
-            console.error('[SystemAudioCapture] Error stopping:', e);
-        }
-
-        // DO NOT destroy monitor here. Keep it alive for seamless restart.
-        // this.monitor = null;  // ← REMOVED — was causing Windows WASAPI device contention
-
+        console.log('[SystemAudioCapture] Stopping capture (deferred native teardown)...');
         this.isRecording = false;
+        const monitor = this.monitor;
+        // Defer the blocking native call. setImmediate runs after the current
+        // poll iteration completes, which is enough to release the Electron main
+        // thread back to the IPC caller before the native teardown begins.
+        setImmediate(() => {
+            try {
+                monitor?.stop();
+            } catch (e) {
+                console.error('[SystemAudioCapture] Error stopping (deferred):', e);
+            }
+        });
         this.emit('stop');
     }
 

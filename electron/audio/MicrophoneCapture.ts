@@ -85,11 +85,17 @@ export class MicrophoneCapture extends EventEmitter {
                     return;
                 }
                 if (chunk && chunk.length > 0) {
+                    // POST-STOP GUARD: see SystemAudioCapture for rationale. The
+                    // deferred native stop() means late chunks may arrive on the JS
+                    // side; drop them so STT.finalize() sees a clean audio-end.
+                    if (!this.isRecording) return;
                     // Debug: log occasionally
                     if (Math.random() < 0.05) {
                         console.log(`[MicrophoneCapture] Emitting chunk: ${chunk.length} bytes to JS`);
                     }
-                    this.emit('data', Buffer.from(chunk));
+                    // PERF: napi-rs Buffer is already owned. Removed redundant Buffer.from copy
+                    // (matches SystemAudioCapture). Saves ~95KB/sec of allocation churn.
+                    this.emit('data', chunk);
                 }
             }, (err: Error | null, _ended: boolean) => {
                 // Speech-ended callback from Rust SilenceSuppressor.
@@ -110,22 +116,29 @@ export class MicrophoneCapture extends EventEmitter {
     }
 
     /**
-     * Stop capturing
+     * Stop capturing.
+     *
+     * PERF: The native `monitor.stop()` blocks waiting for the DSP thread join
+     * AND CPAL stream drop (which itself waits for the platform audio thread —
+     * CoreAudio / WASAPI / ALSA — to release the device). On macOS that's
+     * 30–80ms; on Windows 100–300ms; on flaky USB devices, longer. We flip
+     * `isRecording = false` synchronously so external observers (and our own
+     * data-callback guard) see the stopped state immediately, then defer the
+     * native teardown so the Electron IPC handler returns without waiting.
      */
     public stop(): void {
         if (!this.isRecording) return;
 
-        console.log('[MicrophoneCapture] Stopping capture...');
-        try {
-            this.monitor?.stop();
-        } catch (e) {
-            console.error('[MicrophoneCapture] Error stopping:', e);
-        }
-
-        // DO NOT destroy monitor here. Keep it alive for seamless restart.
-        // this.monitor = null; 
-
+        console.log('[MicrophoneCapture] Stopping capture (deferred native teardown)...');
         this.isRecording = false;
+        const monitor = this.monitor;
+        setImmediate(() => {
+            try {
+                monitor?.stop();
+            } catch (e) {
+                console.error('[MicrophoneCapture] Error stopping (deferred):', e);
+            }
+        });
         this.emit('stop');
     }
 
