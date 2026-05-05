@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useLayoutEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useLayoutEffect, useMemo, useCallback, startTransition as reactStartTransition } from 'react';
 import {
     Sparkles,
     Pencil,
@@ -881,6 +881,13 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
     // synchronously flush the previous intent's buffer before queuing.
     const tokenBufRef = useRef<{ intent: string; text: string; raf: number | null }>({ intent: '', text: '', raf: null });
 
+    // Sprint 13: React 18 concurrent mode — wrap streaming setMessages in
+    // reactStartTransition (React's startTransition, aliased to avoid the
+    // name clash with the local shell-width tween helper) so user input
+    // (clicks, keypresses, scrolling) gets higher render priority than
+    // streaming reconciliation. React can interrupt and resume the messages
+    // render between frames if a higher-priority update arrives. Negligible
+    // cost on small renders, real win when long history is in flight.
     const queueToken = useCallback((intent: string, token: string) => {
         const buf = tokenBufRef.current;
         // If the intent changed, flush the prior buffer immediately so we don't
@@ -890,14 +897,16 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
             const oldText = buf.text;
             buf.text = '';
             if (buf.raf !== null) { cancelAnimationFrame(buf.raf); buf.raf = null; }
-            setMessages(prev => {
-                const lastMsg = prev[prev.length - 1];
-                if (lastMsg && lastMsg.isStreaming && lastMsg.intent === oldIntent) {
-                    const updated = [...prev];
-                    updated[prev.length - 1] = { ...lastMsg, text: lastMsg.text + oldText };
-                    return updated;
-                }
-                return [...prev, { id: Date.now().toString(), role: 'system', text: oldText, intent: oldIntent, isStreaming: true }];
+            reactStartTransition(() => {
+                setMessages(prev => {
+                    const lastMsg = prev[prev.length - 1];
+                    if (lastMsg && lastMsg.isStreaming && lastMsg.intent === oldIntent) {
+                        const updated = [...prev];
+                        updated[prev.length - 1] = { ...lastMsg, text: lastMsg.text + oldText };
+                        return updated;
+                    }
+                    return [...prev, { id: Date.now().toString(), role: 'system', text: oldText, intent: oldIntent, isStreaming: true }];
+                });
             });
         }
         buf.intent = intent;
@@ -909,14 +918,16 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
                 const i = buf.intent;
                 buf.text = '';
                 if (!text) return;
-                setMessages(prev => {
-                    const lastMsg = prev[prev.length - 1];
-                    if (lastMsg && lastMsg.isStreaming && lastMsg.intent === i) {
-                        const updated = [...prev];
-                        updated[prev.length - 1] = { ...lastMsg, text: lastMsg.text + text };
-                        return updated;
-                    }
-                    return [...prev, { id: Date.now().toString(), role: 'system', text, intent: i, isStreaming: true }];
+                reactStartTransition(() => {
+                    setMessages(prev => {
+                        const lastMsg = prev[prev.length - 1];
+                        if (lastMsg && lastMsg.isStreaming && lastMsg.intent === i) {
+                            const updated = [...prev];
+                            updated[prev.length - 1] = { ...lastMsg, text: lastMsg.text + text };
+                            return updated;
+                        }
+                        return [...prev, { id: Date.now().toString(), role: 'system', text, intent: i, isStreaming: true }];
+                    });
                 });
             });
         }
@@ -929,6 +940,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         const text = buf.text;
         const intent = buf.intent;
         buf.text = '';
+        // NOT wrapped in startTransition — flush is called synchronously
+        // before a final-answer setMessages, and we want the trailing tokens
+        // to be in DOM before the final state is committed (so React's batch
+        // doesn't reorder them after the final). The ordering must hold.
         setMessages(prev => {
             const lastMsg = prev[prev.length - 1];
             if (lastMsg && lastMsg.isStreaming && lastMsg.intent === intent) {
