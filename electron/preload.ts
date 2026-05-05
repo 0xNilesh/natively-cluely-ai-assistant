@@ -148,6 +148,9 @@ interface ElectronAPI {
   onIntelligenceManualResult: (callback: (data: { answer: string; question: string }) => void) => () => void
   onIntelligenceModeChanged: (callback: (data: { mode: string }) => void) => () => void
   onIntelligenceError: (callback: (data: { error: string; mode: string }) => void) => () => void
+  // Sprint 7: dedicated negotiation-coaching channel. Replaces the
+  // sentinel-string multiplex through suggested_answer_token / suggested_answer.
+  onIntelligenceNegotiationCoaching: (callback: (data: { payload: any }) => void) => () => void
 
   // Model Management
   getDefaultModel: () => Promise<{ model: string }>
@@ -773,6 +776,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on("intelligence-suggested-answer", subscription)
     return () => {
       ipcRenderer.removeListener("intelligence-suggested-answer", subscription)
+    }
+  },
+  // Sprint 7: dedicated negotiation-coaching channel.
+  onIntelligenceNegotiationCoaching: (callback: (data: { payload: any }) => void) => {
+    const subscription = (_: any, data: any) => callback(data)
+    ipcRenderer.on("intelligence-negotiation-coaching", subscription)
+    return () => {
+      ipcRenderer.removeListener("intelligence-negotiation-coaching", subscription)
     }
   },
   onIntelligenceRefinedAnswerToken: (callback: (data: { token: string; intent: string }) => void) => {

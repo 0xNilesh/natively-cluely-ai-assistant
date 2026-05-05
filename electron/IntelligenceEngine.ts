@@ -54,6 +54,13 @@ export interface IntelligenceModeEvents {
     'manual_answer_result': (answer: string, question: string) => void;
     'mode_changed': (mode: IntelligenceMode) => void;
     'error': (error: Error, mode: IntelligenceMode) => void;
+    // ARCHITECTURE: dedicated channel for live negotiation coaching payloads.
+    // Previously the coaching JSON was multiplexed into the suggested_answer
+    // / suggested_answer_token streams as a sentinel-string, which forced the
+    // renderer to JSON.parse every streaming token to detect the marker.
+    // Splitting the channel removes that hack and gives coaching its own
+    // typed payload.
+    'negotiation_coaching': (payload: unknown) => void;
 }
 
 export class IntelligenceEngine extends EventEmitter {
@@ -246,6 +253,25 @@ export class IntelligenceEngine extends EventEmitter {
                 const context = this.session.getFormattedContext(180);
                 const answer = await this.answerLLM.generate(question || '', context);
                 if (answer) {
+                    // ARCHITECTURE: also catch coaching sentinel on the
+                    // non-streaming fallback path — same routing rule as
+                    // the streaming branch above.
+                    if (
+                        answer.length > 24 &&
+                        answer.charCodeAt(0) === 123 /* { */ &&
+                        answer.includes('__negotiationCoaching')
+                    ) {
+                        try {
+                            const parsed = JSON.parse(answer);
+                            if (parsed && typeof parsed === 'object' && parsed.__negotiationCoaching) {
+                                this.emit('negotiation_coaching', parsed.__negotiationCoaching);
+                                this.setMode('idle');
+                                return null;
+                            }
+                        } catch {
+                            // Fall through to normal answer.
+                        }
+                    }
                     this.session.addAssistantMessage(answer);
                     this.emit('suggested_answer', answer, question || 'inferred', confidence);
                 }
@@ -312,6 +338,31 @@ export class IntelligenceEngine extends EventEmitter {
                     streamAborted = true;
                     break;
                 }
+                // ARCHITECTURE: detect the live-negotiation-coaching sentinel
+                // here (server-side) and route to the dedicated event channel
+                // instead of leaking the raw JSON through suggested_answer_token.
+                // The sentinel arrives as one complete token (LLMHelper yields a
+                // single JSON.stringify call). Cheap-prefix gate keeps the hot
+                // path fast for normal tokens (~400 throws-per-answer eliminated).
+                if (
+                    token.length > 24 &&
+                    token.charCodeAt(0) === 123 /* { */ &&
+                    token.includes('__negotiationCoaching')
+                ) {
+                    try {
+                        const parsed = JSON.parse(token);
+                        if (parsed && typeof parsed === 'object' && parsed.__negotiationCoaching) {
+                            this.emit('negotiation_coaching', parsed.__negotiationCoaching);
+                            // Coaching IS the entire response — terminate the stream
+                            // so we don't also fire suggested_answer/suggested_answer_token.
+                            await stream.return(undefined);
+                            this.setMode('idle');
+                            return null;
+                        }
+                    } catch {
+                        // Prefix matched but JSON failed — treat as a normal token below.
+                    }
+                }
                 this.emit('suggested_answer_token', token, question || 'inferred', confidence);
                 fullAnswer += token;
             }
@@ -324,6 +375,29 @@ export class IntelligenceEngine extends EventEmitter {
 
             if (!fullAnswer || fullAnswer.trim().length < 5) {
                 fullAnswer = "Could you repeat that? I want to make sure I address your question properly.";
+            }
+
+            // ARCHITECTURE: defensive sentinel check on the assembled answer.
+            // The streaming path's per-token check should fire first, but if
+            // for some reason the sentinel was split across two tokens or
+            // arrived in the synchronous answerLLM.generate path further down,
+            // catch it here too — same routing rule: emit dedicated event,
+            // skip the suggested_answer emission.
+            if (
+                fullAnswer.length > 24 &&
+                fullAnswer.charCodeAt(0) === 123 /* { */ &&
+                fullAnswer.includes('__negotiationCoaching')
+            ) {
+                try {
+                    const parsed = JSON.parse(fullAnswer);
+                    if (parsed && typeof parsed === 'object' && parsed.__negotiationCoaching) {
+                        this.emit('negotiation_coaching', parsed.__negotiationCoaching);
+                        this.setMode('idle');
+                        return null;
+                    }
+                } catch {
+                    // Not actually JSON — fall through to the normal answer path.
+                }
             }
 
             this.session.addAssistantMessage(fullAnswer);

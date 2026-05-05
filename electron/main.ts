@@ -1912,6 +1912,17 @@ export class AppState {
       }
     })
 
+    // Sprint 7: dedicated negotiation-coaching channel. Engine emits this
+    // INSTEAD of suggested_answer / suggested_answer_token when it detects
+    // the coaching sentinel, so the renderer no longer needs JSON.parse-
+    // every-token detection.
+    this.intelligenceManager.on('negotiation_coaching', (payload: unknown) => {
+      const win = mainWindow()
+      if (win) {
+        win.webContents.send('intelligence-negotiation-coaching', { payload })
+      }
+    })
+
     this.intelligenceManager.on('refined_answer_token', (token: string, intent: string) => {
       const win = mainWindow()
       if (win) {
