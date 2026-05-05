@@ -248,6 +248,14 @@ export class AppState {
 
   private hasDebugged: boolean = false
   private isMeetingActive: boolean = false; // Guard for session state leaks
+  // Tracks remembered output device so reconfigureAudio can no-op when nothing changed.
+  // Mirrors the existing _lastRequestedInputDeviceId for the input side.
+  private _lastRequestedOutputDeviceId: string | undefined = undefined;
+  // Promise representing in-flight endMeeting background teardown (STT.stop +
+  // intelligenceManager.stopMeeting + RAG cleanup). startMeeting() awaits this
+  // before booting a new session so the shared STT instances are not torn down
+  // mid-meeting by a stale teardown task.
+  private _pendingTeardown: Promise<void> | null = null;
   private _isQuitting: boolean = false;
   private _verboseLogging: boolean = false;
   // Tracks whether STT sample-rate has been applied for the current capture
@@ -1169,6 +1177,38 @@ export class AppState {
   }
 
   /**
+   * PERF: Pre-construct STT provider objects at app launch so the meeting-start
+   * critical path doesn't pay for createSTTProvider (which does CredentialsManager
+   * lookup + listener wiring + per-provider class init).
+   *
+   * NOTE: this only constructs the JS objects. Provider sockets are still opened
+   * lazily on first .write() / .start() — opening idle sockets at app launch
+   * would burn provider quota and is provider-specific behavior we don't want
+   * to assume. The actual streaming-WebSocket cold-start is a separate (larger)
+   * optimization that should be done per-provider.
+   *
+   * Safe to call multiple times: existence guards in setupSystemAudioPipeline
+   * prevent duplicate construction.
+   */
+  public prewarmSttProviders(): void {
+    if (this.googleSTT && this.googleSTT_User) return;
+    try {
+      if (!this.googleSTT) {
+        console.log('[Main] Pre-warming interviewer STT provider...');
+        this.googleSTT = this.createSTTProvider('interviewer');
+      }
+      if (!this.googleSTT_User) {
+        console.log('[Main] Pre-warming user STT provider...');
+        this.googleSTT_User = this.createSTTProvider('user');
+      }
+    } catch (err) {
+      // Pre-warm failure is non-fatal; setupSystemAudioPipeline will retry on
+      // first meeting start with full error handling.
+      console.warn('[Main] STT pre-warm failed (will retry on meeting start):', err);
+    }
+  }
+
+  /**
    * Broadcast which device the main process actually opened, vs what the
    * renderer requested. Renderer subscribes to this so it can show a banner
    * when fallback to default occurred (e.g. saved AirPods name no longer in
@@ -1188,9 +1228,28 @@ export class AppState {
 
   private async reconfigureAudio(inputDeviceId?: string, outputDeviceId?: string): Promise<void> {
     console.log(`[Main] Reconfiguring Audio: Input=${inputDeviceId}, Output=${outputDeviceId}`);
+
+    // PERF: skip the entire destroy+recreate cycle when neither device changed
+    // since the last reconfigure AND both captures already exist. Each
+    // destroy()+new() costs 50–200ms (macOS CoreAudio Tap re-init, Windows
+    // WASAPI device contention, CPAL stream open). The common case — user
+    // starts a second meeting with the same mic/speakers — hits this path.
+    const wantedInput = inputDeviceId || undefined;
+    const wantedOutput = outputDeviceId || undefined;
+    if (
+      this.systemAudioCapture &&
+      this.microphoneCapture &&
+      this._lastRequestedInputDeviceId === wantedInput &&
+      this._lastRequestedOutputDeviceId === wantedOutput
+    ) {
+      console.log('[Main] Audio reconfigure skipped — device IDs unchanged.');
+      return;
+    }
+
     // Remember the input id so the mic-recovery handler can recreate with the
     // same selection if the cpal stream errors out mid-meeting.
-    this._lastRequestedInputDeviceId = inputDeviceId || undefined;
+    this._lastRequestedInputDeviceId = wantedInput;
+    this._lastRequestedOutputDeviceId = wantedOutput;
     // Reset mic recovery counter for the new device choice.
     this._micRecoveryAttempts = 0;
 
@@ -1657,6 +1716,20 @@ export class AppState {
   public async startMeeting(metadata?: any): Promise<void> {
     console.log('[Main] Starting Meeting...', metadata);
 
+    // If a previous endMeeting() is still draining STT in the background, wait
+    // for it to finish before we boot a new session — otherwise the BG teardown
+    // could call STT.stop() on instances the new meeting just started using.
+    // In the common case (Stop, then Start seconds later) this awaits an
+    // already-resolved promise and is free.
+    if (this._pendingTeardown) {
+      try {
+        await this._pendingTeardown;
+      } catch {
+        // teardown already logs; safe to swallow here
+      }
+      this._pendingTeardown = null;
+    }
+
     // PR #173: Reset audio recovery state for fresh session
     this._systemAudioRecoveryInProgress = false;
     this._systemAudioRecoveryAttempts = 0;
@@ -1770,30 +1843,21 @@ export class AppState {
       this.setOverlayMousePassthrough(false);
     }
 
-    // Stop the native captures first so no new audio enters the STT pipeline,
-    // then finalize the STT sessions so any trailing audio gets transcribed.
-    // Only after a brief grace window do we flip isMeetingActive=false — otherwise
-    // late-arriving final transcripts get filtered out by isActive guards downstream
-    // and the user sees their last words vanish.
+    // ─── SYNCHRONOUS: things the user expects "right now" on Stop click ────
+    // Captures are deferred-stop wrappers (see SystemAudioCapture.stop /
+    // MicrophoneCapture.stop) — they flip the JS-side isRecording flag
+    // immediately so no new audio reaches STT, but defer the blocking native
+    // teardown to setImmediate. Returns within ~1ms.
     this.systemAudioCapture?.stop();
     this.microphoneCapture?.stop();
+
+    // Tell STT to mark the audio stream as ended; trailing finals will arrive
+    // over the next ~150ms while we're already returning to the renderer.
     this.googleSTT?.finalize?.();
     this.googleSTT_User?.finalize?.();
-    await new Promise(resolve => setTimeout(resolve, 250));
-    this.googleSTT?.stop();
-    this.googleSTT_User?.stop();
 
-    this.isMeetingActive = false;
-    this.broadcastMeetingState();
-
-    // Save session state and reset context — MeetingPersistence.stopMeeting() is
-    // already fire-and-forget internally (processAndSaveMeeting runs in background).
-    // Capture the meetingId NOW so the background IIFE uses a deterministic ID
-    // rather than getRecentMeetings(1) which could return a different meeting if the
-    // user starts a new session before background processing finishes.
-    const meetingId = await this.intelligenceManager.stopMeeting();
-
-    // Revert to Default Model — synchronous, no blocking I/O
+    // Revert to Default Model — synchronous, no blocking I/O. The user
+    // expects the model UI to revert immediately on Stop.
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
       const cm = CredentialsManager.getInstance();
@@ -1808,44 +1872,59 @@ export class AppState {
       console.error('[Main] Failed to revert model:', e);
     }
 
-    // ─── Background post-processing ──────────────────────────────────────────
-    // These are the previously blocking operations that caused the stop-button
-    // delay. They are pure background tasks with no UI dependency:
-    //   • stopLiveIndexing flushes the JIT RAG live stream
-    //   • processCompletedMeetingForRAG embeds the full meeting into the vector store
-    //   • deleteMeetingData cleans up provisional JIT chunks
-    // Chain them sequentially in the background so ordering is preserved,
-    // but the IPC call returns immediately and the UI transitions without delay.
+    // ─── BACKGROUND: STT drain + meeting save + RAG embed ────────────────
+    // Critical: isMeetingActive stays TRUE during the 250ms grace window
+    // because main.ts:932 (stt.on('transcript')) drops segments when isActive
+    // is false — without that guarantee, the user's last words vanish.
+    //
+    // We expose the in-flight teardown as `_pendingTeardown` so a fast
+    // start→stop→start sequence awaits this completion in startMeeting()
+    // before booting a new session on the (still-shared) STT instances.
     const ragManager = this.ragManager;
-    if (meetingId) {
-      (async () => {
-        try {
+    this._pendingTeardown = (async () => {
+      try {
+        // 1. Grace window for STT trailing finals (Google/Soniox/Deepgram all
+        //    reply to finalize() within 100–200ms). 250ms is conservative.
+        await new Promise(resolve => setTimeout(resolve, 250));
+
+        // 2. Tear down STT sockets now that finals have arrived.
+        this.googleSTT?.stop();
+        this.googleSTT_User?.stop();
+
+        // 3. Now safe to mark meeting inactive — STT delivered its finals.
+        this.isMeetingActive = false;
+        this.broadcastMeetingState();
+
+        // 4. Snapshot transcript + persist placeholder + queue title/summary LLM.
+        //    intelligenceManager.stopMeeting itself runs LLM in background.
+        const meetingId = await this.intelligenceManager.stopMeeting();
+
+        // 5. RAG cleanup — same logic as before, just inside the BG IIFE.
+        if (meetingId) {
           if (ragManager) {
             await ragManager.stopLiveIndexing();
             console.log('[Main] Live RAG indexing stopped.');
           }
           await this.processCompletedMeetingForRAG(meetingId);
-          // Guard: only delete live-meeting-current provisional chunks if no new
-          // meeting has started while we were processing. If a new meeting IS active,
-          // 'live-meeting-current' now belongs to that session — leave it alone.
           if (ragManager && !this.isMeetingActive) {
             ragManager.deleteMeetingData('live-meeting-current');
             console.log('[Main] JIT RAG provisional chunks cleaned up.');
           } else if (this.isMeetingActive) {
             console.log('[Main] New meeting started during cleanup — skipping live-meeting-current deletion.');
           }
-        } catch (err) {
-          console.error('[Main] Background post-meeting RAG processing failed:', err);
+        } else {
+          if (ragManager) {
+            await ragManager.stopLiveIndexing().catch(() => {});
+            if (!this.isMeetingActive) ragManager.deleteMeetingData('live-meeting-current');
+          }
         }
-      })();
-    } else {
-      // Meeting was too short — still flush the live indexer and clean up
-      if (ragManager) {
-        ragManager.stopLiveIndexing().catch(() => {});
-        if (!this.isMeetingActive) ragManager.deleteMeetingData('live-meeting-current');
+      } catch (err) {
+        console.error('[Main] Background meeting teardown failed:', err);
       }
-    }
-    // ─────────────────────────────────────────────────────────────────────────
+    })();
+    // endMeeting returns NOW — the IPC handler resolves and the renderer's
+    // "Stop" button transitions instantly. Total endMeeting wall-clock time
+    // is now bounded by the synchronous block above (~1–5ms typical).
   }
 
   private async processCompletedMeetingForRAG(meetingId: string): Promise<void> {
@@ -2897,6 +2976,16 @@ async function initializeApp() {
   }
 
   console.log("App is ready")
+
+  // PERF: pre-construct STT provider objects so the meeting-start critical
+  // path doesn't pay for class init + listener wiring. Runs after all
+  // credentials are loaded (so the provider can read its API key) and is
+  // non-blocking — failures are logged and retried at meeting start.
+  try {
+    appState.prewarmSttProviders();
+  } catch (err) {
+    console.warn('[Init] STT pre-warm threw (non-fatal):', err);
+  }
 
   appState.createWindow()
 
