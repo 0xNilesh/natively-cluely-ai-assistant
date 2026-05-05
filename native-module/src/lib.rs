@@ -26,14 +26,18 @@ use crate::silence_suppression::{FrameAction, SilenceSuppressionConfig, SilenceS
 // ============================================================================
 
 /// Convert an i16 slice to little-endian bytes.
-/// Returns a Vec<u8> suitable for wrapping in napi::Buffer.
+///
+/// All targets supported by Natively (macOS x64/arm64, Windows x64, Linux x64)
+/// are little-endian, so `i16` in memory IS the little-endian byte
+/// representation. `bytemuck::cast_slice` produces a `&[u8]` view of the same
+/// memory in O(1) with no per-sample work; we then `to_vec` once into the
+/// owned buffer napi requires for `Buffer::from(Vec<u8>)`.
+///
+/// Replaces the previous per-sample `extend_from_slice(&s.to_le_bytes())` loop,
+/// which did 960 sequential 2-byte appends per 20ms chunk × 50 chunks/sec.
 #[inline]
 fn i16_slice_to_le_bytes(samples: &[i16]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(samples.len() * 2);
-    for &s in samples {
-        bytes.extend_from_slice(&s.to_le_bytes());
-    }
-    bytes
+    bytemuck::cast_slice::<i16, u8>(samples).to_vec()
 }
 
 // ============================================================================
@@ -163,6 +167,12 @@ impl SystemAudioCapture {
             let chunk_size = (native_rate as usize / 1000) * 20;
             let mut frame_buffer: Vec<i16> = Vec::with_capacity(chunk_size * 4);
             let mut raw_batch: Vec<f32> = Vec::with_capacity(4096);
+            // PERF: pre-allocate the per-chunk scratch buffer once per capture
+            // session so `frame_buffer.drain(..).collect()` (one Vec alloc per
+            // chunk) becomes `frame_scratch.extend(drain(..))` (zero alloc once
+            // capacity is reached). At 50 chunks/sec this saves 50 small Vec
+            // allocations per second per capture.
+            let mut frame_scratch: Vec<i16> = Vec::with_capacity(chunk_size);
 
             loop {
                 if stop_signal.load(Ordering::Relaxed) {
@@ -185,9 +195,10 @@ impl SystemAudioCapture {
 
                 // Process in 20ms chunks through the two-stage gate
                 while frame_buffer.len() >= chunk_size {
-                    let frame: Vec<i16> = frame_buffer.drain(0..chunk_size).collect();
+                    frame_scratch.clear();
+                    frame_scratch.extend(frame_buffer.drain(0..chunk_size));
 
-                    let (action, speech_ended) = suppressor.process(&frame);
+                    let (action, speech_ended) = suppressor.process(&frame_scratch);
 
                     match action {
                         FrameAction::Send(data) => {
@@ -198,7 +209,10 @@ impl SystemAudioCapture {
                             );
                         }
                         FrameAction::SendSilence => {
-                            // Send zero-filled buffer to keep streaming APIs alive
+                            // Send zero-filled buffer to keep streaming APIs alive.
+                            // napi consumes the Vec, so we can't share a static — but
+                            // vec![0u8; N] is memset-fast (SIMD). No optimization win
+                            // available here without unsafe Buffer aliasing.
                             let silence = vec![0u8; chunk_size * 2];
                             tsfn.call(
                                 Ok(Buffer::from(silence)),
@@ -358,6 +372,8 @@ impl MicrophoneCapture {
             let chunk_size = (native_rate as usize / 1000) * 20;
             let mut frame_buffer: Vec<i16> = Vec::with_capacity(chunk_size * 4);
             let mut raw_batch: Vec<f32> = Vec::with_capacity(4096);
+            // PERF: pre-allocated scratch — see SystemAudioCapture for rationale.
+            let mut frame_scratch: Vec<i16> = Vec::with_capacity(chunk_size);
 
             println!("[MicrophoneCapture] DSP thread started (VAD + suppression active, rate={}Hz, chunk={})", native_rate, chunk_size);
 
@@ -398,9 +414,10 @@ impl MicrophoneCapture {
 
                 // 3. Process in 20ms chunks through the two-stage gate
                 while frame_buffer.len() >= chunk_size {
-                    let frame: Vec<i16> = frame_buffer.drain(0..chunk_size).collect();
+                    frame_scratch.clear();
+                    frame_scratch.extend(frame_buffer.drain(0..chunk_size));
 
-                    let (action, speech_ended) = suppressor.process(&frame);
+                    let (action, speech_ended) = suppressor.process(&frame_scratch);
 
                     match action {
                         FrameAction::Send(data) => {
