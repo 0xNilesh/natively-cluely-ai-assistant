@@ -1076,6 +1076,73 @@ export class AppState {
     return stt;
   }
 
+  /**
+   * REFACTOR: wireSystemCapture / wireMicCapture.
+   *
+   * Previously the listener-wiring blocks for SystemAudioCapture were
+   * duplicated three times (setupSystemAudioPipeline + happy-path of
+   * reconfigureAudio + fallback-path of reconfigureAudio), each with its own
+   * closure-local chunk counter (`_sysChunkCount` / `_rcfgSysChunkCount` /
+   * `_dfltSysChunkCount`) and slightly different log prefix. That made it
+   * impossible to know which counter was active from the logs.
+   *
+   * Consolidation: a single helper attaches all four listeners against the
+   * given capture instance. The `label` parameter only affects logging so
+   * the originating call site is still identifiable. setupAudioRecoveryHandler
+   * is also called here so every wire-up path gets recovery for free.
+   */
+  private wireSystemCapture(capture: SystemAudioCapture, label: string = ''): void {
+    const prefix = label ? `[Main] ${label} ` : '[Main] ';
+    let chunkCount = 0;
+    capture.on('data', (chunk: Buffer) => {
+      chunkCount++;
+      if (!this._sysSttRateApplied && this.googleSTT && this.systemAudioCapture === capture) {
+        const rate = capture.getSampleRate();
+        this.googleSTT.setSampleRate(rate);
+        this.googleSTT.setAudioChannelCount?.(1);
+        this._sysSttRateApplied = true;
+        console.log(`${prefix}Interviewer STT rate locked from first chunk: ${rate}Hz`);
+      }
+      if (chunkCount <= 3 || chunkCount % 500 === 0) {
+        console.log(`${prefix}SystemAudio->STT: chunk #${chunkCount}, ${chunk.length}B, googleSTT=${this.googleSTT ? 'active' : 'NULL'}`);
+      }
+      this.googleSTT?.write(chunk);
+    });
+    capture.on('sample_rate_changed', (rate: number) => {
+      console.log(`${prefix}SystemAudioCapture rate updated dynamically to ${rate}Hz`);
+      this.googleSTT?.setSampleRate(rate);
+    });
+    capture.on('speech_ended', () => {
+      this.googleSTT?.notifySpeechEnded?.();
+    });
+    // setupAudioRecoveryHandler registers its own 'error' listener — do not
+    // add a duplicate logger here or the same error reports twice.
+    this.setupAudioRecoveryHandler();
+  }
+
+  private wireMicCapture(capture: MicrophoneCapture, label: string = ''): void {
+    const prefix = label ? `[Main] ${label} ` : '[Main] ';
+    capture.on('data', (chunk: Buffer) => {
+      if (!this._micSttRateApplied && this.googleSTT_User && this.microphoneCapture === capture) {
+        const rate = capture.getSampleRate();
+        this.googleSTT_User.setSampleRate(rate);
+        this.googleSTT_User.setAudioChannelCount?.(1);
+        this._micSttRateApplied = true;
+        console.log(`${prefix}User STT rate locked from first mic chunk: ${rate}Hz`);
+      }
+      this.googleSTT_User?.write(chunk);
+    });
+    capture.on('sample_rate_changed', (rate: number) => {
+      console.log(`${prefix}MicrophoneCapture rate updated dynamically to ${rate}Hz`);
+      this.googleSTT_User?.setSampleRate(rate);
+    });
+    capture.on('speech_ended', () => {
+      this.googleSTT_User?.notifySpeechEnded?.();
+    });
+    // setupMicRecoveryHandler registers its own 'error' listener.
+    this.setupMicRecoveryHandler();
+  }
+
   private setupSystemAudioPipeline(): void {
     // REMOVED EARLY RETURN: if (this.systemAudioCapture && this.microphoneCapture) return; // Already initialized
 
@@ -1084,65 +1151,12 @@ export class AppState {
       // If they already exist (e.g. from reconfigureAudio), they are already wired to write to this.googleSTT/User
       if (!this.systemAudioCapture) {
         this.systemAudioCapture = new SystemAudioCapture();
-        // Wire Capture -> STT
-        let _sysChunkCount = 0;
-        this.systemAudioCapture.on('data', (chunk: Buffer) => {
-          _sysChunkCount++;
-          // Lazy STT rate configuration on first chunk. By the time data
-          // arrives the native module has published the real device rate
-          // (Windows: synchronously after stream() returns; macOS CoreAudio
-          // Tap: once the bg init thread populates the atomic). This avoids
-          // the race where setupSystemAudioPipeline ran before start() and
-          // saw the constructor default 48000.
-          if (!this._sysSttRateApplied && this.googleSTT && this.systemAudioCapture) {
-            const rate = this.systemAudioCapture.getSampleRate();
-            this.googleSTT.setSampleRate(rate);
-            this.googleSTT.setAudioChannelCount?.(1);
-            this._sysSttRateApplied = true;
-            console.log(`[Main] Interviewer STT rate locked from first capture chunk: ${rate}Hz`);
-          }
-          if (_sysChunkCount <= 3 || _sysChunkCount % 500 === 0) {
-            console.log(`[Main] SystemAudio->STT: chunk #${_sysChunkCount}, ${chunk.length}B, googleSTT=${this.googleSTT ? 'active' : 'NULL'}`);
-          }
-          this.googleSTT?.write(chunk);
-        });
-        this.systemAudioCapture.on('sample_rate_changed', (rate: number) => {
-          console.log(`[Main] SystemAudioCapture rate updated dynamically to ${rate}Hz`);
-          // Forward to ALL active STT providers — STTProvider union includes setSampleRate
-          this.googleSTT?.setSampleRate(rate);
-        });
-        this.systemAudioCapture.on('speech_ended', () => {
-          this.googleSTT?.notifySpeechEnded?.();
-        });
-        // PR #173: Wire audio recovery handler — handles both logging and auto-restart.
-        // NOTE: Do NOT add a separate 'error' listener here; setupAudioRecoveryHandler
-        // registers its own which logs + recovers. Dual listeners would double-fire.
-        this.setupAudioRecoveryHandler();
+        this.wireSystemCapture(this.systemAudioCapture);
       }
 
       if (!this.microphoneCapture) {
         this.microphoneCapture = new MicrophoneCapture();
-        this.microphoneCapture.on('data', (chunk: Buffer) => {
-          if (!this._micSttRateApplied && this.googleSTT_User && this.microphoneCapture) {
-            const rate = this.microphoneCapture.getSampleRate();
-            this.googleSTT_User.setSampleRate(rate);
-            this.googleSTT_User.setAudioChannelCount?.(1);
-            this._micSttRateApplied = true;
-            console.log(`[Main] User STT rate locked from first mic chunk: ${rate}Hz`);
-          }
-          this.googleSTT_User?.write(chunk);
-        });
-        this.microphoneCapture.on('sample_rate_changed', (rate: number) => {
-          console.log(`[Main] MicrophoneCapture rate updated dynamically to ${rate}Hz`);
-          // Forward to ALL active STT providers — STTProvider union includes setSampleRate
-          this.googleSTT_User?.setSampleRate(rate);
-        });
-        this.microphoneCapture.on('speech_ended', () => {
-          this.googleSTT_User?.notifySpeechEnded?.();
-        });
-        // Recovery handler also subscribes to 'error'; gives us auto-restart
-        // when the cpal err_fn fires (USB unplug, format change, etc.).
-        this.setupMicRecoveryHandler();
+        this.wireMicCapture(this.microphoneCapture);
       }
 
       // 2. Initialize STT Services if missing
@@ -1265,34 +1279,8 @@ export class AppState {
     try {
       console.log('[Main] Initializing SystemAudioCapture...');
       this.systemAudioCapture = new SystemAudioCapture(outputDeviceId || undefined);
-      // Defer rate sync to first-chunk handler — see setupSystemAudioPipeline.
       this._sysSttRateApplied = false;
-
-      let _rcfgSysChunkCount = 0;
-      this.systemAudioCapture.on('data', (chunk: Buffer) => {
-        _rcfgSysChunkCount++;
-        if (!this._sysSttRateApplied && this.googleSTT && this.systemAudioCapture) {
-          const r = this.systemAudioCapture.getSampleRate();
-          this.googleSTT.setSampleRate(r);
-          this.googleSTT.setAudioChannelCount?.(1);
-          this._sysSttRateApplied = true;
-          console.log(`[Main] (Reconfigured) Interviewer STT rate locked from first chunk: ${r}Hz`);
-        }
-        if (_rcfgSysChunkCount <= 3 || _rcfgSysChunkCount % 500 === 0) {
-          console.log(`[Main] (Reconfigured) SystemAudio->STT: chunk #${_rcfgSysChunkCount}, ${chunk.length}B, googleSTT=${this.googleSTT ? 'active' : 'NULL'}`);
-        }
-        this.googleSTT?.write(chunk);
-      });
-      this.systemAudioCapture.on('sample_rate_changed', (rate: number) => {
-        console.log(`[Main] (Reconfigured) SystemAudioCapture rate updated dynamically to ${rate}Hz`);
-        this.googleSTT?.setSampleRate(rate);
-      });
-      this.systemAudioCapture.on('speech_ended', () => {
-        this.googleSTT?.notifySpeechEnded?.();
-      });
-      // PR #173: Re-wire recovery handler on the new capture instance after device reconfigure.
-      // Without this, audio recovery is lost whenever the user changes their output device.
-      this.setupAudioRecoveryHandler();
+      this.wireSystemCapture(this.systemAudioCapture, '(Reconfigured)');
       console.log('[Main] SystemAudioCapture initialized.');
       this.broadcastDeviceSelection({
         kind: 'output',
@@ -1305,31 +1293,7 @@ export class AppState {
       try {
         this.systemAudioCapture = new SystemAudioCapture(); // Default
         this._sysSttRateApplied = false;
-
-        let _dfltSysChunkCount = 0;
-        this.systemAudioCapture.on('data', (chunk: Buffer) => {
-          _dfltSysChunkCount++;
-          if (!this._sysSttRateApplied && this.googleSTT && this.systemAudioCapture) {
-            const r = this.systemAudioCapture.getSampleRate();
-            this.googleSTT.setSampleRate(r);
-            this.googleSTT.setAudioChannelCount?.(1);
-            this._sysSttRateApplied = true;
-            console.log(`[Main] (Default) Interviewer STT rate locked from first chunk: ${r}Hz`);
-          }
-          if (_dfltSysChunkCount <= 3 || _dfltSysChunkCount % 500 === 0) {
-            console.log(`[Main] (Default) SystemAudio->STT: chunk #${_dfltSysChunkCount}, ${chunk.length}B, googleSTT=${this.googleSTT ? 'active' : 'NULL'}`);
-          }
-          this.googleSTT?.write(chunk);
-        });
-        this.systemAudioCapture.on('sample_rate_changed', (rate: number) => {
-          console.log(`[Main] (Reconfigured Default) SystemAudioCapture rate updated dynamically to ${rate}Hz`);
-          this.googleSTT?.setSampleRate(rate);
-        });
-        this.systemAudioCapture.on('speech_ended', () => {
-          this.googleSTT?.notifySpeechEnded?.();
-        });
-        // PR #173: Recovery handler on fallback path too
-        this.setupAudioRecoveryHandler();
+        this.wireSystemCapture(this.systemAudioCapture, '(Default)');
         this.broadcastDeviceSelection({
           kind: 'output',
           requested: outputDeviceId || null,
@@ -1360,27 +1324,7 @@ export class AppState {
       console.log('[Main] Initializing MicrophoneCapture...');
       this.microphoneCapture = new MicrophoneCapture(inputDeviceId || undefined);
       this._micSttRateApplied = false;
-
-      this.microphoneCapture.on('data', (chunk: Buffer) => {
-        if (!this._micSttRateApplied && this.googleSTT_User && this.microphoneCapture) {
-          const r = this.microphoneCapture.getSampleRate();
-          this.googleSTT_User.setSampleRate(r);
-          this.googleSTT_User.setAudioChannelCount?.(1);
-          this._micSttRateApplied = true;
-          console.log(`[Main] (Reconfigured) User STT rate locked from first mic chunk: ${r}Hz`);
-        }
-        this.googleSTT_User?.write(chunk);
-      });
-      this.microphoneCapture.on('sample_rate_changed', (rate: number) => {
-        console.log(`[Main] (Reconfigured) MicrophoneCapture rate updated dynamically to ${rate}Hz`);
-        this.googleSTT_User?.setSampleRate(rate);
-      });
-      this.microphoneCapture.on('speech_ended', () => {
-        this.googleSTT_User?.notifySpeechEnded?.();
-      });
-      // Recovery handler attaches its own 'error' listener; do not add a
-      // duplicate logger here or the same error will be reported twice.
-      this.setupMicRecoveryHandler();
+      this.wireMicCapture(this.microphoneCapture, '(Reconfigured)');
       console.log('[Main] MicrophoneCapture initialized.');
       this.broadcastDeviceSelection({
         kind: 'input',
@@ -1393,25 +1337,7 @@ export class AppState {
       try {
         this.microphoneCapture = new MicrophoneCapture(); // Default
         this._micSttRateApplied = false;
-
-        this.microphoneCapture.on('data', (chunk: Buffer) => {
-          if (!this._micSttRateApplied && this.googleSTT_User && this.microphoneCapture) {
-            const r = this.microphoneCapture.getSampleRate();
-            this.googleSTT_User.setSampleRate(r);
-            this.googleSTT_User.setAudioChannelCount?.(1);
-            this._micSttRateApplied = true;
-            console.log(`[Main] (Default) User STT rate locked from first mic chunk: ${r}Hz`);
-          }
-          this.googleSTT_User?.write(chunk);
-        });
-        this.microphoneCapture.on('sample_rate_changed', (rate: number) => {
-          console.log(`[Main] (Reconfigured Default) MicrophoneCapture rate updated dynamically to ${rate}Hz`);
-          this.googleSTT_User?.setSampleRate(rate);
-        });
-        this.microphoneCapture.on('speech_ended', () => {
-          this.googleSTT_User?.notifySpeechEnded?.();
-        });
-        this.setupMicRecoveryHandler();
+        this.wireMicCapture(this.microphoneCapture, '(Default)');
         this.broadcastDeviceSelection({
           kind: 'input',
           requested: inputDeviceId || null,
