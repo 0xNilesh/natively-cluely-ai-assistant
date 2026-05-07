@@ -142,14 +142,82 @@ pub struct MicrophoneStream {
     err_signal: Arc<Mutex<Option<String>>>,
 }
 
+/// Pick a usable `SupportedStreamConfig` for the given device.
+///
+/// The device's "default" config is what cpal reports as the OS-recommended
+/// format — but on some hardware it lands on a SampleFormat we don't support
+/// in `build_input_stream` (we handle F32/I16/I32 only). Common offenders:
+/// some Bluetooth HFP profiles report U16, some pro audio interfaces return
+/// F64, and a few USB cards return formats cpal exposes but no STT pipeline
+/// downstream can consume. Pre-fix, this caused a hard failure at meeting
+/// start with a "Unsupported sample format" error instead of just picking a
+/// usable config the device also advertises.
+///
+/// Strategy: try the default first (it's usually best). If unsupported,
+/// enumerate `supported_input_configs()`, prefer F32 (lossless, what our
+/// downstream already expects without conversion), then I16 (universal),
+/// then I32 (rare on input). For each candidate format we pick the highest
+/// sample rate it supports up to 48kHz (the rate STT providers natively
+/// accept).
+fn pick_supported_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
+    let default_cfg = device
+        .default_input_config()
+        .map_err(|e| anyhow::anyhow!("Failed to get default input config: {}", e))?;
+
+    if matches!(
+        default_cfg.sample_format(),
+        SampleFormat::F32 | SampleFormat::I16 | SampleFormat::I32
+    ) {
+        return Ok(default_cfg);
+    }
+
+    println!(
+        "[Microphone] Default config has unsupported format ({:?}); negotiating from supported_input_configs()...",
+        default_cfg.sample_format()
+    );
+
+    let configs: Vec<_> = device
+        .supported_input_configs()
+        .map_err(|e| anyhow::anyhow!("supported_input_configs failed: {}", e))?
+        .collect();
+
+    // Preference order: F32 first (no resample loss), then I16, then I32.
+    for preferred in [SampleFormat::F32, SampleFormat::I16, SampleFormat::I32] {
+        if let Some(range) = configs
+            .iter()
+            .find(|r| r.sample_format() == preferred)
+        {
+            // Clamp to 48kHz max; STT expects 48k or below.
+            let target_rate = range
+                .max_sample_rate()
+                .0
+                .min(48_000)
+                .max(range.min_sample_rate().0);
+            let cfg = range
+                .clone()
+                .with_sample_rate(cpal::SampleRate(target_rate));
+            println!(
+                "[Microphone] Negotiated fallback config: {}Hz, {}ch, {:?}",
+                cfg.sample_rate().0,
+                cfg.channels(),
+                cfg.sample_format()
+            );
+            return Ok(cfg);
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "Microphone exposes no supported format (need F32/I16/I32). Default was {:?}.",
+        default_cfg.sample_format()
+    ))
+}
+
 impl MicrophoneStream {
     pub fn new(device_id: Option<String>) -> Result<Self> {
         let host = cpal::default_host();
         let device = resolve_input_device(&host, device_id.as_deref())?;
 
-        let config = device
-            .default_input_config()
-            .map_err(|e| anyhow::anyhow!("Failed to get config: {}", e))?;
+        let config = pick_supported_config(&device)?;
 
         let sample_rate = config.sample_rate().0;
         let channels = config.channels() as usize;

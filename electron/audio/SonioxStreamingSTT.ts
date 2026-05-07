@@ -19,6 +19,7 @@
 import { EventEmitter } from 'events';
 import WebSocket from 'ws';
 import { RECOGNITION_LANGUAGES } from '../config/languages';
+import { streamingStttWsOptions } from './dnsHelpers';
 
 const SONIOX_WEBSOCKET_URL = 'wss://stt-rt.soniox.com/transcribe-websocket';
 const RECONNECT_BASE_DELAY_MS = 1000;
@@ -184,7 +185,10 @@ export class SonioxStreamingSTT extends EventEmitter {
         console.log(`[SonioxStreaming] Connecting (rate=${this.sampleRate}, ch=${this.numChannels})...`);
 
         this.configSent = false;
-        this.ws = new WebSocket(SONIOX_WEBSOCKET_URL);
+        // streamingStttWsOptions: forces IPv4-only DNS lookup (sidesteps Node's
+        // macOS dual-stack ENOTFOUND on IPv4-only CNAME chains) and caps the
+        // TLS+upgrade handshake at 15s. See dnsHelpers.ts.
+        this.ws = new WebSocket(SONIOX_WEBSOCKET_URL, streamingStttWsOptions() as any);
 
         this.ws.on('open', () => {
             // Guard: stop() may have been called while the WS handshake was in flight.

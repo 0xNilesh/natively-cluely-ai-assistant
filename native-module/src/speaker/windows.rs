@@ -85,6 +85,18 @@ pub fn list_output_devices() -> Result<Vec<(String, String)>> {
     Ok(list)
 }
 
+/// Returns the WASAPI device id of the current default render device on the
+/// eMultimedia/eConsole role, or empty string on failure. JS polls this so the
+/// SystemAudioCapture follows the user's output route when they switch
+/// devices mid-meeting. Note: this still doesn't track the eCommunications
+/// role separately (a known limitation tracked in find_device_by_id).
+pub fn default_output_device_uid() -> String {
+    match get_default_device(&Direction::Render) {
+        Ok(dev) => dev.get_id().unwrap_or_default(),
+        Err(_) => String::new(),
+    }
+}
+
 impl SpeakerInput {
     pub fn new(device_id: Option<String>) -> Result<Self> {
         let device_id = device_id.filter(|id| !id.is_empty() && id != "default");

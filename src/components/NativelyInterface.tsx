@@ -512,6 +512,25 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         return () => unsub?.();
     }, []);
 
+    // Audio capture failure banner — surfaces specific Rust-side errors
+    // (CoreAudio Tap failure, SCK timeout, no displays) and the stuck-watchdog
+    // signal (capture started but no chunks for 8s, suggesting a routing
+    // mismatch). Without this, users staring at an empty interviewer transcript
+    // had no signal that anything was wrong.
+    useEffect(() => {
+        const unsub = window.electronAPI?.onAudioCaptureFailed?.((payload) => {
+            if (payload.channel !== 'system') return;  // mic failures already shown via STT status
+            // Only surface terminal failures or the stuck signal — transient
+            // recovery attempts shouldn't spam the banner since recovery
+            // typically succeeds within ~1.5s.
+            if (payload.terminal || payload.stuck) {
+                setSystemAudioWarning(payload.message);
+                setIsExpanded(true);
+            }
+        });
+        return () => unsub?.();
+    }, []);
+
     // PR #173: STT not configured warning — shown when provider is 'none' during a meeting
     const [sttNotConfigured, setSttNotConfigured] = useState(false);
     useEffect(() => {

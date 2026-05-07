@@ -571,3 +571,17 @@ pub fn get_output_devices() -> Vec<AudioDeviceInfo> {
         }
     }
 }
+
+/// Returns the platform-native ID of the current default output device.
+/// macOS: CoreAudio device UID. Windows: WASAPI device id (eMultimedia/eConsole role).
+/// Empty string on error or unsupported platform.
+///
+/// JS polls this every few seconds during an active meeting; when the value
+/// changes, main.ts recreates SystemAudioCapture so the CoreAudio Tap follows
+/// the new output route. Without this, switching output devices mid-meeting
+/// (plug in headphones, swap AirPods, route to virtual cable) leaves the tap
+/// bound to the original device, capturing silence.
+#[napi]
+pub fn get_default_output_device_id() -> String {
+    speaker::default_output_device_uid()
+}

@@ -15,6 +15,10 @@ export interface NativeModule {
   deactivateDodoKey?: (licenseKey: string, instanceId: string) => Promise<string>;
   getInputDevices(): Array<AudioDeviceInfo>;
   getOutputDevices(): Array<AudioDeviceInfo>;
+  // Default-output device id for the system default route. Optional because
+  // existing shipped binaries don't have it — main.ts checks `typeof` before
+  // calling. Requires a binary rebuild (cargo build --release).
+  getDefaultOutputDeviceId?: () => string;
   SystemAudioCapture: new (deviceId?: string | null) => {
     getSampleRate(): number;
     start(callback: (...args: any[]) => any, onSpeechEnded?: (...args: any[]) => any): void;

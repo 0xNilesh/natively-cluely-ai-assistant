@@ -29,6 +29,18 @@ pub fn list_output_devices() -> Result<Vec<(String, String)>> {
     Ok(list)
 }
 
+/// Returns the UID of the current macOS default output device, or empty string
+/// if none can be resolved. Used by main.ts to detect mid-meeting output route
+/// changes (user plugs in headphones, switches to AirPods) — when the default
+/// changes, the JS side recreates SystemAudioCapture so the CoreAudio Tap
+/// follows the new route instead of capturing silence on the old device.
+pub fn default_output_device_uid() -> String {
+    match ca::System::default_output_device() {
+        Ok(dev) => dev.uid().map(|u| u.to_string()).unwrap_or_default(),
+        Err(_) => String::new(),
+    }
+}
+
 pub struct AudioHandlerInner {
     producer: HeapProd<f32>,
 }

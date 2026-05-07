@@ -94,7 +94,7 @@ export class SystemAudioCapture extends EventEmitter {
                     // emit trailing finals deterministically.
                     if (!this.isRecording) return;
                     this.chunkCount++;
-                    if (this.chunkCount <= 3 || this.chunkCount % 200 === 0) {
+                    if (this.chunkCount <= 3 || this.chunkCount % 500 === 0) {
                         console.log(`[SystemAudioCapture] Chunk #${this.chunkCount}: ${chunk.length} bytes from Rust`);
                     }
                     // PERF: napi-rs already returns an owned Node Buffer from Rust's

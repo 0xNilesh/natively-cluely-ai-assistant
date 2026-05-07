@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { RECOGNITION_LANGUAGES } from '../config/languages';
+import { streamingStttWsOptions } from './dnsHelpers';
 
 const ELEVENLABS_WS_URL = 'wss://api.elevenlabs.io/v1/speech-to-text/realtime';
 
@@ -233,11 +234,12 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
         
         console.log(`[ElevenLabsStreaming] Connecting with URL: ${url.replace(this.apiKey, '***')}`);
 
-        this.ws = new WebSocket(url, {
+        // streamingStttWsOptions: IPv4-only DNS + 15s handshake cap (dnsHelpers.ts).
+        this.ws = new WebSocket(url, streamingStttWsOptions({
             headers: {
                 'xi-api-key': this.apiKey,
-            }
-        });
+            },
+        }) as any);
 
         this.ws.on('open', () => {
             // Guard: stop() calls removeAllListeners() before closing, so this handler

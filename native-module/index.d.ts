@@ -32,6 +32,19 @@ export interface AudioDeviceInfo {
 export declare function deactivateDodoKey(licenseKey: string, instanceId: string): Promise<unknown>
 
 /**
+ * Returns the platform-native ID of the current default output device.
+ * macOS: CoreAudio device UID. Windows: WASAPI device id (eMultimedia/eConsole role).
+ * Empty string on error or unsupported platform.
+ *
+ * JS polls this every few seconds during an active meeting; when the value
+ * changes, main.ts recreates SystemAudioCapture so the CoreAudio Tap follows
+ * the new output route. Without this, switching output devices mid-meeting
+ * (plug in headphones, swap AirPods, route to virtual cable) leaves the tap
+ * bound to the original device, capturing silence.
+ */
+export declare function getDefaultOutputDeviceId(): string
+
+/**
  * Returns a deterministic hardware fingerprint (SHA-256 hash of the machine UID).
  * This is used to lock license keys to a specific physical device.
  */

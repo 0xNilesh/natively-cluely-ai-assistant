@@ -182,8 +182,22 @@ const StartupSequence: React.FC<StartupSequenceProps> = ({ onComplete }) => {
 
                 {/* Footer Component */}
                 <motion.div variants={itemVariants} className="mt-auto flex flex-col items-center w-full">
-                    <p className="text-[12px] opacity-40 mb-6 text-center" style={{ color: '#a7a7ad' }}>
-                        By signing up, you agree to our <span className="font-semibold text-[#2f2f34]">Terms of Service</span> and <span className="font-semibold text-[#2f2f34]">Privacy Policy</span>.
+                    <p className="text-[12px] opacity-60 mb-6 text-center" style={{ color: '#a7a7ad' }}>
+                        By clicking Continue, you agree to our{' '}
+                        <span
+                            onClick={() => (window.electronAPI as any)?.openExternal?.('https://natively.software/termsandconditions')}
+                            className="font-semibold text-[#2f2f34] underline underline-offset-[3px] decoration-[#2f2f34]/30 hover:decoration-[#2f2f34]/70 cursor-pointer transition-colors"
+                        >
+                            Terms &amp; Conditions
+                        </span>
+                        {' '}and{' '}
+                        <span
+                            onClick={() => (window.electronAPI as any)?.openExternal?.('https://natively.software/privacy')}
+                            className="font-semibold text-[#2f2f34] underline underline-offset-[3px] decoration-[#2f2f34]/30 hover:decoration-[#2f2f34]/70 cursor-pointer transition-colors"
+                        >
+                            Privacy Policy
+                        </span>
+                        .
                     </p>
                     <PressLogos />
                 </motion.div>

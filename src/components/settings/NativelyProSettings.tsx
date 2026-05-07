@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import {
     Lock, Key, CheckCircle, AlertCircle, Check, Copy, X, Sparkles, PlayCircle,
-    Layers, UserCheck, Database, TrendingUp, Maximize2, Target, FileText, Building2
+    Layers, UserCheck, Database, TrendingUp, Maximize2, Target, FileText, Building2,
+    Shield
 } from 'lucide-react';
 import { useResolvedTheme } from '../../hooks/useResolvedTheme';
 import { NativelyLogoMark } from '../NativelyLogoMark';
@@ -93,6 +94,8 @@ export const NativelyProSettings: React.FC = () => {
         setCopiedHwid(true);
         setTimeout(() => setCopiedHwid(false), 2000);
     };
+
+    const openExternal = (url: string) => { (window.electronAPI as any)?.openExternal?.(url); };
 
     if (isPremium === null) {
         return <div className="p-8 flex justify-center"><div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" /></div>;
@@ -268,11 +271,77 @@ export const NativelyProSettings: React.FC = () => {
                                         <AlertCircle size={14} className="shrink-0" /> {errorMessage}
                                     </div>
                                 )}
+
+                                {/* T&C consent */}
+                                <p className="text-[10.5px] text-text-tertiary leading-relaxed text-center pt-1">
+                                    By activating, you agree to our{' '}
+                                    <span
+                                        onClick={() => openExternal('https://natively.software/nativelypro/t&c')}
+                                        className="text-text-secondary hover:text-text-primary underline decoration-border-subtle underline-offset-[3px] cursor-pointer transition-colors"
+                                    >
+                                        Terms &amp; Conditions
+                                    </span>
+                                    .
+                                </p>
                             </div>
                         </div>
                     </Card>
                 </>
             )}
+
+            {/* ── Refund Policy ────────────────────────────────── */}
+            <Card>
+                <div className="flex items-center gap-3 px-5 pt-5 pb-4">
+                    <div className="w-9 h-9 rounded-xl bg-amber-500/15 border border-amber-500/20 flex items-center justify-center shrink-0">
+                        <Shield size={18} className="text-amber-400" />
+                    </div>
+                    <div className="min-w-0">
+                        <p className="text-[13px] font-semibold text-text-primary">Refund Policy — Natively Pro</p>
+                        <p className="text-[11px] text-text-tertiary leading-snug mt-0.5">
+                            Please try the Free Trial first
+                        </p>
+                    </div>
+                </div>
+
+                <div className="h-px bg-border-subtle mx-5" />
+
+                <div className="px-5 pt-4 pb-4">
+                    <div className="space-y-3">
+                        <div className="rounded-xl bg-bg-input/50 border border-border-subtle px-3.5 py-3">
+                            <p className="text-[11.5px] text-text-secondary leading-relaxed">
+                                <strong className="text-text-primary font-semibold">A quick heads-up:</strong> Natively is built and maintained by a single developer and integrates a lot of third-party services — AI providers, speech-to-text engines, search APIs, payments, OS-level audio &amp; screen capture. That gives Pro a lot of capability, but the surface area is wider than a typical closed-source app, and once in a while something may not behave exactly as expected. If that happens, please <em>report it</em> rather than disputing the charge — we read every report and fixes typically land in the next update.
+                            </p>
+                        </div>
+
+                        <div className="flex items-start gap-3">
+                            <div className="w-1.5 h-1.5 rounded-full bg-amber-400/70 shrink-0 mt-[6px]" />
+                            <p className="text-[11.5px] text-text-secondary leading-relaxed">
+                                Purchases made with a coupon, voucher, referral credit, or limited-time offer (including <code className="px-1 py-0.5 rounded bg-bg-input border border-border-subtle text-[10.5px] font-mono">INSIDER25</code>) are <strong className="text-text-primary font-semibold">final sale</strong> and not eligible for refund.
+                            </p>
+                        </div>
+
+                        <div className="h-px bg-border-subtle mt-4 mb-3" />
+
+                        <p className="text-[11.5px] text-text-secondary leading-relaxed">
+                            For everything else — the 1-hour pre-activation window, subscription handling, taxes &amp; fees, and your local consumer rights — please see our full{' '}
+                            <span
+                                onClick={() => openExternal('https://natively.software/refundpolicy')}
+                                className="text-text-primary hover:text-text-secondary underline decoration-border-subtle underline-offset-[3px] cursor-pointer transition-colors"
+                            >
+                                Refund Policy
+                            </span>
+                            . Have a question before buying? Email{' '}
+                            <span
+                                onClick={() => openExternal('mailto:natively.contact@gmail.com')}
+                                className="text-text-primary hover:text-text-secondary underline decoration-border-subtle underline-offset-[3px] cursor-pointer transition-colors"
+                            >
+                                natively.contact@gmail.com
+                            </span>
+                            .
+                        </p>
+                    </div>
+                </div>
+            </Card>
 
             {/* Hardware ID */}
             {hardwareId && (

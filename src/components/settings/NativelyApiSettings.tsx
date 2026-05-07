@@ -679,6 +679,18 @@ export const NativelyApiSettings: React.FC = () => {
                             Subscribe to get one
                         </span>
                     </p>
+
+                    {/* T&C consent */}
+                    <p className="text-[10.5px] text-text-tertiary leading-relaxed text-center">
+                        By saving your key, you agree to our{' '}
+                        <span
+                            onClick={() => openExternal('https://natively.software/nativelyapi/t&c')}
+                            className="text-text-secondary hover:text-text-primary underline decoration-border-subtle underline-offset-[3px] cursor-pointer transition-colors"
+                        >
+                            Terms &amp; Conditions
+                        </span>
+                        .
+                    </p>
                 </div>
             </Card>
 
@@ -795,7 +807,7 @@ export const NativelyApiSettings: React.FC = () => {
                     <div className="min-w-0">
                         <p className="text-[13px] font-semibold text-text-primary">Refund Policy</p>
                         <p className="text-[11px] text-text-tertiary leading-snug mt-0.5">
-                            Transparency on our billing and 3-day refund window
+                            24-hour refund window — voucher purchases are final sale
                         </p>
                     </div>
                 </div>
@@ -804,29 +816,37 @@ export const NativelyApiSettings: React.FC = () => {
 
                 <div className="px-5 pt-4 pb-4">
                     <div className="space-y-3">
+                        <div className="rounded-xl bg-bg-input/50 border border-border-subtle px-3.5 py-3">
+                            <p className="text-[11.5px] text-text-secondary leading-relaxed">
+                                <strong className="text-text-primary font-semibold">A quick heads-up:</strong> Natively is built and maintained by a single developer and integrates a lot of third-party services — AI providers, transcription engines, search APIs, payments, OS-level audio &amp; screen capture. That gives the app a lot of capability, but the surface area is wider than a typical closed-source product, and once in a while something may not behave exactly as expected. If you run into something like that, please <em>report it</em> rather than disputing the charge — we read every report and fixes typically land in the next update.
+                            </p>
+                        </div>
+
                         <div className="flex items-start gap-3">
                             <div className="w-1.5 h-1.5 rounded-full bg-text-tertiary/40 shrink-0 mt-[6px]" />
                             <p className="text-[11.5px] text-text-secondary leading-relaxed">
-                                Refunds are available within 3 days of purchase if you have used less than 10% of your monthly quota.
+                                Purchases made with a coupon, voucher, referral credit, or limited-time offer are <strong className="text-text-primary font-semibold">final sale</strong> and not eligible for refund.
                             </p>
                         </div>
-                        <div className="flex items-start gap-3">
-                            <div className="w-1.5 h-1.5 rounded-full bg-text-tertiary/40 shrink-0 mt-[6px]" />
-                            <p className="text-[11.5px] text-text-secondary leading-relaxed">
-                                If you have used more than 10% of your quota, refunds are not available as API costs are incurred immediately on usage.
-                            </p>
-                        </div>
-                        <div className="flex items-start gap-3">
-                            <div className="w-1.5 h-1.5 rounded-full bg-text-tertiary/40 shrink-0 mt-[6px]" />
-                            <p className="text-[11.5px] text-text-secondary leading-relaxed">
-                                No refunds on partial months after the first billing cycle.
-                            </p>
-                        </div>
-                        
+
                         <div className="h-px bg-border-subtle mt-4 mb-3" />
-                        
+
                         <p className="text-[11.5px] text-text-secondary leading-relaxed">
-                            To request a refund contact <span onClick={() => openExternal('mailto:natively.contact@gmail.com')} className="text-text-primary hover:text-text-secondary underline decoration-border-subtle underline-offset-[3px] cursor-pointer transition-colors">natively.contact@gmail.com</span> with your order ID.
+                            For everything else — the 24-hour refund window, subscription handling, taxes &amp; fees, and your local consumer rights — please see our full{' '}
+                            <span
+                                onClick={() => openExternal('https://natively.software/refundpolicy')}
+                                className="text-text-primary hover:text-text-secondary underline decoration-border-subtle underline-offset-[3px] cursor-pointer transition-colors"
+                            >
+                                Refund Policy
+                            </span>
+                            . To request a refund or ask a question, email{' '}
+                            <span
+                                onClick={() => openExternal('mailto:natively.contact@gmail.com')}
+                                className="text-text-primary hover:text-text-secondary underline decoration-border-subtle underline-offset-[3px] cursor-pointer transition-colors"
+                            >
+                                natively.contact@gmail.com
+                            </span>
+                            .
                         </p>
                     </div>
                 </div>

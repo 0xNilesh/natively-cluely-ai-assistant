@@ -579,6 +579,7 @@ module.exports = nativeBinding
 module.exports.MicrophoneCapture = nativeBinding.MicrophoneCapture
 module.exports.SystemAudioCapture = nativeBinding.SystemAudioCapture
 module.exports.deactivateDodoKey = nativeBinding.deactivateDodoKey
+module.exports.getDefaultOutputDeviceId = nativeBinding.getDefaultOutputDeviceId
 module.exports.getHardwareId = nativeBinding.getHardwareId
 module.exports.getInputDevices = nativeBinding.getInputDevices
 module.exports.getOutputDevices = nativeBinding.getOutputDevices

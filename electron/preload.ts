@@ -114,6 +114,7 @@ interface ElectronAPI {
   onSttLanguageAutoDetected: (callback: (bcp47: string) => void) => () => void
   onSystemAudioPermissionDenied: (callback: (message: string) => void) => () => void
   onDeviceSelectionApplied: (callback: (payload: { kind: 'input' | 'output'; requested: string | null; actual: string | null; fellBack: boolean; reason?: string }) => void) => () => void
+  onAudioCaptureFailed: (callback: (payload: { channel: 'system' | 'mic'; message: string; attempt: number; maxAttempts: number; terminal?: boolean; stuck?: boolean }) => void) => () => void
 
   // STT Status Events
   onSttStatusChanged: (callback: (data: { state: 'connected' | 'reconnecting' | 'failed'; provider: string; error?: string; channel: 'user' | 'interviewer'; reconnectAttempts?: number }) => void) => () => void
@@ -703,6 +704,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
     const subscription = (_: any, payload: any) => callback(payload);
     ipcRenderer.on('device-selection-applied', subscription);
     return () => { ipcRenderer.removeListener('device-selection-applied', subscription); };
+  },
+  onAudioCaptureFailed: (callback: (payload: { channel: 'system' | 'mic'; message: string; attempt: number; maxAttempts: number; terminal?: boolean; stuck?: boolean }) => void) => {
+    const subscription = (_: any, payload: any) => callback(payload);
+    ipcRenderer.on('audio-capture-failed', subscription);
+    return () => { ipcRenderer.removeListener('audio-capture-failed', subscription); };
   },
 
   // STT Status Events

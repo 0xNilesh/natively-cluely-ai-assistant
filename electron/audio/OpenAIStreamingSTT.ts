@@ -17,6 +17,7 @@ import WebSocket from 'ws';
 import axios from 'axios';
 import FormData from 'form-data';
 import { RECOGNITION_LANGUAGES } from '../config/languages';
+import { streamingStttWsOptions } from './dnsHelpers';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -318,12 +319,13 @@ export class OpenAIStreamingSTT extends EventEmitter {
         const model: WsModel = WS_MODELS[this.wsModelIndex] ?? WS_MODELS[0];
         console.log(`[OpenAIStreaming] Connecting WebSocket (model=${model}, attempt=${this.reconnectAttempts + 1})...`);
 
-        this.ws = new WebSocket(REALTIME_WS_URL, {
+        // streamingStttWsOptions: IPv4-only DNS + 15s handshake cap (dnsHelpers.ts).
+        this.ws = new WebSocket(REALTIME_WS_URL, streamingStttWsOptions({
             headers: {
                 Authorization:   `Bearer ${this.apiKey}`,
                 'OpenAI-Beta':   'realtime=v1',
             },
-        });
+        }) as any);
 
         // 10-second connection timeout to prevent hanging on dropped networks
         this.connectionTimeoutTimer = setTimeout(() => {
