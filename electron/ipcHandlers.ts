@@ -12,6 +12,7 @@ import { PhoneMirrorService } from "./services/PhoneMirrorService";
 
 
 import { RECOGNITION_LANGUAGES, AI_RESPONSE_LANGUAGES } from "./config/languages"
+import { TRIAL_SENTINEL_KEY } from "./config/constants"
 
 export function initializeIpcHandlers(appState: AppState): void {
   const safeHandle = (channel: string, listener: (event: any, ...args: any[]) => Promise<any> | any) => {
@@ -1077,13 +1078,13 @@ export function initializeIpcHandlers(appState: AppState): void {
 
         // Auto-configure natively as the model + STT provider during trial
         const prevSttProvider = cm.getSttProvider();
-        cm.setNativelyApiKey('__trial__');   // sentinel — activates natively model routing
+        cm.setNativelyApiKey(TRIAL_SENTINEL_KEY);   // sentinel — activates natively model routing
         const newSttProvider = cm.getSttProvider();
         if (newSttProvider !== prevSttProvider) {
           await appState.reconfigureSttProvider();
         }
         const llmHelper = appState.processingHelper?.getLLMHelper?.();
-        if (llmHelper) llmHelper.setNativelyKey('__trial__');
+        if (llmHelper) llmHelper.setNativelyKey(TRIAL_SENTINEL_KEY);
       }
 
       return { ok: true, ...data };
@@ -2914,7 +2915,7 @@ export function initializeIpcHandlers(appState: AppState): void {
           const { NativelySearchProvider } = require('../premium/electron/knowledge/NativelySearchProvider');
           // Pass the real trial token when key is the __trial__ sentinel so the
           // server can authenticate via x-trial-token instead of the invalid key.
-          const trialToken = nativelyKey === '__trial__' ? cm.getTrialToken() : undefined;
+          const trialToken = nativelyKey === TRIAL_SENTINEL_KEY ? cm.getTrialToken() : undefined;
           engine.setSearchProvider(new NativelySearchProvider(nativelyKey, trialToken ?? undefined));
           console.log('[IPC] Company research: using Natively API search (no Tavily key configured)');
         }

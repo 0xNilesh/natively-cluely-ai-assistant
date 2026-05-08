@@ -108,7 +108,7 @@ export function sparsifyTranscript(
     maxTurns: number = 12
 ): TranscriptTurn[] {
     if (turns.length <= maxTurns) {
-        return turns;
+        return [...turns].sort((a, b) => a.timestamp - b.timestamp);
     }
 
     // Separate by role

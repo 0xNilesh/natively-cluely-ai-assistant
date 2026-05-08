@@ -1076,50 +1076,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
 
 
         cleanups.push(window.electronAPI.onIntelligenceSuggestedAnswerToken((data) => {
-            // Progressive update for 'what_to_answer' mode
-            // Mirrors the guard in onGeminiStreamToken: if this token is the negotiation
-            // coaching JSON sentinel, accumulate the raw JSON silently so the Done handler
-            // can convert it to the card UI. Without this, the raw JSON leaks into the
-            // chat bubble (issue #213).
-            //
-            // PERF: gate the JSON.parse with a cheap prefix check. The sentinel always
-            // arrives as a single token whose JSON form starts with `{"__negotiationCoaching"`.
-            // Without the gate we'd JSON.parse + throw on every regular text token (~400/answer).
-            const tok = data.token;
-            const looksLikeSentinel = tok.length > 24 && tok.charCodeAt(0) === 123 /* { */ && tok.includes('__negotiationCoaching');
-            try {
-                const parsed = looksLikeSentinel ? JSON.parse(tok) : null;
-                if (parsed?.__negotiationCoaching) {
-                    // Discard any pending batched text — sentinel REPLACES the
-                    // streaming row's text, so flushing buffered chars onto it
-                    // would corrupt the JSON the final-answer handler parses.
-                    tokenBufRef.current.text = '';
-                    if (tokenBufRef.current.raf !== null) {
-                        cancelAnimationFrame(tokenBufRef.current.raf);
-                        tokenBufRef.current.raf = null;
-                    }
-                    setMessages(prev => {
-                        const lastMsg = prev[prev.length - 1];
-                        if (lastMsg && lastMsg.isStreaming && lastMsg.intent === 'what_to_answer') {
-                            const updated = [...prev];
-                            updated[prev.length - 1] = { ...lastMsg, text: data.token };
-                            return updated;
-                        }
-                        return [...prev, {
-                            id: Date.now().toString(),
-                            role: 'system',
-                            text: data.token,
-                            intent: 'what_to_answer',
-                            isStreaming: true
-                        }];
-                    });
-                    return;
-                }
-            } catch {
-                // Not JSON — normal token, fall through.
-            }
-
-            // PERF: rAF-coalesce instead of per-token setMessages.
+            // Coaching now arrives via onIntelligenceNegotiationCoaching only —
+            // sentinel detection on this stream has been removed.
             queueToken('what_to_answer', data.token);
         }));
 
@@ -1130,57 +1088,21 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
             flushToken();
             setIsProcessing(false);
 
-            // If the final answer is a negotiation coaching JSON sentinel, route it
-            // to the proper card UI instead of dumping raw JSON into the message bubble.
-            let isCoaching = false;
-            let coachingData: any = null;
-            try {
-                const parsed = JSON.parse(data.answer);
-                if (parsed?.__negotiationCoaching) {
-                    isCoaching = true;
-                    coachingData = parsed.__negotiationCoaching;
-                }
-            } catch {
-                // Not JSON — normal answer.
-            }
-
             setMessages(prev => {
                 const lastMsg = prev[prev.length - 1];
-
-                // If we were streaming, finalize it
                 if (lastMsg && lastMsg.isStreaming && lastMsg.intent === 'what_to_answer') {
                     const updated = [...prev];
-                    updated[prev.length - 1] = isCoaching
-                        ? {
-                            ...lastMsg,
-                            isStreaming: false,
-                            isNegotiationCoaching: true,
-                            negotiationCoachingData: coachingData,
-                            text: '',
-                        }
-                        : {
-                            ...lastMsg,
-                            text: data.answer, // Ensure final consistency
-                            isStreaming: false
-                        };
+                    updated[prev.length - 1] = {
+                        ...lastMsg,
+                        text: data.answer,
+                        isStreaming: false
+                    };
                     return updated;
-                }
-
-                // If we missed the stream (or not streaming), append fresh
-                if (isCoaching) {
-                    return [...prev, {
-                        id: Date.now().toString(),
-                        role: 'system',
-                        text: '',
-                        intent: 'what_to_answer',
-                        isNegotiationCoaching: true,
-                        negotiationCoachingData: coachingData,
-                    }];
                 }
                 return [...prev, {
                     id: Date.now().toString(),
                     role: 'system',
-                    text: data.answer,  // Plain text, no markdown - ready to speak
+                    text: data.answer,
                     intent: 'what_to_answer'
                 }];
             });
@@ -1621,30 +1543,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
 
         // Stream Token
         cleanups.push(window.electronAPI.onGeminiStreamToken((token) => {
-            // Guard: if this token is the negotiation coaching JSON sentinel, accumulate it
-            // silently. The JSON is always emitted as a single complete `yield JSON.stringify(...)`
-            // call, so one parse attempt is sufficient. The onGeminiStreamDone handler will
-            // detect the accumulated JSON and render the proper card UI — we just prevent the
-            // raw JSON characters from ever appearing in the chat bubble.
-            try {
-                const parsed = JSON.parse(token);
-                if (parsed?.__negotiationCoaching) {
-                    // Store the raw JSON text (Done handler needs it) but don't show it.
-                    setMessages(prev => {
-                        const lastMsg = prev[prev.length - 1];
-                        if (lastMsg && lastMsg.isStreaming && lastMsg.role === 'system') {
-                            const updated = [...prev];
-                            updated[prev.length - 1] = { ...lastMsg, text: token };
-                            return updated;
-                        }
-                        return prev;
-                    });
-                    return; // Skip the normal append below
-                }
-            } catch {
-                // Not JSON — normal text token, fall through to the standard append.
-            }
-
             setMessages(prev => {
                 const lastMsg = prev[prev.length - 1];
                 if (lastMsg && lastMsg.isStreaming && lastMsg.role === 'system') {
@@ -1682,21 +1580,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
             setMessages(prev => {
                 const lastMsg = prev[prev.length - 1];
                 if (lastMsg && lastMsg.isStreaming && lastMsg.role === 'system') {
-                    // Detect negotiation coaching response
-                    try {
-                        const parsed = JSON.parse(lastMsg.text);
-                        if (parsed?.__negotiationCoaching) {
-                            const coaching = parsed.__negotiationCoaching;
-                            return [...prev.slice(0, -1), {
-                                ...lastMsg,
-                                isStreaming: false,
-                                isNegotiationCoaching: true,
-                                negotiationCoachingData: coaching,
-                                text: '',
-                            }];
-                        }
-                    } catch { }
-                    // Normal completion
                     return [...prev.slice(0, -1), { ...lastMsg, isStreaming: false }];
                 }
                 return prev;
@@ -1733,27 +1616,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         // JIT RAG Stream listeners (for live meeting RAG responses)
         if (window.electronAPI.onRAGStreamChunk) {
             cleanups.push(window.electronAPI.onRAGStreamChunk((data: { chunk: string }) => {
-                // Same guard as onGeminiStreamToken: suppress raw JSON if this chunk is
-                // the negotiation coaching sentinel. The onRAGStreamComplete handler will
-                // convert it to the proper card UI.
-                try {
-                    const parsed = JSON.parse(data.chunk);
-                    if (parsed?.__negotiationCoaching) {
-                        setMessages(prev => {
-                            const lastMsg = prev[prev.length - 1];
-                            if (lastMsg && lastMsg.isStreaming && lastMsg.role === 'system') {
-                                const updated = [...prev];
-                                updated[prev.length - 1] = { ...lastMsg, text: data.chunk };
-                                return updated;
-                            }
-                            return prev;
-                        });
-                        return; // Skip normal append
-                    }
-                } catch {
-                    // Normal text chunk — fall through.
-                }
-
                 setMessages(prev => {
                     const lastMsg = prev[prev.length - 1];
                     if (lastMsg && lastMsg.isStreaming && lastMsg.role === 'system') {
@@ -1777,21 +1639,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
                 setMessages(prev => {
                     const lastMsg = prev[prev.length - 1];
                     if (lastMsg && lastMsg.isStreaming && lastMsg.role === 'system') {
-                        // Detect negotiation coaching response
-                        try {
-                            const parsed = JSON.parse(lastMsg.text);
-                            if (parsed?.__negotiationCoaching) {
-                                const coaching = parsed.__negotiationCoaching;
-                                return [...prev.slice(0, -1), {
-                                    ...lastMsg,
-                                    isStreaming: false,
-                                    isNegotiationCoaching: true,
-                                    negotiationCoachingData: coaching,
-                                    text: '',
-                                }];
-                            }
-                        } catch { }
-                        // Normal completion
                         return [...prev.slice(0, -1), { ...lastMsg, isStreaming: false }];
                     }
                     if (lastMsg && lastMsg.isStreaming) {

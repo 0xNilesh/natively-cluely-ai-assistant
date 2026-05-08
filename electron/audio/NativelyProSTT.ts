@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events';
 import WebSocket from 'ws';
 import { RECOGNITION_LANGUAGES, EnglishVariant } from '../config/languages';
+import { TRIAL_SENTINEL_KEY } from '../config/constants';
 import { streamingStttWsOptions } from './dnsHelpers';
 
 /**
@@ -26,6 +27,15 @@ export class NativelyProSTT extends EventEmitter {
     private sampleRate    = 16000;
     private audioChannels = 1;
     private buffer: Buffer[] = [];
+    // Soft cap: at 48 kHz stereo / 20 ms frames a chunk is ~3.8 KB, so 500 chunks
+    // ≈ 10 s of audio. Above this, the disconnect window has clearly exceeded
+    // what live transcription can usefully recover, and continuing to grow risks
+    // unbounded memory under a long network outage. We emit an event so the UI
+    // can surface the loss; we log a single rate-limited warning per session so
+    // operators can correlate with reconnect storms.
+    private readonly BUFFER_MAX_CHUNKS = 500;
+    private bufferOverflowReported = false;
+    private bufferDroppedChunks = 0;
 
     // Language state — updated via setRecognitionLanguage()
     private languageBcp47          = 'en-US';
@@ -205,8 +215,18 @@ export class NativelyProSTT extends EventEmitter {
 
         if (!this.isConnected || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
             this.buffer.push(chunk);
-            // Cap buffer to prevent unbounded memory growth
-            if (this.buffer.length > 500) this.buffer.shift();
+            // Cap buffer to prevent unbounded memory growth. Beyond BUFFER_MAX_CHUNKS
+            // we drop the oldest chunk — speech earlier than ~10 s back is not useful
+            // for live transcription anyway, but the loss must NOT be silent.
+            if (this.buffer.length > this.BUFFER_MAX_CHUNKS) {
+                this.buffer.shift();
+                this.bufferDroppedChunks++;
+                if (!this.bufferOverflowReported) {
+                    this.bufferOverflowReported = true;
+                    console.warn(`[NativelyProSTT:${this.channel}] Buffer overflow — dropping oldest chunks. Reconnect taking too long; transcript will have a gap.`);
+                    this.emit('buffer-overflow', { channel: this.channel });
+                }
+            }
             // Log first few buffered chunks so we can tell if audio is arriving before connect
             if (this.buffer.length <= 3 || this.buffer.length % 100 === 0) {
                 const wsState = this.ws ? ['CONNECTING','OPEN','CLOSING','CLOSED'][this.ws.readyState] || this.ws.readyState : 'null';
@@ -287,7 +307,7 @@ export class NativelyProSTT extends EventEmitter {
                 audio_channels:      this.audioChannels,
                 channel:             this.channel,
             };
-            if (this.apiKey === '__trial__') {
+            if (this.apiKey === TRIAL_SENTINEL_KEY) {
                 try {
                     const { CredentialsManager } = require('../services/CredentialsManager');
                     const trialToken = CredentialsManager.getInstance().getTrialToken();
@@ -456,9 +476,19 @@ export class NativelyProSTT extends EventEmitter {
 
     private flushBuffer(): void {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-        while (this.buffer.length > 0) {
-            const chunk = this.buffer.shift();
-            if (chunk) this.ws.send(chunk);
+        // Snapshot + clear, then iterate. Previous version called shift() in a loop
+        // which is O(n²) — every shift on a large buffer re-indexes every remaining
+        // element. With 500 chunks the snapshot+iterate version is O(n) and runs in
+        // a single tight loop instead of 500 array reallocations.
+        const pending = this.buffer;
+        this.buffer = [];
+        if (this.bufferDroppedChunks > 0) {
+            console.warn(`[NativelyProSTT:${this.channel}] Reconnected — flushing ${pending.length} buffered chunks; ${this.bufferDroppedChunks} were dropped during outage`);
+        }
+        this.bufferDroppedChunks = 0;
+        this.bufferOverflowReported = false;
+        for (const chunk of pending) {
+            this.ws.send(chunk);
         }
     }
 

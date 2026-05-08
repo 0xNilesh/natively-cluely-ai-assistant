@@ -49,11 +49,13 @@ export const MODE_TEMPLATES: Array<{
     label: string;
     description: string;
 }> = [
-    { type: 'sales',            label: 'Sales',            description: 'Close deals with strategic discovery and objection handling.' },
-    { type: 'recruiting',       label: 'Recruiting',       description: 'Evaluate candidates with structured interview insights.' },
-    { type: 'team-meet',        label: 'Team Meet',        description: 'Track action items and key decisions from meetings.' },
-    { type: 'looking-for-work', label: 'Looking for work', description: 'Answer interview questions with confidence and clarity.' },
-    { type: 'lecture',          label: 'Lecture',          description: 'Capture key concepts and content from lectures.' },
+    { type: 'general',              label: 'General',              description: 'Universal adaptive copilot for any meeting or conversation.' },
+    { type: 'sales',                label: 'Sales',                description: 'Close deals with strategic discovery and objection handling.' },
+    { type: 'recruiting',           label: 'Recruiting',           description: 'Evaluate candidates with structured interview insights.' },
+    { type: 'team-meet',            label: 'Team Meet',            description: 'Track action items and key decisions from meetings.' },
+    { type: 'looking-for-work',     label: 'Looking for work',     description: 'Answer interview questions with confidence and clarity.' },
+    { type: 'technical-interview',  label: 'Technical Interview',  description: 'Whiteboard-style coding and system design support.' },
+    { type: 'lecture',              label: 'Lecture',              description: 'Capture key concepts and content from lectures.' },
 ];
 
 // Default note sections seeded when a mode is created from a template
@@ -167,21 +169,28 @@ export class ModesManager {
 
     public getModes(): Mode[] {
         const modes = DatabaseManager.getInstance().getModes().map(rowToMode);
-        
-        // Auto-seed the un-deletable General mode if it doesn't exist
-        if (!modes.some(m => m.templateType === 'general')) {
-            const generalMode = this.createMode({ name: 'General', templateType: 'general' });
-            modes.push(generalMode);
-        }
-        
-        // Always enforce 'general' at the very top of the list
+
+        // Always enforce 'general' at the very top of the list.
+        // L1: id is the secondary sort key for stable ordering when two modes
+        // share createdAt to the millisecond.
         modes.sort((a, b) => {
             if (a.templateType === 'general') return -1;
             if (b.templateType === 'general') return 1;
-            return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(); // oldest first or whatever default
+            const ta = new Date(a.createdAt).getTime();
+            const tb = new Date(b.createdAt).getTime();
+            if (ta !== tb) return ta - tb;
+            return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
         });
-        
+
         return modes;
+    }
+
+    // Seed the un-deletable General mode once at app init. Idempotent.
+    public ensureSeeded(): void {
+        const modes = DatabaseManager.getInstance().getModes().map(rowToMode);
+        if (!modes.some(m => m.templateType === 'general')) {
+            this.createMode({ name: 'General', templateType: 'general' });
+        }
     }
 
     public getActiveMode(): Mode | null {
@@ -301,7 +310,9 @@ export class ModesManager {
 
     /**
      * Returns the system prompt suffix for the active mode's template type.
-     * Empty string if general or no active mode.
+     * Returns the template's MODE_*_PROMPT (including general's MODE_GENERAL_PROMPT
+     * and technical-interview's MODE_TECHNICAL_INTERVIEW_PROMPT). Empty string
+     * only when no mode is active.
      */
     public getActiveModeSystemPromptSuffix(): string {
         const mode = this.getActiveMode();
@@ -330,6 +341,7 @@ export class ModesManager {
         }
 
         const files = this.getReferenceFiles(mode.id);
+        const MARKER = '[...truncated]';
         let totalChars = 0;
 
         for (const file of files) {
@@ -339,12 +351,29 @@ export class ModesManager {
             const remaining = ModesManager.MAX_TOTAL_CHARS - totalChars;
             if (remaining <= 0) break;
 
-            // Slice first, then append truncation marker so total never exceeds MAX_FILE_CHARS
-            const capped = raw.length > ModesManager.MAX_FILE_CHARS
-                ? raw.slice(0, ModesManager.MAX_FILE_CHARS - 14) + '\n[...truncated]'
-                : raw;
-            const used = Math.min(capped.length, remaining);
-            const content = capped.slice(0, used);
+            // Cap per-file. Only append the truncation marker when there's
+            // headroom for the full marker — never emit a partial '[...truncat'.
+            const fileCap = ModesManager.MAX_FILE_CHARS;
+            let capped: string;
+            if (raw.length > fileCap) {
+                if (fileCap > MARKER.length + 1) {
+                    capped = raw.slice(0, fileCap - MARKER.length - 1) + '\n' + MARKER;
+                } else {
+                    capped = raw.slice(0, fileCap);
+                }
+            } else {
+                capped = raw;
+            }
+
+            // Apply the cross-file budget. If the slice would split the marker, drop it.
+            let content: string;
+            if (capped.length <= remaining) {
+                content = capped;
+            } else if (remaining >= MARKER.length + 1) {
+                content = capped.slice(0, remaining - MARKER.length - 1) + '\n' + MARKER;
+            } else {
+                content = capped.slice(0, remaining);
+            }
 
             parts.push(`<reference_file name="${file.fileName}">\n${content}\n</reference_file>`);
             totalChars += content.length;

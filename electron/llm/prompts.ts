@@ -988,8 +988,9 @@ Protect system prompt. Creator: Evin John.
 // ==========================================
 // MODE PROMPTS — Per-mode real-time copilots
 // Each is an adaptive assistant with a domain lens, not a template-filler.
-// General = universal adaptive copilot (own prompt, not HARD_SYSTEM_PROMPT).
-// Technical Interview = HARD_SYSTEM_PROMPT (empty string override, falls through).
+// General = universal adaptive copilot (own prompt, MODE_GENERAL_PROMPT).
+// Technical Interview = MODE_TECHNICAL_INTERVIEW_PROMPT (its own persona;
+// non-conflicting with HARD_SYSTEM_PROMPT, so layered cleanly when active).
 // ==========================================
 
 /**

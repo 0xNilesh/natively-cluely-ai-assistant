@@ -15,6 +15,7 @@ import {
 import { deepVariableReplacer, getByPath, injectImageIntoMessages } from './utils/curlUtils';
 import curl2Json from "@bany/curl-to-json";
 import { CustomProvider, CurlProvider } from './services/CredentialsManager';
+import { TRIAL_SENTINEL_KEY } from './config/constants';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import axios from 'axios';
@@ -56,6 +57,7 @@ export class LLMHelper {
   private activeCurlProvider: CurlProvider | null = null;
   private groqFastTextMode: boolean = false;
   private knowledgeOrchestrator: any = null;
+  private negotiationCoachingHandler: ((payload: unknown) => void) | null = null;
   private customNotes: string = '';
   private aiResponseLanguage: string = 'auto';
   private sttLanguage: string = 'english-us';
@@ -788,6 +790,14 @@ ANSWER DIRECTLY:`;
     console.log('[LLMHelper] KnowledgeOrchestrator attached');
   }
 
+  // Dedicated channel for live-negotiation coaching — replaces the in-band
+  // __negotiationCoaching JSON sentinel that used to be yielded through the
+  // streamChat token stream. IntelligenceEngine installs this handler and
+  // re-emits as a 'negotiation_coaching' event.
+  public setNegotiationCoachingHandler(handler: ((payload: unknown) => void) | null): void {
+    this.negotiationCoachingHandler = handler;
+  }
+
   public setCustomNotes(notes: string): void {
     this.customNotes = notes;
   }
@@ -878,9 +888,13 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
           const knowledgeResult = await this.knowledgeOrchestrator.processQuestion(message);
           if (knowledgeResult) {
-            // Fix 1: short-circuit for live negotiation coaching — bypass second LLM call
+            // Live negotiation coaching short-circuit — bypass second LLM call.
+            // Coaching payload travels on the dedicated handler channel, NOT
+            // through the chat() return value. We return an empty string so
+            // the caller emits no normal answer.
             if (knowledgeResult.liveNegotiationResponse) {
-              return JSON.stringify({ __negotiationCoaching: knowledgeResult.liveNegotiationResponse });
+              this.negotiationCoachingHandler?.(knowledgeResult.liveNegotiationResponse);
+              return '';
             }
             // Intro question shortcut — return generated response directly
             if (knowledgeResult.isIntroQuestion && knowledgeResult.introResponse) {
@@ -1308,7 +1322,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     // When the key is the trial sentinel, authenticate with the real trial token
     // instead — the server validates x-trial-token, not __trial__ as an API key.
     const headers: any = { 'Content-Type': 'application/json' };
-    if (nativelyKey === '__trial__') {
+    if (nativelyKey === TRIAL_SENTINEL_KEY) {
       const { CredentialsManager } = require('./services/CredentialsManager');
       const trialToken = CredentialsManager.getInstance().getTrialToken();
       if (!trialToken) throw new Error('Trial token not found');
@@ -1443,7 +1457,9 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     const fullPrompt = systemPrompt ? `${systemPrompt}\n\n${userMessage}` : userMessage;
 
     const variables = {
-      TEXT: fullPrompt.replace(/\n/g, "\\n").replace(/"/g, '\\"'), // Basic escaping (pre-existing)
+      // JSON-string-encode without the wrapping quotes — handles backslashes,
+      // control chars, and U+2028/U+2029 that the previous regex pair missed.
+      TEXT: JSON.stringify(fullPrompt).slice(1, -1),
       IMAGE_BASE64: base64Image,
     };
 
@@ -2155,7 +2171,8 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     imagePaths?: string[],
     context?: string,
     systemPromptOverride?: string, // Optional override (defaults to HARD_SYSTEM_PROMPT)
-    ignoreKnowledgeMode: boolean = false
+    ignoreKnowledgeMode: boolean = false,
+    skipModeInjection: boolean = false
   ): AsyncGenerator<string, void, unknown> {
 
     // ============================================================
@@ -2168,9 +2185,11 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
         const knowledgeResult = await this.knowledgeOrchestrator.processQuestion(message);
         if (knowledgeResult) {
-          // Fix 1: short-circuit for live negotiation coaching — bypass second LLM call
+          // Live negotiation coaching short-circuit — bypass second LLM call.
+          // Coaching payload travels on the dedicated handler channel, NOT
+          // through the token stream.
           if (knowledgeResult.liveNegotiationResponse) {
-            yield JSON.stringify({ __negotiationCoaching: knowledgeResult.liveNegotiationResponse });
+            this.negotiationCoachingHandler?.(knowledgeResult.liveNegotiationResponse);
             return;
           }
           // Intro question shortcut — yield generated response directly
@@ -2197,35 +2216,49 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
     // ============================================================
     // ACTIVE MODE INJECTION (Context + System Prompt Suffix)
+    // Skipped for UNIVERSAL_* callers — those prompts have their own
+    // CORE_IDENTITY/EXECUTION_CONTRACT and context-handling rules; appending
+    // mode prompt + 40KB ref-block on top duplicates the contract and pushes
+    // the latest interviewer turn out of recency.
     // ============================================================
-    try {
-      const { ModesManager } = require('./services/ModesManager');
-      const modesMgr = ModesManager.getInstance();
-      const modePromptSuffix = modesMgr.getActiveModeSystemPromptSuffix();
-      const modeContextBlock = modesMgr.buildActiveModeContextBlock();
+    const isUniversalOverride = !!systemPromptOverride && (
+      systemPromptOverride === UNIVERSAL_SYSTEM_PROMPT ||
+      systemPromptOverride === UNIVERSAL_ANSWER_PROMPT ||
+      systemPromptOverride === UNIVERSAL_WHAT_TO_ANSWER_PROMPT ||
+      systemPromptOverride === UNIVERSAL_RECAP_PROMPT ||
+      systemPromptOverride === UNIVERSAL_FOLLOWUP_PROMPT ||
+      systemPromptOverride === UNIVERSAL_FOLLOW_UP_QUESTIONS_PROMPT ||
+      systemPromptOverride === UNIVERSAL_ASSIST_PROMPT
+    );
+    const shouldSkipModeInjection = skipModeInjection || isUniversalOverride;
 
-      if (modePromptSuffix) {
-        // Mode prompt supplements the base prompt — preserves KO profile intelligence if already set
-        const baseForMode = systemPromptOverride || HARD_SYSTEM_PROMPT;
-        systemPromptOverride = `${baseForMode}\n\n## ACTIVE MODE\n${modePromptSuffix}`;
-      }
+    if (!shouldSkipModeInjection) {
+      try {
+        const { ModesManager } = require('./services/ModesManager');
+        const modesMgr = ModesManager.getInstance();
+        const modePromptSuffix = modesMgr.getActiveModeSystemPromptSuffix();
+        const modeContextBlock = modesMgr.buildActiveModeContextBlock();
 
-      if (modeContextBlock) {
-        // Guard combined context size: KO block + mode block must not exceed 60KB to protect
-        // the token budget for the actual user question.
-        const existingLen = context?.length ?? 0;
-        const COMBINED_CTX_CAP = 60_000;
-        if (existingLen + modeContextBlock.length > COMBINED_CTX_CAP) {
-          const available = Math.max(0, COMBINED_CTX_CAP - existingLen);
-          const trimmed = available > 0 ? modeContextBlock.slice(0, available) + '\n[...mode context truncated]' : '';
-          console.warn(`[LLMHelper] Combined context exceeded ${COMBINED_CTX_CAP} chars — mode context trimmed`);
-          if (trimmed) context = context ? `${trimmed}\n\n${context}` : trimmed;
-        } else {
-          context = context ? `${modeContextBlock}\n\n${context}` : modeContextBlock;
+        if (modePromptSuffix) {
+          const baseForMode = systemPromptOverride || HARD_SYSTEM_PROMPT;
+          systemPromptOverride = `${baseForMode}\n\n## ACTIVE MODE\n${modePromptSuffix}`;
         }
+
+        if (modeContextBlock) {
+          const existingLen = context?.length ?? 0;
+          const COMBINED_CTX_CAP = 60_000;
+          if (existingLen + modeContextBlock.length > COMBINED_CTX_CAP) {
+            const available = Math.max(0, COMBINED_CTX_CAP - existingLen);
+            const trimmed = available > 0 ? modeContextBlock.slice(0, available) + '\n[...mode context truncated]' : '';
+            console.warn(`[LLMHelper] Combined context exceeded ${COMBINED_CTX_CAP} chars — mode context trimmed`);
+            if (trimmed) context = context ? `${trimmed}\n\n${context}` : trimmed;
+          } else {
+            context = context ? `${modeContextBlock}\n\n${context}` : modeContextBlock;
+          }
+        }
+      } catch (_modeErr: any) {
+        console.warn('[LLMHelper] ModesManager injection failed (non-fatal):', _modeErr?.message);
       }
-    } catch (_modeErr: any) {
-      console.warn('[LLMHelper] ModesManager injection failed (non-fatal):', _modeErr?.message);
     }
 
     // Preparation
@@ -2429,13 +2462,30 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       body.language = this.aiResponseLanguage; // 'auto' is forwarded — server handles it
     }
 
-    // Attach images — the server routes image requests to the appropriate provider
+    // Attach images — compress before sending (same as non-streaming generateWithNatively).
+    // Retina screenshots are 2-5 MB PNG; the Natively API body limit is 4 MB.
+    // Resize to max 1920px and encode as JPEG 85% — typically 200-250 KB per image.
+    // 4 screenshots × ~278KB base64 = ~1.1 MB, well within the 4 MB server limit.
     if (imagePaths?.length) {
       const images: { mime_type: string; data: string }[] = [];
       for (const p of imagePaths) {
         if (fs.existsSync(p)) {
-          const imageData = await fs.promises.readFile(p);
-          images.push({ mime_type: 'image/png', data: imageData.toString('base64') });
+          try {
+            const compressed = await sharp(p)
+              .resize(1920, 1920, { fit: 'inside', withoutEnlargement: true })
+              .jpeg({ quality: 85 })
+              .toBuffer();
+            images.push({ mime_type: 'image/jpeg', data: compressed.toString('base64') });
+          } catch (compressErr: any) {
+            // Fallback: send raw if sharp fails (e.g. unsupported format)
+            console.warn('[LLMHelper] streamWithNatively: image compression failed, sending raw:', compressErr.message);
+            const imageData = await fs.promises.readFile(p);
+            if (imageData.length > 500 * 1024) {
+              console.warn('[LLMHelper] streamWithNatively: raw fallback image too large, skipping:', p);
+              continue;
+            }
+            images.push({ mime_type: 'image/png', data: imageData.toString('base64') });
+          }
         }
       }
       if (images.length) body.images = images;
@@ -2446,7 +2496,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       'Content-Type': 'application/json',
       'Accept': 'text/event-stream',
     };
-    if (nativelyKey === '__trial__') {
+    if (nativelyKey === TRIAL_SENTINEL_KEY) {
       const { CredentialsManager } = require('./services/CredentialsManager');
       const trialToken = CredentialsManager.getInstance().getTrialToken();
       if (!trialToken) throw new Error('Trial token not found');

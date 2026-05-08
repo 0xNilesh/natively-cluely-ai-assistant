@@ -3523,6 +3523,14 @@ async function initializeApp() {
   // Explicitly load credentials into helpers
   appState.processingHelper.loadStoredCredentials();
 
+  // Seed the un-deletable General mode once at startup. Idempotent.
+  try {
+    const { ModesManager } = require('./services/ModesManager');
+    ModesManager.getInstance().ensureSeeded();
+  } catch (err) {
+    console.warn('[Init] ModesManager.ensureSeeded threw (non-fatal):', err);
+  }
+
   // Initialize IPC handlers before window creation
   initializeIpcHandlers(appState)
 

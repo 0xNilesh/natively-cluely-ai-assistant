@@ -1,5 +1,4 @@
 import { app, safeStorage, shell, net } from 'electron';
-import axios from 'axios';
 import http from 'http';
 import url from 'url';
 import fs from 'fs';
@@ -167,12 +166,23 @@ export class CalendarManager extends EventEmitter {
     private async exchangeCodeForToken(code: string) {
         try {
             // Proxied through natively-api so GOOGLE_CLIENT_SECRET never ships in the desktop app.
-            const response = await axios.post(`${NATIVELY_API_URL}/api/calendar/exchange`, {
-                code,
-                redirect_uri: REDIRECT_URI,
+            // Fetch (vs. axios) so this call shares the global keep-alive pool with every other
+            // request to api.natively.software and exposes the same error shape (res.ok / res.status)
+            // as the rest of the codebase.
+            const response = await fetch(`${NATIVELY_API_URL}/api/calendar/exchange`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ code, redirect_uri: REDIRECT_URI }),
+                signal: AbortSignal.timeout(15_000),
             });
 
-            this.handleTokenResponse(response.data);
+            if (!response.ok) {
+                const errBody = await response.json().catch(() => ({} as any));
+                throw new Error(`exchange_failed status=${response.status} ${(errBody as any).error || ''}`.trim());
+            }
+
+            const data = await response.json();
+            this.handleTokenResponse(data);
         } catch (error) {
             console.error('[CalendarManager] Token exchange failed:', error);
             throw error;
@@ -226,11 +236,20 @@ export class CalendarManager extends EventEmitter {
 
         try {
             // Proxied through natively-api so GOOGLE_CLIENT_SECRET never ships in the desktop app.
-            const response = await axios.post(`${NATIVELY_API_URL}/api/calendar/refresh`, {
-                refresh_token: this.refreshToken,
+            const response = await fetch(`${NATIVELY_API_URL}/api/calendar/refresh`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ refresh_token: this.refreshToken }),
+                signal: AbortSignal.timeout(15_000),
             });
 
-            this.handleTokenResponse(response.data);
+            if (!response.ok) {
+                const errBody = await response.json().catch(() => ({} as any));
+                throw new Error(`refresh_failed status=${response.status} ${(errBody as any).error || ''}`.trim());
+            }
+
+            const data = await response.json();
+            this.handleTokenResponse(data);
         } catch (error) {
             console.error('[CalendarManager] Token refresh failed:', error);
             // If refresh fails (e.g. revoked), disconnect
@@ -373,20 +392,26 @@ export class CalendarManager extends EventEmitter {
         const horizon = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
 
         try {
-            const response = await axios.get('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
-                headers: {
-                    Authorization: `Bearer ${this.accessToken}`
-                },
-                params: {
-                    timeMin: now.toISOString(),
-                    timeMax: horizon.toISOString(),
-                    singleEvents: true,
-                    orderBy: 'startTime',
-                    maxResults: 50,
-                }
+            const params = new URLSearchParams({
+                timeMin: now.toISOString(),
+                timeMax: horizon.toISOString(),
+                singleEvents: 'true',
+                orderBy: 'startTime',
+                maxResults: '50',
             });
-
-            const items = response.data.items || [];
+            const response = await fetch(
+                `https://www.googleapis.com/calendar/v3/calendars/primary/events?${params.toString()}`,
+                {
+                    headers: { Authorization: `Bearer ${this.accessToken}` },
+                    signal: AbortSignal.timeout(15_000),
+                }
+            );
+            if (!response.ok) {
+                console.error(`[CalendarManager] Google Calendar fetch failed: HTTP ${response.status}`);
+                return [];
+            }
+            const data = await response.json() as any;
+            const items = data.items || [];
             console.log(`[CalendarManager] Google returned ${items.length} raw items in next 7 days`);
 
             const filtered = items
