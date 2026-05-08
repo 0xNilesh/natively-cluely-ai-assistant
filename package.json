@@ -19,7 +19,8 @@
     "watch": "tsc -p electron/tsconfig.json --watch",
     "start": "npm run app:dev",
     "dist": "npm run app:build",
-    "build:native": "node scripts/build-native.js"
+    "build:native": "node scripts/build-native.js",
+    "test": "npm run build:electron && node --test 'electron/services/__tests__/**/*.test.mjs'"
   },
   "build": {
     "generateUpdatesFilesForAllChannels": true,

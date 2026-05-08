@@ -327,6 +327,9 @@ export const AIProvidersSettings: React.FC = () => {
             const configToTest = saveResult?.config || codexCliConfig;
             const result = await window.electronAPI?.testCodexCli?.(configToTest);
             if (result?.success) {
+                // If the main process auto-detected an install, reflect the
+                // resolved path in the form so the user sees what got picked.
+                if (result.config) setCodexCliConfig(result.config);
                 setCodexCliStatus('success');
                 setTimeout(() => setCodexCliStatus('idle'), 3000);
             } else {

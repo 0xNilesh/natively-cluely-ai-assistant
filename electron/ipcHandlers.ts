@@ -9,6 +9,8 @@ import * as path from "path";
 import * as fs from "fs";
 import { AudioDevices } from "./audio/AudioDevices";
 import { PhoneMirrorService } from "./services/PhoneMirrorService";
+import { CodexCliService } from "./services/CodexCliService";
+import { SettingsManager } from "./services/SettingsManager";
 
 
 import { RECOGNITION_LANGUAGES, AI_RESPONSE_LANGUAGES } from "./config/languages"
@@ -2024,16 +2026,13 @@ export function initializeIpcHandlers(appState: AppState): void {
     try {
       const llmHelper = appState.processingHelper.getLLMHelper();
       return llmHelper.getCodexCliConfig();
-    } catch (error: any) {
-      const { CodexCliService } = require('./services/CodexCliService');
+    } catch {
       return CodexCliService.normalizeConfig({});
     }
   });
 
   safeHandle("set-codex-cli-config", (_, config: any) => {
     try {
-      const { CodexCliService } = require('./services/CodexCliService');
-      const { SettingsManager } = require('./services/SettingsManager');
       const normalized = CodexCliService.normalizeConfig(config || {});
       const sm = SettingsManager.getInstance();
       sm.set('codexCliEnabled', normalized.enabled);
@@ -2041,6 +2040,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       sm.set('codexCliModel', normalized.model);
       sm.set('codexCliFastModel', normalized.fastModel);
       sm.set('codexCliTimeoutMs', normalized.timeoutMs);
+      sm.set('codexCliSandboxMode', normalized.sandboxMode);
       appState.processingHelper.getLLMHelper().setCodexCliConfig(normalized);
       return { success: true, config: normalized };
     } catch (error: any) {
@@ -2050,10 +2050,19 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle("test-codex-cli", async (_, config?: any) => {
     try {
-      const { CodexCliService } = require('./services/CodexCliService');
       const current = appState.processingHelper.getLLMHelper().getCodexCliConfig();
       const normalized = CodexCliService.normalizeConfig({ ...current, ...(config || {}) });
-      return await CodexCliService.validateExecutable(normalized.path);
+      const result = await CodexCliService.validateExecutable(normalized.path);
+      // If auto-detection found a different working path, persist it so
+      // subsequent chat calls don't re-ENOENT.
+      if (result.success && result.resolvedPath && result.resolvedPath !== normalized.path) {
+        const updated = CodexCliService.normalizeConfig({ ...normalized, path: result.resolvedPath });
+        const sm = SettingsManager.getInstance();
+        sm.set('codexCliPath', updated.path);
+        appState.processingHelper.getLLMHelper().setCodexCliConfig(updated);
+        return { success: true, resolvedPath: result.resolvedPath, config: updated };
+      }
+      return result;
     } catch (error: any) {
       return { success: false, error: error.message };
     }

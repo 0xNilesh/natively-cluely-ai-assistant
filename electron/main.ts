@@ -472,6 +472,7 @@ export class AppState {
         model: settingsManager.get('codexCliModel') || 'gpt-5.4',
         fastModel: settingsManager.get('codexCliFastModel') || 'gpt-5.3-codex-spark',
         timeoutMs: settingsManager.get('codexCliTimeoutMs') || 60_000,
+        sandboxMode: settingsManager.get('codexCliSandboxMode') || 'read-only',
       });
       // Restore custom notes for non-premium path
       try {
