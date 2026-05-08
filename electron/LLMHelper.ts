@@ -12,6 +12,14 @@ import {
   CUSTOM_SYSTEM_PROMPT, CUSTOM_ANSWER_PROMPT, CUSTOM_WHAT_TO_ANSWER_PROMPT,
   CUSTOM_RECAP_PROMPT, CUSTOM_FOLLOWUP_PROMPT, CUSTOM_FOLLOW_UP_QUESTIONS_PROMPT, CUSTOM_ASSIST_PROMPT
 } from "./llm/prompts"
+import {
+  TINY_SYSTEM_PROMPT, TINY_ANSWER_PROMPT, TINY_WHAT_TO_ANSWER_PROMPT,
+  TINY_RECAP_PROMPT, TINY_FOLLOWUP_PROMPT, TINY_FOLLOW_UP_QUESTIONS_PROMPT,
+  TINY_ASSIST_PROMPT, TINY_BRAINSTORM_PROMPT, TINY_CLARIFY_PROMPT, TINY_CODE_HINT_PROMPT,
+  TINY_PROMPTS_SET
+} from "./llm/tinyPrompts"
+import { getModelCapabilities, selectPromptTier, estimateTokens, truncateTranscriptToFit, type PromptTier, type ModelCapabilities } from "./llm/modelCapabilities"
+import type { TranscriptTurn } from "./llm/transcriptCleaner"
 import { deepVariableReplacer, getByPath, injectImageIntoMessages } from './utils/curlUtils';
 import curl2Json from "@bany/curl-to-json";
 import { CustomProvider, CurlProvider } from './services/CredentialsManager';
@@ -49,8 +57,8 @@ export class LLMHelper {
   private openaiApiKey: string | null = null
   private claudeApiKey: string | null = null
   private useOllama: boolean = false
-  private ollamaModel: string = "llama3.2"
-  private ollamaUrl: string = "http://localhost:11434"
+  private ollamaModel: string = ""
+  private ollamaUrl: string = "http://127.0.0.1:11434"
   private ollamaStartedByApp: boolean = false;
   private geminiModel: string = GEMINI_FLASH_MODEL
   private customProvider: CustomProvider | null = null;
@@ -100,11 +108,11 @@ export class LLMHelper {
     }
 
     if (useOllama) {
-      this.ollamaUrl = ollamaUrl || "http://localhost:11434"
-      this.ollamaModel = ollamaModel || "gemma:latest" // Default fallback
-      // console.log(`[LLMHelper] Using Ollama with model: ${this.ollamaModel}`)
+      this.ollamaUrl = ollamaUrl || "http://127.0.0.1:11434"
+      this.ollamaModel = ollamaModel || ""
+      console.log(`[LLMHelper] Using Ollama with model: ${this.ollamaModel || '(auto-detect)'}`)
 
-      // Auto-detect and use first available model if specified model doesn't exist
+      // Auto-detect first installed model when none specified.
       this.initializeOllamaModel()
     } else if (apiKey) {
       this.apiKey = apiKey
@@ -284,6 +292,32 @@ export class LLMHelper {
     console.log(`[LLMHelper] Switched to cURL provider: ${provider.name}`);
   }
 
+  // Trim a context blob to fit within the active model's prompt budget.
+  // Cloud tier always returns text unchanged. Local tiers drop oldest lines first.
+  public fitContextForCurrentModel(text: string, reservedOutputTokens?: number): string {
+    if (!text) return text;
+    const modelId = this.useOllama ? this.ollamaModel : this.currentModelId;
+    const caps = getModelCapabilities(modelId, this.useOllama);
+    if (caps.maxContextTokens >= 100_000) return text;
+    const reserved = reservedOutputTokens ?? 2000;
+    const cap = Math.floor(caps.maxContextTokens * 0.8);
+    const totalFor = (s: string) => caps.promptBudgetTokens + reserved + estimateTokens(s);
+    if (totalFor(text) <= cap) return text;
+    const lines = text.split('\n');
+    while (lines.length > 1 && totalFor(lines.join('\n')) > cap) {
+      lines.shift();
+    }
+    return lines.join('\n');
+  }
+
+  // Trim a transcript array to fit within the active model's prompt budget.
+  public fitTranscriptForCurrentModel(turns: TranscriptTurn[]): TranscriptTurn[] {
+    const modelId = this.useOllama ? this.ollamaModel : this.currentModelId;
+    const caps = getModelCapabilities(modelId, this.useOllama);
+    const budget = Math.max(0, Math.floor(caps.maxContextTokens * 0.8) - caps.promptBudgetTokens - caps.outputBudgetTokens);
+    return truncateTranscriptToFit(turns, budget);
+  }
+
   private cleanJsonResponse(text: string): string {
     // Remove markdown code block syntax if present
     text = text.replace(/^```(?:json)?\n/, '').replace(/\n```$/, '');
@@ -292,9 +326,8 @@ export class LLMHelper {
     return text;
   }
 
-  private async callOllama(prompt: string, imagePath?: string): Promise<string> {
+  private async callOllama(prompt: string, imagePath?: string, systemPrompt?: string): Promise<string> {
     try {
-      // Build optional images array — Ollama multimodal API accepts raw base64 strings (no data-URL prefix)
       let images: string[] | undefined;
       if (imagePath) {
         try {
@@ -305,32 +338,54 @@ export class LLMHelper {
         }
       }
 
-      const response = await fetch(`${this.ollamaUrl}/api/generate`, {
+      const sys = systemPrompt ?? TINY_SYSTEM_PROMPT;
+      // Per-request hard guard: trim userContent (never sys) until total fits the model's max ctx.
+      let userContent = prompt;
+      const maxCtx = getModelCapabilities(this.ollamaModel, true).maxContextTokens;
+      let total = estimateTokens(sys) + estimateTokens(userContent) + 2000;
+      if (total > maxCtx) {
+        console.warn('[Ollama] context overflow', { model: this.ollamaModel, total, max: maxCtx });
+        const lines = userContent.split('\n');
+        while (lines.length > 1 && (estimateTokens(sys) + estimateTokens(lines.join('\n')) + 2000) > maxCtx) {
+          lines.shift();
+        }
+        userContent = lines.join('\n');
+      }
+      const userMessage: any = { role: 'user', content: userContent };
+      if (images) userMessage.images = images;
+      const messages = [
+        { role: 'system', content: sys },
+        userMessage,
+      ];
+
+      console.log(`[LLMHelper] Ollama call → model=${this.ollamaModel} sysLen=${sys.length} userLen=${userContent.length} images=${images?.length ?? 0}`);
+
+      const response = await fetch(`${this.ollamaUrl}/api/chat`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: this.ollamaModel,
-          prompt: prompt,
+          messages,
           stream: false,
-          ...(images ? { images } : {}),
           options: {
             temperature: 0.7,
             top_p: 0.9,
           }
         }),
-      })
+        signal: AbortSignal.timeout(120_000),
+      });
 
       if (!response.ok) {
-        throw new Error(`Ollama API error: ${response.status} ${response.statusText}`)
+        const body = await response.text().catch(() => '');
+        throw new Error(`Ollama API error: ${response.status} ${response.statusText} ${body.slice(0, 200)}`);
       }
 
-      const data: OllamaResponse = await response.json()
-      return data.response
+      const data: any = await response.json();
+      const out = data?.message?.content ?? data?.response ?? '';
+      return out;
     } catch (error: any) {
-      // console.error("[LLMHelper] Error calling Ollama:", error)
-      throw new Error(`Failed to connect to Ollama: ${error.message}. Make sure Ollama is running on ${this.ollamaUrl}`)
+      console.error("[LLMHelper] Error calling Ollama:", error?.message || error);
+      throw new Error(`Failed to connect to Ollama: ${error.message}. Make sure Ollama is running on ${this.ollamaUrl}`);
     }
   }
 
@@ -347,31 +402,54 @@ export class LLMHelper {
     try {
       const availableModels = await this.getOllamaModels()
       if (availableModels.length === 0) {
-        // console.warn("[LLMHelper] No Ollama models found")
+        const msg = `No Ollama models installed. Run "ollama pull <model>" (e.g. ollama pull qwen2.5:4b) and restart.`;
+        console.warn(`[LLMHelper] ${msg}`);
+        this.notifyRendererOllamaError(msg);
         return
       }
 
-      // Check if current model exists, if not use the first available
-      if (!availableModels.includes(this.ollamaModel)) {
+      if (!this.ollamaModel || !availableModels.includes(this.ollamaModel)) {
         this.ollamaModel = availableModels[0]
-        // console.log(`[LLMHelper] Auto-selected first available model: ${this.ollamaModel}`)
+        console.log(`[LLMHelper] Auto-selected Ollama model: ${this.ollamaModel}`)
       }
 
-      // Test the selected model works
-      await this.callOllama("Hello")
-      // console.log(`[LLMHelper] Successfully initialized with model: ${this.ollamaModel}`)
+      // /api/show validates the model is loadable without spending tokens.
+      const showResp = await fetch(`${this.ollamaUrl}/api/show`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: this.ollamaModel }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!showResp.ok) {
+        throw new Error(`/api/show failed: ${showResp.status}`);
+      }
+      console.log(`[LLMHelper] Ollama model ready: ${this.ollamaModel}`);
     } catch (error: any) {
-      // console.error(`[LLMHelper] Failed to initialize Ollama model: ${error.message}`)
-      // Try to use first available model as fallback
+      console.error(`[LLMHelper] Failed to initialize Ollama model: ${error?.message}`);
       try {
         const models = await this.getOllamaModels()
         if (models.length > 0) {
           this.ollamaModel = models[0]
-          // console.log(`[LLMHelper] Fallback to: ${this.ollamaModel}`)
+          console.log(`[LLMHelper] Fallback to first installed model: ${this.ollamaModel}`)
+        } else {
+          this.notifyRendererOllamaError(`Ollama is reachable but no models are installed.`);
         }
       } catch (fallbackError: any) {
-        // console.error(`[LLMHelper] Fallback also failed: ${fallbackError.message}`)
+        console.error(`[LLMHelper] Fallback also failed: ${fallbackError?.message}`);
+        this.notifyRendererOllamaError(`Ollama unreachable at ${this.ollamaUrl}.`);
       }
+    }
+  }
+
+  private notifyRendererOllamaError(message: string): void {
+    try {
+      const { BrowserWindow } = require('electron');
+      const wins = BrowserWindow.getAllWindows();
+      for (const w of wins) {
+        try { w.webContents.send('ollama-error', { message }); } catch { /* noop */ }
+      }
+    } catch {
+      // electron not available (test context); skip
     }
   }
 
@@ -2228,7 +2306,8 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       systemPromptOverride === UNIVERSAL_RECAP_PROMPT ||
       systemPromptOverride === UNIVERSAL_FOLLOWUP_PROMPT ||
       systemPromptOverride === UNIVERSAL_FOLLOW_UP_QUESTIONS_PROMPT ||
-      systemPromptOverride === UNIVERSAL_ASSIST_PROMPT
+      systemPromptOverride === UNIVERSAL_ASSIST_PROMPT ||
+      TINY_PROMPTS_SET.has(systemPromptOverride)
     );
     const shouldSkipModeInjection = skipModeInjection || isUniversalOverride;
 
@@ -2851,13 +2930,23 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     return response.text || "";
   }
 
-  // --- OLLAMA STREAMING ---
-  private async * streamWithOllama(message: string, context?: string, systemPrompt: string = UNIVERSAL_SYSTEM_PROMPT, imagePaths?: string[]): AsyncGenerator<string, void, unknown> {
-    const fullPrompt = context
-      ? `SYSTEM: ${systemPrompt}\nCONTEXT: ${context}\nUSER: ${message}`
-      : `SYSTEM: ${systemPrompt}\nUSER: ${message}`;
+  // --- OLLAMA STREAMING (uses /api/chat with proper messages array) ---
+  private async * streamWithOllama(message: string, context?: string, systemPrompt: string = TINY_SYSTEM_PROMPT, imagePaths?: string[]): AsyncGenerator<string, void, unknown> {
+    let userContent = context ? `CONTEXT:\n${context}\n\nUSER:\n${message}` : message;
+    // Per-request hard guard: trim userContent (never systemPrompt) until total fits the model's max ctx.
+    {
+      const maxCtx = getModelCapabilities(this.ollamaModel, true).maxContextTokens;
+      const total = estimateTokens(systemPrompt) + estimateTokens(userContent) + 2000;
+      if (total > maxCtx) {
+        console.warn('[Ollama] context overflow', { model: this.ollamaModel, total, max: maxCtx });
+        const lines = userContent.split('\n');
+        while (lines.length > 1 && (estimateTokens(systemPrompt) + estimateTokens(lines.join('\n')) + 2000) > maxCtx) {
+          lines.shift();
+        }
+        userContent = lines.join('\n');
+      }
+    }
 
-    // Build optional images array — Ollama multimodal API accepts raw base64 strings (no data-URL prefix)
     let images: string[] | undefined;
     if (imagePaths?.length) {
       const encoded: string[] = [];
@@ -2872,40 +2961,68 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       if (encoded.length) images = encoded;
     }
 
+    const userMessage: any = { role: 'user', content: userContent };
+    if (images) userMessage.images = images;
+
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      userMessage,
+    ];
+
+    console.log(`[LLMHelper] Ollama stream → model=${this.ollamaModel} sysLen=${systemPrompt.length} userLen=${userContent.length} images=${images?.length ?? 0}`);
+
+    const decoder = new TextDecoder();
+    let buffer = '';
     try {
-      const response = await fetch(`${this.ollamaUrl}/api/generate`, {
+      const response = await fetch(`${this.ollamaUrl}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: this.ollamaModel,
-          prompt: fullPrompt,
+          messages,
           stream: true,
-          ...(images ? { images } : {}),
           options: { temperature: 0.7 }
-        })
+        }),
+        signal: AbortSignal.timeout(120_000),
       });
 
+      if (!response.ok) {
+        const txt = await response.text().catch(() => '');
+        throw new Error(`Ollama /api/chat ${response.status}: ${txt.slice(0, 200)}`);
+      }
       if (!response.body) throw new Error("No response body from Ollama");
 
-      // iterate over the readable stream
       // @ts-ignore
       for await (const chunk of response.body) {
-        const text = new TextDecoder().decode(chunk);
-        // Ollama sends JSON objects per line
-        const lines = text.split('\n').filter(l => l.trim());
-        for (const line of lines) {
+        buffer += decoder.decode(chunk, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf('\n')) !== -1) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (!line) continue;
           try {
             const json = JSON.parse(line);
-            if (json.response) yield json.response;
-            if (json.done) return;
-          } catch (e) {
+            const piece = json?.message?.content;
+            if (piece) yield piece;
+            if (json?.done) return;
+          } catch {
             // ignore partial json
           }
         }
       }
-    } catch (e) {
-      console.error("Ollama streaming failed", e);
-      yield "Error: Failed to stream from Ollama.";
+      const tail = (buffer + decoder.decode()).trim();
+      if (tail) {
+        try {
+          const json = JSON.parse(tail);
+          const piece = json?.message?.content;
+          if (piece) yield piece;
+        } catch {
+          // ignore
+        }
+      }
+    } catch (e: any) {
+      console.error('[LLMHelper] Ollama streaming failed:', e?.message || e);
+      yield `Error: Failed to stream from Ollama (${e?.message || 'unknown'}).`;
     }
   }
 
@@ -3058,7 +3175,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 1000); // Fast 1s timeout
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
 
       const response = await fetch(`${baseUrl}/api/tags`, {
         signal: controller.signal
@@ -3075,8 +3192,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
       return [];
     } catch (error: any) {
-      // Silently catch connection refused/timeout errors. 
-      // OllamaManager handles logging the startup status.
+      // Connection refused/timeout — OllamaManager logs startup status.
       return [];
     }
   }
@@ -3127,6 +3243,14 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     if (this.customProvider) return this.customProvider.name;
     if (this.activeCurlProvider) return this.activeCurlProvider.id;
     return this.useOllama ? this.ollamaModel : this.currentModelId;
+  }
+
+  public getPromptTier(): PromptTier {
+    return selectPromptTier(this.getCurrentModel(), this.useOllama);
+  }
+
+  public getCapabilities(): ModelCapabilities {
+    return getModelCapabilities(this.getCurrentModel(), this.useOllama);
   }
 
   /**
@@ -3530,7 +3654,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       await this.initializeOllamaModel();
     }
 
-    // console.log(`[LLMHelper] Switched to Ollama: ${this.ollamaModel} at ${this.ollamaUrl}`);
+    console.log(`[LLMHelper] Switched to Ollama: ${this.ollamaModel} at ${this.ollamaUrl}`);
   }
 
   public async switchToGemini(apiKey?: string, modelId?: string): Promise<void> {
@@ -3592,9 +3716,9 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   /**
    * Universal Chat (Non-streaming)
    */
-  public async chat(message: string, imagePaths?: string[], context?: string, systemPromptOverride?: string): Promise<string> {
+  public async chat(message: string, imagePaths?: string[], context?: string, systemPromptOverride?: string, skipModeInjection: boolean = false): Promise<string> {
     let fullResponse = "";
-    for await (const chunk of this.streamChat(message, imagePaths, context, systemPromptOverride)) {
+    for await (const chunk of this.streamChat(message, imagePaths, context, systemPromptOverride, false, skipModeInjection)) {
       fullResponse += chunk;
     }
     return fullResponse;

@@ -1,5 +1,7 @@
 import { LLMHelper } from "../LLMHelper";
 import { UNIVERSAL_WHAT_TO_ANSWER_PROMPT } from "./prompts";
+import { TINY_WHAT_TO_ANSWER_PROMPT } from "./tinyPrompts";
+import { estimateTokens } from "./modelCapabilities";
 import { TemporalContext } from "./TemporalContextBuilder";
 import { IntentResult } from "./IntentClassifier";
 
@@ -47,15 +49,16 @@ ANSWER SHAPE: ${intentResult.answerShape}
             }
 
             const extraContext = contextParts.join('\n\n');
+            // Reserve room for extraContext + output via fitContextForCurrentModel; cloud returns unchanged.
+            const reservedForFit = (this.llmHelper.getCapabilities().outputBudgetTokens || 2000) + estimateTokens(extraContext);
+            const workingTranscript = this.llmHelper.fitContextForCurrentModel(cleanedTranscript, reservedForFit);
             const fullMessage = extraContext
-                ? `${extraContext}\n\nCONVERSATION:\n${cleanedTranscript}`
-                : cleanedTranscript;
+                ? `${extraContext}\n\nCONVERSATION:\n${workingTranscript}`
+                : workingTranscript;
 
-            // Use Universal Prompt
-            // Note: WhatToAnswer has a very specific prompt. 
-            // We should use UNIVERSAL_WHAT_TO_ANSWER_PROMPT as override
+            const promptOverride = this.llmHelper.getPromptTier() === 'tiny' ? TINY_WHAT_TO_ANSWER_PROMPT : UNIVERSAL_WHAT_TO_ANSWER_PROMPT;
 
-            yield* this.llmHelper.streamChat(fullMessage, imagePaths, undefined, UNIVERSAL_WHAT_TO_ANSWER_PROMPT, false, true);
+            yield* this.llmHelper.streamChat(fullMessage, imagePaths, undefined, promptOverride, false, true);
 
         } catch (error) {
             console.error("[WhatToAnswerLLM] Stream failed:", error);

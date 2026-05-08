@@ -1,5 +1,6 @@
 import { LLMHelper } from "../LLMHelper";
 import { CODE_HINT_PROMPT, buildCodeHintMessage } from "./prompts";
+import { TINY_CODE_HINT_PROMPT } from "./tinyPrompts";
 
 export class CodeHintLLM {
     private llmHelper: LLMHelper;
@@ -15,17 +16,29 @@ export class CodeHintLLM {
         transcriptContext?: string
     ): AsyncGenerator<string> {
         try {
+            // Vision-required + small model lacking image support → fail loud, not malformed.
+            if (imagePaths?.length) {
+                const caps = this.llmHelper.getCapabilities();
+                if (!caps.supportsImages) {
+                    yield `The current local model (${caps.name}) doesn't support image input. Switch to a vision-capable model (e.g. llava, llama3.2-vision, gemma3) or use a cloud model.`;
+                    return;
+                }
+            }
+
             const message = buildCodeHintMessage(
                 questionContext ?? null,
                 questionSource ?? null,
                 transcriptContext ?? null
             );
 
+            const promptOverride = this.llmHelper.getPromptTier() === 'tiny' ? TINY_CODE_HINT_PROMPT : CODE_HINT_PROMPT;
+            const fittedMessage = this.llmHelper.fitContextForCurrentModel(message);
+
             yield* this.llmHelper.streamChat(
-                message,
+                fittedMessage,
                 imagePaths,
                 undefined,
-                CODE_HINT_PROMPT
+                promptOverride
             );
         } catch (error) {
             console.error("[CodeHintLLM] Stream failed:", error);

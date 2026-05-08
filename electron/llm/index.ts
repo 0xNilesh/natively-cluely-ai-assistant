@@ -47,3 +47,35 @@ export {
     buildCodeHintMessage,
     BRAINSTORM_MODE_PROMPT
 } from "./prompts";
+export {
+    TINY_CORE,
+    TINY_SYSTEM_PROMPT,
+    TINY_ANSWER_PROMPT,
+    TINY_WHAT_TO_ANSWER_PROMPT,
+    TINY_ASSIST_PROMPT,
+    TINY_RECAP_PROMPT,
+    TINY_FOLLOWUP_PROMPT,
+    TINY_FOLLOW_UP_QUESTIONS_PROMPT,
+    TINY_BRAINSTORM_PROMPT,
+    TINY_CLARIFY_PROMPT,
+    TINY_CODE_HINT_PROMPT,
+    TINY_TITLE_PROMPT,
+    TINY_SUMMARY_JSON_PROMPT,
+    TINY_FOLLOWUP_EMAIL_PROMPT,
+    TINY_MODE_GENERAL_PROMPT,
+    TINY_MODE_LOOKING_FOR_WORK_PROMPT,
+    TINY_MODE_SALES_PROMPT,
+    TINY_MODE_RECRUITING_PROMPT,
+    TINY_MODE_TEAM_MEET_PROMPT,
+    TINY_MODE_LECTURE_PROMPT,
+    TINY_MODE_TECHNICAL_INTERVIEW_PROMPT,
+    TINY_PROMPTS_SET
+} from "./tinyPrompts";
+export {
+    getModelCapabilities,
+    selectPromptTier,
+    estimateTokens,
+    truncateTranscriptToFit,
+    parseOllamaSize
+} from "./modelCapabilities";
+export type { ModelCapabilities, ModelTier, PromptTier } from "./modelCapabilities";

@@ -1,5 +1,6 @@
 import { LLMHelper } from "../LLMHelper";
 import { UNIVERSAL_ANSWER_PROMPT } from "./prompts";
+import { TINY_ANSWER_PROMPT } from "./tinyPrompts";
 
 export class AnswerLLM {
     private llmHelper: LLMHelper;
@@ -13,9 +14,9 @@ export class AnswerLLM {
      */
     async generate(question: string, context?: string): Promise<string> {
         try {
-            // Use LLMHelper's streamChat but collect all tokens since this method is non-streaming
-            // We use UNIVERSAL_ANSWER_PROMPT as override
-            const stream = this.llmHelper.streamChat(question, undefined, context, UNIVERSAL_ANSWER_PROMPT);
+            const promptOverride = this.llmHelper.getPromptTier() === 'tiny' ? TINY_ANSWER_PROMPT : UNIVERSAL_ANSWER_PROMPT;
+            const fittedContext = context ? this.llmHelper.fitContextForCurrentModel(context) : context;
+            const stream = this.llmHelper.streamChat(question, undefined, fittedContext, promptOverride);
 
             let fullResponse = "";
             for await (const chunk of stream) {

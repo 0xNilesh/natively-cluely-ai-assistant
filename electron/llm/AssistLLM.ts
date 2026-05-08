@@ -5,6 +5,7 @@
 
 import { LLMHelper } from "../LLMHelper";
 import { UNIVERSAL_ASSIST_PROMPT } from "./prompts";
+import { TINY_ASSIST_PROMPT } from "./tinyPrompts";
 
 export class AssistLLM {
     private llmHelper: LLMHelper;
@@ -28,11 +29,14 @@ export class AssistLLM {
             // providing a specific instruction as message, using UNIVERSAL_ASSIST_PROMPT as system prompt
             const instruction = "Briefly summarize what is happening right now in 1-2 sentences. Do not give advice, just observation.";
 
+            const promptOverride = this.llmHelper.getPromptTier() === 'tiny' ? TINY_ASSIST_PROMPT : UNIVERSAL_ASSIST_PROMPT;
+            const fittedContext = this.llmHelper.fitContextForCurrentModel(context);
             return await this.llmHelper.chat(
                 instruction,
-                undefined, // no image
-                context,
-                UNIVERSAL_ASSIST_PROMPT
+                undefined,
+                fittedContext,
+                promptOverride,
+                true
             );
 
         } catch (error) {
