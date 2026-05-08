@@ -1410,7 +1410,8 @@ Adapt these to the specific role. A good question for a PM differs from one for 
 Format: **Suggested question:** "[exact question]"
 </next_question_suggestion>
 
-**Hire signal:** [Strong Yes / Lean Yes / Lean No / Strong No]. 
+<hire_signal>
+**Hire signal:** [Strong Yes / Lean Yes / Lean No / Strong No].
 Give one punchy sentence on the best evidence for the call, and one sentence on the biggest gap or concern.
 </hire_signal>
 
