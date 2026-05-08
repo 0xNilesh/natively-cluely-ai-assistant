@@ -16,6 +16,8 @@ export interface ShortcutConfig {
     recap: string[];
     scrollUp: string[];
     scrollDown: string[];
+    scrollLeft: string[];
+    scrollRight: string[];
     // Window Movement
     moveWindowUp: string[];
     moveWindowDown: string[];
@@ -45,8 +47,10 @@ function buildDefaultShortcuts(): ShortcutConfig {
         brainstorm: [mod, '7'],
         shorten: [],
         recap: [],
-        scrollUp: ['↑'],
-        scrollDown: ['↓'],
+        scrollUp: [mod, '↑'],
+        scrollDown: [mod, '↓'],
+        scrollLeft: [mod, isMac ? '⌥' : 'Alt', '←'],
+        scrollRight: [mod, isMac ? '⌥' : 'Alt', '→'],
         moveWindowUp: [mod, shift, '↑'],
         moveWindowDown: [mod, shift, '↓'],
         moveWindowLeft: [mod, shift, '←'],
@@ -72,8 +76,10 @@ export const DEFAULT_SHORTCUTS: ShortcutConfig = {
     brainstorm: ['⌘', '7'],
     shorten: [],
     recap: [],
-    scrollUp: ['↑'],
-    scrollDown: ['↓'],
+    scrollUp: ['⌘', '↑'],
+    scrollDown: ['⌘', '↓'],
+    scrollLeft: ['⌘', '⌥', '←'],
+    scrollRight: ['⌘', '⌥', '→'],
     moveWindowUp: ['⌘', '⇧', '↑'],
     moveWindowDown: ['⌘', '⇧', '↓'],
     moveWindowLeft: ['⌘', '⇧', '←'],
@@ -113,6 +119,8 @@ export const useShortcuts = () => {
                 else if (kb.id === 'chat:recap') newShortcuts.recap = keys;
                 else if (kb.id === 'chat:scrollUp') newShortcuts.scrollUp = keys;
                 else if (kb.id === 'chat:scrollDown') newShortcuts.scrollDown = keys;
+                else if (kb.id === 'chat:scrollLeft') newShortcuts.scrollLeft = keys;
+                else if (kb.id === 'chat:scrollRight') newShortcuts.scrollRight = keys;
                 else if (kb.id === 'chat:auto-answer-mode') newShortcuts.autoAnswerMode = keys;
                 // Window
                 else if (kb.id === 'window:move-up') newShortcuts.moveWindowUp = keys;
@@ -176,6 +184,8 @@ export const useShortcuts = () => {
             case 'recap': backendId = 'chat:recap'; break;
             case 'scrollUp': backendId = 'chat:scrollUp'; break;
             case 'scrollDown': backendId = 'chat:scrollDown'; break;
+            case 'scrollLeft': backendId = 'chat:scrollLeft'; break;
+            case 'scrollRight': backendId = 'chat:scrollRight'; break;
             // Window
             case 'moveWindowUp': backendId = 'window:move-up'; break;
             case 'moveWindowDown': backendId = 'window:move-down'; break;
