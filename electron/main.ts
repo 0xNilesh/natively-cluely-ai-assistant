@@ -996,6 +996,18 @@ export class AppState {
     let _lastState: 'connected' | 'reconnecting' | 'failed' = 'reconnecting';
 
     stt.on('error', (err: Error) => {
+      // Google streamingRecognize's 10s silence timeout closes the stream
+      // with gRPC code 11 ("Audio Timeout Error"). GoogleSTT already
+      // swallows this case before it reaches us, but other providers may
+      // surface a similar idle-timeout that the lazy-reconnect path
+      // recovers from cleanly. Downgrade to a one-liner here as well so
+      // a stray bubble-up doesn't cascade into stack-trace noise.
+      const grpcCode = (err as any)?.code;
+      if (grpcCode === 11 || /Audio Timeout Error/i.test(err.message || '')) {
+        console.warn(`[Main] STT (${speaker}) idle-timed-out (provider's no-audio limit), reconnecting on next chunk.`);
+        return;
+      }
+
       console.error(`[Main] STT (${speaker}) Error:`, err);
 
       // Extract richer error info from Axios errors (RestSTT)
@@ -1137,6 +1149,31 @@ export class AppState {
         if (this.systemAudioCapture !== capture) return; // capture was replaced
         if (chunkCount > 0) return;                       // already producing
         if (!this.isMeetingActive) return;                // meeting ended
+
+        // Bluetooth devices like AirPods register with separate identifiers
+        // for input (cpal device name) and output (CoreAudio UID with
+        // optional :input/:output suffix). When the user has the same
+        // physical device on both sides of the pipeline, macOS cannot run a
+        // CoreAudio Process Tap on it while it's also the active microphone
+        // — the tap initializes "successfully" but every IO callback yields
+        // zero frames. The 8s watchdog is the most reliable signal we get.
+        // Surface the actual cause instead of a generic "route mismatch"
+        // hint so the user knows what to change.
+        const sameDeviceName = this.detectSameInputOutputDevice();
+        if (sameDeviceName) {
+          const msg = `Silent capture detected — input and output are the same device (${sameDeviceName}). macOS cannot tap a device while it is also the active microphone. Switch input to built-in mic or output to built-in speakers.`;
+          console.warn(`${prefix}SystemAudioCapture ${msg}`);
+          this.broadcast('audio-capture-failed', {
+            channel: 'system',
+            message: msg,
+            attempt: 0,
+            maxAttempts: 3,
+            terminal: false,
+            stuck: true,
+          });
+          return;
+        }
+
         console.warn(`${prefix}SystemAudioCapture produced 0 chunks in 8s — likely silent capture (route mismatch or permission revoked).`);
         this.broadcast('audio-capture-failed', {
           channel: 'system',
@@ -1624,6 +1661,46 @@ export class AppState {
     if (!trimmed) return undefined;
     if (trimmed.toLowerCase() === 'default') return undefined;
     return trimmed;
+  }
+
+  /**
+   * Detect the case where the requested input and output devices are the same
+   * physical hardware (typically AirPods on both sides). Input IDs come from
+   * cpal (device name), output IDs come from CoreAudio (UID with optional
+   * :input/:output suffix), so direct string comparison won't catch the
+   * conflict. We resolve the output UID to a friendly name via
+   * AudioDevices.getOutputDevices() and compare it to the input name (case-
+   * insensitive). Returns the friendly name when a same-device conflict is
+   * detected, undefined otherwise.
+   */
+  private detectSameInputOutputDevice(): string | undefined {
+    const inputId = this._lastRequestedInputDeviceId;
+    const outputId = this._lastRequestedOutputDeviceId;
+    if (!inputId || !outputId) return undefined;
+
+    // Strip the macOS CoreAudio :input/:output suffix before any comparison —
+    // a single Bluetooth device can appear with both suffixes.
+    const stripSuffix = (s: string) => s.replace(/:(input|output)$/i, '');
+    const inputBase = stripSuffix(inputId).toLowerCase();
+    const outputBase = stripSuffix(outputId).toLowerCase();
+    if (inputBase === outputBase) {
+      return stripSuffix(inputId);
+    }
+
+    // Resolve the output UID to its friendly name and compare to the input
+    // name (input IDs from cpal ARE the device name, e.g. "Evin's AirPods Pro").
+    try {
+      const outputs = AudioDevices.getOutputDevices();
+      const outputMatch = outputs.find(d => stripSuffix(d.id).toLowerCase() === outputBase);
+      if (outputMatch && outputMatch.name) {
+        if (outputMatch.name.toLowerCase() === inputId.toLowerCase()) {
+          return outputMatch.name;
+        }
+      }
+    } catch {
+      // Native module unavailable — fall through to "no conflict detected".
+    }
+    return undefined;
   }
 
   private async reconfigureAudio(inputDeviceId?: string | null, outputDeviceId?: string | null): Promise<void> {

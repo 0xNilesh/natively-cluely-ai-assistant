@@ -5,6 +5,43 @@ import {
 } from 'lucide-react';
 import { ProfileVisualizer, PremiumUpgradeModal } from '../premium';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
+import { motion, AnimatePresence } from 'framer-motion';
+
+const spring = { type: "spring" as const, stiffness: 100, damping: 20 };
+
+const BezelCard = ({ children, className = "", delay = 0, style = {} }: any) => {
+    return (
+        <motion.div 
+            layout
+            initial={{ opacity: 0, y: 15 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ ...spring, delay }}
+            style={style}
+            className={`bg-bg-item-surface border border-border-subtle rounded-xl overflow-hidden ${className}`}
+        >
+            {children}
+        </motion.div>
+    );
+};
+
+const MagneticButton = ({ children, onClick, disabled, className = "", primary = false, style }: any) => {
+    return (
+        <motion.button
+            whileHover={!disabled ? { scale: 1.02 } : {}}
+            whileTap={!disabled ? { scale: 0.98 } : {}}
+            transition={spring}
+            onClick={onClick}
+            disabled={disabled}
+            style={style}
+            className={`relative group px-3.5 py-2 text-[12px] font-semibold rounded-lg flex items-center justify-center gap-1.5 overflow-hidden ${disabled ? 'opacity-50 cursor-not-allowed' : ''} ${className} ${primary ? 'bg-text-primary text-bg-main' : 'bg-bg-input text-text-primary hover:bg-bg-surface border border-border-subtle'}`}
+        >
+            {children}
+            {primary && (
+                <div className="absolute inset-0 rounded-lg ring-1 ring-inset ring-white/10 pointer-events-none" />
+            )}
+        </motion.button>
+    );
+};
 
 // ---------------------------------------------------------------------------
 // StarRating
@@ -110,72 +147,77 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
     };
 
     return (
-        <div className="flex flex-col h-full bg-bg-main relative">
-            {/* Header */}
-            <div className="flex items-center justify-between p-5 border-b border-border-subtle bg-bg-surface/50 shrink-0 backdrop-blur-md">
-                <div className="flex items-center gap-4">
-                    <div className="w-10 h-10 rounded-xl bg-bg-input border border-border-subtle shadow-inner flex items-center justify-center text-text-primary">
-                        <User size={20} strokeWidth={2.5} />
+        <div className="flex flex-col h-full bg-bg-main relative" style={{ fontFamily: '"Geist", "Satoshi", "Cabinet Grotesk", system-ui, sans-serif' }}>
+            <motion.div 
+                initial={{ y: -50, opacity: 0 }}
+                animate={{ y: 0, opacity: 1 }}
+                transition={{ ...spring, delay: 0.1 }}
+                className="flex items-center justify-between p-6 border-b border-white/5 bg-bg-surface/70 shrink-0 backdrop-blur-3xl sticky top-0 z-50"
+            >
+                <div className="flex items-center gap-5">
+                    <div className="w-10 h-10 rounded-xl bg-bg-input border border-border-subtle shadow-[inset_0_1px_1px_rgba(255,255,255,0.1)] flex items-center justify-center text-text-primary">
+                        <User size={18} strokeWidth={2} />
                     </div>
                     <div>
-                        <div className="flex items-center gap-2">
-                            <h2 className="text-[17px] font-bold text-text-primary tracking-tight">Profile Intelligence</h2>
-                            <span className="bg-yellow-500/10 text-yellow-500 text-[9px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wide">BETA</span>
+                        <div className="flex items-center gap-3 mb-1">
+                            <h2 className="text-xl font-bold text-text-primary tracking-tighter leading-none">Profile Intelligence</h2>
+                            <span className="bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-700 text-[9px] font-bold px-2.5 py-0.5 rounded-full uppercase tracking-widest shadow-sm">
+                                BETA
+                            </span>
                             {isPremium && premiumPlan && (
-                                <span className="bg-[#FACC15]/10 text-[#FACC15] border border-[#FACC15]/20 text-[9px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wide">
+                                <span className="bg-[#FACC15]/10 text-[#FACC15] border border-[#FACC15]/20 text-[9px] font-bold px-2.5 py-0.5 rounded-full uppercase tracking-widest">
                                     {premiumPlan.toUpperCase()} PLAN
                                 </span>
                             )}
                             {isTrialActive && !isPremium && (
-                                <span className="bg-violet-500/10 text-violet-400 border border-violet-500/20 text-[9px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wide">
+                                <span className="bg-violet-500/10 text-violet-400 border border-violet-500/20 text-[9px] font-bold px-2.5 py-0.5 rounded-full uppercase tracking-widest">
                                     FREE TRIAL
                                 </span>
                             )}
                         </div>
-                        <p className="text-[12px] text-text-secondary mt-0.5">Manage your persona, career history, and active job description</p>
+                        <p className="text-[13px] text-text-secondary tracking-tight">Manage your persona, career history, and active job description</p>
                     </div>
                 </div>
-                <div className="flex items-center gap-2">
-                    <button
+                <div className="flex items-center gap-3">
+                    <motion.button
+                        whileHover={{ scale: 1.02 }}
+                        whileTap={{ scale: 0.98 }}
                         onClick={() => setIsPremiumModalOpen(true)}
-                        className={`text-[11px] font-semibold flex items-center gap-1.5 transition-all duration-200 px-2.5 py-1 rounded-full border shadow-[0_0_10px_rgba(250,204,21,0.2)] hover:shadow-[0_0_15px_rgba(250,204,21,0.3)] ${isPremium
+                        className={`text-[13px] font-bold tracking-tight flex items-center gap-2 transition-all duration-300 px-5 py-2.5 rounded-full border shadow-[0_0_15px_rgba(250,204,21,0.1)] hover:shadow-[0_0_20px_rgba(250,204,21,0.2)] ${isPremium
                             ? (isLight ? 'bg-bg-component text-text-primary border-border-subtle hover:bg-bg-item-surface' : 'bg-zinc-800 text-white border-white/10 hover:bg-zinc-700')
                             : isTrialActive
-                            ? 'bg-violet-500/15 text-violet-300 border-violet-500/30 hover:bg-violet-500/25 active:scale-[0.98]'
-                            : 'bg-[#FACC15] text-black border-transparent hover:bg-[#FDE047] active:scale-[0.98]'
+                            ? 'bg-violet-500/15 text-violet-300 border-violet-500/30 hover:bg-violet-500/25'
+                            : 'bg-[#FACC15] text-black border-transparent hover:bg-[#FDE047]'
                             }`}
                     >
-                        {isPremium ? <CheckCircle size={12} className="text-green-400" /> : isTrialActive ? <Sparkles size={12} className="text-violet-400" /> : <Sparkles size={12} className="text-black/80" />}
+                        {isPremium ? <CheckCircle size={14} className="text-green-500" /> : isTrialActive ? <Sparkles size={14} className="text-violet-500" /> : <Sparkles size={14} className="text-black/80" />}
                         {isPremium ? 'Manage Pro' : isTrialActive ? 'Upgrade' : 'Unlock Pro'}
-                    </button>
-                    <button
+                    </motion.button>
+                    <motion.button
+                        whileHover={{ scale: 1.05, rotate: 90 }}
+                        whileTap={{ scale: 0.95 }}
+                        transition={{ type: 'spring', stiffness: 200, damping: 15 }}
                         onClick={onClose}
-                        className="w-8 h-8 flex items-center justify-center rounded-lg text-text-tertiary hover:text-text-primary hover:bg-bg-input transition-colors border border-transparent hover:border-border-subtle"
+                        className="w-10 h-10 flex items-center justify-center rounded-full text-text-tertiary hover:text-text-primary hover:bg-bg-input transition-colors border border-transparent hover:border-border-subtle"
                     >
-                        <X size={18} />
-                    </button>
+                        <X size={20} strokeWidth={2} />
+                    </motion.button>
                 </div>
-            </div>
+            </motion.div>
 
             {/* Scrollable Content */}
             <div className="flex-1 overflow-y-auto">
                 <div className="max-w-3xl mx-auto p-5 pb-12">
-                                <div className="space-y-6 animated fadeIn">
-                                    {/* Introduction */}
-                                    <div className="mb-5">
-                                        <div className="flex items-center justify-between mb-1">
-                                            <div className="flex items-center gap-2">
-                                                <h3 className="text-sm font-bold text-text-primary">Professional Identity</h3>
-                                            </div>
-                                        </div>
-                                        <p className="text-xs text-text-secondary mb-2">
-                                            This engine constructs an intelligent representation of your career history.
-                                        </p>
-                                    </div>
+                    <div className="space-y-6">
+                        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.15, ...spring }} className="mb-4 pt-2">
+                            <h3 className="text-[15px] font-semibold text-text-primary">Professional Identity</h3>
+                            <p className="text-xs text-text-secondary mt-1">
+                                This engine constructs an intelligent representation of your career history and skills graph.
+                            </p>
+                        </motion.div>
 
-                                    {/* Intelligence Graph Hero Card */}
-                                    <div className="bg-bg-item-surface rounded-xl border border-border-subtle flex flex-col justify-between overflow-hidden">
-                                        <div className="flex flex-col justify-between min-h-[160px]">
+                                    <BezelCard delay={0.2}>
+                                        <div className="flex flex-col justify-between min-h-[200px]">
 
                                             {/* Header */}
                                             <div className="p-5 pb-4">
@@ -284,36 +326,37 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                                 )}
                                             </div>
                                         </div>
-                                    </div>
+                                    </BezelCard>
 
-                                    {/* Upload Area */}
-                                    <div className="mt-5">
-                                        <div className={`bg-bg-item-surface rounded-xl border transition-all ${profileUploading ? 'border-accent-primary/50 ring-1 ring-accent-primary/20' : 'border-border-subtle'}`}>
-                                            <div className="p-5 flex items-center justify-between">
-                                                <div className="flex items-center gap-4 min-w-0">
-                                                    <div className="w-10 h-10 rounded-lg bg-bg-input border border-border-subtle flex items-center justify-center text-text-tertiary shrink-0">
-                                                        {profileUploading ? <RefreshCw size={20} className="animate-spin text-accent-primary" /> : <Upload size={20} />}
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                        <BezelCard delay={0.3} className={profileUploading ? 'ring-accent-primary/50' : ''}>
+                                        <div className="transition-all">
+                                            <div className="p-5 flex flex-col gap-5">
+                                                <div className="flex items-start gap-4 min-w-0">
+                                                    <div className="w-8 h-8 rounded-[8px] bg-bg-input border border-border-subtle flex items-center justify-center text-text-tertiary shrink-0 mt-0.5">
+                                                        {profileUploading ? <RefreshCw size={16} className="animate-spin text-accent-primary" /> : <Upload size={16} />}
                                                     </div>
                                                     <div className="min-w-0">
-                                                        <h4 className="text-sm font-bold text-text-primary mb-0.5 truncate pr-4">
+                                                        <h4 className="text-sm font-semibold text-text-primary mb-1">
                                                             {profileStatus.hasProfile ? 'Overwrite Source Document' : 'Initialize Knowledge Base'}
                                                         </h4>
                                                         {profileUploading ? (
-                                                            <div className="flex items-center gap-2">
+                                                            <div className="flex items-center gap-2 mt-2">
                                                                 <div className="h-[4px] w-[100px] bg-bg-input rounded-full overflow-hidden">
                                                                     <div className="h-full bg-accent-primary rounded-full animate-pulse" style={{ width: '50%' }} />
                                                                 </div>
                                                                 <span className="text-[10px] text-text-secondary tracking-wide">Processing structural semantics...</span>
                                                             </div>
                                                         ) : (
-                                                            <p className="text-xs text-text-secondary truncate pr-4">
+                                                            <p className="text-xs text-text-secondary leading-relaxed pr-2">
                                                                 Provide a resume file to seed the intelligence engine.
                                                             </p>
                                                         )}
                                                     </div>
                                                 </div>
 
-                                                <button
+                                                <div className="flex justify-end pt-2">
+                                                    <MagneticButton
                                                     onClick={async () => {
                                                         setProfileError('');
                                                         try {
@@ -337,10 +380,16 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                                         }
                                                     }}
                                                     disabled={profileUploading}
-                                                    className={`px-4 py-2 rounded-full text-xs font-medium transition-all whitespace-nowrap shrink-0 ${profileUploading ? 'bg-bg-input text-text-tertiary cursor-wait border border-border-subtle' : 'bg-text-primary text-bg-main hover:opacity-90 shadow-sm'}`}
+                                                    primary={!profileStatus.hasProfile}
                                                 >
                                                     {profileUploading ? 'Ingesting...' : 'Select File'}
-                                                </button>
+                                                    {!profileUploading && (
+                                                        <div className="w-6 h-6 rounded-full bg-black/10 dark:bg-white/10 flex items-center justify-center ml-1">
+                                                            <Upload size={12} />
+                                                        </div>
+                                                    )}
+                                                </MagneticButton>
+                                                </div>
                                             </div>
 
                                             {profileError && (
@@ -351,47 +400,46 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                                 </div>
                                             )}
                                         </div>
-                                    </div>
+                                    </BezelCard>
 
-                                    {/* JD Upload Card */}
-                                    <div className="mt-5">
-                                        <div className={`rounded-xl transition-all border ${jdUploading ? 'border-blue-500/50 ring-1 ring-blue-500/20 bg-bg-item-surface' : profileData?.hasActiveJD ? 'border-blue-500/30 bg-blue-500/5' : 'border-border-subtle bg-bg-item-surface'}`}>
-                                            <div className="p-5 flex items-center justify-between">
-                                                <div className="flex items-center gap-4 min-w-0">
-                                                    <div className="w-10 h-10 rounded-lg bg-bg-input border border-border-subtle flex items-center justify-center text-text-tertiary shrink-0">
-                                                        {jdUploading ? <RefreshCw size={20} className="animate-spin text-blue-500" /> : <Briefcase size={20} />}
+                                    <BezelCard delay={0.4} className={jdUploading ? 'ring-blue-500/50' : profileData?.hasActiveJD ? 'ring-blue-500/30' : ''}>
+                                        <div className="transition-all">
+                                            <div className="p-5 flex flex-col gap-5">
+                                                <div className="flex items-start gap-4 min-w-0">
+                                                    <div className="w-8 h-8 rounded-[8px] bg-bg-input border border-border-subtle flex items-center justify-center text-text-tertiary shrink-0 mt-0.5">
+                                                        {jdUploading ? <RefreshCw size={16} className="animate-spin text-blue-500" /> : <Briefcase size={16} />}
                                                     </div>
                                                     <div className="min-w-0">
-                                                        <h4 className="text-sm font-bold text-text-primary mb-0.5 truncate pr-4">
+                                                        <h4 className="text-sm font-semibold text-text-primary mb-1">
                                                             {profileData?.hasActiveJD ? `${profileData.activeJD?.title} @ ${profileData.activeJD?.company}` : 'Upload Job Description'}
                                                         </h4>
                                                         {jdUploading ? (
-                                                            <div className="flex items-center gap-2">
+                                                            <div className="flex items-center gap-2 mt-2">
                                                                 <div className="h-[4px] w-[100px] bg-bg-input rounded-full overflow-hidden">
                                                                     <div className="h-full bg-blue-500 rounded-full animate-pulse" style={{ width: '50%' }} />
                                                                 </div>
                                                                 <span className="text-[10px] text-text-secondary tracking-wide">Parsing JD structure...</span>
                                                             </div>
                                                         ) : profileData?.hasActiveJD ? (
-                                                            <div className="flex items-center gap-3">
+                                                            <div className="flex items-center gap-3 mt-1 flex-wrap">
                                                                 <span className="text-[9px] font-bold text-blue-500 px-1.5 py-0.5 bg-blue-500/10 rounded uppercase tracking-wide border border-blue-500/20">
                                                                     {profileData.activeJD?.level || 'mid'}-level
                                                                 </span>
-                                                                <div className="flex gap-1.5">
+                                                                <div className="flex gap-1.5 flex-wrap">
                                                                     {profileData.activeJD?.technologies?.slice(0, 3).map((t: string, i: number) => (
                                                                         <span key={i} className="text-[10px] text-text-secondary">{t}</span>
                                                                     ))}
                                                                 </div>
                                                             </div>
                                                         ) : (
-                                                            <p className="text-xs text-text-secondary">
+                                                            <p className="text-xs text-text-secondary leading-relaxed pr-2">
                                                                 Upload a JD to enable persona tuning and company research.
                                                             </p>
                                                         )}
                                                     </div>
                                                 </div>
 
-                                                <div className="flex items-center gap-2 shrink-0">
+                                                <div className="flex items-center justify-end gap-2 pt-2">
                                                     {profileData?.hasActiveJD && (
                                                         <button
                                                             onClick={async () => {
@@ -405,7 +453,7 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                                             <Trash2 size={14} />
                                                         </button>
                                                     )}
-                                                    <button
+                                                    <MagneticButton
                                                         onClick={async () => {
                                                             setJdError('');
                                                             try {
@@ -427,10 +475,15 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                                             }
                                                         }}
                                                         disabled={jdUploading}
-                                                        className={`px-4 py-2 rounded-full text-xs font-medium transition-all whitespace-nowrap shrink-0 ${jdUploading ? 'bg-bg-input text-text-tertiary cursor-wait border border-border-subtle' : 'bg-blue-600 text-white hover:bg-blue-500 shadow-sm'}`}
+                                                        primary={true}
                                                     >
                                                         {jdUploading ? 'Parsing...' : profileData?.hasActiveJD ? 'Replace JD' : 'Upload JD'}
-                                                    </button>
+                                                        {!jdUploading && (
+                                                            <div className="w-6 h-6 rounded-full bg-black/10 dark:bg-white/10 flex items-center justify-center ml-1">
+                                                                <Briefcase size={12} />
+                                                            </div>
+                                                        )}
+                                                    </MagneticButton>
                                                 </div>
                                             </div>
 
@@ -442,11 +495,10 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                                 </div>
                                             )}
                                         </div>
+                                    </BezelCard>
                                     </div>
 
-                                    {/* Custom Context Card */}
-                                    <div className="mt-5">
-                                        <div className="bg-bg-item-surface rounded-xl border border-border-subtle">
+                                    <BezelCard delay={0.3}>
                                             <div className="p-5">
                                                 <div className="flex items-center gap-4 mb-4">
                                                     <div className="w-10 h-10 rounded-lg bg-bg-input border border-border-subtle flex items-center justify-center text-text-tertiary shrink-0">
@@ -497,16 +549,13 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                                     </div>
                                                 </div>
                                             </div>
-                                        </div>
-                                    </div>
+                                        </BezelCard>
 
-                                    {/* Google Search API Card */}
-                                    <div className="mt-5">
-                                        <div className="bg-bg-item-surface rounded-xl border border-border-subtle">
+                                    <BezelCard delay={0.4}>
                                             <div className="p-5">
                                                 <div className="flex items-center gap-4 mb-4">
                                                     <div className="w-10 h-10 rounded-lg bg-bg-input border border-border-subtle flex items-center justify-center text-emerald-500 shrink-0">
-                                                        <Globe size={20} />
+                                                        <Globe size={16} />
                                                     </div>
                                                     <div>
                                                         <div className="flex items-center gap-2">
@@ -546,7 +595,7 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                                     {tavilyError && (
                                                         <p className="text-[10px] text-red-400 px-1">{tavilyError}</p>
                                                     )}
-                                                    <button
+                                                    <MagneticButton
                                                         onClick={async () => {
                                                             if (!tavilyApiKey.trim()) return;
                                                             setTavilyError('');
@@ -566,10 +615,11 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                                             }
                                                         }}
                                                         disabled={tavilySaving || !tavilyApiKey.trim()}
-                                                        className={`w-full px-4 py-2 rounded-lg text-xs font-medium transition-all ${tavilySaving ? 'bg-bg-input text-text-tertiary cursor-wait' : !tavilyApiKey.trim() ? 'bg-bg-input text-text-tertiary cursor-not-allowed' : 'bg-emerald-600 text-white hover:bg-emerald-500 shadow-sm'}`}
+                                                        primary={true}
+                                                        className="w-full"
                                                     >
                                                         {tavilySaving ? 'Saving...' : 'Save API Key'}
-                                                    </button>
+                                                    </MagneticButton>
                                                 </div>
 
                                                 <div className="mt-3 flex items-start gap-2 px-3 py-2.5 bg-bg-input/50 rounded-lg">
@@ -579,13 +629,11 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                                     </p>
                                                 </div>
                                             </div>
-                                        </div>
-                                    </div>
+                                        </BezelCard>
 
-                                    {/* Company Research Section */}
                                     {profileData?.hasActiveJD && profileData?.activeJD?.company && (
-                                        <div className="mt-5">
-                                            <div className="bg-bg-item-surface rounded-xl border border-border-subtle p-5">
+                                        <BezelCard delay={0.5}>
+                                            <div className="p-5">
                                                 <div className="flex items-center justify-between mb-4">
                                                     <div className="flex items-center gap-4">
                                                         <div className="w-10 h-10 rounded-lg bg-bg-input border border-border-subtle flex items-center justify-center text-purple-500">
@@ -604,7 +652,7 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                                         </div>
                                                     </div>
 
-                                                    <button
+                                                    <MagneticButton
                                                         onClick={async () => {
                                                             setCompanyResearching(true);
                                                             setCompanySearchQuotaExhausted(false);
@@ -623,11 +671,10 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                                             }
                                                         }}
                                                         disabled={companyResearching}
-                                                        className={`px-4 py-2 rounded-full text-xs font-medium transition-all flex items-center gap-2 ${companyResearching ? 'bg-bg-input text-text-tertiary cursor-wait border border-border-subtle' : 'bg-purple-600/10 text-purple-500 hover:bg-purple-600/20 border border-purple-500/20'}`}
                                                     >
                                                         {companyResearching ? <RefreshCw size={14} className="animate-spin" /> : <Search size={14} />}
                                                         {companyResearching ? 'Researching...' : companyDossier ? 'Refresh' : 'Research Now'}
-                                                    </button>
+                                                    </MagneticButton>
                                                 </div>
 
                                                 {/* Search quota exhausted notice */}
@@ -862,14 +909,14 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                                     </div>
                                                 )}
                                             </div>
-                                        </div>
+                                        </BezelCard>
                                     )}
-                                    <ProfileVisualizer profileData={profileData} />
+                                    <div className="pt-4">
+                                        <ProfileVisualizer profileData={profileData} />
+                                    </div>
 
-                                    {/* Salary Negotiation Script */}
                                     {profileData?.hasActiveJD && (
-                                        <div className="mt-6 animated fadeIn">
-                                            <div className="relative rounded-xl border border-border-subtle overflow-hidden bg-bg-item-surface">
+                                        <BezelCard delay={0.6}>
 
                                                 <div className="p-5">
                                                     {/* Header row */}
@@ -914,7 +961,7 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                                                 </button>
                                                             )}
                                                             {!negotiationScript && (
-                                                                <button
+                                                                <MagneticButton
                                                                     onClick={async () => {
                                                                         setNegotiationGenerating(true);
                                                                         setNegotiationError('');
@@ -929,12 +976,12 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                                                         finally { setNegotiationGenerating(false); }
                                                                     }}
                                                                     disabled={negotiationGenerating}
-                                                                    className="px-4 py-1.5 rounded-full text-[11px] font-semibold transition-all flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-wait"
+                                                                    primary={true}
                                                                     style={{ background: 'linear-gradient(135deg, rgba(16,185,129,0.2) 0%, rgba(6,182,212,0.15) 100%)', border: '1px solid rgba(16,185,129,0.3)', color: '#34d399' }}
                                                                 >
                                                                     {negotiationGenerating ? <RefreshCw size={11} className="animate-spin" /> : <Sparkles size={11} />}
                                                                     {negotiationGenerating ? 'Generating…' : 'Generate Script'}
-                                                                </button>
+                                                                </MagneticButton>
                                                             )}
                                                         </div>
                                                     </div>
@@ -950,7 +997,7 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                                     {!negotiationScript && !negotiationGenerating && !negotiationError && (
                                                         <div className="flex flex-col items-center justify-center py-8 gap-3">
                                                             <div className="w-12 h-12 rounded-2xl flex items-center justify-center" style={{ background: 'linear-gradient(135deg, rgba(16,185,129,0.08) 0%, rgba(6,182,212,0.06) 100%)', border: '1px solid rgba(16,185,129,0.15)' }}>
-                                                                <Briefcase size={20} className="text-emerald-500/50" />
+                                                                <Briefcase size={16} className="text-emerald-500/50" />
                                                             </div>
                                                             <div className="text-center">
                                                                 <p className="text-[12px] font-medium text-text-secondary">No script yet</p>
@@ -1054,11 +1101,10 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                                         </div>
                                                     )}
                                                 </div>
-                                            </div>
-                                        </div>
+                                        </BezelCard>
                                     )}
 
-                                </div>
+                    </div>
                 </div>
             </div>
 

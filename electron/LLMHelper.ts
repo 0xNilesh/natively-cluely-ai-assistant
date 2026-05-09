@@ -138,6 +138,15 @@ export class LLMHelper {
     console.log("[LLMHelper] Gemini API Key updated.");
   }
 
+  // Thinking-mode models burn num_predict in <think> blocks unless `think:false` is sent.
+  private isThinkingModel(modelId: string): boolean {
+    if (!modelId) return false;
+    return /^qwen3/i.test(modelId)
+      || /qwq/i.test(modelId)
+      || /deepseek-r1/i.test(modelId)
+      || /(^|[^a-z])o1([^a-z]|$)/i.test(modelId);
+  }
+
   public setGroqApiKey(apiKey: string) {
     this.groqClient = new Groq({ apiKey });
     console.log("[LLMHelper] Groq API Key updated.");
@@ -414,18 +423,20 @@ export class LLMHelper {
 
       console.log(`[LLMHelper] Ollama call → model=${this.ollamaModel} sysLen=${sys.length} userLen=${userContent.length} images=${images?.length ?? 0}`);
 
+      const ollamaBody: any = {
+        model: this.ollamaModel,
+        messages,
+        stream: false,
+        options: {
+          temperature: 0.7,
+          top_p: 0.9,
+        }
+      };
+      if (this.isThinkingModel(this.ollamaModel)) ollamaBody.think = false;
       const response = await fetch(`${this.ollamaUrl}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: this.ollamaModel,
-          messages,
-          stream: false,
-          options: {
-            temperature: 0.7,
-            top_p: 0.9,
-          }
-        }),
+        body: JSON.stringify(ollamaBody),
         signal: AbortSignal.timeout(120_000),
       });
 
@@ -894,6 +905,16 @@ ANSWER DIRECTLY:`;
     const systemPrompt = this.injectLanguageInstruction(basePrompt);
 
     try {
+      if (this.codexCliConfig.enabled) {
+        // Codex CLI takes priority when enabled — same precedence as in chat().
+        try {
+          const text = await this.generateWithCodexCli(lastQuestion, basePrompt);
+          if (text && text.trim().length > 0) return this.processResponse(text);
+          console.warn('[LLMHelper] Codex CLI suggestion empty, falling back.');
+        } catch (e: any) {
+          console.warn(`[LLMHelper] Codex CLI suggestion failed: ${e.message}. Falling back.`);
+        }
+      }
       if (this.useOllama) {
         return await this.callOllama(systemPrompt);
       } else if (this.customProvider || this.activeCurlProvider) {
@@ -1291,6 +1312,16 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   public async generateContentStructured(message: string): Promise<string> {
     type ProviderAttempt = { name: string; execute: () => Promise<string> };
     const providers: ProviderAttempt[] = [];
+
+    // Priority 0: Codex CLI (when enabled). Structured-JSON workloads still
+    // benefit from the user's selected backend; downstream callers run their
+    // own JSON-extraction regex so prose-around-JSON is tolerated.
+    if (this.codexCliConfig.enabled) {
+      providers.push({
+        name: `Codex CLI (${this.codexCliConfig.model})`,
+        execute: () => this.generateWithCodexCli(message),
+      });
+    }
 
     // Priority 1: OpenAI
     if (this.openaiClient) {
@@ -2074,6 +2105,27 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         name: `Ollama (${this.ollamaModel})`,
         execute: () => this.callOllama(`${systemPrompt}\n\n${userPrompt}`, isMultimodal ? imagePaths[0] : undefined)
       });
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Codex CLI runs FIRST when enabled — same priority as in chat() so
+    // every AI feature that flows through generateWithVisionFallback
+    // (analyzeImageFiles, generateRollingScript, debugSolutionWithImages,
+    // extractProblemFromImages, generateSolution) honors the user's pick.
+    // On failure we fall back to the cloud tier rotation below.
+    // ──────────────────────────────────────────────────────────────────
+    if (this.codexCliConfig.enabled) {
+      try {
+        console.log(`[LLMHelper] 🚀 [Codex CLI] Attempting (${this.codexCliConfig.model}, ${isMultimodal ? imagePaths.length + ' image(s)' : 'text-only'})...`);
+        const text = await this.generateWithCodexCli(userPrompt, systemPrompt, false, isMultimodal ? imagePaths : undefined);
+        if (text && text.trim().length > 0) {
+          console.log(`[LLMHelper] ✅ [Codex CLI] succeeded.`);
+          return text;
+        }
+        console.warn(`[LLMHelper] ⚠️ [Codex CLI] returned empty response, falling back to cloud tiers.`);
+      } catch (e: any) {
+        console.warn(`[LLMHelper] ⚠️ [Codex CLI] failed: ${e.message}. Falling back to cloud tiers.`);
+      }
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -3068,15 +3120,17 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     const decoder = new TextDecoder();
     let buffer = '';
     try {
+      const streamBody: any = {
+        model: this.ollamaModel,
+        messages,
+        stream: true,
+        options: { temperature: 0.7 }
+      };
+      if (this.isThinkingModel(this.ollamaModel)) streamBody.think = false;
       const response = await fetch(`${this.ollamaUrl}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: this.ollamaModel,
-          messages,
-          stream: true,
-          options: { temperature: 0.7 }
-        }),
+        body: JSON.stringify(streamBody),
         signal: AbortSignal.timeout(120_000),
       });
 
@@ -3637,6 +3691,24 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         }
       } catch (e: any) {
         console.warn(`[LLMHelper] ⚠️ Natively API summary failed: ${e.message}. Falling back...`);
+      }
+    }
+
+    // ATTEMPT 2: Codex CLI (if user has it enabled — text-only path)
+    if (this.codexCliConfig.enabled) {
+      console.log(`[LLMHelper] Attempting Codex CLI for summary...`);
+      try {
+        const text = await this.withTimeout(
+          this.generateWithCodexCli(`Context:\n${context}`, systemPrompt),
+          Math.max(this.codexCliConfig.timeoutMs, 60000),
+          'Codex CLI Summary'
+        );
+        if (text.trim().length > 0) {
+          console.log(`[LLMHelper] ✅ Codex CLI summary generated successfully.`);
+          return this.processResponse(text);
+        }
+      } catch (e: any) {
+        console.warn(`[LLMHelper] ⚠️ Codex CLI summary failed: ${e.message}. Falling back...`);
       }
     }
 

@@ -119,7 +119,7 @@ export const TEXT_PROVIDER_ORDER: TextModelFamily[] = [
   TextModelFamily.GEMINI_PRO,
 ];
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const DISCOVERY_INTERVAL_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
 const PERSISTENCE_FILENAME = 'model_versions.json';
 const MAX_DISCOVERY_FAILURES_BEFORE_BACKOFF = 3;
@@ -969,6 +969,15 @@ export class ModelVersionManager {
 
         if (parsed.schemaVersion === SCHEMA_VERSION) {
           console.log('[ModelVersionManager] Loaded persisted state from disk');
+          this.reconcileBaselines(parsed);
+          return parsed;
+        }
+
+        // Schema migration: v3 → v4 (forces baseline reconciliation for stale Gemini 1.5 entries)
+        if (parsed.schemaVersion === 3) {
+          console.log('[ModelVersionManager] Migrating v3 → v4 state (reconciling stale baselines)');
+          this.reconcileBaselines(parsed);
+          parsed.schemaVersion = SCHEMA_VERSION;
           return parsed;
         }
 
@@ -1018,6 +1027,54 @@ export class ModelVersionManager {
     }
 
     return this.createDefaultState();
+  }
+
+  /**
+   * Reset any family whose persisted baseline diverges from the current
+   * hardcoded baseline. This handles the case where a dev bumps a baseline
+   * in code (e.g. retired Gemini 1.5 → Gemini 3.1) — without this, loaders
+   * would keep promoting the stale baseline as Tier 1 indefinitely.
+   *
+   * Also resets families whose tier1 is older than the current baseline
+   * (defensive — catches any other source of drift).
+   */
+  private reconcileBaselines(state: PersistedState): void {
+    const expected: Record<string, string> = {
+      ...BASELINE_MODELS,
+      ...TEXT_BASELINE_MODELS,
+    };
+
+    for (const [family, currentBaseline] of Object.entries(expected)) {
+      const entry = state.families[family];
+      if (!entry) continue;
+
+      const baselineVersion = parseModelVersion(currentBaseline);
+      const baselineMismatch = entry.baseline !== currentBaseline;
+      const tier1OlderThanBaseline =
+        baselineVersion &&
+        entry.tier1Version &&
+        compareVersions(entry.tier1Version, baselineVersion) < 0;
+
+      if (baselineMismatch || tier1OlderThanBaseline) {
+        console.log(
+          `[ModelVersionManager] 🔄 Reconciling stale family "${family}": ` +
+          `baseline ${entry.baseline} → ${currentBaseline}, tier1 ${entry.tier1} → ${currentBaseline}`
+        );
+        entry.baseline = currentBaseline;
+        entry.tier1 = currentBaseline;
+        entry.tier1Version = baselineVersion;
+        entry.previousTier1 = null;
+        const latestStillValid =
+          baselineVersion &&
+          entry.latestVersion &&
+          compareVersions(entry.latestVersion, baselineVersion) >= 0;
+        if (!latestStillValid) {
+          entry.latest = currentBaseline;
+          entry.latestVersion = baselineVersion;
+        }
+        entry.previousLatest = null;
+      }
+    }
   }
 
   private persistState() {
