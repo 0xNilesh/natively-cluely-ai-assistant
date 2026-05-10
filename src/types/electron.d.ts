@@ -322,6 +322,16 @@ export interface ElectronAPI {
   onKeybindRegistrationFailed: (callback: (data: { id: string; accelerator: string }) => void) => () => void
   onGlobalShortcut: (callback: (data: { action: string }) => void) => () => void
 
+  // CGEventTap-backed stealth typing (macOS only — graceful degradation elsewhere)
+  stealthTapAvailable: () => Promise<boolean>
+  stealthTapPermissionGranted: () => Promise<boolean>
+  stealthTapRequestPermission: () => Promise<boolean>
+  stealthTapOpenSettings: () => Promise<void>
+  stealthTapIsActive: () => Promise<boolean>
+  stealthTapStop: () => Promise<void>
+  onStealthTapState: (cb: (state: { active: boolean; reason?: string }) => void) => () => void
+  onStealthKeyCaptured: (cb: (ev: { keyCode: number; chars: string; flags: number; isKeyDown: boolean }) => void) => () => void
+
   // Profile Engine API
   profileUploadResume: (filePath: string) => Promise<{ success: boolean; error?: string }>
   profileGetStatus: () => Promise<{ hasProfile: boolean; profileMode: boolean; name?: string; role?: string; totalExperienceYears?: number }>

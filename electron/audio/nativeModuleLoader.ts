@@ -19,6 +19,34 @@ export interface NativeModule {
   // existing shipped binaries don't have it — main.ts checks `typeof` before
   // calling. Requires a binary rebuild (cargo build --release).
   getDefaultOutputDeviceId?: () => string;
+  // macOS-only: apply NSPanel-nonactivating + becomesKeyOnlyIfNeeded +
+  // hidesOnDeactivate=NO + the right collectionBehavior on the overlay
+  // window so clicks/keystrokes don't activate Natively (foreground app
+  // keeps key state in dock/menu bar/screen-share). Requires a binary
+  // rebuild — WindowHelper checks `typeof` and degrades to plain panel
+  // type if missing. Caller passes BrowserWindow.getNativeWindowHandle().
+  applyStealthToWindow?: (handle: Buffer) => void;
+  // macOS-only: Accessibility permission gate for CGEventTap. Returns
+  // true if the process is currently trusted; false otherwise. Cheap;
+  // safe to poll to drive UI state.
+  isAccessibilityGranted?: () => boolean;
+  // macOS-only: CGEventTap-backed stealth keyboard interception.
+  // Engaged by StealthKeyboardManager; the foreground app does NOT
+  // receive any keystroke while the tap is active. Optional: requires
+  // binary rebuild AND Accessibility permission at runtime.
+  StealthKeyboardTap?: new () => {
+    start(callback: (err: Error | null, ev: CapturedKey) => void): boolean;
+    stop(): void;
+    readonly isActive: boolean;
+  };
+}
+
+/** Mirrors native-module/src/keyboard_tap.rs CapturedKey. */
+export interface CapturedKey {
+  keyCode: number;
+  chars: string;
+  flags: number;
+  isKeyDown: boolean;
   SystemAudioCapture: new (deviceId?: string | null) => {
     getSampleRate(): number;
     start(callback: (...args: any[]) => any, onSpeechEnded?: (...args: any[]) => any): void;

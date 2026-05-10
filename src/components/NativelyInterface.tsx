@@ -294,6 +294,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
     const voiceInputRef = useRef<string>('');  // Ref for capturing in async handlers
     const textInputRef = useRef<HTMLInputElement>(null); // Ref for input focus
     const isStealthRef = useRef<boolean>(false); // Tracks if the next expansion should be stealthy
+    // CGEventTap stealth-typing state. Driven by IPC from main; ref shadows
+    // the state so the captured-key handler can early-out without depending
+    // on React's render cycle for stop signals.
+    const [stealthTapActive, setStealthTapActive] = useState<boolean>(false);
+    const stealthTapActiveRef = useRef<boolean>(false);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const contentRef = useRef<HTMLDivElement>(null);
     const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -2614,6 +2619,17 @@ Provide only the answer, nothing else.`;
             else if (action === 'scrollDown') inertialScrollRef.current?.kick('vert', 1);
             else if (action === 'scrollLeft') inertialScrollRef.current?.kick('horiz', -1);
             else if (action === 'scrollRight') inertialScrollRef.current?.kick('horiz', 1);
+            else if (action === 'focusInput') {
+                // Stealth-focus the chat input: the panel-type overlay (macOS) is
+                // already key without activating the app. We just need the input
+                // element to be the active DOM target so keystrokes land in it.
+                // Defer to next frame so an expand-from-collapsed has time to
+                // mount the input before .focus() runs.
+                setIsExpanded(true);
+                requestAnimationFrame(() => {
+                    requestAnimationFrame(() => textInputRef.current?.focus());
+                });
+            }
             else if (action === 'processScreenshots') generalHandlers.processScreenshots();
             else if (action === 'resetCancel') generalHandlers.resetCancel();
             else if (action === 'takeScreenshot') generalHandlers.takeScreenshot();
@@ -2623,6 +2639,82 @@ Provide only the answer, nothing else.`;
             setTimeout(() => { isStealthRef.current = false; }, 500);
         });
         return unsubscribe;
+    }, []);
+
+    // ── Stealth keyboard tap (CGEventTap) — true Cluely-grade input path ──
+    //
+    // When the OS-level tap is engaged (toggled by Cmd/Ctrl+Shift+Space),
+    // every keystroke is captured BEFORE the foreground app sees it and
+    // forwarded here. We append `chars` directly to inputValue without ever
+    // touching DOM focus — the chat input never has to be the active element,
+    // so the panel never has to be the key window. Zoom/browser stays as the
+    // OS frontmost+key application throughout the entire typing session.
+    //
+    // HID virtual keycodes referenced below (stable across layouts):
+    //   36 = Return,  48 = Tab,  51 = Delete (Backspace),  53 = Esc,
+    //   76 = Numpad Enter,  123 = Left,  124 = Right,  125 = Down,  126 = Up.
+    useEffect(() => {
+        if (!window.electronAPI?.onStealthTapState || !window.electronAPI?.onStealthKeyCaptured) return;
+
+        const unsubState = window.electronAPI.onStealthTapState(({ active, reason }) => {
+            stealthTapActiveRef.current = active;
+            setStealthTapActive(active);
+            if (active) {
+                // Auto-expand the overlay so the user can see what they're
+                // typing. We do NOT call .focus() — the whole point of the
+                // tap is to avoid window-level focus.
+                isStealthRef.current = true;
+                setIsExpanded(true);
+            }
+            if (!active && reason === 'permission') {
+                console.warn('[stealth-tap] Accessibility permission required — guide user to System Settings');
+            }
+        });
+
+        const unsubKey = window.electronAPI.onStealthKeyCaptured((ev) => {
+            if (!stealthTapActiveRef.current) return; // defensive: ignore late events after stop
+
+            // Cmd+modifier sequences are not text — skip them. Cmd is bit 1<<20.
+            const CMD = 1 << 20;
+            const MOD_TEXT_NEUTRAL = CMD;
+            if (ev.flags & MOD_TEXT_NEUTRAL) {
+                // Cmd+Enter = submit, Cmd+anything else = ignore (let user
+                // know shortcuts work even in stealth mode for these two).
+                if (ev.isKeyDown && (ev.keyCode === 36 || ev.keyCode === 76)) {
+                    handleManualSubmit();
+                    window.electronAPI.stealthTapStop();
+                }
+                return;
+            }
+
+            if (!ev.isKeyDown) return; // we only act on keyDown
+
+            switch (ev.keyCode) {
+                case 53: // Esc — main process auto-stops; we just clear partial input
+                    setInputValue('');
+                    return;
+                case 36: // Return
+                case 76: // Numpad Enter
+                    handleManualSubmit();
+                    window.electronAPI.stealthTapStop();
+                    return;
+                case 51: // Backspace
+                    setInputValue(prev => prev.slice(0, -1));
+                    return;
+                case 48: // Tab
+                case 123: case 124: case 125: case 126: // arrow keys
+                    return; // ignore navigation keys in stealth mode
+            }
+
+            // Append printable chars. CGEventKeyboardGetUnicodeString already
+            // honors the active layout, dead keys, and IME — we don't need to
+            // re-derive characters from keyCode + modifiers ourselves.
+            if (ev.chars && ev.chars.length > 0 && ev.chars !== '\r' && ev.chars !== '\n' && ev.chars !== '\t') {
+                setInputValue(prev => prev + ev.chars);
+            }
+        });
+
+        return () => { unsubState(); unsubKey(); };
     }, []);
 
     // ── Derived STT status for the rolling transcript indicator (interviewer channel) ──

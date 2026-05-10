@@ -1555,11 +1555,13 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       body.language = this.aiResponseLanguage; // 'auto' is forwarded — server handles it
     }
 
+    // 8s hard cap: a `fetch failed` network error without this can stall the provider
+    // waterfall for 25-30s before the OS-level TCP reset fires.
     const response = await fetch(endpointUrl, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(25000),
+      signal: AbortSignal.timeout(8000),
     });
 
     if (!response.ok) {
@@ -2386,8 +2388,14 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
     // ============================================================
     // KNOWLEDGE MODE INTERCEPT (Streaming)
+    // Skip when fast-text mode is active — intent classification +
+    // hybrid search add 300-800ms that defeat the purpose of fast mode.
     // ============================================================
-    if (!ignoreKnowledgeMode && this.knowledgeOrchestrator?.isKnowledgeMode()) {
+    const shouldRunKnowledge = !ignoreKnowledgeMode &&
+      !this.groqFastTextMode &&
+      this.knowledgeOrchestrator?.isKnowledgeMode();
+
+    if (shouldRunKnowledge) {
       try {
         // Feed to depth scorer only (not negotiation tracker) — mirrors non-streaming path fix.
         this.knowledgeOrchestrator.feedForDepthScoring(message);
@@ -2730,14 +2738,28 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       streamHeaders['x-natively-key'] = nativelyKey;
     }
 
-    // 60s timeout covers worst-case: max-token Gemini Pro response streamed over a slow connection.
-    // This is intentionally longer than the non-streaming 25s timeout.
-    const response = await fetch('https://api.natively.software/v1/chat', {
-      method: 'POST',
-      headers: streamHeaders,
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(60_000),
-    });
+    // Connect-only timeout: 10s to establish the TCP+TLS+HTTP handshake.
+    // Once the server sends the first response byte (headers received), we clear
+    // the timer so the SSE stream can run as long as needed.
+    // IMPORTANT: AbortSignal.timeout() applies to the ENTIRE request lifetime, not
+    // just the connection phase — using it here would kill Flash mid-stream at 10s
+    // and Pro at 10s even when actively yielding tokens. The AbortController pattern
+    // below correctly scopes the timeout to the connection phase only.
+    const _connectController = new AbortController();
+    const _connectTimer = setTimeout(() => _connectController.abort(new Error('Natively API connect timeout (10s)')), 10_000);
+    let response: Response;
+    try {
+      response = await fetch('https://api.natively.software/v1/chat', {
+        method: 'POST',
+        headers: streamHeaders,
+        body: JSON.stringify(body),
+        signal: _connectController.signal,
+      });
+    } finally {
+      // Connection established (or failed) — stop the connect-phase timer.
+      // The stream body will now be read without any timeout.
+      clearTimeout(_connectTimer);
+    }
 
     if (!response.ok) {
       const errData = await response.json().catch(() => ({}) as Record<string, unknown>);
@@ -3028,15 +3050,36 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   private async * streamWithGeminiParallelRace(fullMessage: string, imagePaths?: string[]): AsyncGenerator<string, void, unknown> {
     if (!this.client) throw new Error("Gemini client not initialized");
 
-    // Start both streams
-    const flashPromise = this.collectStreamResponse(fullMessage, GEMINI_FLASH_MODEL, imagePaths);
-    const proPromise = this.collectStreamResponse(fullMessage, GEMINI_PRO_MODEL, imagePaths);
+    // BUG-1 fix: use a shared AbortController so the winning model cancels the loser.
+    // Previously, both Flash AND Pro ran to full completion — only the winner's response
+    // was used, but the loser's entire API call (tokens + compute) was silently wasted.
+    // Note: the Google GenAI SDK does not expose AbortSignal on generateContent, so the
+    // underlying HTTP call for the loser still runs to completion. We cancel our WAIT
+    // for the result — the HTTP connection is released when the SDK call eventually settles.
+    // Timing reference: Flash ≤15s (≤30s with images), Pro ≤30s.
+    const raceController = new AbortController();
 
-    // Race - whoever finishes first wins
-    const result = await Promise.any([flashPromise, proPromise]);
+    const race = async (model: string): Promise<string> => {
+      const result = await this.collectStreamResponse(fullMessage, model, imagePaths, raceController.signal);
+      // This model won — signal the other to stop waiting for its result.
+      raceController.abort(new Error(`${model} won the race`));
+      return result;
+    };
 
-    // Yield the collected response character by character to simulate streaming
-    // (Or yield in chunks for efficiency)
+    let result: string;
+    try {
+      result = await Promise.any([race(GEMINI_FLASH_MODEL), race(GEMINI_PRO_MODEL)]);
+    } catch (agg: any) {
+      // Promise.any throws AggregateError when ALL promises reject.
+      // agg.message is always the unhelpful 'All promises were rejected' —
+      // unwrap individual errors so the caller's catch logs Flash+Pro failure details.
+      const details = Array.isArray(agg.errors)
+        ? agg.errors.map((e: any) => e?.message ?? String(e)).join(' | ')
+        : agg.message;
+      throw new Error(`Both Gemini models failed in parallel race: ${details}`);
+    }
+
+    // Yield in chunks to simulate incremental streaming UX.
     const chunkSize = 10;
     for (let i = 0; i < result.length; i += chunkSize) {
       yield result.substring(i, i + chunkSize);
@@ -3044,10 +3087,15 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   }
 
   /**
-   * Collect full response from a Gemini model (non-streaming for race)
+   * Collect full response from a Gemini model (non-streaming, used by parallel race).
+   * Accepts an AbortSignal so the losing model can be cancelled by the winner.
+   * Timing reference: Flash 10-15s (up to 30s with images), Pro up to 30s.
    */
-  private async collectStreamResponse(fullMessage: string, model: string, imagePaths?: string[]): Promise<string> {
+  private async collectStreamResponse(fullMessage: string, model: string, imagePaths?: string[], signal?: AbortSignal): Promise<string> {
     if (!this.client) throw new Error("Gemini client not initialized");
+
+    // Bail immediately if already cancelled (e.g. the other model already won).
+    if (signal?.aborted) throw new Error(`Gemini ${model} request cancelled before start`);
 
     const contents: any[] = [{ text: fullMessage }];
     if (imagePaths?.length) {
@@ -3064,7 +3112,10 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       }
     }
 
-    const response = await this.client.models.generateContent({
+    // Wrap the API call in an abort-aware race so the signal can interrupt it.
+    // The Google GenAI SDK does not natively support AbortSignal on generateContent,
+    // so we implement manual cancellation via Promise.race.
+    const apiCall = this.client.models.generateContent({
       model: model,
       contents: contents,
       config: {
@@ -3073,6 +3124,19 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       }
     });
 
+    if (signal) {
+      // If the signal is already aborted before the API resolves, race resolves with rejection.
+      const abortPromise = new Promise<never>((_, reject) => {
+        if (signal.aborted) { reject(new Error(`Gemini ${model} aborted`)); return; }
+        signal.addEventListener('abort', () => reject(new Error(`Gemini ${model} aborted`)), { once: true });
+      });
+      // Suppress unhandled rejection on the losing API call promise.
+      apiCall.catch(() => {});
+      const response = await Promise.race([apiCall, abortPromise]);
+      return response.text || "";
+    }
+
+    const response = await apiCall;
     return response.text || "";
   }
 
@@ -3677,12 +3741,14 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     }
 
     // ATTEMPT 1: Natively API (if configured — first in chain)
+    // Inner fetch timeout: 8s (AbortSignal.timeout in generateWithNatively).
+    // Outer safety net: 10s — covers JSON parsing + any overhead after the fetch resolves.
     if (this.hasNatively()) {
       try {
         console.log(`[LLMHelper] Attempting Natively API for summary...`);
         const text = await this.withTimeout(
           this.generateWithNatively(`Context:\n${context}`, systemPrompt),
-          60000,
+          10000,
           'Natively Summary'
         );
         if (text.trim().length > 0) {

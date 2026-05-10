@@ -42,7 +42,7 @@ If you’re looking for a hosted desktop recording API, consider checking out [R
 [![License](https://img.shields.io/badge/License-AGPL--3.0-blue?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows-blueviolet?style=flat-square)](https://github.com/Natively-AI-assistant/natively-cluely-ai-assistant/releases)
 [![Downloads](https://img.shields.io/github/downloads/evinjohnn/natively-cluely-ai-assistant/total?style=flat-square&color=success)](https://github.com/Natively-AI-assistant/natively-cluely-ai-assistant/releases)
-![Repo Views](https://img.shields.io/badge/Views-250k-orange?style=flat-square)
+![Repo Views](https://img.shields.io/badge/Views-341k-orange?style=flat-square)
 [![Stars](https://img.shields.io/github/stars/evinjohnn/natively-cluely-ai-assistant?style=flat-square&color=gold)](https://github.com/Natively-AI-assistant/natively-cluely-ai-assistant)
 ![Status](https://img.shields.io/badge/Status-active-success?style=flat-square)
 [![X Community](https://img.shields.io/badge/Community-black?style=flat-square&logo=x&logoColor=white)](https://x.com/i/communities/2031398735515693507)
@@ -166,6 +166,12 @@ This demo shows **a complete live meeting scenario**:
 | **Process Disguise**      | ✅ Terminal, Settings, etc | ❌                   | ❌         | ❌               | ❌                     |
 | **Resume & context**      | ✅ Pro                     | ❌                   | ❌         | ✅ Yes           | ✅ Yes                 |
 | **Custom Personas/Modes** | ✅ Pro                     | ✅ Yes               | ❌         | ❌               | ⚠️ Limited             |
+| **Phone Link Companion**  | ✅ Yes                     | ❌                   | ❌         | ❌               | ❌                     |
+| **Auto-Calendar Sync**    | ✅ Yes                     | ❌                   | ❌         | ❌               | ❌                     |
+| **Smart Task Sync**       | ✅ Yes                     | ❌                   | ❌         | ❌               | ❌                     |
+| **Speaker Diarization**   | ✅ Yes                     | ❌                   | ❌         | ❌               | ❌                     |
+| **Codex CLI Integration** | ✅ Yes                     | ❌                   | ❌         | ❌               | ❌                     |
+| **Offline SLM Mode**      | ✅ Yes                     | ❌                   | ❌         | ❌               | ❌                     |
 | **Data breach history**   | ✅ None                    | ❌ 83k users exposed | ✅ None    | ✅ None          | ✅ None                |
 
 > **Legend:** ✅ Full support · ⚠️ Partial or limited · ❌ Not available
@@ -353,6 +359,9 @@ We've launched the official **$NAT token** on Printr! Holders who maintain a spe
 | **Live Salary & Offer Negotiation Copilot**         |      ❌       |      ✅      |
 | **Custom Persona Modes (Sales, Tech, etc.)**        |      ❌       |      ✅      |
 | **Custom Real-Time Context & Reference Files**      |      ❌       |      ✅      |
+| **Phone Link Companion App**                        |      ❌       |      ✅      |
+| **Auto-Calendar & Task Sync**                       |      ❌       |      ✅      |
+| **Speaker Diarization**                             |      ❌       |      ✅      |
 | **Priority Feature Access & Support**               |      ❌       |      ✅      |
 
 <p align="center">
@@ -363,6 +372,20 @@ We've launched the official **$NAT token** on Printr! Holders who maintain a spe
     <img src="https://img.shields.io/badge/Yearly_License-Unlock_Premium-black?style=for-the-badge&logo=fastapi&logoColor=white" />
   </a>
 </p>
+
+---
+
+### What's New in v2.6.0
+
+Version 2.6.0 brings massive workflow and integration capabilities to make your AI assistant even more powerful:
+
+- **Phone Link Integration**: Connect your iOS or Android device to seamlessly use it as a wireless remote microphone or companion screen for your meeting notes.
+- **TinyPrompts™ Engine**: Highly optimized system prompts for local SLMs (Ollama, Qwen 2.5:4B, Llama 3.2), enabling premium intelligence on consumer-grade hardware.
+- **Codex CLI Integration**: Native support for the Codex automation system, allowing sandboxed code execution and local terminal tasks via `gpt-5.3-codex`.
+- **Auto-Calendar Sync**: Natively now securely connects to Google Calendar and Outlook to automatically pull context and prepare for your upcoming meetings.
+- **Smart Task Sync**: Action items are now auto-extracted with extreme precision and can be instantly exported to Jira, Linear, or Asana boards.
+- **Speaker Identification**: Advanced real-time speaker diarization automatically tags individual speakers by name throughout the meeting transcript.
+- **Expanded Offline Mode**: 100% offline transcription and intelligent note generation using specialized, lightning-fast on-device SLMs.
 
 ---
 
@@ -393,7 +416,7 @@ Version 2.5.0 introduces major feature upgrades, architectural overhauls, and ro
 - [Why Natively wins](#why-natively-wins)
 - [AI Coding Assistant](#free-ai-coding-interview-assistant-undetectable-on-leetcode-hackerrank--coderpad)
 - [Natively Pro](#natively-pro)
-- [What's New in v2.4.0](#whats-new-in-v240)
+- [What's New in v2.6.0](#whats-new-in-v260)
 - [Privacy & Security](#privacy--security-core-design-principle)
 - [Installation](#installation-developers--contributors)
 - [AI Providers](#ai-providers)
@@ -634,7 +657,8 @@ This runs: Vite build → TypeScript compile → native module build → electro
 - Context-aware Memory (RAG) for Past Meetings
 - Instant answers as questions are asked
 - **Interim/Final Bridging**: Manual transcript finalization and interim bridging during recordings for higher accuracy.
-- Smart recap and summaries
+- **Smart Recap & Summaries**: Instant meeting minutes and executive summaries.
+- **TinyPrompts™ Engine**: Specialized prompt architecture for local SLMs (4B-8B params), ensuring instruction following and reasoning parity with cloud models on local hardware.
 - **Dynamic Note Templates**: AI automatically generates structured meeting notes based on your active persona mode (e.g., Tech Interview follow-ups vs Sales action items).
 
 ### Instant Screen & Slide Analysis (OCR) — AI Coding Interview Assistant
@@ -660,6 +684,14 @@ This runs: Vite build → TypeScript compile → native module build → electro
 - Recap conversation
 - Suggest follow-up questions
 - Manual or voice-triggered prompts
+
+### Seamless Integrations & Sync
+
+- **Phone Link:** Use your iOS/Android device as a wireless remote microphone or companion screen.
+- **Calendar Prep:** Auto-syncs with Google Calendar and Outlook to prepare context before meetings.
+- **Smart Task Export:** Send extracted action items directly to Jira, Linear, or Asana.
+- **Speaker Diarization:** Real-time speaker identification tags individual speakers by name automatically.
+- **Codex CLI:** Execute terminal tasks, manage workspace files, and run sandboxed code via native Codex integration.
 
 ### Dual-Channel Audio Intelligence
 

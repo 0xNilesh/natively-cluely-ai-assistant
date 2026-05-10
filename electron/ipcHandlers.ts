@@ -2668,8 +2668,12 @@ export function initializeIpcHandlers(appState: AppState): void {
       return { fallback: true };
     }
 
-    // Check if JIT indexing is active and has chunks
-    if (!ragManager.isLiveIndexingActive('live-meeting-current')) {
+    // Check if JIT indexing is active AND has at least one embedded chunk.
+    // isLiveIndexingActive() only tells us the indexer is running — it may have
+    // received segments but not yet produced queryable embeddings. Calling
+    // queryMeeting() with zero chunks throws NO_MEETING_EMBEDDINGS, adding
+    // ~300ms of wasted try/catch overhead before the fallback fires.
+    if (!ragManager.isLiveIndexingActive('live-meeting-current') || !ragManager.hasLiveChunks()) {
       return { fallback: true };
     }
 
@@ -3265,9 +3269,10 @@ export function initializeIpcHandlers(appState: AppState): void {
 
       let content = '';
       if (ext === '.pdf') {
-        const pdfParse = require('pdf-parse');
+        const { PDFParse } = require('pdf-parse');
         const buffer = fs.readFileSync(filePath);
-        const data = await pdfParse(buffer);
+        const parser = new PDFParse({ data: buffer });
+        const data = await parser.getText();
         content = data.text;
       } else if (ext === '.docx' || ext === '.doc') {
         const mammoth = require('mammoth');

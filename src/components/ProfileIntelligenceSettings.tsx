@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
     X, RefreshCw, Upload, Briefcase, Trash2, Pencil, Check, Globe,
-    Building2, Search, AlertCircle, Gift, Info, Star, Sparkles, User, CheckCircle
+    Building2, Search, AlertCircle, Gift, Info, Star, Sparkles, User, CheckCircle, ArrowUpRight
 } from 'lucide-react';
 import { ProfileVisualizer, PremiumUpgradeModal } from '../premium';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
@@ -9,17 +9,309 @@ import { motion, AnimatePresence } from 'framer-motion';
 
 const spring = { type: "spring" as const, stiffness: 100, damping: 20 };
 
+// ─── Profile Intelligence Apple-style CSS (mirrors ModesSettings GATE_CSS) ────
+// Lives at module scope so it's not re-allocated on each render.
+const PI_CSS = `
+    .pi-root {
+        --pi-hero: #ffffff;
+        --pi-sub: rgba(255,255,255,0.55);
+        --pi-sub-low: rgba(255,255,255,0.4);
+        --pi-border: rgba(255,255,255,0.06);
+        --pi-shell-bg: rgba(255,255,255,0.025);
+        --pi-shell-border: rgba(255,255,255,0.05);
+        --pi-shell-hover: rgba(255,255,255,0.09);
+        --pi-core-bg1: rgba(255,255,255,0.045);
+        --pi-core-bg2: rgba(255,255,255,0.01);
+        --pi-core-shadow1: rgba(255,255,255,0.1);
+        --pi-core-shadow2: rgba(255,255,255,0.04);
+        --pi-cta-bg: #ffffff;
+        --pi-cta-text: #0a0a0a;
+        --pi-cta-ring: rgba(0,0,0,0.08);
+        --pi-cta-shadow: 0 4px 14px rgba(0,0,0,0.28);
+        --pi-noise: 0.035;
+    }
+    .pi-root[data-theme='light'] {
+        --pi-hero: #1d1d1f;
+        --pi-sub: #6e6e73;
+        --pi-sub-low: #86868b;
+        --pi-border: rgba(0,0,0,0.07);
+        --pi-shell-bg: #f5f5f7;
+        --pi-shell-border: rgba(0,0,0,0.05);
+        --pi-shell-hover: rgba(0,0,0,0.1);
+        --pi-core-bg1: #ffffff;
+        --pi-core-bg2: #fdfdfd;
+        --pi-core-shadow1: rgba(0,0,0,0.02);
+        --pi-core-shadow2: #ffffff;
+        --pi-cta-bg: #0a0a0a;
+        --pi-cta-text: #ffffff;
+        --pi-cta-ring: rgba(255,255,255,0.14);
+        --pi-cta-shadow: 0 4px 14px rgba(0,0,0,0.12);
+        --pi-noise: 0;
+    }
+
+    /* ── Premium Double-Bezel Bento (Doppelrand) ── */
+    .pi-bento-shell {
+        padding: 6px;
+        background: var(--pi-shell-bg);
+        border-radius: 28px;
+        border: 1px solid var(--pi-shell-border);
+        box-shadow: 0 6px 18px rgba(0,0,0,0.08);
+        transition: border-color 320ms cubic-bezier(0.23, 1, 0.32, 1),
+                    box-shadow 320ms cubic-bezier(0.23, 1, 0.32, 1);
+    }
+    .pi-bento-shell:hover {
+        box-shadow: 0 14px 36px rgba(0,0,0,0.16);
+        border-color: var(--pi-shell-hover);
+    }
+    .pi-bento-core {
+        background-image: linear-gradient(135deg, var(--pi-core-bg1) 0%, var(--pi-core-bg2) 100%);
+        box-shadow: inset 0 1px 1px var(--pi-core-shadow1),
+                    inset 0 0 0 1px var(--pi-core-shadow2);
+        border-radius: calc(28px - 6px);
+        overflow: hidden;
+        position: relative;
+        height: 100%;
+        width: 100%;
+    }
+    .pi-bento-core::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        opacity: var(--pi-noise);
+        background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 400 400' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+        z-index: 10;
+        mix-blend-mode: overlay;
+    }
+    .pi-bento-content { position: relative; z-index: 1; height: 100%; }
+
+    /* ── Button-in-Button CTA (Manage Pro / Unlock Pro) ── */
+    .pi-cta-group {
+        padding: 5px 5px 5px 18px;
+        height: 40px;
+        border-radius: 20px;
+        background: var(--pi-cta-bg);
+        color: var(--pi-cta-text);
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        border: none;
+        cursor: pointer;
+        display: inline-flex; align-items: center; justify-content: center; gap: 10px;
+        box-shadow: var(--pi-cta-shadow);
+        transition: transform 220ms cubic-bezier(0.23, 1, 0.32, 1),
+                    box-shadow 220ms ease;
+        white-space: nowrap;
+    }
+    .pi-cta-group:hover {
+        transform: scale(0.975);
+        box-shadow: 0 8px 22px rgba(0,0,0,0.22);
+    }
+    .pi-cta-group:active { transform: scale(0.94); }
+    .pi-cta-icon-ring {
+        width: 30px; height: 30px;
+        border-radius: 50%;
+        background: var(--pi-cta-ring);
+        display: flex; align-items: center; justify-content: center;
+        transition: transform 320ms cubic-bezier(0.23, 1, 0.32, 1);
+        flex-shrink: 0;
+    }
+    .pi-cta-group:hover .pi-cta-icon-ring {
+        transform: translateX(2px) translateY(-1px) scale(1.06);
+    }
+
+    /* Trial variant retains violet without losing pill geometry */
+    .pi-cta-group--trial {
+        background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%);
+        color: #ffffff;
+        box-shadow: 0 4px 14px rgba(124,58,237,0.35);
+    }
+    .pi-cta-group--trial .pi-cta-icon-ring { background: rgba(255,255,255,0.18); }
+    .pi-cta-group--trial:hover { box-shadow: 0 8px 22px rgba(124,58,237,0.45); }
+
+    /* ── Yellow BETA pill ── */
+    .pi-beta-badge {
+        display: inline-flex; align-items: center; justify-content: center;
+        height: 22px;
+        padding: 0 10px;
+        border-radius: 999px;
+        background: #FACC15;
+        color: #0a0a0a;
+        font-size: 9.5px;
+        font-weight: 800;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        line-height: 1;
+        box-shadow: 0 1px 0 rgba(255,255,255,0.4) inset,
+                    0 2px 6px rgba(250,204,21,0.35);
+    }
+
+    /* ── Subtle pill badges (plan / trial) ── */
+    .pi-meta-badge {
+        display: inline-flex; align-items: center;
+        height: 22px;
+        padding: 0 10px;
+        border-radius: 999px;
+        font-size: 9.5px;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        line-height: 1;
+    }
+    .pi-meta-badge--plan {
+        background: var(--pi-shell-bg);
+        color: var(--pi-hero);
+        border: 1px solid var(--pi-shell-border);
+    }
+    .pi-meta-badge--trial {
+        background: linear-gradient(135deg, rgba(139,92,246,0.18) 0%, rgba(124,58,237,0.14) 100%);
+        color: #c4b5fd;
+        border: 1px solid rgba(139,92,246,0.32);
+    }
+    .pi-root[data-theme='light'] .pi-meta-badge--trial { color: #6d28d9; }
+
+    /* ── Long upload pill with internal indeterminate progress ── */
+    .pi-upload-pill {
+        position: relative;
+        width: 100%;
+        height: 48px;
+        border-radius: 999px;
+        padding: 5px 5px 5px 22px;
+        background: var(--pi-cta-bg);
+        color: var(--pi-cta-text);
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        border: none;
+        cursor: pointer;
+        display: flex; align-items: center; justify-content: space-between; gap: 10px;
+        box-shadow: var(--pi-cta-shadow);
+        overflow: hidden;
+        transition: transform 220ms cubic-bezier(0.23, 1, 0.32, 1),
+                    box-shadow 220ms ease,
+                    background 200ms ease;
+    }
+    .pi-upload-pill:hover:not(:disabled) {
+        transform: scale(0.985);
+        box-shadow: 0 8px 22px rgba(0,0,0,0.22);
+    }
+    .pi-upload-pill:active:not(:disabled) { transform: scale(0.96); }
+    .pi-upload-pill:disabled { cursor: progress; }
+
+    .pi-upload-pill--secondary {
+        background: var(--pi-shell-bg);
+        color: var(--pi-hero);
+        border: 1px solid var(--pi-shell-border);
+        box-shadow: none;
+    }
+    .pi-upload-pill--secondary:hover:not(:disabled) {
+        background: var(--pi-shell-hover);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+    }
+
+    /* Indeterminate sweep — fills the pill while work is in flight */
+    .pi-upload-pill__fill {
+        position: absolute;
+        inset: 0;
+        z-index: 0;
+        overflow: hidden;
+        border-radius: inherit;
+    }
+    .pi-upload-pill__fill::before {
+        content: '';
+        position: absolute;
+        top: 0; bottom: 0;
+        left: -45%;
+        width: 45%;
+        background: linear-gradient(90deg,
+            transparent 0%,
+            var(--pi-upload-sweep, rgba(0,0,0,0.18)) 50%,
+            transparent 100%);
+        animation: pi-upload-sweep 1.5s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+    }
+    .pi-upload-pill__fill::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        background: var(--pi-upload-tint, transparent);
+        opacity: 0.5;
+    }
+    /* Primary (dark bg in dark, white bg in light): subtle inverse sweep */
+    .pi-root[data-theme='light'] .pi-upload-pill:not(.pi-upload-pill--secondary) {
+        --pi-upload-sweep: rgba(255,255,255,0.22);
+    }
+    /* Accent tinting via data-accent */
+    .pi-upload-pill[data-accent='blue'] {
+        --pi-upload-sweep: rgba(59,130,246,0.45);
+        --pi-upload-tint: rgba(59,130,246,0.08);
+    }
+    .pi-upload-pill[data-accent='emerald'] {
+        --pi-upload-sweep: rgba(16,185,129,0.45);
+        --pi-upload-tint: rgba(16,185,129,0.08);
+    }
+
+    @keyframes pi-upload-sweep {
+        0%   { left: -45%; }
+        100% { left: 100%; }
+    }
+
+    .pi-upload-pill__content {
+        position: relative; z-index: 1;
+        display: flex; align-items: center; gap: 10px;
+        min-width: 0;
+    }
+    .pi-upload-pill__label {
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .pi-upload-pill__ring {
+        position: relative; z-index: 1;
+        width: 38px; height: 38px;
+        border-radius: 50%;
+        background: var(--pi-cta-ring);
+        display: flex; align-items: center; justify-content: center;
+        transition: transform 320ms cubic-bezier(0.23, 1, 0.32, 1);
+        flex-shrink: 0;
+    }
+    .pi-upload-pill:hover:not(:disabled) .pi-upload-pill__ring {
+        transform: translateX(2px) scale(1.05);
+    }
+    .pi-upload-pill--secondary .pi-upload-pill__ring {
+        background: var(--pi-shell-bg);
+        border: 1px solid var(--pi-shell-border);
+    }
+    .pi-upload-spinner { animation: pi-spin 0.9s linear infinite; }
+    @keyframes pi-spin { to { transform: rotate(360deg); } }
+
+    /* ── Header close button (mirrors ModesSettings manager closeBtn — flat, no shadow) ── */
+    .pi-close-btn {
+        display: flex; align-items: center; justify-content: center;
+        width: 36px; height: 36px; border-radius: 8px;
+        background: transparent;
+        color: var(--pi-sub-low);
+        border: none;
+        cursor: pointer;
+        box-shadow: none;
+        transition: color 150ms ease, transform 150ms ease;
+    }
+    .pi-close-btn:hover { color: var(--pi-hero); background: transparent; }
+    .pi-close-btn:active { transform: scale(0.9); }
+`;
+
 const BezelCard = ({ children, className = "", delay = 0, style = {} }: any) => {
     return (
-        <motion.div 
+        <motion.div
             layout
-            initial={{ opacity: 0, y: 15 }}
-            animate={{ opacity: 1, y: 0 }}
+            initial={{ opacity: 0, y: 30, filter: 'blur(10px)' }}
+            animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
             transition={{ ...spring, delay }}
             style={style}
-            className={`bg-bg-item-surface border border-border-subtle rounded-xl overflow-hidden ${className}`}
+            className={`pi-bento-shell ${className}`}
         >
-            {children}
+            <div className="pi-bento-core bg-bg-item-surface">
+                <div className="pi-bento-content">
+                    {children}
+                </div>
+            </div>
         </motion.div>
     );
 };
@@ -27,17 +319,17 @@ const BezelCard = ({ children, className = "", delay = 0, style = {} }: any) => 
 const MagneticButton = ({ children, onClick, disabled, className = "", primary = false, style }: any) => {
     return (
         <motion.button
-            whileHover={!disabled ? { scale: 1.02 } : {}}
+            whileHover={!disabled ? { scale: 1.02, y: -1 } : {}}
             whileTap={!disabled ? { scale: 0.98 } : {}}
             transition={spring}
             onClick={onClick}
             disabled={disabled}
             style={style}
-            className={`relative group px-3.5 py-2 text-[12px] font-semibold rounded-lg flex items-center justify-center gap-1.5 overflow-hidden ${disabled ? 'opacity-50 cursor-not-allowed' : ''} ${className} ${primary ? 'bg-text-primary text-bg-main' : 'bg-bg-input text-text-primary hover:bg-bg-surface border border-border-subtle'}`}
+            className={`relative group px-6 py-3 text-[13px] tracking-tight font-bold rounded-full flex items-center justify-center gap-2 overflow-hidden ${disabled ? 'opacity-50 cursor-not-allowed' : ''} ${className} ${primary ? 'bg-text-primary text-bg-main shadow-[0_10px_20px_-10px_rgba(0,0,0,0.2)]' : 'bg-bg-input text-text-primary hover:bg-bg-surface border border-border-subtle'}`}
         >
             {children}
             {primary && (
-                <div className="absolute inset-0 rounded-lg ring-1 ring-inset ring-white/10 pointer-events-none" />
+                <div className="absolute inset-0 rounded-full ring-1 ring-inset ring-white/20 pointer-events-none" />
             )}
         </motion.button>
     );
@@ -66,10 +358,45 @@ const StarRating = ({ value, size = 11 }: { value: number; size?: number }) => {
     );
 };
 
+// Cache premium state in localStorage so the CTA renders in its correct
+// state on first paint — avoids the "Unlock Pro" → "Manage Pro" flash for
+// activated users while the async licenseGetDetails() call is in flight.
+// Cleared whenever the canonical check returns non-premium (or on deactivate).
+const PI_PREMIUM_CACHE_KEY = 'pi:isPremium';
+const PI_PREMIUM_PLAN_CACHE_KEY = 'pi:premiumPlan';
+
+const readPremiumCache = (): { isPremium: boolean; plan: string } => {
+    if (typeof window === 'undefined') return { isPremium: false, plan: '' };
+    try {
+        return {
+            isPremium: window.localStorage.getItem(PI_PREMIUM_CACHE_KEY) === '1',
+            plan: window.localStorage.getItem(PI_PREMIUM_PLAN_CACHE_KEY) ?? '',
+        };
+    } catch {
+        return { isPremium: false, plan: '' };
+    }
+};
+
+const writePremiumCache = (isPremium: boolean, plan: string) => {
+    if (typeof window === 'undefined') return;
+    try {
+        if (isPremium) {
+            window.localStorage.setItem(PI_PREMIUM_CACHE_KEY, '1');
+            if (plan) window.localStorage.setItem(PI_PREMIUM_PLAN_CACHE_KEY, plan);
+            else window.localStorage.removeItem(PI_PREMIUM_PLAN_CACHE_KEY);
+        } else {
+            window.localStorage.removeItem(PI_PREMIUM_CACHE_KEY);
+            window.localStorage.removeItem(PI_PREMIUM_PLAN_CACHE_KEY);
+        }
+    } catch { /* localStorage disabled — fall back to live check */ }
+};
+
 export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }) {
-    // Premium Status
-    const [isPremium, setIsPremium] = useState(false);
-    const [premiumPlan, setPremiumPlan] = useState<string>('');
+    // Premium Status — seed from cache so the header CTA paints correctly
+    // before licenseGetDetails() resolves.
+    const cachedPremium = readPremiumCache();
+    const [isPremium, setIsPremium] = useState(cachedPremium.isPremium);
+    const [premiumPlan, setPremiumPlan] = useState<string>(cachedPremium.plan);
     const [isTrialActive, setIsTrialActive] = useState(false);
     const [isPremiumModalOpen, setIsPremiumModalOpen] = useState(false);
     const hasProfileAccess = isPremium || isTrialActive;
@@ -103,14 +430,22 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
     const customNotesDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     useEffect(() => {
-        // Fetch premium details
+        // Fetch premium details — canonical source of truth. Sync the
+        // localStorage cache so the next mount paints with the correct state.
         if (window.electronAPI?.licenseGetDetails) {
             window.electronAPI.licenseGetDetails().then((details: any) => {
-                setIsPremium(details.isPremium);
-                if (details.plan) setPremiumPlan(details.plan);
+                const live = !!details?.isPremium;
+                const plan = details?.plan ?? '';
+                setIsPremium(live);
+                if (plan) setPremiumPlan(plan);
+                else if (!live) setPremiumPlan('');
+                writePremiumCache(live, plan);
             }).catch(() => { });
         } else {
-            window.electronAPI?.licenseCheckPremium?.().then(setIsPremium).catch(() => { });
+            window.electronAPI?.licenseCheckPremium?.().then((live: boolean) => {
+                setIsPremium(!!live);
+                writePremiumCache(!!live, premiumPlan);
+            }).catch(() => { });
         }
 
         // Proactively load profile data
@@ -147,61 +482,60 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
     };
 
     return (
-        <div className="flex flex-col h-full bg-bg-main relative" style={{ fontFamily: '"Geist", "Satoshi", "Cabinet Grotesk", system-ui, sans-serif' }}>
-            <motion.div 
+        <div
+            className="pi-root flex flex-col h-full bg-bg-main relative"
+            data-theme={isLight ? 'light' : 'dark'}
+            style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Geist", "Satoshi", system-ui, sans-serif', WebkitFontSmoothing: 'antialiased', MozOsxFontSmoothing: 'grayscale' as any }}
+        >
+            <style>{PI_CSS}</style>
+            <motion.div
                 initial={{ y: -50, opacity: 0 }}
                 animate={{ y: 0, opacity: 1 }}
                 transition={{ ...spring, delay: 0.1 }}
                 className="flex items-center justify-between p-6 border-b border-white/5 bg-bg-surface/70 shrink-0 backdrop-blur-3xl sticky top-0 z-50"
             >
                 <div className="flex items-center gap-5">
-                    <div className="w-10 h-10 rounded-xl bg-bg-input border border-border-subtle shadow-[inset_0_1px_1px_rgba(255,255,255,0.1)] flex items-center justify-center text-text-primary">
-                        <User size={18} strokeWidth={2} />
+                    <div className="w-12 h-12 rounded-[1.25rem] bg-bg-input border border-border-subtle shadow-[inset_0_1px_1px_rgba(255,255,255,0.1)] flex items-center justify-center text-text-primary">
+                        <User size={22} strokeWidth={2} />
                     </div>
                     <div>
-                        <div className="flex items-center gap-3 mb-1">
-                            <h2 className="text-xl font-bold text-text-primary tracking-tighter leading-none">Profile Intelligence</h2>
-                            <span className="bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-700 text-[9px] font-bold px-2.5 py-0.5 rounded-full uppercase tracking-widest shadow-sm">
-                                BETA
-                            </span>
+                        <div className="flex items-center gap-2.5 mb-1.5">
+                            <h2 className="text-[22px] font-bold text-text-primary leading-none" style={{ letterSpacing: '-0.025em' }}>Profile Intelligence</h2>
+                            <span className="pi-beta-badge">BETA</span>
                             {isPremium && premiumPlan && (
-                                <span className="bg-[#FACC15]/10 text-[#FACC15] border border-[#FACC15]/20 text-[9px] font-bold px-2.5 py-0.5 rounded-full uppercase tracking-widest">
-                                    {premiumPlan.toUpperCase()} PLAN
-                                </span>
+                                <span className="pi-meta-badge pi-meta-badge--plan">{premiumPlan} Plan</span>
                             )}
                             {isTrialActive && !isPremium && (
-                                <span className="bg-violet-500/10 text-violet-400 border border-violet-500/20 text-[9px] font-bold px-2.5 py-0.5 rounded-full uppercase tracking-widest">
-                                    FREE TRIAL
-                                </span>
+                                <span className="pi-meta-badge pi-meta-badge--trial">Free Trial</span>
                             )}
                         </div>
-                        <p className="text-[13px] text-text-secondary tracking-tight">Manage your persona, career history, and active job description</p>
+                        <p className="text-[13px] text-text-secondary" style={{ letterSpacing: '-0.005em' }}>
+                            Manage your persona, career history, and active job description
+                        </p>
                     </div>
                 </div>
                 <div className="flex items-center gap-3">
-                    <motion.button
-                        whileHover={{ scale: 1.02 }}
-                        whileTap={{ scale: 0.98 }}
+                    <button
                         onClick={() => setIsPremiumModalOpen(true)}
-                        className={`text-[13px] font-bold tracking-tight flex items-center gap-2 transition-all duration-300 px-5 py-2.5 rounded-full border shadow-[0_0_15px_rgba(250,204,21,0.1)] hover:shadow-[0_0_20px_rgba(250,204,21,0.2)] ${isPremium
-                            ? (isLight ? 'bg-bg-component text-text-primary border-border-subtle hover:bg-bg-item-surface' : 'bg-zinc-800 text-white border-white/10 hover:bg-zinc-700')
-                            : isTrialActive
-                            ? 'bg-violet-500/15 text-violet-300 border-violet-500/30 hover:bg-violet-500/25'
-                            : 'bg-[#FACC15] text-black border-transparent hover:bg-[#FDE047]'
-                            }`}
+                        className={`pi-cta-group${isTrialActive && !isPremium ? ' pi-cta-group--trial' : ''}`}
+                        aria-label={isPremium ? 'Manage Pro' : isTrialActive ? 'Upgrade trial' : 'Unlock Pro'}
                     >
-                        {isPremium ? <CheckCircle size={14} className="text-green-500" /> : isTrialActive ? <Sparkles size={14} className="text-violet-500" /> : <Sparkles size={14} className="text-black/80" />}
-                        {isPremium ? 'Manage Pro' : isTrialActive ? 'Upgrade' : 'Unlock Pro'}
-                    </motion.button>
-                    <motion.button
-                        whileHover={{ scale: 1.05, rotate: 90 }}
-                        whileTap={{ scale: 0.95 }}
-                        transition={{ type: 'spring', stiffness: 200, damping: 15 }}
+                        <span>{isPremium ? 'Manage Pro' : isTrialActive ? 'Upgrade' : 'Unlock Pro'}</span>
+                        <span className="pi-cta-icon-ring">
+                            {isPremium
+                                ? <CheckCircle size={14} strokeWidth={2.5} />
+                                : isTrialActive
+                                ? <Sparkles size={14} strokeWidth={2.5} />
+                                : <ArrowUpRight size={14} strokeWidth={2.5} />}
+                        </span>
+                    </button>
+                    <button
                         onClick={onClose}
-                        className="w-10 h-10 flex items-center justify-center rounded-full text-text-tertiary hover:text-text-primary hover:bg-bg-input transition-colors border border-transparent hover:border-border-subtle"
+                        className="pi-close-btn"
+                        aria-label="Close"
                     >
-                        <X size={20} strokeWidth={2} />
-                    </motion.button>
+                        <X size={18} strokeWidth={2} />
+                    </button>
                 </div>
             </motion.div>
 
@@ -210,8 +544,8 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                 <div className="max-w-3xl mx-auto p-5 pb-12">
                     <div className="space-y-6">
                         <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.15, ...spring }} className="mb-4 pt-2">
-                            <h3 className="text-[15px] font-semibold text-text-primary">Professional Identity</h3>
-                            <p className="text-xs text-text-secondary mt-1">
+                            <h3 className="text-lg font-bold text-text-primary tracking-tight">Professional Identity</h3>
+                            <p className="text-[13px] text-text-secondary mt-1">
                                 This engine constructs an intelligent representation of your career history and skills graph.
                             </p>
                         </motion.div>
@@ -329,34 +663,25 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                     </BezelCard>
 
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                        <BezelCard delay={0.3} className={profileUploading ? 'ring-accent-primary/50' : ''}>
-                                        <div className="transition-all">
-                                            <div className="p-5 flex flex-col gap-5">
+                                        <BezelCard delay={0.3}>
+                                        <div className="transition-all h-full">
+                                            <div className="p-5 flex flex-col gap-5 h-full">
                                                 <div className="flex items-start gap-4 min-w-0">
-                                                    <div className="w-8 h-8 rounded-[8px] bg-bg-input border border-border-subtle flex items-center justify-center text-text-tertiary shrink-0 mt-0.5">
-                                                        {profileUploading ? <RefreshCw size={16} className="animate-spin text-accent-primary" /> : <Upload size={16} />}
+                                                    <div className="w-10 h-10 rounded-lg bg-bg-input border border-border-subtle flex items-center justify-center text-text-tertiary shrink-0 mt-0.5 shadow-sm">
+                                                        <Upload size={20} />
                                                     </div>
                                                     <div className="min-w-0">
-                                                        <h4 className="text-sm font-semibold text-text-primary mb-1">
+                                                        <h4 className="text-[15px] font-bold text-text-primary mb-1 tracking-tight">
                                                             {profileStatus.hasProfile ? 'Overwrite Source Document' : 'Initialize Knowledge Base'}
                                                         </h4>
-                                                        {profileUploading ? (
-                                                            <div className="flex items-center gap-2 mt-2">
-                                                                <div className="h-[4px] w-[100px] bg-bg-input rounded-full overflow-hidden">
-                                                                    <div className="h-full bg-accent-primary rounded-full animate-pulse" style={{ width: '50%' }} />
-                                                                </div>
-                                                                <span className="text-[10px] text-text-secondary tracking-wide">Processing structural semantics...</span>
-                                                            </div>
-                                                        ) : (
-                                                            <p className="text-xs text-text-secondary leading-relaxed pr-2">
-                                                                Provide a resume file to seed the intelligence engine.
-                                                            </p>
-                                                        )}
+                                                        <p className="text-xs text-text-secondary leading-relaxed pr-2">
+                                                            Provide a resume file to seed the intelligence engine.
+                                                        </p>
                                                     </div>
                                                 </div>
 
-                                                <div className="flex justify-end pt-2">
-                                                    <MagneticButton
+                                                <button
+                                                    style={{ marginTop: 'auto' }}
                                                     onClick={async () => {
                                                         setProfileError('');
                                                         try {
@@ -380,16 +705,25 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                                         }
                                                     }}
                                                     disabled={profileUploading}
-                                                    primary={!profileStatus.hasProfile}
+                                                    className={`pi-upload-pill${profileStatus.hasProfile ? ' pi-upload-pill--secondary' : ''}`}
+                                                    aria-busy={profileUploading}
+                                                    aria-label={profileUploading ? 'Ingesting resume' : 'Select resume file'}
                                                 >
-                                                    {profileUploading ? 'Ingesting...' : 'Select File'}
-                                                    {!profileUploading && (
-                                                        <div className="w-6 h-6 rounded-full bg-black/10 dark:bg-white/10 flex items-center justify-center ml-1">
-                                                            <Upload size={12} />
-                                                        </div>
-                                                    )}
-                                                </MagneticButton>
-                                                </div>
+                                                    {profileUploading && <span className="pi-upload-pill__fill" aria-hidden="true" />}
+                                                    <span className="pi-upload-pill__content">
+                                                        {profileUploading
+                                                            ? <RefreshCw size={14} className="pi-upload-spinner" strokeWidth={2.5} />
+                                                            : <Upload size={14} strokeWidth={2.5} />}
+                                                        <span className="pi-upload-pill__label">
+                                                            {profileUploading
+                                                                ? 'Ingesting · Processing structural semantics…'
+                                                                : profileStatus.hasProfile ? 'Replace resume file' : 'Select resume file'}
+                                                        </span>
+                                                    </span>
+                                                    <span className="pi-upload-pill__ring">
+                                                        <ArrowUpRight size={14} strokeWidth={2.5} />
+                                                    </span>
+                                                </button>
                                             </div>
 
                                             {profileError && (
@@ -402,25 +736,18 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                         </div>
                                     </BezelCard>
 
-                                    <BezelCard delay={0.4} className={jdUploading ? 'ring-blue-500/50' : profileData?.hasActiveJD ? 'ring-blue-500/30' : ''}>
-                                        <div className="transition-all">
-                                            <div className="p-5 flex flex-col gap-5">
+                                    <BezelCard delay={0.4}>
+                                        <div className="transition-all h-full">
+                                            <div className="p-5 flex flex-col gap-5 h-full">
                                                 <div className="flex items-start gap-4 min-w-0">
-                                                    <div className="w-8 h-8 rounded-[8px] bg-bg-input border border-border-subtle flex items-center justify-center text-text-tertiary shrink-0 mt-0.5">
-                                                        {jdUploading ? <RefreshCw size={16} className="animate-spin text-blue-500" /> : <Briefcase size={16} />}
+                                                    <div className="w-10 h-10 rounded-lg bg-bg-input border border-border-subtle flex items-center justify-center text-text-tertiary shrink-0 mt-0.5 shadow-sm">
+                                                        <Briefcase size={20} />
                                                     </div>
-                                                    <div className="min-w-0">
-                                                        <h4 className="text-sm font-semibold text-text-primary mb-1">
+                                                    <div className="min-w-0 flex-1">
+                                                        <h4 className="text-[15px] font-bold text-text-primary mb-1 tracking-tight">
                                                             {profileData?.hasActiveJD ? `${profileData.activeJD?.title} @ ${profileData.activeJD?.company}` : 'Upload Job Description'}
                                                         </h4>
-                                                        {jdUploading ? (
-                                                            <div className="flex items-center gap-2 mt-2">
-                                                                <div className="h-[4px] w-[100px] bg-bg-input rounded-full overflow-hidden">
-                                                                    <div className="h-full bg-blue-500 rounded-full animate-pulse" style={{ width: '50%' }} />
-                                                                </div>
-                                                                <span className="text-[10px] text-text-secondary tracking-wide">Parsing JD structure...</span>
-                                                            </div>
-                                                        ) : profileData?.hasActiveJD ? (
+                                                        {profileData?.hasActiveJD ? (
                                                             <div className="flex items-center gap-3 mt-1 flex-wrap">
                                                                 <span className="text-[9px] font-bold text-blue-500 px-1.5 py-0.5 bg-blue-500/10 rounded uppercase tracking-wide border border-blue-500/20">
                                                                     {profileData.activeJD?.level || 'mid'}-level
@@ -437,10 +764,7 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                                             </p>
                                                         )}
                                                     </div>
-                                                </div>
-
-                                                <div className="flex items-center justify-end gap-2 pt-2">
-                                                    {profileData?.hasActiveJD && (
+                                                    {profileData?.hasActiveJD && !jdUploading && (
                                                         <button
                                                             onClick={async () => {
                                                                 await window.electronAPI?.profileDeleteJD?.();
@@ -448,43 +772,57 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                                                 if (data) setProfileData(data);
                                                                 setCompanyDossier(null);
                                                             }}
-                                                            className="px-2.5 py-2 rounded-full text-xs text-text-tertiary hover:text-red-500 hover:bg-red-500/10 transition-all border border-transparent hover:border-red-500/20"
+                                                            className="shrink-0 mt-0.5 px-2.5 py-2 rounded-full text-xs text-text-tertiary hover:text-red-500 hover:bg-red-500/10 transition-all border border-transparent hover:border-red-500/20"
+                                                            aria-label="Remove job description"
                                                         >
                                                             <Trash2 size={14} />
                                                         </button>
                                                     )}
-                                                    <MagneticButton
-                                                        onClick={async () => {
-                                                            setJdError('');
-                                                            try {
-                                                                const fileResult = await window.electronAPI?.profileSelectFile?.();
-                                                                if (fileResult?.cancelled || !fileResult?.filePath) return;
-
-                                                                setJdUploading(true);
-                                                                const result = await window.electronAPI?.profileUploadJD?.(fileResult.filePath);
-                                                                if (result?.success) {
-                                                                    const data = await window.electronAPI?.profileGetProfile?.();
-                                                                    if (data) setProfileData(data);
-                                                                } else {
-                                                                    setJdError(result?.error || 'JD upload failed');
-                                                                }
-                                                            } catch (e: any) {
-                                                                setJdError(e.message || 'JD upload failed');
-                                                            } finally {
-                                                                setJdUploading(false);
-                                                            }
-                                                        }}
-                                                        disabled={jdUploading}
-                                                        primary={true}
-                                                    >
-                                                        {jdUploading ? 'Parsing...' : profileData?.hasActiveJD ? 'Replace JD' : 'Upload JD'}
-                                                        {!jdUploading && (
-                                                            <div className="w-6 h-6 rounded-full bg-black/10 dark:bg-white/10 flex items-center justify-center ml-1">
-                                                                <Briefcase size={12} />
-                                                            </div>
-                                                        )}
-                                                    </MagneticButton>
                                                 </div>
+
+                                                <button
+                                                    style={{ marginTop: 'auto' }}
+                                                    onClick={async () => {
+                                                        setJdError('');
+                                                        try {
+                                                            const fileResult = await window.electronAPI?.profileSelectFile?.();
+                                                            if (fileResult?.cancelled || !fileResult?.filePath) return;
+
+                                                            setJdUploading(true);
+                                                            const result = await window.electronAPI?.profileUploadJD?.(fileResult.filePath);
+                                                            if (result?.success) {
+                                                                const data = await window.electronAPI?.profileGetProfile?.();
+                                                                if (data) setProfileData(data);
+                                                            } else {
+                                                                setJdError(result?.error || 'JD upload failed');
+                                                            }
+                                                        } catch (e: any) {
+                                                            setJdError(e.message || 'JD upload failed');
+                                                        } finally {
+                                                            setJdUploading(false);
+                                                        }
+                                                    }}
+                                                    disabled={jdUploading}
+                                                    className={`pi-upload-pill${profileData?.hasActiveJD ? ' pi-upload-pill--secondary' : ''}`}
+                                                    data-accent="blue"
+                                                    aria-busy={jdUploading}
+                                                    aria-label={jdUploading ? 'Parsing job description' : (profileData?.hasActiveJD ? 'Replace job description' : 'Upload job description')}
+                                                >
+                                                    {jdUploading && <span className="pi-upload-pill__fill" aria-hidden="true" />}
+                                                    <span className="pi-upload-pill__content">
+                                                        {jdUploading
+                                                            ? <RefreshCw size={14} className="pi-upload-spinner" strokeWidth={2.5} />
+                                                            : <Briefcase size={14} strokeWidth={2.5} />}
+                                                        <span className="pi-upload-pill__label">
+                                                            {jdUploading
+                                                                ? 'Parsing · Decoding JD structure…'
+                                                                : profileData?.hasActiveJD ? 'Replace job description' : 'Upload job description'}
+                                                        </span>
+                                                    </span>
+                                                    <span className="pi-upload-pill__ring">
+                                                        <ArrowUpRight size={14} strokeWidth={2.5} />
+                                                    </span>
+                                                </button>
                                             </div>
 
                                             {jdError && (
@@ -555,7 +893,7 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                             <div className="p-5">
                                                 <div className="flex items-center gap-4 mb-4">
                                                     <div className="w-10 h-10 rounded-lg bg-bg-input border border-border-subtle flex items-center justify-center text-emerald-500 shrink-0">
-                                                        <Globe size={16} />
+                                                        <Globe size={20} />
                                                     </div>
                                                     <div>
                                                         <div className="flex items-center gap-2">
@@ -997,7 +1335,7 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                                     {!negotiationScript && !negotiationGenerating && !negotiationError && (
                                                         <div className="flex flex-col items-center justify-center py-8 gap-3">
                                                             <div className="w-12 h-12 rounded-2xl flex items-center justify-center" style={{ background: 'linear-gradient(135deg, rgba(16,185,129,0.08) 0%, rgba(6,182,212,0.06) 100%)', border: '1px solid rgba(16,185,129,0.15)' }}>
-                                                                <Briefcase size={16} className="text-emerald-500/50" />
+                                                                <Briefcase size={20} className="text-emerald-500/50" />
                                                             </div>
                                                             <div className="text-center">
                                                                 <p className="text-[12px] font-medium text-text-secondary">No script yet</p>
@@ -1006,8 +1344,8 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                                         </div>
                                                     )}
 
-                                                    {/* Generating skeleton */}
-                                                    {negotiationGenerating && (
+                                                    {/* First-time generation skeleton — only when no prior script exists */}
+                                                    {negotiationGenerating && !negotiationScript && (
                                                         <div className="space-y-3 py-2">
                                                             {[40, 70, 55].map((w, i) => (
                                                                 <div key={i} className="h-3 rounded-full bg-bg-input animate-pulse" style={{ width: `${w}%`, animationDelay: `${i * 150}ms` }} />
@@ -1016,8 +1354,16 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                                         </div>
                                                     )}
 
-                                                    {negotiationScript && !negotiationGenerating && (
-                                                        <div className="space-y-3">
+                                                    {/* Existing script stays visible during regeneration to avoid a layout
+                                                        collapse → re-expand jump (which Framer's layout animation amplifies).
+                                                        We just dim it and let the spinner in the refresh button signal work. */}
+                                                    {negotiationScript && (
+                                                        <div
+                                                            className="space-y-3 transition-opacity duration-300"
+                                                            style={{
+                                                                opacity: negotiationGenerating ? 0.45 : 1,
+                                                                pointerEvents: negotiationGenerating ? 'none' : 'auto',
+                                                            }}>
                                                             {/* Salary Range Hero */}
                                                             {negotiationScript.salary_range && (
                                                                 <div className="rounded-xl p-4 flex items-center justify-between" style={{ background: 'linear-gradient(135deg, rgba(16,185,129,0.08) 0%, rgba(6,182,212,0.06) 100%)', border: '1px solid rgba(16,185,129,0.18)' }}>
@@ -1114,11 +1460,23 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                 isPremium={isPremium}
                 onActivated={async () => {
                     setIsPremium(true);
+                    // Refresh plan + cache from the canonical source so the
+                    // header reflects the new state on every subsequent mount.
+                    try {
+                        const details = await window.electronAPI?.licenseGetDetails?.();
+                        const plan = details?.plan ?? '';
+                        if (plan) setPremiumPlan(plan);
+                        writePremiumCache(true, plan);
+                    } catch {
+                        writePremiumCache(true, premiumPlan);
+                    }
                     const status = await window.electronAPI?.profileGetStatus?.();
                     if (status) setProfileStatus(status);
                 }}
                 onDeactivated={() => {
                     setIsPremium(false);
+                    setPremiumPlan('');
+                    writePremiumCache(false, '');
                     // Auto-disable profile mode in UI when license is removed
                     setProfileStatus(prev => ({ ...prev, profileMode: false }));
                 }}

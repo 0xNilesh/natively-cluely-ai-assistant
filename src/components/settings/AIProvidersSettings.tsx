@@ -557,10 +557,10 @@ export const AIProvidersSettings: React.FC = () => {
 
                 {/* Fast Response Mode */}
                 <div
-                    className={`bg-bg-item-surface rounded-xl p-5 border border-border-subtle flex items-center justify-between ${!canUseFastMode ? 'opacity-50 grayscale' : ''}`}
+                    className={`bg-bg-item-surface rounded-xl p-5 border border-border-subtle flex items-center justify-between gap-4 ${!canUseFastMode ? 'opacity-50 grayscale' : ''}`}
                     title={!canUseFastMode ? "Requires Groq, Natively API, or Codex CLI to be configured" : ""}
                 >
-                    <div>
+                    <div className="flex-1">
                         <div className="flex items-center gap-2">
                             <label className="block text-xs font-medium text-text-primary uppercase tracking-wide mb-0">Fast Response Mode</label>
                             <span className="bg-orange-500/10 text-orange-500 text-[9px] font-bold px-1.5 py-0.5 rounded border border-orange-500/20">NEW</span>
@@ -582,102 +582,9 @@ export const AIProvidersSettings: React.FC = () => {
                             // @ts-ignore
                             await window.electronAPI?.setGroqFastTextMode(newState);
                         }}
-                        className={`w-11 h-6 rounded-full relative transition-colors ${!canUseFastMode ? 'cursor-not-allowed bg-bg-toggle-switch' : fastResponseMode ? 'bg-orange-500' : 'bg-bg-toggle-switch border border-border-muted'}`}
+                        className={`shrink-0 w-11 h-6 rounded-full relative cursor-pointer transition-colors ${!canUseFastMode ? 'cursor-not-allowed bg-bg-toggle-switch' : fastResponseMode ? 'bg-orange-500' : 'bg-bg-toggle-switch border border-border-muted'}`}
                     >
                         <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${fastResponseMode ? 'translate-x-5' : 'translate-x-0'}`} />
-                    </div>
-                </div>
-            </div>
-
-            {/* Local (Codex CLI) Provider */}
-            <div className="space-y-5">
-                <div>
-                    <h3 className="text-sm font-bold text-text-primary mb-1">Local Provider (Codex CLI)</h3>
-                    <p className="text-xs text-text-secondary">Route text and screenshot responses through a locally authenticated Codex CLI.</p>
-                </div>
-
-                <div className="bg-bg-item-surface rounded-xl p-5 border border-border-subtle space-y-4">
-                    <div className="flex items-center justify-between">
-                        <div>
-                            <label className="block text-xs font-medium text-text-primary uppercase tracking-wide mb-0">Enable Codex CLI</label>
-                            <p className="text-[10px] text-text-secondary">Adds Codex CLI as a selectable local backend and fallback.</p>
-                        </div>
-                        <button
-                            type="button"
-                            onClick={async () => {
-                                const next = { ...codexCliConfig, enabled: !codexCliConfig.enabled };
-                                await saveCodexCliConfig(next);
-                            }}
-                            className={`w-11 h-6 rounded-full relative transition-colors ${codexCliConfig.enabled ? 'bg-accent-primary' : 'bg-bg-toggle-switch border border-border-muted'}`}
-                        >
-                            <span className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${codexCliConfig.enabled ? 'translate-x-5' : 'translate-x-0'}`} />
-                        </button>
-                    </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        <label className="space-y-1">
-                            <span className="text-[10px] font-medium text-text-secondary uppercase tracking-wide">Executable</span>
-                            <input
-                                value={codexCliConfig.path}
-                                onChange={e => setCodexCliConfig(prev => ({ ...prev, path: e.target.value }))}
-                                onBlur={() => saveCodexCliConfig()}
-                                className="w-full bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-xs text-text-primary font-mono focus:outline-none focus:border-accent-primary"
-                                placeholder="codex"
-                            />
-                        </label>
-                        <label className="space-y-1">
-                            <span className="text-[10px] font-medium text-text-secondary uppercase tracking-wide">Timeout (ms)</span>
-                            <input
-                                type="number"
-                                value={codexCliConfig.timeoutMs}
-                                onChange={e => setCodexCliConfig(prev => ({ ...prev, timeoutMs: Number(e.target.value) }))}
-                                onBlur={() => saveCodexCliConfig()}
-                                className="w-full bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-xs text-text-primary font-mono focus:outline-none focus:border-accent-primary"
-                                min={1000}
-                            />
-                        </label>
-                        <CodexCliModelField
-                            label="Normal Model"
-                            value={codexCliConfig.model}
-                            placeholder="gpt-5.5"
-                            onChange={(model) => setCodexCliConfig(prev => ({ ...prev, model }))}
-                            onSelect={(model) => saveCodexCliConfig({ ...codexCliConfig, model })}
-                            onSave={() => saveCodexCliConfig()}
-                        />
-                        <CodexCliModelField
-                            label="Fast Model"
-                            value={codexCliConfig.fastModel}
-                            placeholder="gpt-5.3-codex-spark"
-                            onChange={(fastModel) => setCodexCliConfig(prev => ({ ...prev, fastModel }))}
-                            onSelect={(fastModel) => saveCodexCliConfig({ ...codexCliConfig, fastModel })}
-                            onSave={() => saveCodexCliConfig()}
-                        />
-                    </div>
-
-                    <div className="flex items-center justify-between gap-3">
-                        <div className="min-h-5">
-                            {codexCliStatus === 'success' && (
-                                <div className="flex items-center gap-2 text-xs text-green-400">
-                                    <CheckCircle size={14} />
-                                    <span>Codex CLI detected</span>
-                                </div>
-                            )}
-                            {codexCliStatus === 'error' && (
-                                <div className="flex items-center gap-2 text-xs text-red-400">
-                                    <AlertCircle size={14} />
-                                    <span>{codexCliError}</span>
-                                </div>
-                            )}
-                        </div>
-                        <button
-                            type="button"
-                            onClick={handleTestCodexCli}
-                            disabled={codexCliStatus === 'testing'}
-                            className="flex items-center gap-2 px-3 py-1.5 bg-bg-input hover:bg-bg-elevated border border-border-subtle rounded-lg text-xs font-medium text-text-primary transition-colors disabled:opacity-60"
-                        >
-                            {codexCliStatus === 'testing' ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle size={14} />}
-                            Test CLI
-                        </button>
                     </div>
                 </div>
             </div>
@@ -771,6 +678,99 @@ export const AIProvidersSettings: React.FC = () => {
                         onPreferredModelChange={(model) => setPreferredModels(prev => ({ ...prev, claude: model }))}
                     />
 
+                </div>
+            </div>
+
+            {/* Local (Codex CLI) Provider */}
+            <div className="space-y-5">
+                <div>
+                    <h3 className="text-sm font-bold text-text-primary mb-1">Local Provider (Codex CLI)</h3>
+                    <p className="text-xs text-text-secondary">Route text and screenshot responses through a locally authenticated Codex CLI.</p>
+                </div>
+
+                <div className="bg-bg-item-surface rounded-xl p-5 border border-border-subtle space-y-4">
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <label className="block text-xs font-medium text-text-primary uppercase tracking-wide mb-0">Enable Codex CLI</label>
+                            <p className="text-[10px] text-text-secondary">Adds Codex CLI as a selectable local backend and fallback.</p>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={async () => {
+                                const next = { ...codexCliConfig, enabled: !codexCliConfig.enabled };
+                                await saveCodexCliConfig(next);
+                            }}
+                            className={`w-11 h-6 rounded-full relative transition-colors ${codexCliConfig.enabled ? 'bg-accent-primary' : 'bg-bg-toggle-switch border border-border-muted'}`}
+                        >
+                            <span className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${codexCliConfig.enabled ? 'translate-x-5' : 'translate-x-0'}`} />
+                        </button>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <label className="space-y-1">
+                            <span className="text-[10px] font-medium text-text-secondary uppercase tracking-wide">Executable</span>
+                            <input
+                                value={codexCliConfig.path}
+                                onChange={e => setCodexCliConfig(prev => ({ ...prev, path: e.target.value }))}
+                                onBlur={() => saveCodexCliConfig()}
+                                className="w-full bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-xs text-text-primary font-mono focus:outline-none focus:border-accent-primary"
+                                placeholder="codex"
+                            />
+                        </label>
+                        <label className="space-y-1">
+                            <span className="text-[10px] font-medium text-text-secondary uppercase tracking-wide">Timeout (ms)</span>
+                            <input
+                                type="number"
+                                value={codexCliConfig.timeoutMs}
+                                onChange={e => setCodexCliConfig(prev => ({ ...prev, timeoutMs: Number(e.target.value) }))}
+                                onBlur={() => saveCodexCliConfig()}
+                                className="w-full bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-xs text-text-primary font-mono focus:outline-none focus:border-accent-primary"
+                                min={1000}
+                            />
+                        </label>
+                        <CodexCliModelField
+                            label="Normal Model"
+                            value={codexCliConfig.model}
+                            placeholder="gpt-5.5"
+                            onChange={(model) => setCodexCliConfig(prev => ({ ...prev, model }))}
+                            onSelect={(model) => saveCodexCliConfig({ ...codexCliConfig, model })}
+                            onSave={() => saveCodexCliConfig()}
+                        />
+                        <CodexCliModelField
+                            label="Fast Model"
+                            value={codexCliConfig.fastModel}
+                            placeholder="gpt-5.3-codex-spark"
+                            onChange={(fastModel) => setCodexCliConfig(prev => ({ ...prev, fastModel }))}
+                            onSelect={(fastModel) => saveCodexCliConfig({ ...codexCliConfig, fastModel })}
+                            onSave={() => saveCodexCliConfig()}
+                        />
+                    </div>
+
+                    <div className="flex items-center justify-between gap-3">
+                        <div className="min-h-5">
+                            {codexCliStatus === 'success' && (
+                                <div className="flex items-center gap-2 text-xs text-green-400">
+                                    <CheckCircle size={14} />
+                                    <span>Codex CLI detected</span>
+                                </div>
+                            )}
+                            {codexCliStatus === 'error' && (
+                                <div className="flex items-center gap-2 text-xs text-red-400">
+                                    <AlertCircle size={14} />
+                                    <span>{codexCliError}</span>
+                                </div>
+                            )}
+                        </div>
+                        <button
+                            type="button"
+                            onClick={handleTestCodexCli}
+                            disabled={codexCliStatus === 'testing'}
+                            className="flex items-center gap-2 px-3 py-1.5 bg-bg-input hover:bg-bg-elevated border border-border-subtle rounded-lg text-xs font-medium text-text-primary transition-colors disabled:opacity-60"
+                        >
+                            {codexCliStatus === 'testing' ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle size={14} />}
+                            Test CLI
+                        </button>
+                    </div>
                 </div>
             </div>
 

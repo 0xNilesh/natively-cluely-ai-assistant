@@ -326,6 +326,28 @@ export class AppState {
       this.updateTrayMenu();
     });
 
+    // Stealth keyboard tap (CGEventTap) IPC. Renderer drives the permission
+    // flow + queries availability/state; the tap itself is toggled by the
+    // global shortcut handler above. Only registered on macOS — on other
+    // platforms these handlers no-op so the renderer can render fallback UI.
+    if (process.platform === 'darwin') {
+      const { StealthKeyboardManager } = require('./services/StealthKeyboardManager');
+      const stealth = StealthKeyboardManager.getInstance();
+      ipcMain.handle('stealth-tap:available', () => stealth.isAvailable());
+      ipcMain.handle('stealth-tap:permission-granted', () => stealth.isPermissionGranted());
+      ipcMain.handle('stealth-tap:request-permission', () => stealth.requestPermission());
+      ipcMain.handle('stealth-tap:open-settings', () => { stealth.openSettings(); });
+      ipcMain.handle('stealth-tap:is-active', () => stealth.isActive());
+      ipcMain.handle('stealth-tap:stop', () => { stealth.stop(); });
+    } else {
+      ipcMain.handle('stealth-tap:available', () => false);
+      ipcMain.handle('stealth-tap:permission-granted', () => false);
+      ipcMain.handle('stealth-tap:request-permission', () => false);
+      ipcMain.handle('stealth-tap:open-settings', () => {});
+      ipcMain.handle('stealth-tap:is-active', () => false);
+      ipcMain.handle('stealth-tap:stop', () => {});
+    }
+
     keybindManager.onShortcutTriggered(async (actionId) => {
       console.log(`[Main] Global shortcut triggered: ${actionId}`);
       try {
@@ -373,6 +395,37 @@ export class AppState {
         // --- STEALTH SHORTCUTS: no focus, no show, pure IPC dispatch ---
 
         // Chat actions — fire into the renderer without focusing the window
+        } else if (actionId === 'chat:focusInput') {
+          // Toggle CGEventTap-backed stealth typing mode. While engaged, every
+          // keystroke is captured at the OS event-pipeline layer and routed to
+          // the renderer; the foreground app (Zoom/browser/etc.) does NOT
+          // receive any key events and never loses key/frontmost status. This
+          // is the only path that delivers true Cluely-grade undetectability
+          // on macOS — NSPanel-nonactivating gets us 90% there, the tap closes
+          // the remaining gap (the panel never even has to become key-window).
+          //
+          // Falls back to plain panel.focus() if the native tap is unavailable
+          // (no rebuild yet, no Accessibility permission, or non-macOS).
+          this.showMainWindow(true);
+          const overlay = this.windowHelper.getOverlayWindow();
+          if (overlay && !overlay.isDestroyed()) {
+            overlay.webContents.send('ensure-expanded');
+          }
+
+          if (process.platform === 'darwin') {
+            const { StealthKeyboardManager } = require('./services/StealthKeyboardManager');
+            const mgr = StealthKeyboardManager.getInstance();
+            if (mgr.isAvailable()) {
+              mgr.toggle();
+              return; // tap is the input path; no need to focus the panel
+            }
+          }
+
+          // Fallback: panel-safe focus on macOS without tap, brief focus on Win.
+          if (overlay && !overlay.isDestroyed()) {
+            overlay.webContents.send('global-shortcut', { action: 'focusInput' });
+            overlay.focus();
+          }
         } else if (
           actionId === 'chat:whatToAnswer' ||
           actionId === 'chat:clarify' ||

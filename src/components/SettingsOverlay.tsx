@@ -1303,7 +1303,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                         onClick={() => setActiveTab('natively-api')}
                                         className={`w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-3 ${activeTab === 'natively-api' ? 'bg-bg-item-active text-text-primary' : 'text-text-secondary hover:text-text-primary hover:bg-bg-item-active/50'}`}
                                     >
-                                        <Zap size={16} className={activeTab === 'natively-api' ? 'text-blue-500' : 'text-blue-500/70'} />
+                                        <NativelyLogoMark size={16} className={activeTab === 'natively-api' ? 'text-blue-500' : 'text-blue-500/70'} />
                                         <span>Natively API</span>
                                     </button>
                                     <button
@@ -1982,6 +1982,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                     { id: 'scrollDown', label: 'Scroll Down', icon: <ArrowDown size={14} /> },
                                                     { id: 'scrollLeft', label: 'Scroll Left (code block)', icon: <ArrowLeft size={14} /> },
                                                     { id: 'scrollRight', label: 'Scroll Right (code block)', icon: <ArrowRight size={14} /> },
+                                                    { id: 'focusInput', label: 'Focus Chat Input', icon: <MessageSquare size={14} /> },
                                                 ].map((item, i) => (
                                                     <div key={i} className="flex items-center justify-between py-1.5 group">
                                                         <div className="flex items-center gap-3">
@@ -2717,10 +2718,9 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
 
                                                                             {/* Trailing action — magnetic button */}
                                                                             {ev.link ? (
-                                                                                <a
-                                                                                    href={ev.link}
-                                                                                    target="_blank"
-                                                                                    rel="noopener noreferrer"
+                                                                                <button
+                                                                                    type="button"
+                                                                                    onClick={() => window.electronAPI?.openExternal(ev.link!)}
                                                                                     title={ev.link}
                                                                                     className="self-center shrink-0 group/btn inline-flex items-center gap-1.5 rounded-full pl-3 pr-1.5 py-1.5 bg-white/[0.05] hover:bg-white/[0.1] ring-1 ring-white/[0.07] text-text-primary text-[11px] font-medium transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.97] shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]"
                                                                                 >
@@ -2728,7 +2728,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                                                     <span className="w-5 h-5 rounded-full bg-white/[0.08] ring-1 ring-white/[0.08] flex items-center justify-center transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/btn:translate-x-[1px] group-hover/btn:-translate-y-[1px]">
                                                                                         <ExternalLink size={9} strokeWidth={2} />
                                                                                     </span>
-                                                                                </a>
+                                                                                </button>
                                                                             ) : (
                                                                                 <span
                                                                                     aria-label="No meeting link"

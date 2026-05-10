@@ -42,6 +42,11 @@ export const DEFAULT_KEYBINDS: KeybindConfig[] = [
     { id: 'chat:scrollDown', label: 'Scroll Down', accelerator: 'CommandOrControl+Down', isGlobal: true, defaultAccelerator: 'CommandOrControl+Down' },
     { id: 'chat:scrollLeft', label: 'Scroll Left (code block)', accelerator: 'CommandOrControl+Alt+Left', isGlobal: true, defaultAccelerator: 'CommandOrControl+Alt+Left' },
     { id: 'chat:scrollRight', label: 'Scroll Right (code block)', accelerator: 'CommandOrControl+Alt+Right', isGlobal: true, defaultAccelerator: 'CommandOrControl+Alt+Right' },
+    // CommandOrControl+Shift+Space because bare Cmd+Space is Spotlight on macOS
+    // and Ctrl+Space is the IME source switcher. The overlay is created with
+    // type:'panel' on macOS, so focusing it does not activate the Natively app —
+    // the user's foreground app keeps focus in the dock/menu bar/screen-share.
+    { id: 'chat:focusInput', label: 'Focus Chat Input', accelerator: 'CommandOrControl+Shift+Space', isGlobal: true, defaultAccelerator: 'CommandOrControl+Shift+Space' },
 
     // Window Movement - Global shortcuts (stealth window positioning)
     { id: 'window:move-up', label: 'Move Window Up', accelerator: 'CommandOrControl+Shift+Up', isGlobal: true, defaultAccelerator: 'CommandOrControl+Shift+Up' },
