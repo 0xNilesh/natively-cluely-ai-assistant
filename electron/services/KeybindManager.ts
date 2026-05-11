@@ -46,7 +46,7 @@ export const DEFAULT_KEYBINDS: KeybindConfig[] = [
     // and Ctrl+Space is the IME source switcher. The overlay is created with
     // type:'panel' on macOS, so focusing it does not activate the Natively app —
     // the user's foreground app keeps focus in the dock/menu bar/screen-share.
-    { id: 'chat:focusInput', label: 'Focus Chat Input', accelerator: 'CommandOrControl+Shift+Space', isGlobal: true, defaultAccelerator: 'CommandOrControl+Shift+Space' },
+    { id: 'chat:focusInput', label: 'Toggle Stealth Typing', accelerator: 'CommandOrControl+Shift+Space', isGlobal: true, defaultAccelerator: 'CommandOrControl+Shift+Space' },
 
     // Window Movement - Global shortcuts (stealth window positioning)
     { id: 'window:move-up', label: 'Move Window Up', accelerator: 'CommandOrControl+Shift+Up', isGlobal: true, defaultAccelerator: 'CommandOrControl+Shift+Up' },

@@ -66,7 +66,7 @@
 
 use std::ffi::c_void;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -76,8 +76,8 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use core_foundation::base::CFRelease;
 use core_foundation::mach_port::{CFMachPortInvalidate, CFMachPortRef};
 use core_foundation::runloop::{
-    kCFRunLoopCommonModes, CFRunLoopAddSource, CFRunLoopGetCurrent, CFRunLoopRef, CFRunLoopRun,
-    CFRunLoopSourceRef, CFRunLoopStop,
+    kCFRunLoopCommonModes, CFRunLoopAddSource, CFRunLoopGetCurrent, CFRunLoopRef,
+    CFRunLoopRemoveSource, CFRunLoopRun, CFRunLoopSourceRef, CFRunLoopStop,
 };
 
 // ─── ApplicationServices FFI for Accessibility permission ────────────────
@@ -130,7 +130,7 @@ extern "C" {
         place: u32,
         options: u32,
         events_of_interest: u64,
-        callback: extern "C" fn(*mut c_void, u32, *mut c_void, *mut c_void) -> *mut c_void,
+        callback: unsafe extern "C" fn(*mut c_void, u32, *mut c_void, *mut c_void) -> *mut c_void,
         user_info: *mut c_void,
     ) -> CFMachPortRef;
 
@@ -159,6 +159,12 @@ struct TapState {
     /// Set by the worker thread once the tap is created and the runloop is
     /// running. Cleared on stop. JS-thread reads this to call CFRunLoopStop.
     runloop: Mutex<Option<RunLoopHandle>>,
+    /// CFMachPortRef of the active tap, stored so the C callback can
+    /// re-enable the tap when macOS disables it (TAP_DISABLED_BY_TIMEOUT or
+    /// USER_INPUT). Atomic-storing as `usize` avoids the `Send`/`Sync`
+    /// dance for raw `*mut`. Loaded with Acquire so the callback always
+    /// sees a valid port after the worker publishes it.
+    port: AtomicU64,
     /// Threadsafe callback into V8. Set on start(), cleared on stop(). The
     /// option indirection lets stop() drop the tsfn handle so JS can GC the
     /// closure without keeping the worker thread's strong ref alive past
@@ -208,30 +214,92 @@ pub struct CapturedKey {
 ///     a non-null pointer hands it back; returning null deletes it.
 ///   - We never block in this callback (no synchronous JS calls); the tsfn
 ///     queues onto the V8 thread and returns immediately.
-extern "C" fn tap_callback(
+/// Marked `unsafe extern "C"` because:
+///   - The C runtime invokes us through a function pointer with the
+///     `extern "C"` calling convention; `unsafe` documents that we trust
+///     the C-side contract (pointer validity, calling convention).
+///   - A panic that crosses an `extern "C"` boundary is undefined behavior.
+///     We wrap the entire body in `catch_unwind` and replace `.unwrap()`
+///     calls on Mutexes (which panic on poison) with explicit handling so
+///     a panic in one path can't propagate into the C runloop.
+unsafe extern "C" fn tap_callback(
     _proxy: *mut c_void,
     event_type: u32,
     event: *mut c_void,
     user_info: *mut c_void,
 ) -> *mut c_void {
+    // ── UAF guard, BEFORE catch_unwind ──
+    // Promote the borrowed *const TapState into an Arc by manually managing
+    // the refcount: clone via raw → Arc → temporary clone → forget the
+    // original to avoid double-decrement. This bumps strong_count for the
+    // duration of the callback so the worker thread can't drop the Arc
+    // mid-execution.
+    //
+    // ROUND 2 FIX: this dance MUST happen outside catch_unwind. If a panic
+    // fired between Arc::from_raw and forget(original), the local `original`
+    // would drop during unwind, decrementing the C-owned refcount. The
+    // worker's later cleanup Arc::from_raw would then operate on a count
+    // that's one too low → premature drop → UAF on subsequent in-flight
+    // callbacks. Doing the refcount math here means the only locals catch_unwind
+    // can drop are the bumped clone (which we own) — never touches the C ref.
+    //
+    // These primitive pointer ops cannot panic, so doing them outside the
+    // catch_unwind boundary is safe.
+    let state: Arc<TapState> = unsafe {
+        let raw = user_info as *const TapState;
+        let original = Arc::from_raw(raw);
+        let clone = original.clone();
+        std::mem::forget(original); // user_info retains the original ref
+        clone
+    };
+
+    // Now pass the already-bumped Arc into catch_unwind. If anything inside
+    // panics (mutex poison, tsfn closure panic, slice bug), only the local
+    // `state` clone drops as the unwind passes through — C refcount intact.
+    // Better to leak one keystroke into the foreground app than to UB the
+    // C runloop.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tap_callback_inner(event_type, event, state)
+    }));
+    match result {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("[keyboard_tap] callback panicked; passing event through");
+            event
+        }
+    }
+}
+
+fn tap_callback_inner(
+    event_type: u32,
+    event: *mut c_void,
+    state: Arc<TapState>,
+) -> *mut c_void {
     // CGEventType values: 10 = keyDown, 11 = keyUp, 12 = flagsChanged,
     // 0xFFFFFFFE = tapDisabledByTimeout, 0xFFFFFFFF = tapDisabledByUserInput.
     // The "disabled by timeout" event fires if our callback was too slow on a
-    // prior call (>1s); we just re-enable and pass through.
+    // prior call (>1s); we re-enable using the port stored in TapState.
     const TAP_DISABLED_BY_TIMEOUT: u32 = 0xFFFFFFFE;
     const TAP_DISABLED_BY_USER_INPUT: u32 = 0xFFFFFFFF;
 
     if event_type == TAP_DISABLED_BY_TIMEOUT || event_type == TAP_DISABLED_BY_USER_INPUT {
-        // The OS disabled our tap (most commonly: callback exceeded 1s budget).
-        // Re-enable on the next loop iteration. We can't re-enable from inside
-        // the callback synchronously without a port handle, but the next user
-        // keystroke will go through anyway because the tap is disabled.
-        // Returning the event is correct here — it means "pass through."
+        // The OS disabled our tap (most commonly: a prior callback exceeded
+        // the 1s budget). Without re-enabling, the tap is dead — every
+        // subsequent keystroke goes straight to the foreground app and
+        // stealth typing silently breaks. We re-enable in-place using the
+        // port handle the worker stored in TapState.
+        let port = state.port.load(Ordering::Acquire) as CFMachPortRef;
+        if !port.is_null() {
+            unsafe { CGEventTapEnable(port, true) };
+            eprintln!(
+                "[keyboard_tap] tap was disabled (event_type={:#x}); re-enabled",
+                event_type
+            );
+        }
         return event;
     }
 
     // Re-check active flag to guard against post-stop callback fires.
-    let state = unsafe { &*(user_info as *const TapState) };
     if !state.active.load(Ordering::Acquire) {
         // Pass the event through if we're shutting down — better to leak a
         // keystroke into the foreground app than to swallow one after the
@@ -242,6 +310,66 @@ extern "C" fn tap_callback(
     // Extract keystroke metadata. CGEventField::KEYBOARD_EVENT_KEYCODE = 9.
     let key_code = unsafe { core_graphics_get_int_field(event, 9) } as u32;
     let flags = unsafe { core_graphics_get_flags(event) };
+
+    // ── PASS-THROUGH FILTER (R3) ──
+    //
+    // The previous design swallowed every captured event while the tap was
+    // active. That broke macOS system shortcuts entirely: Cmd+Tab, Cmd+Q,
+    // Cmd+Space (Spotlight), Cmd+H (hide), Cmd+`, volume/brightness keys,
+    // media keys, F-keys — all eaten silently the moment the tap engaged.
+    // User report: "shortcuts of the macbook aren't working when natively
+    // meeting interface is active."
+    //
+    // Fix: only swallow plain typing keys. Pass through (return event) any
+    // event with a system modifier (Cmd / Ctrl / Option / Fn), any F-key,
+    // and any modifier-flagsChanged event. The OS routes those normally to
+    // the foreground app while non-modified character keys still get routed
+    // into Natively's input.
+    //
+    // Trade-off: Cmd+Backspace / Cmd+A / Cmd+Enter no longer reach the
+    // renderer's switch statement. Plain Enter still submits (case 36),
+    // plain Backspace still deletes (case 51), so the typing UX is intact.
+    // Cmd+Enter as alternate submit is dropped in favor of system-shortcut
+    // sanity — net win.
+    const CMD: u32 = 1 << 20;
+    const OPT: u32 = 1 << 19;
+    const CTRL: u32 = 1 << 18;
+    const FN: u32 = 1 << 23;
+    const SYSTEM_MODIFIER_MASK: u32 = CMD | OPT | CTRL | FN;
+
+    if (flags & SYSTEM_MODIFIER_MASK) != 0 {
+        return event;
+    }
+
+    // F-keys: F1=122, F2=120, F3=99, F4=118, F5=96, F6=97, F7=98, F8=100,
+    // F9=101, F10=109, F11=103, F12=111, F13=105, F14=107, F15=113.
+    // ROUND 3 FIX (#3): added F16=106, F17=64, F18=79, F19=80, F20=90 —
+    // extended Apple/Logitech keyboards bind these to media/launchpad/
+    // app-switch by default; users would lose those bindings without this.
+    // On most modern Macs F-keys are bound to brightness, Mission Control,
+    // volume, media playback — eating them would feel completely broken.
+    //
+    // ROUND 4 FIX (#2): added Tab=48 + arrows=123-126. After Cmd+Tab the
+    // user expects plain Tab to work in their newly-active app (focus-
+    // cycle). Tab is rarely useful as text in a chat input — never as a
+    // submit gesture — so passing it through is the right default. Same
+    // rationale for arrow keys: they're navigation, not text.
+    if matches!(
+        key_code,
+        48 | 64 | 79 | 80 | 90 | 96 | 97 | 98 | 99 | 100 | 101 | 103
+            | 105 | 106 | 107 | 109 | 111 | 113 | 118 | 120 | 122
+            | 123 | 124 | 125 | 126
+    ) {
+        return event;
+    }
+
+    // flagsChanged events (modifier press/release alone, e.g. tapping Shift).
+    // Pass through so the OS sees the modifier — otherwise sticky-keys and
+    // accessibility features break. We don't need to deliver these to the
+    // renderer (it ignores keyUp/flagsChanged anyway via the isKeyDown guard).
+    if event_type == 12 {
+        return event;
+    }
 
     // Pull unicode chars (handles layout, dead keys, IME). 8 UniChars is
     // enough for any single keystroke including surrogate pairs and IME
@@ -254,16 +382,44 @@ extern "C" fn tap_callback(
     let chars: String = if actual_len == 0 {
         String::new()
     } else {
+        // CGEventKeyboardGetUnicodeString returns the FULL composition length
+        // in actual_len even when the buffer was truncated to max_string_length.
+        // Long IME compositions (Korean Hangul, Japanese kanji) can exceed our
+        // 8-UniChar buffer; without clamping, slice::from_raw_parts reads past
+        // the stack frame — UB / crash / garbage chars. Truncating to buf.len()
+        // loses the tail of the composition (rare, acceptable trade-off for
+        // safety on a short fixed-size buffer).
+        let n = actual_len.min(buf.len());
         let u16_slice: &[u16] =
-            unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u16, actual_len) };
+            unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u16, n) };
         String::from_utf16_lossy(u16_slice)
     };
 
+    // flagsChanged (event_type == 12) is filtered out by the pass-through
+    // above, so it cannot reach this point. keyDown=10, keyUp=11 are the
+    // only remaining values we subscribe to. Any other value is unexpected
+    // (event mask doesn't include it) — pass through defensively.
+    //
+    // ROUND 4 FIX (#8): log once per process when we see an unknown event
+    // type. The event mask only subscribes to keyDown/keyUp/flagsChanged
+    // so this branch should be unreachable, but if Apple ever changes the
+    // tap to deliver synthetic events or new types, we want to know
+    // (otherwise the event silently passes through and we'd never debug
+    // why some captured-key path is missing). Using a static AtomicBool
+    // keyed on the file scope so we don't spam logs.
     let is_key_down = match event_type {
-        10 => true,                 // keyDown
-        11 => false,                // keyUp
-        12 => (flags & 0xFF00_0000) != 0, // flagsChanged → infer from flags presence
-        _ => true,
+        10 => true,  // keyDown
+        11 => false, // keyUp
+        _ => {
+            static UNKNOWN_TYPE_LOGGED: AtomicBool = AtomicBool::new(false);
+            if !UNKNOWN_TYPE_LOGGED.swap(true, Ordering::Relaxed) {
+                eprintln!(
+                    "[keyboard_tap] unexpected event_type={:#x} from CGEventTap; passing through",
+                    event_type
+                );
+            }
+            return event;
+        }
     };
 
     let payload = CapturedKey {
@@ -276,11 +432,31 @@ extern "C" fn tap_callback(
     // Forward to JS. Non-blocking; if the JS thread is overloaded, events
     // queue up. We deliberately do NOT drop events on backpressure — losing
     // a keystroke mid-typing is worse than a brief latency spike.
-    if let Some(tsfn) = state.callback.lock().unwrap().as_ref() {
+    //
+    // Lock-snapshot pattern: clone the Arc<ThreadsafeFunction> under the
+    // lock, then drop the lock BEFORE calling tsfn. Without this, the
+    // tsfn.call could trigger a re-entrant scenario (tsfn drop on JS-side
+    // close, blocking napi callbacks) while we still hold the Mutex,
+    // potentially deadlocking with the JS-thread `stop()` that's also
+    // trying to lock to clear the callback.
+    //
+    // Poison-safe: if a prior panic poisoned the Mutex, recover via
+    // into_inner on PoisonError — the data is still valid.
+    let tsfn_snapshot: Option<Arc<ThreadsafeFunction<CapturedKey>>> = {
+        let cb_guard = match state.callback.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        cb_guard.as_ref().map(Arc::clone)
+        // guard drops at end of block — lock released before tsfn.call below
+    };
+    if let Some(tsfn) = tsfn_snapshot {
         tsfn.call(Ok(payload), ThreadsafeFunctionCallMode::NonBlocking);
     }
 
     // Return null → swallow. Foreground app does not see this keystroke.
+    // `state` (the local Arc clone) drops here, decrementing the refcount
+    // we bumped above. The worker-thread-owned Arc lives until cleanup.
     ptr::null_mut()
 }
 
@@ -339,6 +515,12 @@ fn tap_worker(state: Arc<TapState>) {
     unsafe { CFRunLoopAddSource(current_loop, source, kCFRunLoopCommonModes) };
     unsafe { CGEventTapEnable(port, true) };
 
+    // Publish the port so the C callback can re-enable the tap if macOS
+    // disables it (TAP_DISABLED_BY_TIMEOUT). Release-store pairs with the
+    // Acquire-load in the callback. Done BEFORE stash-runloop so that if a
+    // disable event fires immediately, the callback sees a valid port.
+    state.port.store(port as u64, Ordering::Release);
+
     // Stash the runloop so stop() can wake us.
     *state.runloop.lock().unwrap() = Some(RunLoopHandle(current_loop));
 
@@ -347,7 +529,16 @@ fn tap_worker(state: Arc<TapState>) {
     unsafe { CFRunLoopRun() };
 
     // ─── Cleanup: invalidate the port, release CF resources, drop our Arc.
+    // Clear the port atomic FIRST so any in-flight callback sees null and
+    // skips the re-enable path. Then disable + remove source from runloop +
+    // invalidate port + release. Per Apple docs (CFMachPort + CFRunLoopSource
+    // section), the source MUST be removed from the runloop BEFORE the port
+    // is invalidated; releasing a still-attached source while the runloop
+    // holds a reference is undefined behavior. In practice it works on
+    // current macOS, but the ordering is the documented contract.
+    state.port.store(0, Ordering::Release);
     unsafe { CGEventTapEnable(port, false) };
+    unsafe { CFRunLoopRemoveSource(current_loop, source, kCFRunLoopCommonModes) };
     unsafe { CFMachPortInvalidate(port) };
     unsafe { CFRelease(source as *const c_void) };
     unsafe { CFRelease(port as *const c_void) };
@@ -365,6 +556,15 @@ fn tap_worker(state: Arc<TapState>) {
 #[napi]
 pub struct StealthKeyboardTap {
     state: Arc<TapState>,
+    /// JoinHandle for the worker thread, stored so `stop()` can wait for
+    /// the worker to fully release its CF resources and clear the shared
+    /// TapState before returning. Without this, a fast stop()→start() cycle
+    /// from JS could spawn a NEW worker that reads/writes `state.port` and
+    /// `state.runloop` while the OLD worker is still in its cleanup path,
+    /// resulting in the new worker's runloop ref being cleared by the old
+    /// worker's `take()` and the new tap being permanently un-stoppable.
+    /// Behind a Mutex so concurrent stop() calls don't double-join.
+    worker: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
 #[napi]
@@ -375,8 +575,10 @@ impl StealthKeyboardTap {
             state: Arc::new(TapState {
                 active: AtomicBool::new(false),
                 runloop: Mutex::new(None),
+                port: AtomicU64::new(0),
                 callback: Mutex::new(None),
             }),
+            worker: Mutex::new(None),
         }
     }
 
@@ -395,22 +597,60 @@ impl StealthKeyboardTap {
         if !is_accessibility_granted() {
             return Ok(false);
         }
-        if self.state.active.swap(true, Ordering::AcqRel) {
+
+        // ROUND 4 FIX (#1): Re-entry guard via non-mutating load — safe
+        // because JS is single-threaded so concurrent start() calls cannot
+        // happen in practice. The previous swap(true)-first ordering left
+        // a narrow window where the prior worker's auto-exit cleanup path
+        // could write active.store(false) AFTER our swap(true), silently
+        // killing the new session.
+        if self.state.active.load(Ordering::Acquire) {
             return Ok(true);
         }
-        *self.state.callback.lock().unwrap() = Some(Arc::new(callback));
+
+        // ROUND 2 FIX (#2) + R4 reorder: take and join any prior worker
+        // handle BEFORE flipping active=true. If a previous session's
+        // worker is still in its cleanup path (which includes a final
+        // active.store(false)), joining first guarantees that store
+        // happens BEFORE our store(true). Without this order, the
+        // cleanup-store could overwrite our true and leave the new tap
+        // silently dead. join() returns immediately when the worker has
+        // already exited.
+        let prev_handle = self.worker.lock().unwrap_or_else(|p| p.into_inner()).take();
+        if let Some(h) = prev_handle {
+            let _ = h.join();
+        }
+
+        // Now safely publish the active state.
+        self.state.active.store(true, Ordering::Release);
+
+        // ROUND 2 FIX (#6): poison-safe lock. Without this, a prior panic
+        // that poisoned the callback Mutex would make .unwrap() panic here,
+        // leaving active=true with no worker — permanently broken until
+        // process restart.
+        *self.state.callback.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some(Arc::new(callback));
 
         let state = self.state.clone();
-        thread::Builder::new()
+        let handle = thread::Builder::new()
             .name("natively-keyboard-tap".into())
             .spawn(move || tap_worker(state))
             .map_err(|e| {
+                // Spawn failed → roll back state so JS can retry cleanly.
+                // Clear the callback we just installed; otherwise the
+                // Arc<ThreadsafeFunction> stays in TapState forever, holding
+                // a strong ref to the JS closure (memory leak) and blocking
+                // V8 from GC-ing the closure even after JS dropped its ref.
                 self.state.active.store(false, Ordering::Release);
+                *self.state.callback.lock().unwrap_or_else(|p| p.into_inner()) = None;
                 Error::new(
                     Status::GenericFailure,
                     format!("failed to spawn tap worker thread: {e}"),
                 )
             })?;
+        // Stash the JoinHandle so stop() can wait for full cleanup before
+        // returning to JS. Lock is brief (one assignment) — no contention.
+        *self.worker.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
 
         Ok(true)
     }
@@ -422,13 +662,65 @@ impl StealthKeyboardTap {
         if !self.state.active.swap(false, Ordering::AcqRel) {
             return;
         }
-        // Wake the worker thread out of CFRunLoopRun. CFRunLoopStop is
-        // safe to call from any thread per Apple docs.
-        if let Some(handle) = self.state.runloop.lock().unwrap().as_ref() {
-            unsafe { CFRunLoopStop(handle.0) };
+        // Atomically claim ownership of the runloop handle by `take()`-ing
+        // it out of the Mutex. This guarantees:
+        //   1. Concurrent stop() calls — only one path calls CFRunLoopStop.
+        //      Subsequent stops see None and no-op.
+        //   2. The worker thread's cleanup-path `take()` (line ~410) and
+        //      ours can't both call CFRunLoopStop on the same handle.
+        //   3. Once the worker thread has exited via its own path (rare —
+        //      would require CFRunLoopRun returning without our stop, which
+        //      shouldn't happen with our setup, but defensive), the handle
+        //      is already None and we don't try to call into a freed runloop.
+        // The null-check on handle.0 is belt-and-braces; CFRunLoopGetCurrent
+        // never returns null on a live thread, but we're paranoid here
+        // because deref-on-null is UB and the cost is one branch.
+        let runloop = self.state.runloop.lock().unwrap().take();
+        if let Some(handle) = runloop {
+            if !handle.0.is_null() {
+                // Wake the worker thread out of CFRunLoopRun. CFRunLoopStop
+                // is safe to call from any thread per Apple docs.
+                unsafe { CFRunLoopStop(handle.0) };
+            }
         }
         // Drop the JS callback handle so V8 can GC its closure.
-        *self.state.callback.lock().unwrap() = None;
+        *self.state.callback.lock().unwrap_or_else(|p| p.into_inner()) = None;
+
+        // Wait for the worker thread to fully finish cleanup (releasing CF
+        // resources, dropping its Arc on user_info, clearing runloop/port
+        // fields of TapState). Without this, a subsequent start() could
+        // spawn a new worker that races with the old worker on the shared
+        // TapState — the new worker's runloop ref gets cleared by the old
+        // worker's cleanup-path `take()`, leaving the new tap un-stoppable.
+        //
+        // We `take()` the JoinHandle out under the lock to avoid double-join
+        // if stop() is called concurrently from two paths (shouldn't happen
+        // but defensive). join() can panic if the worker panicked.
+        //
+        // ROUND 2 FIX (#3): timing watchdog. join() blocks the JS event loop
+        // synchronously. CFRunLoopStop is documented to wake the runloop on
+        // its next iteration; in practice this is sub-millisecond, but if
+        // it ever fails (CG bug, runloop stuck dispatching a long callback),
+        // the entire Node event loop wedges. We log if join exceeds 100ms so
+        // production hangs are diagnosable from console output. We also
+        // surface worker panics rather than silently swallowing — the user
+        // sees "[keyboard_tap] worker panicked" in logs and we know to
+        // investigate.
+        let handle = self.worker.lock().unwrap_or_else(|p| p.into_inner()).take();
+        if let Some(h) = handle {
+            let join_start = std::time::Instant::now();
+            match h.join() {
+                Ok(_) => {}
+                Err(e) => eprintln!("[keyboard_tap] worker panicked during cleanup: {:?}", e),
+            }
+            let join_ms = join_start.elapsed().as_millis();
+            if join_ms > 100 {
+                eprintln!(
+                    "[keyboard_tap] stop() join() took {}ms — runloop may have been wedged",
+                    join_ms
+                );
+            }
+        }
     }
 
     /// True while the tap is engaged. Use to drive UI state ("stealth

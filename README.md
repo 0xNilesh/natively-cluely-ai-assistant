@@ -386,6 +386,8 @@ Version 2.6.0 brings massive workflow and integration capabilities to make your 
 - **Smart Task Sync**: Action items are now auto-extracted with extreme precision and can be instantly exported to Jira, Linear, or Asana boards.
 - **Speaker Identification**: Advanced real-time speaker diarization automatically tags individual speakers by name throughout the meeting transcript.
 - **Expanded Offline Mode**: 100% offline transcription and intelligent note generation using specialized, lightning-fast on-device SLMs.
+- **Advanced Stealth Features**: Hardened undetectable stealth mode with Activity Monitor evasion, process name disguising, and strict timeout management to prevent accidental discovery during OS-level events.
+- **Scroll & Layout Enhancements**: Added scroll keybinds for seamless mouse-free navigation and optimized the horizontal layout for more stable code line rendering.
 
 ---
 

@@ -393,12 +393,9 @@ const App: React.FC = () => {
       });
       if (result.success) {
         analytics.trackMeetingStarted();
-        // Switch to Overlay Mode via IPC
-        // The main process handles window switching, but we can reinforce it or just trust main.
-        // Actually, main process startMeeting triggers nothing UI-wise unless we tell it to switch window
-        // But we configured main.ts to not auto-switch?
-        // Let's explicitly request mode change.
-        await window.electronAPI.setWindowMode('overlay');
+        // Window swap happens inside main's startMeeting() now (before the
+        // meeting-state broadcast) to avoid a blue→green CTA flash on the
+        // launcher. No follow-up setWindowMode IPC needed here.
       } else {
         console.error("Failed to start meeting:", result.error);
       }
@@ -407,31 +404,36 @@ const App: React.FC = () => {
     }
   };
 
-  const handleEndMeeting = async () => {
+  const handleEndMeeting = () => {
     console.log("[App.tsx] handleEndMeeting triggered");
     analytics.trackMeetingEnded();
     setIsProcessingMeeting(true);
-    try {
-      await window.electronAPI.endMeeting();
-      console.log("[App.tsx] endMeeting IPC completed");
-      
-      const startStr = localStorage.getItem('natively_last_meeting_start');
-      if (startStr) {
-        const duration = Date.now() - parseInt(startStr, 10);
-        const threshold = import.meta.env.DEV ? 10000 : 180000;
-        if (duration >= threshold) {
-          localStorage.setItem('natively_show_profile_toaster', 'true');
-        }
-        localStorage.removeItem('natively_last_meeting_start');
-      }
 
-      // Switch back to Native Launcher Mode
-      // (Ad delay tracking moved to onMeetingsUpdated listener so ads wait for note generation to finish)
-      await window.electronAPI.setWindowMode('launcher');
-    } catch (err) {
-      console.error("Failed to end meeting:", err);
-      window.electronAPI.setWindowMode('launcher');
+    // Local bookkeeping that does not depend on the main process.
+    const startStr = localStorage.getItem('natively_last_meeting_start');
+    if (startStr) {
+      const duration = Date.now() - parseInt(startStr, 10);
+      const threshold = import.meta.env.DEV ? 10000 : 180000;
+      if (duration >= threshold) {
+        localStorage.setItem('natively_show_profile_toaster', 'true');
+      }
+      localStorage.removeItem('natively_last_meeting_start');
     }
+
+    // Fire-and-forget: main's endMeeting() handler now performs the
+    // launcher swap synchronously at the top, BEFORE any blocking audio
+    // teardown. Awaiting here would stall the overlay's React render
+    // loop for the IPC round-trip while libuv-blocking setImmediate
+    // native stops fire on the main process — which is the lag the user
+    // was seeing. The launcher window receives a 'meetings-updated'
+    // event after the BG teardown so its list refreshes on its own.
+    window.electronAPI.endMeeting().catch(err => {
+      console.error("Failed to end meeting:", err);
+      // Belt-and-suspenders: if the IPC itself rejected, the swap may
+      // not have happened — request it manually so the user isn't
+      // stranded on a dead overlay.
+      window.electronAPI.setWindowMode('launcher');
+    });
   };
 
   // Render Logic

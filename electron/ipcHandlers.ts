@@ -15,6 +15,7 @@ import { SettingsManager } from "./services/SettingsManager";
 
 import { RECOGNITION_LANGUAGES, AI_RESPONSE_LANGUAGES } from "./config/languages"
 import { TRIAL_SENTINEL_KEY } from "./config/constants"
+import { CHAT_MODE_PROMPT } from "./llm/prompts"
 
 export function initializeIpcHandlers(appState: AppState): void {
   const safeHandle = (channel: string, listener: (event: any, ...args: any[]) => Promise<any> | any) => {
@@ -452,6 +453,12 @@ export function initializeIpcHandlers(appState: AppState): void {
   // that a newer stream has taken over.
   let _chatStreamId = 0;
 
+  // Matches narrow identity/meta probes only. Kept tight so coding/normal asks don't trip it.
+  // Prevents the small fast-mode model from over-firing the "I'm Natively" canned reply
+  // (which used to escape the prompt's hard rule for any ambiguous input).
+  const IDENTITY_PROBE_RE = /^\s*(who\s+(are|r)\s+(you|u|this|natively)|what\s+(are|r)\s+(you|u)|are\s+you\s+(chatgpt|gpt[-\s]?\d?|claude|gemini|llama|an?\s+(ai|bot|llm|model|assistant))|what('?s|\s+is)\s+your\s+(name|model)|which\s+(ai|model|llm)\s+are\s+you|who\s+(made|built|created|developed|trained)\s+(you|this|natively)|what\s+model\s+(are\s+you|do\s+you\s+use)|introduce\s+yourself)\s*\??\s*$/i;
+  const CREATOR_PROBE_RE = /^\s*(who\s+(made|built|created|developed|trained)\s+(you|this|natively))\s*\??\s*$/i;
+
   safeHandle("gemini-chat-stream", async (event, message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean, ignoreKnowledgeMode?: boolean }) => {
     try {
       console.log("[IPC] gemini-chat-stream started using LLMHelper.streamChat");
@@ -460,8 +467,49 @@ export function initializeIpcHandlers(appState: AppState): void {
       // Claim a new stream ID — any prior stream will detect this and stop emitting.
       const myStreamId = ++_chatStreamId;
 
-      // Update IntelligenceManager with USER message immediately
       const intelligenceManager = appState.getIntelligenceManager();
+
+      // Identity probe short-circuit — bypasses the LLM entirely so small models can't
+      // reframe the canned reply or misfire it on coding asks (the original bug).
+      // Regex is `^...$` anchored, so non-probe questions cannot match.
+      if (!imagePaths?.length && typeof message === 'string') {
+        const identityHit = CREATOR_PROBE_RE.test(message)
+          ? "I was developed by Evin John."
+          : (IDENTITY_PROBE_RE.test(message) ? "I'm Natively, an AI assistant." : null);
+        if (identityHit) {
+          intelligenceManager.addTranscript({ text: message, speaker: 'user', timestamp: Date.now(), final: true }, true);
+          try { PhoneMirrorService.getInstance().publishUserMessage(String(myStreamId), message); } catch (_) { /* noop */ }
+          // Guard against a newer chat stream having taken over while we were computing
+          // the canned reply — matches the protection the LLM path uses around its token
+          // loop. Prevents cross-stream UI bleed.
+          if (_chatStreamId !== myStreamId) {
+            console.log(`[IPC] gemini-chat-stream ${myStreamId} (identity probe) superseded by ${_chatStreamId}, skipping emit.`);
+            return null;
+          }
+          event.sender.send("gemini-stream-token", identityHit);
+          event.sender.send("gemini-stream-done");
+          try { PhoneMirrorService.getInstance().publishToken(String(myStreamId), identityHit); } catch (_) { /* noop */ }
+          try { PhoneMirrorService.getInstance().publishDone(String(myStreamId), identityHit); } catch (_) { /* noop */ }
+          intelligenceManager.addAssistantMessage(identityHit);
+          intelligenceManager.logUsage('chat', message, identityHit);
+          return null;
+        }
+      }
+
+      // Capture rolling context BEFORE adding the new user message — otherwise the
+      // 100s window would echo back the user's just-typed message as both context and
+      // question, confusing small models (the "20-char context" log line was just an echo).
+      let autoContextSnapshot: string | undefined;
+      if (!context) {
+        try {
+          const snap = intelligenceManager.getFormattedContext(100);
+          if (snap && snap.trim().length > 0) autoContextSnapshot = snap;
+        } catch (ctxErr) {
+          console.warn("[IPC] Failed to capture pre-turn context:", ctxErr);
+        }
+      }
+
+      // Now add USER message to IntelligenceManager (after context snapshot)
       intelligenceManager.addTranscript({
         text: message,
         speaker: 'user',
@@ -474,24 +522,20 @@ export function initializeIpcHandlers(appState: AppState): void {
 
       let fullResponse = "";
 
-      // Context Injection for "Answer" button (100s rolling window)
-      if (!context) {
-        // User requested 100 seconds of context for the answer button
-        // Logic: If no explicit context provided (like from manual override), auto-inject from IntelligenceManager
-        try {
-          const autoContext = intelligenceManager.getFormattedContext(100);
-          if (autoContext && autoContext.trim().length > 0) {
-            context = autoContext;
-            console.log(`[IPC] Auto - injected 100s context for gemini - chat - stream(${context.length} chars)`);
-          }
-        } catch (ctxErr) {
-          console.warn("[IPC] Failed to auto-inject context:", ctxErr);
-        }
+      if (!context && autoContextSnapshot) {
+        context = autoContextSnapshot;
+        console.log(`[IPC] Auto-injected 100s context for gemini-chat-stream (${context.length} chars)`);
       }
+
+      // Use CHAT_MODE_PROMPT for general chat — bypasses the interview-copilot
+      // framing in HARD_SYSTEM_PROMPT/ASSIST_MODE_PROMPT that was causing coding
+      // questions to be answered with "At Aetherbot AI, I was responsible for..."
+      // (resume hijack via CONTEXT_INTELLIGENCE_LAYER's "you ARE the user").
+      const systemPromptOverride: string | undefined = options?.skipSystemPrompt ? "" : CHAT_MODE_PROMPT;
 
       try {
         // USE streamChat which handles routing
-        const stream = llmHelper.streamChat(message, imagePaths, context, options?.skipSystemPrompt ? "" : undefined, options?.ignoreKnowledgeMode);
+        const stream = llmHelper.streamChat(message, imagePaths, context, systemPromptOverride, options?.ignoreKnowledgeMode);
 
         for await (const token of stream) {
           // Bail if a newer stream has taken over (user triggered a new request)
@@ -1986,7 +2030,18 @@ export function initializeIpcHandlers(appState: AppState): void {
       }
 
     } catch (error: any) {
-      console.error("LLM connection test failed:", error);
+      // CRITICAL: do NOT log the raw axios error — it includes the request config
+      // with the Authorization header (full API key) and is dumped verbatim by
+      // Node's util.inspect. Strip to a safe shape before logging.
+      const safeInfo = {
+        provider,
+        status: error?.response?.status,
+        statusText: error?.response?.statusText,
+        code: error?.code,
+        message: error?.message,
+        responseError: error?.response?.data?.error?.message || error?.response?.data?.message,
+      };
+      console.error("LLM connection test failed:", safeInfo);
       const rawMsg = error?.response?.data?.error?.message || error?.response?.data?.message || (error.response?.data?.error?.type ? `${error.response.data.error.type}: ${error.response.data.error.message}` : error.message) || 'Connection failed';
       const msg = sanitizeErrorMessage(rawMsg);
       return { success: false, error: msg };
@@ -2153,6 +2208,19 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle("toggle-model-selector", (_, coords: { x: number; y: number }) => {
     appState.modelSelectorWindowHelper.toggleWindow(coords.x, coords.y);
+  });
+
+  // ROUND 3 FIX (#4): click-outside close for ModelSelector. With panel-
+  // nonactivating + becomesKeyOnlyIfNeeded, the on('blur') auto-close in
+  // ModelSelectorWindowHelper fires unreliably (panel may never become key
+  // → never receives blur). The overlay's renderer fires this IPC on every
+  // mousedown that isn't on the toggle button itself; if the model selector
+  // is open, we close it. No-op when closed (toggleWindow handled the open).
+  safeHandle("model-selector:close-if-open", () => {
+    const win = appState.modelSelectorWindowHelper.getWindow();
+    if (win && !win.isDestroyed() && win.isVisible()) {
+      appState.modelSelectorWindowHelper.hideWindow();
+    }
   });
 
 

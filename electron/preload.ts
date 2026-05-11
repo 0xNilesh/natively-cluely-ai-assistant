@@ -163,6 +163,7 @@ interface ElectronAPI {
   setModel: (modelId: string) => Promise<{ success: boolean; error?: string }>
   setDefaultModel: (modelId: string) => Promise<{ success: boolean; error?: string }>
   toggleModelSelector: (coords: { x: number; y: number }) => Promise<void>
+  modelSelectorCloseIfOpen: () => Promise<void>
   forceRestartOllama: () => Promise<void>
 
   // Settings Window
@@ -281,6 +282,7 @@ interface ElectronAPI {
   stealthTapOpenSettings: () => Promise<void>
   stealthTapIsActive: () => Promise<boolean>
   stealthTapStop: () => Promise<void>
+  stealthTapStart: () => Promise<boolean>
   onStealthTapState: (cb: (state: { active: boolean; reason?: string }) => void) => () => void
   onStealthKeyCaptured: (cb: (ev: { keyCode: number; chars: string; flags: number; isKeyDown: boolean }) => void) => () => void
 
@@ -944,6 +946,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   setModel: (modelId: string) => ipcRenderer.invoke('set-model', modelId),
   setDefaultModel: (modelId: string) => ipcRenderer.invoke('set-default-model', modelId),
   toggleModelSelector: (coords: { x: number; y: number }) => ipcRenderer.invoke('toggle-model-selector', coords),
+  modelSelectorCloseIfOpen: () => ipcRenderer.invoke('model-selector:close-if-open'),
   forceRestartOllama: () => ipcRenderer.invoke('force-restart-ollama'),
 
   // Settings Window
@@ -1175,6 +1178,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   stealthTapOpenSettings: () => ipcRenderer.invoke('stealth-tap:open-settings'),
   stealthTapIsActive: () => ipcRenderer.invoke('stealth-tap:is-active'),
   stealthTapStop: () => ipcRenderer.invoke('stealth-tap:stop'),
+  stealthTapStart: () => ipcRenderer.invoke('stealth-tap:start'),
   onStealthTapState: (cb: (state: { active: boolean; reason?: string }) => void) => {
     const sub = (_: any, state: { active: boolean; reason?: string }) => cb(state)
     ipcRenderer.on('stealth-tap-state', sub)

@@ -148,6 +148,7 @@ export class SettingsWindowHelper {
     }
 
     private createWindow(x?: number, y?: number, showWhenReady: boolean = true): void {
+        const isMac = process.platform === 'darwin';
         const windowSettings: Electron.BrowserWindowConstructorOptions = {
             width: 200, // Match React component width
             height: 238, // Increased to accommodate new Transcript toggle
@@ -165,7 +166,16 @@ export class SettingsWindowHelper {
                 contextIsolation: true,
                 preload: path.join(__dirname, "preload.js"),
                 backgroundThrottling: false // Keep window ready even when hidden
-            }
+            },
+            // ROUND 3 FIX: type: 'panel' is what makes this an NSPanel rather
+            // than a regular NSWindow. WITHOUT it, the becomesKeyOnlyIfNeeded
+            // and _setPreventsActivation: SPI calls in applyStealthToWindow
+            // are no-ops (those are NSPanel-only properties — respondsToSelector
+            // returns false on a plain NSWindow). The previous fix only added
+            // applyStealthToWindow without the underlying panel type, which is
+            // why focus theft persisted. NSPanel + type:'panel' = the same
+            // Spotlight/Alfred mechanism the overlay uses.
+            ...(isMac ? { type: 'panel' as const } : {}),
         }
 
         if (x !== undefined && y !== undefined) {
@@ -194,13 +204,32 @@ export class SettingsWindowHelper {
         });
 
         this.settingsWindow.once('ready-to-show', () => {
+            // Apply NSPanel stealth attributes (becomesKeyOnlyIfNeeded +
+            // _setPreventsActivation + sharingType=None + collectionBehavior)
+            // BEFORE any show() so clicking the Settings button on the
+            // Natively overlay doesn't activate the Natively app and dim
+            // the user's foreground app (Zoom/browser/IDE) mid-meeting.
+            // Without this, settings was a regular focusable window and
+            // every interaction stole focus. Failure is non-fatal; logged.
+            if (process.platform === 'darwin' && this.settingsWindow && !this.settingsWindow.isDestroyed()) {
+                try {
+                    // eslint-disable-next-line @typescript-eslint/no-var-requires
+                    const { loadNativeModule } = require('./audio/nativeModuleLoader');
+                    const native = loadNativeModule();
+                    if (native && typeof native.applyStealthToWindow === 'function') {
+                        native.applyStealthToWindow(this.settingsWindow.getNativeWindowHandle());
+                    }
+                } catch (e) {
+                    console.error('[SettingsWindowHelper] applyStealthToWindow failed:', e);
+                }
+            }
             if (showWhenReady) {
                 this.showWindow(this.settingsWindow?.getBounds().x || 0, this.settingsWindow?.getBounds().y || 0)
             }
         })
 
-        // Hide on blur instead of close, to keep state? 
-        // Or just let user close it. 
+        // Hide on blur instead of close, to keep state?
+        // Or just let user close it.
         // User asked for "independent window", maybe sticky?
         // Let's keep it simple: clicks outside close it if we want "popover" behavior.
         // For now, let it stay open until toggled or ESC.
@@ -209,6 +238,33 @@ export class SettingsWindowHelper {
             this.lastBlurTime = Date.now();
             this.closeWindow();
         })
+
+        // ROUND 3 FIX (#1): when Settings becomes visible, stop the
+        // CGEventTap. Otherwise the tap intercepts every plain keystroke at
+        // OS level and routes them into Natively's chat input — the user
+        // can't type API keys (or anything) into Settings fields. Settings
+        // input is a long-form interaction; stealth-typing-into-overlay is
+        // not what the user wants here. They can re-engage with the hotkey
+        // after Settings closes.
+        this.settingsWindow.on('show', () => {
+            // ROUND 4 FIX (#7): reset blur timestamp on every successful
+            // show. Without this, a stale lastBlurTime from a prior session
+            // (or from a brief NSPanel-nonactivating blur that did fire)
+            // can keep the 250ms toggle-protection guard hot indefinitely,
+            // suppressing legitimate user re-toggles. Resetting at show
+            // time bounds the guard to "the LAST blur" rather than "any
+            // blur ever observed."
+            this.lastBlurTime = 0;
+
+            if (process.platform !== 'darwin') return;
+            try {
+                // eslint-disable-next-line @typescript-eslint/no-var-requires
+                const { StealthKeyboardManager } = require('./services/StealthKeyboardManager');
+                StealthKeyboardManager.getInstance().stop();
+            } catch (e) {
+                console.error('[SettingsWindowHelper] failed to stop stealth tap on show:', e);
+            }
+        });
 
 
     }

@@ -299,6 +299,21 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
     // on React's render cycle for stop signals.
     const [stealthTapActive, setStealthTapActive] = useState<boolean>(false);
     const stealthTapActiveRef = useRef<boolean>(false);
+    // Latest-handler ref so the captured-key listener (mounted with [] deps)
+    // calls the CURRENT handleManualSubmit closure — not the one captured at
+    // first render, which reads inputValue="" and silently no-ops on submit.
+    // Updated on every render below.
+    const handleManualSubmitRef = useRef<() => void>(() => {});
+    // Set when the user tried to engage the tap but Accessibility isn't
+    // granted yet. Renders the inline permission banner so we never silently
+    // fail — Cluely's onboarding is its UX moat; we mirror it.
+    const [stealthPermissionMissing, setStealthPermissionMissing] = useState<boolean>(false);
+    // Set when KeybindManager reports the stealth-typing global shortcut
+    // failed to register (OS already owns it — common with Cmd+Shift+Space
+    // if another app claimed it, or with the macOS input source switcher
+    // in some configs). Stores the attempted accelerator so the banner can
+    // tell the user exactly what conflicted.
+    const [stealthHotkeyConflict, setStealthHotkeyConflict] = useState<string | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const contentRef = useRef<HTMLDivElement>(null);
     const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -1895,6 +1910,11 @@ Provide only the answer, nothing else.`;
         }
     };
 
+    // Refresh the latest-handler ref on every render so the captured-key
+    // listener (mounted with [] deps) calls the CURRENT closure, not a
+    // stale snapshot from first render.
+    handleManualSubmitRef.current = handleManualSubmit;
+
     const clearChat = () => {
         setMessages([]);
     };
@@ -2656,6 +2676,13 @@ Provide only the answer, nothing else.`;
     useEffect(() => {
         if (!window.electronAPI?.onStealthTapState || !window.electronAPI?.onStealthKeyCaptured) return;
 
+        // Effect-scoped flag set when Esc is observed in the captured-key
+        // stream. Suppresses non-Esc events that may have been queued by the
+        // worker thread before the user pressed Esc. Cleared on each new
+        // active=true state event (a new tap session). Hoisted here so both
+        // listeners see the same binding.
+        let escSuppressUntilNextActive = false;
+
         const unsubState = window.electronAPI.onStealthTapState(({ active, reason }) => {
             stealthTapActiveRef.current = active;
             setStealthTapActive(active);
@@ -2665,56 +2692,172 @@ Provide only the answer, nothing else.`;
                 // tap is to avoid window-level focus.
                 isStealthRef.current = true;
                 setIsExpanded(true);
+                setStealthPermissionMissing(false);
+                escSuppressUntilNextActive = false;
             }
             if (!active && reason === 'permission') {
-                console.warn('[stealth-tap] Accessibility permission required — guide user to System Settings');
+                setStealthPermissionMissing(true);
             }
         });
 
         const unsubKey = window.electronAPI.onStealthKeyCaptured((ev) => {
-            if (!stealthTapActiveRef.current) return; // defensive: ignore late events after stop
+            // CONTRACT WITH RUST: keyboard_tap.rs pass-through filter (R3)
+            // returns the event unmodified for ANY system-modifier key
+            // (Cmd / Ctrl / Option / Fn) and for ALL F-keys, so the OS
+            // routes those normally to the foreground app. Consequence:
+            // (ev.flags & CMD) is NEVER true here, neither is OPT or CTRL.
+            // The previous round had Cmd+Enter / Cmd+Backspace / Cmd+A /
+            // Option+Backspace branches — all dead code under R3. Removed
+            // to prevent a false sense of feature support; if Rust ever
+            // changes the filter to deliver Cmd events, those branches
+            // need to be REINTRODUCED with explicit testing, not
+            // resurrected from a TODO.
 
-            // Cmd+modifier sequences are not text — skip them. Cmd is bit 1<<20.
-            const CMD = 1 << 20;
-            const MOD_TEXT_NEUTRAL = CMD;
-            if (ev.flags & MOD_TEXT_NEUTRAL) {
-                // Cmd+Enter = submit, Cmd+anything else = ignore (let user
-                // know shortcuts work even in stealth mode for these two).
-                if (ev.isKeyDown && (ev.keyCode === 36 || ev.keyCode === 76)) {
-                    handleManualSubmit();
-                    window.electronAPI.stealthTapStop();
-                }
+            // Esc handled regardless of active state (main process broadcasts
+            // it BEFORE stopping the tap, so we get here while still active;
+            // see StealthKeyboardManager.handleCapturedKey ordering).
+            if (ev.isKeyDown && ev.keyCode === 53) {
+                setInputValue('');
+                escSuppressUntilNextActive = true;
                 return;
             }
 
+            // Belt-and-braces clear of the Esc-suppress flag on the first
+            // key event of a new session. State and captured-key arrive on
+            // separate IPC channels and ordering across channels is NOT
+            // guaranteed — if the first keystroke of a new session arrives
+            // before the state-active broadcast, the suppress flag (set by
+            // a prior Esc) would still be true and the keystroke would be
+            // dropped. We re-check the ref (which the state listener flips
+            // synchronously on receipt): if the ref is now true, this is a
+            // legitimate new-session keystroke → clear suppress and proceed.
+            if (escSuppressUntilNextActive && stealthTapActiveRef.current) {
+                console.warn('[stealth] cross-channel race resolved by ref check — captured-key arrived before state event');
+                escSuppressUntilNextActive = false;
+            }
+            if (escSuppressUntilNextActive) return; // drop late-arriving keys after Esc
+            if (!stealthTapActiveRef.current) return; // ignore other events after stop
             if (!ev.isKeyDown) return; // we only act on keyDown
 
             switch (ev.keyCode) {
-                case 53: // Esc — main process auto-stops; we just clear partial input
-                    setInputValue('');
-                    return;
                 case 36: // Return
                 case 76: // Numpad Enter
-                    handleManualSubmit();
-                    window.electronAPI.stealthTapStop();
+                    handleManualSubmitRef.current();
+                    window.electronAPI.stealthTapStop().catch(() => {});
                     return;
-                case 51: // Backspace
+                case 51: // Backspace — delete one char
                     setInputValue(prev => prev.slice(0, -1));
                     return;
-                case 48: // Tab
-                case 123: case 124: case 125: case 126: // arrow keys
-                    return; // ignore navigation keys in stealth mode
+                // ROUND 4 FIX (#6): Tab (48) and arrows (123-126) used to
+                // be no-op'd here. They're now passed through at the Rust
+                // layer (keyboard_tap.rs F-key whitelist) so they reach the
+                // user's foreground app normally. Removing the dead cases
+                // keeps the contract honest: this switch only sees text-
+                // worthy keys + Backspace + Enter. If anyone ever changes
+                // the Rust filter to deliver Tab again, decide explicitly
+                // what it should do here rather than copy-pasting a no-op.
             }
 
             // Append printable chars. CGEventKeyboardGetUnicodeString already
             // honors the active layout, dead keys, and IME — we don't need to
-            // re-derive characters from keyCode + modifiers ourselves.
+            // re-derive characters from keyCode + modifiers ourselves. Filter
+            // shift-only modifier (it's already encoded in the chars).
             if (ev.chars && ev.chars.length > 0 && ev.chars !== '\r' && ev.chars !== '\n' && ev.chars !== '\t') {
                 setInputValue(prev => prev + ev.chars);
             }
         });
 
         return () => { unsubState(); unsubKey(); };
+    }, []);
+
+    // ── Stealth hotkey registration-failure listener ──
+    //
+    // KeybindManager fires this when globalShortcut.register() returns false
+    // (the OS or another app owns the accelerator). Without surfacing it,
+    // the user presses the hotkey, nothing happens, and they assume the
+    // stealth feature is broken. We filter to the stealth-typing keybind
+    // and render an inline banner pointing to Settings → Shortcuts.
+    useEffect(() => {
+        if (!window.electronAPI?.onKeybindRegistrationFailed) return;
+        const unsubscribe = window.electronAPI.onKeybindRegistrationFailed(({ id, accelerator }) => {
+            if (id !== 'chat:focusInput') return;
+            setStealthHotkeyConflict(accelerator);
+        });
+        return unsubscribe;
+    }, []);
+
+    // ── Click-to-activate: engage CGEventTap on chat-input click only
+    //    (opt-IN model) ──
+    //
+    // ROUND 3 FIX (#1): previously this listener engaged the tap on ANY
+    // mousedown anywhere in the overlay (opt-OUT via data-stealth-ignore).
+    // That model broke hard: clicking the Settings button engaged the tap,
+    // then Settings opened and the user couldn't type their API key (tap
+    // intercepted at OS level → keystrokes went to Natively's read-only
+    // chat input). Worse, every NEW button added to the overlay was a
+    // regression risk — forgetting `data-stealth-ignore` re-introduced the
+    // bug silently.
+    //
+    // Inverted to opt-IN: tap ONLY engages when the user clicks an element
+    // marked with `data-stealth-engage="true"` (the chat input wrapper).
+    // Buttons run their normal onClick handlers without engaging the tap.
+    // Two paths still let the user start typing stealth-style:
+    //   • Click the chat input → tap engages → DOM focus blocked → type
+    //   • Press the activation hotkey (Cmd/Ctrl+Shift+Space) → tap engages
+    //
+    // mousedown (not click) so we engage BEFORE the input would otherwise
+    // take DOM focus — preventing the panel from becoming key window, which
+    // is the precise event coding-interview platforms detect via blur.
+    useEffect(() => {
+        if (!window.electronAPI?.stealthTapStart) return;
+
+        const onMouseDown = (e: MouseEvent) => {
+            if (stealthTapActiveRef.current) return; // already on
+            const target = e.target as HTMLElement | null;
+            if (!target?.closest?.('[data-stealth-engage="true"]')) return;
+            window.electronAPI.stealthTapStart().catch(() => {});
+        };
+
+        document.addEventListener('mousedown', onMouseDown, true); // capture phase
+        return () => document.removeEventListener('mousedown', onMouseDown, true);
+    }, []);
+
+    // ── ModelSelector click-outside close ──
+    //
+    // ROUND 3 FIX (#4): replaces the dead `on('blur')` handler in the
+    // ModelSelectorWindowHelper. With NSPanel-nonactivating the model-
+    // selector window may never become key on click, so its blur listener
+    // never fires and the dropdown stays open forever. We close it here
+    // by firing an IPC on every overlay mousedown EXCEPT clicks on the
+    // toggle button itself (which would race with toggleWindow's open/close
+    // logic). Main process no-ops the IPC if model selector is already
+    // closed.
+    useEffect(() => {
+        if (!window.electronAPI?.modelSelectorCloseIfOpen) return;
+        const onMouseDown = (e: MouseEvent) => {
+            const target = e.target as HTMLElement | null;
+            if (target?.closest?.('[data-model-selector-toggle="true"]')) return;
+            window.electronAPI.modelSelectorCloseIfOpen().catch(() => {});
+        };
+        document.addEventListener('mousedown', onMouseDown);
+        return () => document.removeEventListener('mousedown', onMouseDown);
+    }, []);
+
+    // ── Input-click DOM-focus block ──
+    //
+    // When the user clicks the chat input, the browser tries to focus the
+    // <input> element. That focus promotes the NSPanel to key window —
+    // which fires window.onblur on whatever app was previously focused
+    // (Zoom, browser, IDE). preventDefault() on mousedown blocks the focus
+    // attempt entirely. The above mousedown listener has already fired
+    // stealthTapStart() in capture phase, so by the time we get here, the
+    // tap is engaging and DOM focus is no longer the typing path.
+    const blockInputFocus = useCallback((e: React.MouseEvent<HTMLInputElement>) => {
+        e.preventDefault();
+        // Don't blur an already-focused element — that itself fires events.
+        if (document.activeElement === textInputRef.current) {
+            textInputRef.current?.blur();
+        }
     }, []);
 
     // ── Derived STT status for the rolling transcript indicator (interviewer channel) ──
@@ -3012,15 +3155,84 @@ Provide only the answer, nothing else.`;
                                     </div>
                                 )}
 
-                                <div className="relative group">
+                                {/* Stealth hotkey conflict banner — shown if globalShortcut.register()
+                                    failed for chat:focusInput (typically because Cmd+Shift+Space is
+                                    already claimed by another app, or by macOS in some configs).
+                                    Click-to-activate still works (mousedown listener is independent
+                                    of the hotkey), but the user can rebind to anything in Settings. */}
+                                {stealthHotkeyConflict && (
+                                    <div className="mb-2 px-3 py-2 rounded-xl border border-rose-400/40 bg-rose-500/10 text-[11px] flex items-center gap-2"
+                                         data-stealth-ignore="true">
+                                        <span className="overlay-text-primary flex-1">
+                                            Stealth typing hotkey <kbd className="px-1 py-0.5 rounded bg-white/10 font-mono text-[10px]">{stealthHotkeyConflict}</kbd> is already in use. Click the input to activate, or rebind in Settings.
+                                        </span>
+                                        <button
+                                            onClick={() => window.electronAPI.openSettingsTab('keybinds')}
+                                            className="px-2 py-1 rounded-md bg-rose-500/20 hover:bg-rose-500/30 transition-colors text-[11px] font-medium overlay-text-primary whitespace-nowrap"
+                                            data-stealth-ignore="true"
+                                        >
+                                            Rebind
+                                        </button>
+                                        <button
+                                            onClick={() => setStealthHotkeyConflict(null)}
+                                            className="px-1.5 py-1 rounded-md hover:bg-white/10 transition-colors text-[11px] overlay-text-muted"
+                                            aria-label="Dismiss"
+                                            data-stealth-ignore="true"
+                                        >×</button>
+                                    </div>
+                                )}
+
+                                {/* Stealth tap permission banner — shown only when the user
+                                    pressed the activation hotkey but Accessibility wasn't
+                                    granted. Inline above the input so it's discoverable without
+                                    blocking the rest of the UI. Dismissed automatically once
+                                    the next start() succeeds. */}
+                                {stealthPermissionMissing && (
+                                    <div className="mb-2 px-3 py-2 rounded-xl border border-amber-400/40 bg-amber-500/10 text-[11px] flex items-center gap-2"
+                                         data-stealth-ignore="true">
+                                        <span className="overlay-text-primary flex-1">
+                                            Stealth typing needs Accessibility access.
+                                            Grant it in System Settings, then restart Natively.
+                                        </span>
+                                        <button
+                                            onClick={() => window.electronAPI.stealthTapOpenSettings()}
+                                            className="px-2 py-1 rounded-md bg-amber-500/20 hover:bg-amber-500/30 transition-colors text-[11px] font-medium overlay-text-primary whitespace-nowrap"
+                                            data-stealth-ignore="true"
+                                        >
+                                            Open Settings
+                                        </button>
+                                        <button
+                                            onClick={() => setStealthPermissionMissing(false)}
+                                            className="px-1.5 py-1 rounded-md hover:bg-white/10 transition-colors text-[11px] overlay-text-muted"
+                                            aria-label="Dismiss"
+                                            data-stealth-ignore="true"
+                                        >×</button>
+                                    </div>
+                                )}
+
+                                {/* data-stealth-engage marks this subtree as
+                                    the ONLY clickable region that engages the
+                                    CGEventTap. See the click-to-activate
+                                    useEffect (~line 2840) for the opt-IN
+                                    rationale — buttons elsewhere in the
+                                    overlay no longer accidentally engage the
+                                    tap and break inputs in Settings/Model
+                                    Selector windows. */}
+                                <div className="relative group" data-stealth-engage="true">
                                     <input
                                         ref={textInputRef}
                                         type="text"
                                         value={inputValue}
                                         onChange={(e) => setInputValue(e.target.value)}
                                         onKeyDown={(e) => e.key === 'Enter' && handleManualSubmit()}
-
-                                        className={`w-full border focus:ring-1 rounded-xl pl-3 pr-10 py-2.5 focus:outline-none transition-all duration-200 ease-sculpted text-[13px] leading-relaxed ${inputClass}`}
+                                        // Block native DOM focus on click — the panel becoming
+                                        // key window is exactly the signal coding-interview
+                                        // platforms watch for via window.onblur on the parent.
+                                        // mousedown listener (capture phase) already engaged
+                                        // the CGEventTap, so typing routes through that path.
+                                        onMouseDown={blockInputFocus}
+                                        readOnly={stealthTapActive}
+                                        className={`w-full border focus:ring-1 rounded-xl pl-3 pr-10 py-2.5 focus:outline-none transition-all duration-200 ease-sculpted text-[13px] leading-relaxed ${inputClass} ${stealthTapActive ? 'ring-2 ring-emerald-400/30 border-emerald-400/40 shadow-[0_0_12px_rgba(52,211,153,0.15)]' : ''}`}
                                         style={appearance.inputStyle}
                                     />
 
@@ -3051,6 +3263,7 @@ Provide only the answer, nothing else.`;
                                 <div className="flex items-center justify-between mt-3 px-0.5">
                                     <div className="flex items-center gap-1.5">
                                         <button
+                                            data-model-selector-toggle="true"
                                             onClick={(e) => {
                                                 // Calculate position for detached window
                                                 if (!contentRef.current) return;

@@ -10,7 +10,8 @@ import {
   UNIVERSAL_SYSTEM_PROMPT, UNIVERSAL_ANSWER_PROMPT, UNIVERSAL_WHAT_TO_ANSWER_PROMPT,
   UNIVERSAL_RECAP_PROMPT, UNIVERSAL_FOLLOWUP_PROMPT, UNIVERSAL_FOLLOW_UP_QUESTIONS_PROMPT, UNIVERSAL_ASSIST_PROMPT,
   CUSTOM_SYSTEM_PROMPT, CUSTOM_ANSWER_PROMPT, CUSTOM_WHAT_TO_ANSWER_PROMPT,
-  CUSTOM_RECAP_PROMPT, CUSTOM_FOLLOWUP_PROMPT, CUSTOM_FOLLOW_UP_QUESTIONS_PROMPT, CUSTOM_ASSIST_PROMPT
+  CUSTOM_RECAP_PROMPT, CUSTOM_FOLLOWUP_PROMPT, CUSTOM_FOLLOW_UP_QUESTIONS_PROMPT, CUSTOM_ASSIST_PROMPT,
+  CHAT_MODE_PROMPT
 } from "./llm/prompts"
 import {
   TINY_SYSTEM_PROMPT, TINY_ANSWER_PROMPT, TINY_WHAT_TO_ANSWER_PROMPT,
@@ -149,6 +150,7 @@ export class LLMHelper {
 
   public setGroqApiKey(apiKey: string) {
     this.groqClient = new Groq({ apiKey });
+    this._groqLocalDisabled = false;
     console.log("[LLMHelper] Groq API Key updated.");
   }
 
@@ -270,6 +272,11 @@ export class LLMHelper {
   // ---------------------------
 
   private currentModelId: string = GEMINI_FLASH_MODEL;
+
+  // Tripped when local Groq returns 401 (invalid key). Prevents re-trying every chat
+  // turn for the rest of the session — saves ~200-500ms per turn. Reset on key update
+  // via setGroqApiKey().
+  private _groqLocalDisabled: boolean = false;
 
   public setModel(modelId: string, customProviders: (CustomProvider | CurlProvider)[] = []) {
     // Map UI short codes to internal Model IDs
@@ -986,41 +993,82 @@ ANSWER DIRECTLY:`;
    *   2. System prompt body (unchanged)
    *   3. Closing reminder at the bottom (double-lock)
    */
-  private injectLanguageInstruction(systemPrompt: string): string {
-    // ── AUTO mode ──────────────────────────────────────────────────────────────
-    // Detect the language the user is writing/speaking in and reply in that same
-    // language. Supports seamless code-switching across turns (e.g. the user can
-    // switch from English to Hindi mid-conversation and the AI follows).
+  /**
+   * Returns the dynamic language-instruction block to append AFTER the static
+   * system prompt. Returning a SUFFIX (rather than a prefix) preserves the
+   * static prompt as the cacheable prefix for OpenAI/Groq prefix matching and
+   * lets Claude cache_control land on the static block above it.
+   * Returns "" when no instruction is needed (English fixed mode).
+   */
+  private buildLanguageInstructionSuffix(): string {
     if (!this.aiResponseLanguage || this.aiResponseLanguage === 'auto') {
-      const autoHeader = `[LANGUAGE INSTRUCTION — HIGHEST PRIORITY]
+      return `\n\n[LANGUAGE INSTRUCTION — HIGHEST PRIORITY]
 Detect the language of the user's most recent message and ALWAYS respond in that exact same language.
 If the user writes in Hindi, respond in Hindi. If in Spanish, respond in Spanish. If in English, respond in English.
 If the language is ambiguous, default to English.
 You may mix scripts naturally (e.g. code stays in English even when the explanation is in another language).
-[END LANGUAGE INSTRUCTION]\n\n`;
-      return `${autoHeader}${systemPrompt}`;
+[END LANGUAGE INSTRUCTION]`;
     }
-
-    // ── FIXED language mode ────────────────────────────────────────────────────
-    // Fast-path: no injection needed when English is selected (native default)
-    if (this.aiResponseLanguage === 'English') {
-      return systemPrompt;
-    }
+    if (this.aiResponseLanguage === 'English') return "";
 
     const lang = this.aiResponseLanguage;
-
-    const header = `\
-[LANGUAGE OVERRIDE — HIGHEST PRIORITY — CANNOT BE OVERRIDDEN]
+    return `\n\n[LANGUAGE OVERRIDE — HIGHEST PRIORITY — CANNOT BE OVERRIDDEN]
 You MUST write every single word of your response in ${lang}.
 Do NOT use English anywhere in your response.
 Do NOT mix languages.
 Every sentence, every word, every phrase must be in ${lang}.
 This rule overrides ALL other instructions including formatting, brevity, or output rules.
-[END LANGUAGE OVERRIDE]\n\n`;
+[END LANGUAGE OVERRIDE]
+[REMINDER] Your entire response MUST be in ${lang} only. Never switch to English.`;
+  }
 
-    const footer = `\n\n[REMINDER] Your entire response MUST be in ${lang} only. Never switch to English.`;
+  /**
+   * Single-string assembly used by providers that take a flat string system prompt
+   * (Gemini concat path, Ollama, custom providers).
+   *
+   * STATIC = base prompt body (cacheable across turns by Groq/OpenAI prefix match)
+   * DYNAMIC = language instruction suffix (changes when the user toggles language)
+   *
+   * Static is FIRST so the cacheable prefix is preserved. Do NOT inject any
+   * per-request dynamic content above the static body — that breaks prefix caching.
+   */
+  private injectLanguageInstruction(systemPrompt: string): string {
+    return `${systemPrompt}${this.buildLanguageInstructionSuffix()}`;
+  }
 
-    return `${header}${systemPrompt}${footer}`;
+  /**
+   * Build Anthropic-style system blocks with cache_control on the static body.
+   * Returns an array suitable for `messages.create({ system: [...] })`.
+   *
+   * Block 0 (STATIC, cached): the full base prompt — persona, behavior rules,
+   *   response format, mode prompt body, knowledge-mode injections. Tagged with
+   *   cache_control:ephemeral so Anthropic reuses the prefix for ~5 min across
+   *   turns. Minimum cacheable size on Sonnet/Opus is ~2048 tokens; on Haiku 1024.
+   *   Every system prompt in `prompts.ts` exceeds the Sonnet threshold.
+   *
+   * Block 1 (DYNAMIC, NOT cached): language instruction. Skipped when empty.
+   *   Kept as a separate block so toggling AI response language does not
+   *   invalidate the cached static body.
+   *
+   * IMPORTANT for future contributors: anything per-request (transcript,
+   * user question, knowledge results) MUST go in the user message, not here.
+   * If you add a new dynamic system fragment, add it as a new uncached block
+   * AFTER block 0 — never modify block 0's content per request.
+   */
+  private buildClaudeSystemBlocks(systemPrompt: string): Array<{
+    type: 'text';
+    text: string;
+    cache_control?: { type: 'ephemeral' };
+  }> {
+    const blocks: Array<{ type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }> = [
+      { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } },
+    ];
+    const langSuffix = this.buildLanguageInstructionSuffix();
+    if (langSuffix) {
+      // Strip the leading \n\n that's used when concatenated into one string.
+      blocks.push({ type: 'text', text: langSuffix.replace(/^\n+/, '') });
+    }
+    return blocks;
   }
 
   public async chatWithGemini(message: string, imagePaths?: string[], context?: string, skipSystemPrompt: boolean = false, alternateGroqMessage?: string): Promise<string> {
@@ -1101,8 +1149,14 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       const openaiSystemPrompt = skipSystemPrompt ? undefined : this.injectLanguageInstruction(OPENAI_SYSTEM_PROMPT);
       const claudeSystemPrompt = skipSystemPrompt ? undefined : this.injectLanguageInstruction(CLAUDE_SYSTEM_PROMPT);
 
-      // GROQ FAST TEXT OVERRIDE (Text-Only)
-      if (this.groqFastTextMode && !isMultimodal && this.codexCliConfig.enabled) {
+      // GROQ FAST TEXT OVERRIDE (Text-Only) — gated on picked model so Gemini/Claude/OpenAI
+      // selections aren't silently routed to Groq. See streamChat() for matching gate.
+      const fastModeAppliesNS = this.groqFastTextMode && !isMultimodal && (
+        this.codexCliConfig.enabled ||
+        this.isGroqModel(this.currentModelId) ||
+        this.currentModelId === 'natively'
+      );
+      if (fastModeAppliesNS && this.codexCliConfig.enabled) {
         console.log(`[LLMHelper] ⚡️ Fast Text Mode Active. Routing to Codex CLI...`);
         try {
           return await this.generateWithCodexCli(userContent, openaiSystemPrompt, true);
@@ -1111,12 +1165,18 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         }
       }
 
-      if (this.groqFastTextMode && !isMultimodal && this.groqClient) {
+      if (fastModeAppliesNS && this.groqClient && !this._groqLocalDisabled) {
         console.log(`[LLMHelper] ⚡️ Groq Fast Text Mode Active. Routing to Groq...`);
         try {
-          return await this.generateWithGroq(combinedMessages.groq); // intentional: Fast Text Mode always uses baseline GROQ_MODEL for speed — do not thread currentModelId
+          // intentional: Fast Text Mode always uses baseline GROQ_MODEL for speed — do not thread currentModelId
+          // CACHE: pass system separately so Groq prefix-cache hits across turns.
+          return await this.generateWithGroq(userContent, GROQ_MODEL, skipSystemPrompt ? undefined : finalGroqPrompt);
         } catch (e: any) {
           console.warn("[LLMHelper] Groq Fast Text failed, falling back to standard routing:", e.message);
+          if (typeof e?.message === 'string' && /401|invalid[_\s-]api[_\s-]key/i.test(e.message)) {
+            this._groqLocalDisabled = true;
+            console.warn("[LLMHelper] Local Groq key rejected (401) — disabling local Groq for the rest of this session.");
+          }
           // Fall through to standard routing
         }
       }
@@ -1172,7 +1232,8 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         if (isMultimodal && imagePaths) {
           return await this.generateWithGroqMultimodal(userContent, imagePaths, openaiSystemPrompt);
         }
-        return await this.generateWithGroq(combinedMessages.groq, this.currentModelId);
+        // CACHE: pass system separately so Groq prefix-cache hits across turns.
+        return await this.generateWithGroq(userContent, this.currentModelId, skipSystemPrompt ? undefined : finalGroqPrompt);
       }
 
       // Fallback (Gemini) - logic handled below by SMART DYNAMIC FALLBACK list
@@ -1231,7 +1292,8 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           providers.push({ name: 'Natively API', execute: () => this.generateWithNatively(userContent, openaiSystemPrompt) });
         }
         if (this.groqClient) {
-          providers.push({ name: `Groq (${textGroq})`, execute: () => this.generateWithGroq(combinedMessages.groq, textGroq) });
+          // CACHE: pass system separately so Groq prefix-cache hits across turns.
+          providers.push({ name: `Groq (${textGroq})`, execute: () => this.generateWithGroq(userContent, textGroq, skipSystemPrompt ? undefined : finalGroqPrompt) });
         }
         if (this.codexCliConfig.enabled) {
           providers.push({ name: `Codex CLI (${this.codexCliConfig.model})`, execute: () => this.generateWithCodexCli(userContent, openaiSystemPrompt) });
@@ -1467,15 +1529,34 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     );
   }
 
-  private async generateWithGroq(fullMessage: string, modelId: string = GROQ_MODEL): Promise<string> {
+  /**
+   * Non-streaming Groq generation.
+   *
+   * PREFIX CACHING: Groq auto-caches based on the leading bytes of the messages
+   * array. Pass `systemPrompt` SEPARATELY (not concatenated into `userMessage`)
+   * so the static system block becomes a stable cacheable prefix across turns.
+   * Bundling system into user content (the previous behavior) breaks the cache
+   * because the user content changes every turn.
+   *
+   * For backwards compatibility, this method still accepts a single bundled
+   * string when `systemPrompt` is omitted — callers should migrate to the
+   * two-arg form.
+   */
+  private async generateWithGroq(userMessage: string, modelId: string = GROQ_MODEL, systemPrompt?: string): Promise<string> {
     if (!this.groqClient) throw new Error("Groq client not initialized");
 
     await this.rateLimiters.groq.acquire();
 
-    // Non-streaming Groq call
+    const messages: any[] = [];
+    if (systemPrompt) {
+      // CACHE-CACHEABLE PREFIX: must come first, must be byte-identical across turns.
+      messages.push({ role: "system", content: systemPrompt });
+    }
+    messages.push({ role: "user", content: userMessage });
+
     const response = await this.groqClient.chat.completions.create({
       model: modelId,
-      messages: [{ role: "user", content: fullMessage }],
+      messages,
       temperature: 0.4,
       max_tokens: 8192,
       stream: false
@@ -1574,7 +1655,8 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   }
 
   /**
-   * Non-streaming OpenAI generation with proper system/user separation
+   * Non-streaming OpenAI generation with proper system/user separation.
+   * PREFIX CACHING: see streamWithOpenai for the caching contract.
    */
   private async generateWithOpenai(userMessage: string, systemPrompt?: string, imagePaths?: string[], modelId?: string): Promise<string> {
     if (!this.openaiClient) throw new Error("OpenAI client not initialized");
@@ -1720,7 +1802,8 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         const stream = this.claudeClient!.messages.stream({
           model,
           max_tokens: this.getClaudeMaxOutput(model),
-          ...(systemPrompt ? { system: systemPrompt } : {}),
+          // CACHE BOUNDARY: system blocks are static; dynamic content lives in `messages` only.
+          ...(systemPrompt ? { system: this.buildClaudeSystemBlocks(systemPrompt) } : {}),
           messages: [{ role: "user", content }],
         });
         return await stream.finalMessage();
@@ -2035,7 +2118,8 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           }
           return {
             name: `Groq (${modelId})`,
-            execute: () => this.generateWithGroq(`${systemPrompt}\n\n${userPrompt}`, modelId)
+            // CACHE: pass system separately so Groq prefix-cache hits across turns.
+            execute: () => this.generateWithGroq(userPrompt, modelId, systemPrompt)
           };
 
         default:
@@ -2234,6 +2318,11 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       groq: buildCombinedMessage(GROQ_SYSTEM_PROMPT),
     };
 
+    // CACHE: separate system for Groq's prefix cache (used by streamWithGroq below).
+    const groqSystemForCache = skipSystemPrompt ? undefined : this.injectLanguageInstruction(GROQ_SYSTEM_PROMPT);
+    // CACHE: separate system for Gemini's systemInstruction channel.
+    const geminiSystemForCache = skipSystemPrompt ? undefined : this.injectLanguageInstruction(HARD_SYSTEM_PROMPT);
+
     if (this.useOllama) {
       const response = await this.callOllama(combinedMessages.gemini, imagePaths?.[0]);
       yield response;
@@ -2273,13 +2362,15 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         providers.push({ name: `OpenAI (${textOpenAI})`, execute: () => this.streamWithOpenaiMultimodal(userContent, imagePaths!, openaiSystemPrompt, textOpenAI) });
       }
       if (this.client) {
-        providers.push({ name: `Gemini Flash (${textGeminiFlash})`, execute: () => this.streamWithGeminiModel(combinedMessages.gemini, textGeminiFlash, imagePaths) });
+        // CACHE: pass system via systemInstruction so it is separated from per-request contents.
+        providers.push({ name: `Gemini Flash (${textGeminiFlash})`, execute: () => this.streamWithGeminiModel(userContent, textGeminiFlash, imagePaths, geminiSystemForCache) });
       }
       if (this.claudeClient) {
         providers.push({ name: `Claude (${textClaude})`, execute: () => this.streamWithClaudeMultimodal(userContent, imagePaths!, claudeSystemPrompt, textClaude) });
       }
       if (this.client) {
-        providers.push({ name: `Gemini Pro (${textGeminiPro})`, execute: () => this.streamWithGeminiModel(combinedMessages.gemini, textGeminiPro, imagePaths) });
+        // CACHE: pass system via systemInstruction so it is separated from per-request contents.
+        providers.push({ name: `Gemini Pro (${textGeminiPro})`, execute: () => this.streamWithGeminiModel(userContent, textGeminiPro, imagePaths, geminiSystemForCache) });
       }
       if (this.groqClient) {
         providers.push({ name: `Groq (meta-llama/llama-4-scout-17b-16e-instruct)`, execute: () => this.streamWithGroqMultimodal(userContent, imagePaths!, openaiSystemPrompt) });
@@ -2290,7 +2381,8 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         providers.push({ name: 'Natively API', execute: () => this.streamWithNatively(userContent, openaiSystemPrompt) });
       }
       if (this.groqClient) {
-        providers.push({ name: `Groq (${textGroq})`, execute: () => this.streamWithGroq(combinedMessages.groq, textGroq) });
+        // CACHE: pass system separately so Groq prefix-cache hits across turns.
+        providers.push({ name: `Groq (${textGroq})`, execute: () => this.streamWithGroq(userContent, textGroq, groqSystemForCache) });
       }
       if (this.codexCliConfig.enabled) {
         providers.push({ name: `Codex CLI (${this.codexCliConfig.model})`, execute: () => this.streamWithCodexCli(userContent, openaiSystemPrompt) });
@@ -2302,8 +2394,9 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         providers.push({ name: `Claude (${textClaude})`, execute: () => this.streamWithClaude(userContent, claudeSystemPrompt, textClaude) });
       }
       if (this.client) {
-        providers.push({ name: `Gemini Flash (${textGeminiFlash})`, execute: () => this.streamWithGeminiModel(combinedMessages.gemini, textGeminiFlash) });
-        providers.push({ name: `Gemini Pro (${textGeminiPro})`, execute: () => this.streamWithGeminiModel(combinedMessages.gemini, textGeminiPro) });
+        // CACHE: pass system via systemInstruction so it is separated from per-request contents.
+        providers.push({ name: `Gemini Flash (${textGeminiFlash})`, execute: () => this.streamWithGeminiModel(userContent, textGeminiFlash, undefined, geminiSystemForCache) });
+        providers.push({ name: `Gemini Pro (${textGeminiPro})`, execute: () => this.streamWithGeminiModel(userContent, textGeminiPro, undefined, geminiSystemForCache) });
       }
     }
 
@@ -2446,6 +2539,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       systemPromptOverride === UNIVERSAL_FOLLOWUP_PROMPT ||
       systemPromptOverride === UNIVERSAL_FOLLOW_UP_QUESTIONS_PROMPT ||
       systemPromptOverride === UNIVERSAL_ASSIST_PROMPT ||
+      systemPromptOverride === CHAT_MODE_PROMPT ||
       TINY_PROMPTS_SET.has(systemPromptOverride)
     );
     const shouldSkipModeInjection = skipModeInjection || isUniversalOverride;
@@ -2495,7 +2589,16 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     // GROQ FAST TEXT OVERRIDE (Text-Only)
     // Two paths: local Groq key → call Groq directly; Natively API only → send fast_mode:true
     // to the server so it routes to its internal Groq pool (llama-3.3-70b-versatile).
-    if (this.groqFastTextMode && !isMultimodal) {
+    //
+    // Gate: only short-circuit to fast paths when the user's picked model is one of
+    // the providers fast-mode actually routes to. Otherwise picking Gemini/Claude/OpenAI
+    // in the UI is silently ignored because fast-mode returns before model routing runs.
+    const fastModeApplies = this.groqFastTextMode && !isMultimodal && (
+      this.codexCliConfig.enabled ||
+      this.isGroqModel(this.currentModelId) ||
+      this.currentModelId === 'natively'
+    );
+    if (fastModeApplies) {
       if (this.codexCliConfig.enabled) {
         console.log(`[LLMHelper] ⚡️ Fast Text Mode Active (Streaming). Routing to Codex CLI...`);
         try {
@@ -2505,17 +2608,23 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           console.warn("[LLMHelper] Codex CLI Fast Text streaming failed, falling back:", e.message);
         }
       }
-      if (this.groqClient) {
+      if (this.groqClient && !this._groqLocalDisabled) {
         console.log(`[LLMHelper] ⚡️ Groq Fast Text Mode Active (Streaming). Routing to local Groq...`);
         try {
           const groqSystem = systemPromptOverride || GROQ_SYSTEM_PROMPT;
           const finalGroqSystem = this.injectLanguageInstruction(groqSystem);
-          const groqFullMessage = `${finalGroqSystem}\n\n${userContent}`;
-          const groqModelId = this.isCodexCliModel(this.currentModelId) ? undefined : this.currentModelId;
-          yield* this.streamWithGroq(groqFullMessage, groqModelId);
+          // Only thread currentModelId when it's actually a Groq model; otherwise
+          // we'd send 'natively' or a Gemini ID as the Groq model name → 400.
+          const groqModelId = this.isGroqModel(this.currentModelId) ? this.currentModelId : GROQ_MODEL;
+          // CACHE: pass system separately so Groq prefix-cache hits across turns.
+          yield* this.streamWithGroq(userContent, groqModelId, finalGroqSystem);
           return;
         } catch (e: any) {
           console.warn("[LLMHelper] Groq Fast Text streaming failed, falling back:", e.message);
+          if (typeof e?.message === 'string' && /401|invalid[_\s-]api[_\s-]key/i.test(e.message)) {
+            this._groqLocalDisabled = true;
+            console.warn("[LLMHelper] Local Groq key rejected (401) — disabling local Groq for the rest of this session. Re-enable by saving a new key in Settings.");
+          }
         }
         // Local Groq failed — fall through to Natively if available
       }
@@ -2600,8 +2709,8 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       // Text-only Groq
       const groqSystem = systemPromptOverride ? baseSystemPrompt : GROQ_SYSTEM_PROMPT;
       const finalGroqSystem = this.injectLanguageInstruction(groqSystem);
-      const groqFullMessage = `${finalGroqSystem}\n\n${userContent}`;
-      yield* this.streamWithGroq(groqFullMessage, this.currentModelId);
+      // CACHE: pass system separately so Groq prefix-cache hits across turns.
+      yield* this.streamWithGroq(userContent, this.currentModelId, finalGroqSystem);
       return;
     }
 
@@ -2626,7 +2735,9 @@ This rule overrides ALL other instructions including formatting, brevity, or out
               } else {
                 const groqSystem = systemPromptOverride ? baseSystemPrompt : GROQ_SYSTEM_PROMPT;
                 const finalGroqSystem = this.injectLanguageInstruction(groqSystem);
-                yield* this.streamWithGroq(`${finalGroqSystem}\n\n${userContent}`); // intentional: emergency fallback waterfall — use stable GROQ_MODEL baseline, not currentModelId
+                // intentional: emergency fallback waterfall — use stable GROQ_MODEL baseline, not currentModelId
+                // CACHE: pass system separately so Groq prefix-cache hits across turns.
+                yield* this.streamWithGroq(userContent, GROQ_MODEL, finalGroqSystem);
               }
               return;
             } catch (groqErr: any) {
@@ -2641,16 +2752,17 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
     // 4. Gemini Routing & Fallback
     if (this.client) {
-      // Direct model use if specified
+      // CACHE: pass system prompt via `systemInstruction` so it is structurally
+      // separated from per-request user content. Static content also leads in
+      // `userContent` is not the case — userContent is dynamic — so the system
+      // instruction channel is the cacheable surface for Gemini.
       if (this.isGeminiModel(this.currentModelId)) {
-        const fullMsg = `${finalSystemPrompt}\n\n${userContent}`;
-        yield* this.streamWithGeminiModel(fullMsg, this.currentModelId, imagePaths);
+        yield* this.streamWithGeminiModel(userContent, this.currentModelId, imagePaths, finalSystemPrompt);
         return;
       }
 
       // Race strategy (default)
-      const raceMsg = `${finalSystemPrompt}\n\n${userContent}`;
-      yield* this.streamWithGeminiParallelRace(raceMsg, imagePaths);
+      yield* this.streamWithGeminiParallelRace(userContent, imagePaths, finalSystemPrompt);
       return;
     }
 
@@ -2803,12 +2915,26 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   /**
    * Stream response from Groq
    */
-  private async * streamWithGroq(fullMessage: string, modelId: string = GROQ_MODEL): AsyncGenerator<string, void, unknown> {
+  /**
+   * Stream response from Groq.
+   *
+   * PREFIX CACHING: pass `systemPrompt` SEPARATELY (not concatenated into
+   * `userMessage`) so Groq's prefix cache hits across turns. See generateWithGroq
+   * for the full rationale. The single-arg form is retained for legacy callers.
+   */
+  private async * streamWithGroq(userMessage: string, modelId: string = GROQ_MODEL, systemPrompt?: string): AsyncGenerator<string, void, unknown> {
     if (!this.groqClient) throw new Error("Groq client not initialized");
+
+    const messages: any[] = [];
+    if (systemPrompt) {
+      // CACHE-CACHEABLE PREFIX: must be byte-identical across turns.
+      messages.push({ role: "system", content: systemPrompt });
+    }
+    messages.push({ role: "user", content: userMessage });
 
     const stream = await this.groqClient.chat.completions.create({
       model: modelId,
-      messages: [{ role: "user", content: fullMessage }],
+      messages,
       stream: true,
       temperature: 0.4,
       max_tokens: 8192,
@@ -2862,7 +2988,13 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   }
 
   /**
-   * Stream response from OpenAI with proper system/user message separation
+   * Stream response from OpenAI with proper system/user message separation.
+   *
+   * PREFIX CACHING: OpenAI auto-caches based on the leading bytes of the
+   * messages array (no opt-in needed). The static system prompt sits in the
+   * `system` role and the user message follows — same shape across turns, so
+   * the cache hits naturally. Do NOT inline per-request data into the system
+   * string above the static body, or the cache prefix will be invalidated.
    */
   private async * streamWithOpenai(userMessage: string, systemPrompt?: string, modelId?: string): AsyncGenerator<string, void, unknown> {
     if (!this.openaiClient) throw new Error("OpenAI client not initialized");
@@ -2903,7 +3035,8 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     const stream = await this.claudeClient.messages.stream({
       model,
       max_tokens: this.getClaudeMaxOutput(model),
-      ...(systemPrompt ? { system: systemPrompt } : {}),
+      // CACHE BOUNDARY: system blocks are static; dynamic content lives in `messages` only.
+      ...(systemPrompt ? { system: this.buildClaudeSystemBlocks(systemPrompt) } : {}),
       messages: [{ role: "user", content: userMessage }],
     });
 
@@ -2979,7 +3112,8 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     const stream = await this.claudeClient.messages.stream({
       model,
       max_tokens: this.getClaudeMaxOutput(model),
-      ...(systemPrompt ? { system: systemPrompt } : {}),
+      // CACHE BOUNDARY: system blocks are static; image bytes + user text stay in `messages`.
+      ...(systemPrompt ? { system: this.buildClaudeSystemBlocks(systemPrompt) } : {}),
       messages: [{
         role: "user",
         content: [
@@ -2997,9 +3131,25 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   }
 
   /**
-   * Stream response from a specific Gemini model
+   * Stream response from a specific Gemini model.
+   *
+   * CACHING NOTES:
+   * - When `systemInstruction` is supplied, it is passed via `config.systemInstruction`
+   *   so the static prompt is structurally separated from per-request `contents`.
+   *   This is a prerequisite for Gemini's explicit context caching (caches.create)
+   *   which we don't activate yet — see TODO below.
+   * - The legacy single-string form (`fullMessage` = "system\n\nuser") is still
+   *   supported when `systemInstruction` is omitted, for callers that haven't
+   *   migrated yet. The static content STILL comes first in that string, so
+   *   Gemini's own implicit caching on Flash/Pro 2.x sees a stable prefix.
+   *
+   * TODO(prompt-cache): for sessions where the system prompt is stable for
+   * minutes, switch to `client.caches.create({...})` + `config.cachedContent`.
+   * The system prompts here are 1700-3700 tokens (well above the 1024-token
+   * minimum), but cache lifecycle (TTL renewal, mode/knowledge invalidation)
+   * needs to be managed centrally before turning this on.
    */
-  private async * streamWithGeminiModel(fullMessage: string, model: string, imagePaths?: string[]): AsyncGenerator<string, void, unknown> {
+  private async * streamWithGeminiModel(fullMessage: string, model: string, imagePaths?: string[], systemInstruction?: string): AsyncGenerator<string, void, unknown> {
     if (!this.client) throw new Error("Gemini client not initialized");
 
     const contents: any[] = [{ text: fullMessage }];
@@ -3023,6 +3173,8 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       config: {
         maxOutputTokens: MAX_OUTPUT_TOKENS,
         temperature: 0.4,
+        // CACHE BOUNDARY: static system content lives here; dynamic content stays in `contents`.
+        ...(systemInstruction ? { systemInstruction: { parts: [{ text: systemInstruction }] } } : {}),
       }
     });
 
@@ -3045,9 +3197,11 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   }
 
   /**
-   * Race Flash and Pro streams, return whichever succeeds first
+   * Race Flash and Pro streams, return whichever succeeds first.
+   * Optional `systemInstruction` is forwarded to both racers so the static
+   * system prompt is separated from `fullMessage` (cache-friendly).
    */
-  private async * streamWithGeminiParallelRace(fullMessage: string, imagePaths?: string[]): AsyncGenerator<string, void, unknown> {
+  private async * streamWithGeminiParallelRace(fullMessage: string, imagePaths?: string[], systemInstruction?: string): AsyncGenerator<string, void, unknown> {
     if (!this.client) throw new Error("Gemini client not initialized");
 
     // BUG-1 fix: use a shared AbortController so the winning model cancels the loser.
@@ -3060,7 +3214,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     const raceController = new AbortController();
 
     const race = async (model: string): Promise<string> => {
-      const result = await this.collectStreamResponse(fullMessage, model, imagePaths, raceController.signal);
+      const result = await this.collectStreamResponse(fullMessage, model, imagePaths, raceController.signal, systemInstruction);
       // This model won — signal the other to stop waiting for its result.
       raceController.abort(new Error(`${model} won the race`));
       return result;
@@ -3091,7 +3245,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
    * Accepts an AbortSignal so the losing model can be cancelled by the winner.
    * Timing reference: Flash 10-15s (up to 30s with images), Pro up to 30s.
    */
-  private async collectStreamResponse(fullMessage: string, model: string, imagePaths?: string[], signal?: AbortSignal): Promise<string> {
+  private async collectStreamResponse(fullMessage: string, model: string, imagePaths?: string[], signal?: AbortSignal, systemInstruction?: string): Promise<string> {
     if (!this.client) throw new Error("Gemini client not initialized");
 
     // Bail immediately if already cancelled (e.g. the other model already won).
@@ -3121,6 +3275,8 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       config: {
         maxOutputTokens: MAX_OUTPUT_TOKENS,
         temperature: 0.4,
+        // CACHE BOUNDARY: static system content lives here; dynamic content stays in `contents`.
+        ...(systemInstruction ? { systemInstruction: { parts: [{ text: systemInstruction }] } } : {}),
       }
     });
 

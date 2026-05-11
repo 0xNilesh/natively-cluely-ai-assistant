@@ -426,6 +426,22 @@ export class CropperWindowHelper {
 
         this.cropperWindow = new BrowserWindow(windowSettings)
 
+        // Apply NSPanel stealth attributes (becomesKeyOnlyIfNeeded +
+        // _setPreventsActivation: SPI + sharingType=None + collectionBehavior).
+        // Cropper opens during meetings via Cmd+Shift+H — without this, the
+        // cropperWindow.show()/.focus() calls below steal focus from the
+        // foreground app (Zoom/browser), defeating the whole stealth model.
+        //
+        // ROUND 2 FIX (#7): stealth-apply moved INTO the same ready-to-show
+        // listener as opacity-shield + show (registered ~40 lines below).
+        // Two independent ready-to-show listeners had ordering risk: if
+        // stealth's try/catch swallowed a native panic, the opacity-shield
+        // listener still fired and show() exposed a panel-attribute-less
+        // window — focus theft mid-meeting. Consolidating means stealth
+        // attempts run BEFORE show in a single listener body. (Stealth is
+        // still try/catch-wrapped so a failure doesn't block the cropper
+        // from being usable; partial stealth is better than no cropper.)
+
         // On Windows, ensure window spans all monitors by explicitly setting bounds
         // This is needed because BrowserWindow might auto-adjust to primary monitor
         if (process.platform === 'win32') {
@@ -453,10 +469,42 @@ export class CropperWindowHelper {
         });
 
         this.cropperWindow.once('ready-to-show', () => {
+            if (!this.cropperWindow || this.cropperWindow.isDestroyed()) return;
+            // Apply stealth attributes BEFORE any show() so the panel never
+            // appears with default activation behavior. Failure is logged
+            // but non-fatal — partial stealth (panel type + content
+            // protection) still applies via the BrowserWindow constructor.
+            if (process.platform === 'darwin') {
+                try {
+                    // eslint-disable-next-line @typescript-eslint/no-var-requires
+                    const { loadNativeModule } = require('./audio/nativeModuleLoader');
+                    const native = loadNativeModule();
+                    if (native && typeof native.applyStealthToWindow === 'function') {
+                        native.applyStealthToWindow(this.cropperWindow.getNativeWindowHandle());
+                    }
+                } catch (e) {
+                    console.error('[CropperWindowHelper] applyStealthToWindow failed:', e);
+                }
+            }
             if (showImmediately) {
                 this.applyOpacityShield();
             }
         })
+
+        // ROUND 3 FIX (#1): stop the stealth tap when Cropper shows so the
+        // user's selection-area drag/keystrokes (Esc to cancel, etc.) reach
+        // the cropper, not the overlay's hidden chat input. Same rationale
+        // as Settings + Model Selector.
+        this.cropperWindow.on('show', () => {
+            if (process.platform !== 'darwin') return;
+            try {
+                // eslint-disable-next-line @typescript-eslint/no-var-requires
+                const { StealthKeyboardManager } = require('./services/StealthKeyboardManager');
+                StealthKeyboardManager.getInstance().stop();
+            } catch (e) {
+                console.error('[CropperWindowHelper] failed to stop stealth tap on show:', e);
+            }
+        });
 
         this.cropperWindow.on('closed', () => {
             // Protect against race condition: window closed after successful selection

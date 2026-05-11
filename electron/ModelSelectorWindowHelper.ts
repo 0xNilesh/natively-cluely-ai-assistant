@@ -128,6 +128,7 @@ export class ModelSelectorWindowHelper {
     }
 
     private createWindow(x?: number, y?: number, showWhenReady: boolean = true): void {
+        const isMac = process.platform === 'darwin';
         const windowSettings: Electron.BrowserWindowConstructorOptions = {
             width: 140,
             height: 200,
@@ -145,7 +146,21 @@ export class ModelSelectorWindowHelper {
                 contextIsolation: true,
                 preload: path.join(__dirname, "preload.js"),
                 backgroundThrottling: false
-            }
+            },
+            // ROUND 3 FIX: type:'panel' makes this an NSPanel rather than a
+            // regular NSWindow. Required for becomesKeyOnlyIfNeeded and
+            // _setPreventsActivation: SPI calls in applyStealthToWindow to
+            // actually take effect (those are NSPanel-only properties).
+            // Without this, the previous applyStealthToWindow call was a
+            // no-op and clicking the model selector still stole focus from
+            // the user's foreground app.
+            //
+            // KNOWN INTERACTION: this window has an on('blur') auto-close
+            // handler. With panel-nonactivating + becomesKeyOnlyIfNeeded,
+            // the window may not become key on click → blur may not fire
+            // as expected. Watch for "model selector won't close" reports;
+            // remediation is a click-outside handler on the parent overlay.
+            ...(isMac ? { type: 'panel' as const } : {}),
         }
 
         if (x !== undefined && y !== undefined) {
@@ -174,17 +189,68 @@ export class ModelSelectorWindowHelper {
         });
 
         this.window.once('ready-to-show', () => {
+            // Apply NSPanel stealth attributes BEFORE any show() so clicking
+            // the model selector on the Natively overlay doesn't activate
+            // Natively and dim the user's foreground app (Zoom/browser) mid
+            // meeting. Without this, model-switch was a regular focusable
+            // window and every interaction stole focus. Failure non-fatal.
+            //
+            // NOTE: model selector also uses `on('blur')` to auto-close
+            // (line below). With panel-nonactivating + becomesKeyOnlyIfNeeded,
+            // blur semantics are subtle — the window may not become key on
+            // click and therefore never receives blur. If that proves
+            // problematic, the close-on-blur handler should switch to a
+            // click-outside listener registered on the parent overlay.
+            if (process.platform === 'darwin' && this.window && !this.window.isDestroyed()) {
+                try {
+                    // eslint-disable-next-line @typescript-eslint/no-var-requires
+                    const { loadNativeModule } = require('./audio/nativeModuleLoader');
+                    const native = loadNativeModule();
+                    if (native && typeof native.applyStealthToWindow === 'function') {
+                        native.applyStealthToWindow(this.window.getNativeWindowHandle());
+                    }
+                } catch (e) {
+                    console.error('[ModelSelectorWindowHelper] applyStealthToWindow failed:', e);
+                }
+            }
             if (showWhenReady) {
                 this.showWindow(this.window?.getBounds().x || 0, this.window?.getBounds().y || 0)
             }
         })
 
-        // Close on blur (click outside)
+        // Close on blur (click outside) — NOTE: with NSPanel-nonactivating
+        // + becomesKeyOnlyIfNeeded, this fires unreliably (panel may never
+        // become key on click → blur never fires). Click-outside close is
+        // handled by the overlay-side IPC `model-selector:close-on-outside`
+        // (registered when this window is shown). Keeping the blur handler
+        // as belt-and-braces for the cases where it does fire (e.g. user
+        // clicks a text input we don't know about).
         this.window.on('blur', () => {
             if (this.ignoreBlur) return;
             this.lastBlurTime = Date.now();
             this.hideWindow();
         })
+
+        // ROUND 3 FIX (#1): stop the stealth tap when Model Selector shows,
+        // mirroring the Settings handler. While brief (model selector is a
+        // dropdown), interaction with the dropdown still requires keystrokes
+        // to reach this window's React tree, which the tap would otherwise
+        // intercept at OS level.
+        this.window.on('show', () => {
+            // ROUND 4 FIX (#7): see SettingsWindowHelper for rationale —
+            // reset blur timestamp on show so the 250ms toggle-protection
+            // guard doesn't latch open from a stale prior-session blur.
+            this.lastBlurTime = 0;
+
+            if (process.platform !== 'darwin') return;
+            try {
+                // eslint-disable-next-line @typescript-eslint/no-var-requires
+                const { StealthKeyboardManager } = require('./services/StealthKeyboardManager');
+                StealthKeyboardManager.getInstance().stop();
+            } catch (e) {
+                console.error('[ModelSelectorWindowHelper] failed to stop stealth tap on show:', e);
+            }
+        });
     }
 
     private ensureVisibleOnScreen() {

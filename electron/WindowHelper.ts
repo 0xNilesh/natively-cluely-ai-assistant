@@ -303,6 +303,19 @@ export class WindowHelper {
     this.overlayWindow = new BrowserWindow(overlaySettings)
     this.overlayWindow.setContentProtection(this.contentProtection)
 
+    // Register the overlay as the sole recipient of CGEventTap captured-key
+    // broadcasts. Without this, captured keystrokes fan out to ALL windows
+    // (settings, cropper, etc.) — silent privacy/security exposure.
+    if (process.platform === 'darwin') {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { StealthKeyboardManager } = require('./services/StealthKeyboardManager');
+        StealthKeyboardManager.getInstance().setOverlayWindow(this.overlayWindow);
+      } catch (e) {
+        console.error('[WindowHelper] failed to register overlay with StealthKeyboardManager:', e);
+      }
+    }
+
     if (process.platform === "darwin") {
       this.overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
       this.overlayWindow.setHiddenInMissionControl(true)
@@ -316,25 +329,34 @@ export class WindowHelper {
       // ANY click on the overlay (button, input, anywhere) activates Natively
       // and dims the user's foreground app — even with type:'panel' set.
       //
+      // DEFERRED to `ready-to-show`: getNativeWindowHandle() returns the
+      // NSView pointer immediately after `new BrowserWindow`, but the view's
+      // [NSView window] may briefly be nil before Electron finishes attaching
+      // the view to its NSWindow. Calling now races and the Rust side returns
+      // "NSView has no associated NSWindow" → silent fallback to plain panel.
+      // ready-to-show fires AFTER the NSWindow is attached and the renderer
+      // has performed its first paint, so the window is guaranteed live.
+      //
       // Optional: requires the rebuilt native module (npm run build:native).
       // If the binary predates this method we silently skip; clicks will still
       // soft-activate the panel as before but type:'panel' alone keeps the
       // dock icon out of the way. Existing users see no regression.
-      try {
-        // Lazy-require to avoid pulling the native loader into early boot for
-        // platforms that don't need it (Windows/Linux short-circuit above).
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const { loadNativeModule } = require('./audio/nativeModuleLoader');
-        const native = loadNativeModule();
-        if (native && typeof native.applyStealthToWindow === 'function') {
-          native.applyStealthToWindow(this.overlayWindow.getNativeWindowHandle());
-          console.log('[WindowHelper] Applied stealth NSPanel attributes to overlay');
-        } else {
-          console.warn('[WindowHelper] applyStealthToWindow unavailable — rebuild native module (npm run build:native) for full stealth');
+      this.overlayWindow.once('ready-to-show', () => {
+        if (!this.overlayWindow || this.overlayWindow.isDestroyed()) return;
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-var-requires
+          const { loadNativeModule } = require('./audio/nativeModuleLoader');
+          const native = loadNativeModule();
+          if (native && typeof native.applyStealthToWindow === 'function') {
+            native.applyStealthToWindow(this.overlayWindow.getNativeWindowHandle());
+            console.log('[WindowHelper] Applied stealth NSPanel attributes to overlay');
+          } else {
+            console.warn('[WindowHelper] applyStealthToWindow unavailable — rebuild native module (npm run build:native) for full stealth');
+          }
+        } catch (e) {
+          console.error('[WindowHelper] Failed to apply stealth attributes:', e);
         }
-      } catch (e) {
-        console.error('[WindowHelper] Failed to apply stealth attributes:', e);
-      }
+      });
     } else if (process.platform === "win32") {
       // 'floating' level (HWND_TOPMOST baseline) is not enough to render above
       // fullscreen browser windows (F11). 'screen-saver' uses a higher TOPMOST

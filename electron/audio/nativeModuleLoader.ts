@@ -39,14 +39,6 @@ export interface NativeModule {
     stop(): void;
     readonly isActive: boolean;
   };
-}
-
-/** Mirrors native-module/src/keyboard_tap.rs CapturedKey. */
-export interface CapturedKey {
-  keyCode: number;
-  chars: string;
-  flags: number;
-  isKeyDown: boolean;
   SystemAudioCapture: new (deviceId?: string | null) => {
     getSampleRate(): number;
     start(callback: (...args: any[]) => any, onSpeechEnded?: (...args: any[]) => any): void;
@@ -57,6 +49,14 @@ export interface CapturedKey {
     start(callback: (...args: any[]) => any, onSpeechEnded?: (...args: any[]) => any): void;
     stop(): void;
   };
+}
+
+/** Mirrors native-module/src/keyboard_tap.rs CapturedKey. */
+export interface CapturedKey {
+  keyCode: number;
+  chars: string;
+  flags: number;
+  isKeyDown: boolean;
 }
 
 // Hard-required: crash the module load if any of these are missing.

@@ -226,6 +226,7 @@ export interface ElectronAPI {
   setModel: (modelId: string) => Promise<{ success: boolean; error?: string }>;
   setDefaultModel: (modelId: string) => Promise<{ success: boolean; error?: string }>;
   toggleModelSelector: (coords: { x: number; y: number }) => Promise<void>;
+  modelSelectorCloseIfOpen: () => Promise<void>;
   forceRestartOllama: () => Promise<void>;
 
   // Settings Window
@@ -329,6 +330,7 @@ export interface ElectronAPI {
   stealthTapOpenSettings: () => Promise<void>
   stealthTapIsActive: () => Promise<boolean>
   stealthTapStop: () => Promise<void>
+  stealthTapStart: () => Promise<boolean>
   onStealthTapState: (cb: (state: { active: boolean; reason?: string }) => void) => () => void
   onStealthKeyCaptured: (cb: (ev: { keyCode: number; chars: string; flags: number; isKeyDown: boolean }) => void) => () => void
 
