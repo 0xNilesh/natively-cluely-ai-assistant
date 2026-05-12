@@ -325,6 +325,29 @@ export class AppState {
       this.cropperWindowHelper.preload();
     }
 
+    // Warm the local Whisper worker in the background so the first recording
+    // session starts instantly instead of waiting for model load from disk.
+    // Only fires if local-whisper is selected AND a model is already cached.
+    setImmediate(() => {
+      try {
+        const { CredentialsManager } = require('./services/CredentialsManager');
+        if (CredentialsManager.getInstance().getSttProvider() === 'local-whisper') {
+          const { isModelCached } = require('./audio/whisper/modelManager');
+          const { modelPreloader } = require('./audio/whisper/modelPreloader');
+          const { resolveInferenceConfig } = require('./audio/whisper/inferenceConfig');
+          const modelId = settingsManager.get('localWhisperModel') ?? 'Xenova/whisper-tiny.en';
+          const { dtype } = resolveInferenceConfig();
+          if (isModelCached(modelId, dtype)) {
+            console.log(`[AppState] Preloading local Whisper model: ${modelId}`);
+            modelPreloader.preload(modelId);
+          }
+        }
+      } catch (e) {
+        // Non-fatal — recording still works, just with a cold-start delay
+        console.warn('[AppState] Local Whisper preload skipped:', e);
+      }
+    });
+
     // Initialize KeybindManager
     const keybindManager = KeybindManager.getInstance();
     keybindManager.setWindowHelper(this.windowHelper);
@@ -347,6 +370,14 @@ export class AppState {
       ipcMain.handle('stealth-tap:is-active', () => stealth.isActive());
       ipcMain.handle('stealth-tap:stop', () => { stealth.stop(); });
       ipcMain.handle('stealth-tap:start', () => stealth.start());
+      // IME users (Pinyin, Hangul, Kanji, …) cannot compose under the tap
+      // because CGEventTap fires below TIS. Renderer consults this before
+      // click-to-engage so it can fall back to plain DOM focus when an IME
+      // is in play. See electron/services/ImeDetector.ts for the rationale.
+      ipcMain.handle('stealth-tap:should-auto-engage', () => {
+        const { shouldAutoEngageStealthTap } = require('./services/ImeDetector');
+        return shouldAutoEngageStealthTap();
+      });
     } else {
       ipcMain.handle('stealth-tap:available', () => false);
       ipcMain.handle('stealth-tap:permission-granted', () => false);
@@ -355,6 +386,7 @@ export class AppState {
       ipcMain.handle('stealth-tap:is-active', () => false);
       ipcMain.handle('stealth-tap:stop', () => {});
       ipcMain.handle('stealth-tap:start', () => false);
+      ipcMain.handle('stealth-tap:should-auto-engage', () => true);
     }
 
     keybindManager.onShortcutTriggered(async (actionId) => {
@@ -1005,6 +1037,26 @@ export class AppState {
         console.warn(`[Main] No API key for ${sttProvider} STT, falling back to GoogleSTT`);
         stt = new GoogleSTT(speaker);
       }
+    } else if (sttProvider === 'local-whisper') {
+      const { LocalWhisperSTT } = require('./audio/LocalWhisperSTT');
+      const sm = SettingsManager.getInstance();
+      const globalModel = sm.get('localWhisperModel') ?? 'Xenova/whisper-tiny.en';
+      // Per-channel override: when enabled the two STT instances may load
+      // different models (e.g. Moonshine Tiny for mic, Moonshine Base for
+      // system audio). Falls back to globalModel if the per-channel slot is
+      // empty or the feature is disabled.
+      let modelId = globalModel;
+      if (sm.get('localWhisperPerChannelEnabled')) {
+        const override = speaker === 'interviewer'
+          ? sm.get('localWhisperModelSystem')
+          : sm.get('localWhisperModelMic');
+        if (override) modelId = override;
+      }
+      console.log(`[Main] Using LocalWhisperSTT for ${speaker}, model: ${modelId}`);
+      const lws = new LocalWhisperSTT(modelId);
+      // Channel label disambiguates the two concurrent instances in latency logs.
+      lws.setChannel(speaker === 'interviewer' ? 'system' : 'mic');
+      stt = lws as any;
     } else {
       stt = new GoogleSTT(speaker);
     }
@@ -1740,8 +1792,17 @@ export class AppState {
    * detected, undefined otherwise.
    */
   private detectSameInputOutputDevice(): string | undefined {
-    const inputId = this._lastRequestedInputDeviceId;
-    const outputId = this._lastRequestedOutputDeviceId;
+    return this.checkSameInputOutputDevice(this._lastRequestedInputDeviceId, this._lastRequestedOutputDeviceId);
+  }
+
+  /**
+   * Pure variant of detectSameInputOutputDevice that takes the IDs as args
+   * instead of reading from instance state. Used by reconfigureAudio so the
+   * conflict check runs against the INCOMING request before instance state
+   * is mutated, which would otherwise interact badly with the skip-if-
+   * unchanged early-exit.
+   */
+  private checkSameInputOutputDevice(inputId?: string, outputId?: string): string | undefined {
     if (!inputId || !outputId) return undefined;
 
     // Strip the macOS CoreAudio :input/:output suffix before any comparison —
@@ -1769,6 +1830,37 @@ export class AppState {
     return undefined;
   }
 
+  /**
+   * Pick the best mic to use when the requested input conflicts with the
+   * audio output (same physical device — typically AirPods on both sides).
+   * Built-in mics get first preference because they are always available
+   * and never participate in the Bluetooth aggregate that's blocking the
+   * tap. Falls back to any other input that isn't the conflicting device.
+   * Returns undefined if nothing else is plugged in.
+   */
+  private pickFallbackInputDevice(conflictingName: string): { id: string; name: string } | undefined {
+    try {
+      const inputs = AudioDevices.getInputDevices();
+      if (!inputs?.length) return undefined;
+
+      const stripSuffix = (s: string) => s.replace(/:(input|output)$/i, '');
+      const conflictBase = stripSuffix(conflictingName).toLowerCase();
+      const isConflicting = (d: { id: string; name: string }) =>
+        stripSuffix(d.id).toLowerCase() === conflictBase ||
+        d.name.toLowerCase() === conflictBase;
+      // Built-in mics on macOS show up as "MacBook Pro Microphone" / "MacBook
+      // Air Microphone" / "Built-in Microphone" / "iMac Microphone". Match
+      // loosely so we don't miss future Apple naming changes.
+      const isBuiltIn = (d: { id: string; name: string }) =>
+        /macbook|built[- ]?in|imac|mac\s+studio|mac\s+mini/i.test(d.name);
+
+      return inputs.find(d => !isConflicting(d) && isBuiltIn(d))
+          ?? inputs.find(d => !isConflicting(d));
+    } catch {
+      return undefined;
+    }
+  }
+
   private async reconfigureAudio(inputDeviceId?: string | null, outputDeviceId?: string | null): Promise<void> {
     console.log(`[Main] Reconfiguring Audio: Input=${inputDeviceId}, Output=${outputDeviceId}`);
 
@@ -1777,8 +1869,39 @@ export class AppState {
     // destroy()+new() costs 50–200ms (macOS CoreAudio Tap re-init, Windows
     // WASAPI device contention, CPAL stream open). The common case — user
     // starts a second meeting with the same mic/speakers — hits this path.
-    const wantedInput = this.normalizeDeviceId(inputDeviceId);
+    let wantedInput = this.normalizeDeviceId(inputDeviceId);
     const wantedOutput = this.normalizeDeviceId(outputDeviceId);
+
+    // Auto-fallback for the "same device on both sides" conflict (most common
+    // with AirPods used for both listening and the meeting mic). macOS won't
+    // tap a device while it's also the active microphone — the system audio
+    // capture would silently produce zero-filled buffers and the interviewer
+    // transcript would stay empty. Switch the mic to a non-conflicting input
+    // (built-in preferred) so the user can keep their headphones for audio
+    // output without touching system settings.
+    //
+    // This check runs BEFORE the skip-if-unchanged comparison so the skip
+    // path uses the post-fallback wantedInput. Otherwise a stale identical
+    // request could short-circuit a needed re-resolution (e.g., user
+    // unplugged the built-in fallback after the first reconfigure).
+    if (wantedInput && wantedOutput) {
+      const conflict = this.checkSameInputOutputDevice(wantedInput, wantedOutput);
+      if (conflict) {
+        const fallback = this.pickFallbackInputDevice(conflict);
+        if (fallback) {
+          console.warn(`[Main] I/O conflict detected (${conflict} on both sides). Auto-switching mic to "${fallback.name}".`);
+          wantedInput = this.normalizeDeviceId(fallback.id);
+          this.broadcast('audio-input-auto-switched', {
+            from: conflict,
+            to: fallback.name,
+            reason: 'same-device-conflict',
+          });
+        } else {
+          console.warn(`[Main] I/O conflict detected (${conflict}) but no alternate input available — system audio will likely be silent.`);
+        }
+      }
+    }
+
     if (
       this.systemAudioCapture &&
       this.microphoneCapture &&
@@ -1789,8 +1912,9 @@ export class AppState {
       return;
     }
 
-    // Remember the input id so the mic-recovery handler can recreate with the
-    // same selection if the cpal stream errors out mid-meeting.
+    // Remember the (possibly fallback-overridden) input id so the mic-recovery
+    // handler can recreate with the same selection if the cpal stream errors
+    // out mid-meeting.
     this._lastRequestedInputDeviceId = wantedInput;
     this._lastRequestedOutputDeviceId = wantedOutput;
     // Reset mic recovery counter for the new device choice.

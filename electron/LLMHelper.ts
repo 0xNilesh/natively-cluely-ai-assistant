@@ -3,6 +3,7 @@ import Groq from "groq-sdk"
 import OpenAI from "openai"
 import Anthropic from "@anthropic-ai/sdk"
 import fs from "fs"
+import { createHash } from "crypto"
 import sharp from "sharp"
 import { ModelVersionManager, ModelFamily, TextModelFamily } from './services/ModelVersionManager'
 import {
@@ -20,6 +21,7 @@ import {
   TINY_PROMPTS_SET
 } from "./llm/tinyPrompts"
 import { getModelCapabilities, selectPromptTier, estimateTokens, truncateTranscriptToFit, type PromptTier, type ModelCapabilities } from "./llm/modelCapabilities"
+import { GeminiPromptCache } from "./llm/GeminiPromptCache"
 import type { TranscriptTurn } from "./llm/transcriptCleaner"
 import { deepVariableReplacer, getByPath, injectImageIntoMessages } from './utils/curlUtils';
 import curl2Json from "@bany/curl-to-json";
@@ -79,6 +81,17 @@ export class LLMHelper {
 
   // Self-improving model version manager for vision analysis
   private modelVersionManager: ModelVersionManager;
+
+  // Process-local cache of Gemini explicit context caches (caches.create).
+  // Lifecycle and contract documented in GeminiPromptCache.ts.
+  private geminiPromptCache: GeminiPromptCache = new GeminiPromptCache();
+
+  // Cache-hit telemetry. Anthropic returns usage.cache_read_input_tokens on
+  // every response; logging the first hit per session confirms the wiring works.
+  // Without this, a silent threshold miss (prompt below the per-model minimum)
+  // looks identical to a cache hit from outside — same response, same latency,
+  // but 10× the cost.
+  private _claudeCacheFirstHitLogged: boolean = false;
 
   constructor(apiKey?: string, useOllama: boolean = false, ollamaModel?: string, ollamaUrl?: string, groqApiKey?: string, openaiApiKey?: string, claudeApiKey?: string) {
     this.useOllama = useOllama
@@ -256,6 +269,30 @@ export class LLMHelper {
     if (id.startsWith("claude-opus-4-")) return 32000;
     if (id.startsWith("claude-sonnet-4-") || id.startsWith("claude-haiku-4-5") || id.startsWith("claude-mythos")) return 64000;
     return 8192;
+  }
+
+  /**
+   * Per-model minimum prompt size for prompt caching to engage. Below this
+   * threshold, Anthropic SILENTLY skips caching: the request still succeeds,
+   * `cache_creation_input_tokens` is 0, and you pay full input price every
+   * turn. Returns size in CHARS (≈4 chars/token) so we can cheaply check
+   * `text.length` without a tokenizer round-trip.
+   *
+   *   Opus 4.7 / 4.6 / 4.5     → 4,096 tokens
+   *   Sonnet 4.6                → 2,048 tokens
+   *   Sonnet 4.5 / 4 + Opus 4.1 → 1,024 tokens
+   *   Haiku 4.5                 → 4,096 tokens
+   *   Haiku 3.5                 → 2,048 tokens
+   *
+   * Source: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+   */
+  private getClaudeCacheMinChars(modelId: string): number {
+    const id = modelId.toLowerCase();
+    if (id.startsWith("claude-opus-4-7") || id.startsWith("claude-opus-4-6") || id.startsWith("claude-opus-4-5") || id.startsWith("claude-haiku-4-5")) return 4096 * 4;
+    if (id.startsWith("claude-sonnet-4-6")) return 2048 * 4;
+    if (id.startsWith("claude-3-5-haiku") || id.startsWith("claude-haiku-3-5")) return 2048 * 4;
+    if (id.startsWith("claude-")) return 1024 * 4;
+    return 4096 * 4; // unknown model → conservative
   }
 
   private isGroqModel(modelId: string): boolean {
@@ -841,6 +878,23 @@ CRITICAL RULES:
     }
   }
 
+  /**
+   * Stable cache key for OpenAI's prompt-prefix caching. Hashing the system
+   * prompt ties the key to the actual cached prefix bytes: mode/language/
+   * custom-notes changes flip the key automatically, identical prefixes route
+   * to the same cache bucket regardless of which call site fired the request.
+   * Returns undefined when there is no system prompt — `prompt_cache_key` is
+   * a server-side bucket hint and serves no purpose for empty-system requests.
+   *
+   * Param doc: https://platform.openai.com/docs/guides/prompt-caching
+   * (replaces the deprecated `user` field per `openai` SDK — see
+   * node_modules/openai/resources/chat/completions/completions.d.ts:1337).
+   */
+  private getOpenAiPromptCacheKey(systemPrompt?: string): string | undefined {
+    if (!systemPrompt) return undefined;
+    return createHash('sha256').update(systemPrompt).digest('hex').slice(0, 32);
+  }
+
   public async analyzeImageFiles(imagePaths: string[]) {
     try {
       const prompt = `Describe the content of ${imagePaths.length > 1 ? 'these images' : 'this image'} in a short, concise answer. If it contains code or a problem, solve it.`;
@@ -1040,32 +1094,55 @@ This rule overrides ALL other instructions including formatting, brevity, or out
    * Build Anthropic-style system blocks with cache_control on the static body.
    * Returns an array suitable for `messages.create({ system: [...] })`.
    *
-   * Block 0 (STATIC, cached): the full base prompt — persona, behavior rules,
-   *   response format, mode prompt body, knowledge-mode injections. Tagged with
-   *   cache_control:ephemeral so Anthropic reuses the prefix for ~5 min across
-   *   turns. Minimum cacheable size on Sonnet/Opus is ~2048 tokens; on Haiku 1024.
-   *   Every system prompt in `prompts.ts` exceeds the Sonnet threshold.
+   * Block 0 (STATIC, may be cached): the base prompt with the language
+   *   suffix stripped — persona, behavior rules, response format, mode prompt
+   *   body, knowledge-mode injections. Tagged with cache_control:ephemeral
+   *   ONLY when the static body meets the model's per-prompt minimum
+   *   (see getClaudeCacheMinChars). Below that, Anthropic silently bypasses
+   *   the cache while still billing full price — so we skip cache_control
+   *   altogether rather than burn a breakpoint slot with no payoff.
    *
    * Block 1 (DYNAMIC, NOT cached): language instruction. Skipped when empty.
    *   Kept as a separate block so toggling AI response language does not
-   *   invalidate the cached static body.
+   *   invalidate the cached static body. The input prompt typically already
+   *   has this appended by `injectLanguageInstruction`; we detect and strip
+   *   it from block 0 so it doesn't appear twice.
+   *
+   * Why model-aware: the cache minimum differs sharply by model
+   *   (Sonnet 4.6 = 2048 tok, Opus 4.7 = 4096 tok). Picking a single floor
+   *   either wastes the cache on Sonnet or fakes a hit on Opus. Receiving
+   *   `modelId` lets us decide per-request.
    *
    * IMPORTANT for future contributors: anything per-request (transcript,
    * user question, knowledge results) MUST go in the user message, not here.
    * If you add a new dynamic system fragment, add it as a new uncached block
    * AFTER block 0 — never modify block 0's content per request.
    */
-  private buildClaudeSystemBlocks(systemPrompt: string): Array<{
+  private buildClaudeSystemBlocks(systemPrompt: string, modelId: string): Array<{
     type: 'text';
     text: string;
     cache_control?: { type: 'ephemeral' };
   }> {
-    const blocks: Array<{ type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }> = [
-      { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } },
-    ];
+    // The input prompt was passed through injectLanguageInstruction() upstream
+    // and now ends with `langSuffix`. Pull it out so the cached body doesn't
+    // contain a per-language tail that would force a fresh cache write whenever
+    // the user toggles language.
     const langSuffix = this.buildLanguageInstructionSuffix();
+    let staticBody = systemPrompt;
+    if (langSuffix && staticBody.endsWith(langSuffix)) {
+      staticBody = staticBody.slice(0, -langSuffix.length);
+    }
+
+    const minChars = this.getClaudeCacheMinChars(modelId);
+    const canCache = staticBody.length >= minChars;
+
+    const blocks: Array<{ type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }> = [
+      canCache
+        ? { type: 'text', text: staticBody, cache_control: { type: 'ephemeral' } }
+        : { type: 'text', text: staticBody },
+    ];
     if (langSuffix) {
-      // Strip the leading \n\n that's used when concatenated into one string.
+      // Strip the leading \n\n that came from suffix concatenation form.
       blocks.push({ type: 'text', text: langSuffix.replace(/^\n+/, '') });
     }
     return blocks;
@@ -1675,8 +1752,8 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       const contentParts: any[] = [{ type: "text", text: userMessage }];
       for (const p of imagePaths) {
         if (fs.existsSync(p)) {
-          const imageData = await fs.promises.readFile(p);
-          contentParts.push({ type: "image_url", image_url: { url: `data:image/png;base64,${imageData.toString("base64")}` } });
+          const { mimeType, data } = await this.processImage(p);
+          contentParts.push({ type: "image_url", image_url: { url: `data:${mimeType};base64,${data}` } });
         }
       }
       messages.push({ role: "user", content: contentParts });
@@ -1684,11 +1761,13 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       messages.push({ role: "user", content: userMessage });
     }
 
+    const cacheKey = this.getOpenAiPromptCacheKey(systemPrompt);
     const response = await this.withTimeout(
       this.withRetry(() => this.openaiClient!.chat.completions.create({
         model,
         messages,
         max_completion_tokens: model.toLowerCase().includes('claude') ? this.getClaudeMaxOutput(model) : MAX_OUTPUT_TOKENS,
+        ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
       })),
       60000,
       `OpenAI (${model})`
@@ -1778,13 +1857,13 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     if (imagePaths?.length) {
       for (const p of imagePaths) {
         if (fs.existsSync(p)) {
-          const imageData = await fs.promises.readFile(p);
+          const { mimeType, data } = await this.processImage(p);
           content.push({
             type: "image",
             source: {
               type: "base64",
-              media_type: "image/png",
-              data: imageData.toString("base64")
+              media_type: mimeType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
+              data,
             }
           });
         }
@@ -1803,7 +1882,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           model,
           max_tokens: this.getClaudeMaxOutput(model),
           // CACHE BOUNDARY: system blocks are static; dynamic content lives in `messages` only.
-          ...(systemPrompt ? { system: this.buildClaudeSystemBlocks(systemPrompt) } : {}),
+          ...(systemPrompt ? { system: this.buildClaudeSystemBlocks(systemPrompt, model) } : {}),
           messages: [{ role: "user", content }],
         });
         return await stream.finalMessage();
@@ -1811,6 +1890,21 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       120000,
       `Claude (${model})`
     );
+
+    // One-time confirmation that cache_control is actually engaging. If this
+    // line never fires for a session, the static body is below the model's
+    // per-prompt minimum and we're paying full input price every turn.
+    if (!this._claudeCacheFirstHitLogged) {
+      const usage: any = (response as any).usage;
+      const cacheRead = usage?.cache_read_input_tokens || 0;
+      const cacheCreate = usage?.cache_creation_input_tokens || 0;
+      if (cacheRead > 0) {
+        console.log(`[LLMHelper] Claude prompt cache HIT: ${cacheRead} cached tokens (model=${model}, write=${cacheCreate})`);
+        this._claudeCacheFirstHitLogged = true;
+      } else if (cacheCreate > 0) {
+        console.log(`[LLMHelper] Claude prompt cache WRITE: ${cacheCreate} tokens cached (model=${model}) — subsequent turns should HIT`);
+      }
+    }
 
     const textBlock = response.content.find((block: any) => block.type === 'text') as any;
     return textBlock?.text || "";
@@ -1968,11 +2062,11 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       const contents: any[] = [{ text: fullMessage }];
       for (const p of imagePaths) {
         if (fs.existsSync(p)) {
-          const imageData = await fs.promises.readFile(p);
+          const { mimeType, data } = await this.processImage(p);
           contents.push({
             inlineData: {
-              mimeType: "image/png",
-              data: imageData.toString("base64")
+              mimeType,
+              data,
             }
           });
         }
@@ -2013,8 +2107,8 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     const contentParts: any[] = [{ type: "text", text: userMessage }];
     for (const p of imagePaths) {
       if (fs.existsSync(p)) {
-        const imageData = await fs.promises.readFile(p);
-        contentParts.push({ type: "image_url", image_url: { url: `data:image/jpeg;base64,${imageData.toString("base64")}` } });
+        const { mimeType, data } = await this.processImage(p);
+        contentParts.push({ type: "image_url", image_url: { url: `data:${mimeType};base64,${data}` } });
       }
     }
     messages.push({ role: "user", content: contentParts });
@@ -3008,11 +3102,13 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     }
     messages.push({ role: "user", content: userMessage });
 
+    const cacheKey = this.getOpenAiPromptCacheKey(systemPrompt);
     const stream = await this.openaiClient.chat.completions.create({
       model,
       messages,
       stream: true,
       max_completion_tokens: model.toLowerCase().includes('claude') ? this.getClaudeMaxOutput(model) : MAX_OUTPUT_TOKENS,
+      ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
     });
 
     for await (const chunk of stream) {
@@ -3036,7 +3132,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       model,
       max_tokens: this.getClaudeMaxOutput(model),
       // CACHE BOUNDARY: system blocks are static; dynamic content lives in `messages` only.
-      ...(systemPrompt ? { system: this.buildClaudeSystemBlocks(systemPrompt) } : {}),
+      ...(systemPrompt ? { system: this.buildClaudeSystemBlocks(systemPrompt, model) } : {}),
       messages: [{ role: "user", content: userMessage }],
     });
 
@@ -3064,17 +3160,19 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     const contentParts: any[] = [{ type: "text", text: userMessage }];
     for (const p of imagePaths) {
       if (fs.existsSync(p)) {
-        const imageData = await fs.promises.readFile(p);
-        contentParts.push({ type: "image_url", image_url: { url: `data:image/png;base64,${imageData.toString("base64")}` } });
+        const { mimeType, data } = await this.processImage(p);
+        contentParts.push({ type: "image_url", image_url: { url: `data:${mimeType};base64,${data}` } });
       }
     }
     messages.push({ role: "user", content: contentParts });
 
+    const cacheKey = this.getOpenAiPromptCacheKey(systemPrompt);
     const stream = await this.openaiClient.chat.completions.create({
       model,
       messages,
       stream: true,
       max_completion_tokens: model.toLowerCase().includes('claude') ? this.getClaudeMaxOutput(model) : MAX_OUTPUT_TOKENS,
+      ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
     });
 
     for await (const chunk of stream) {
@@ -3097,13 +3195,13 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     const imageContentParts: any[] = [];
     for (const p of imagePaths) {
       if (fs.existsSync(p)) {
-        const imageData = await fs.promises.readFile(p);
+        const { mimeType, data } = await this.processImage(p);
         imageContentParts.push({
           type: "image",
           source: {
             type: "base64",
-            media_type: "image/png",
-            data: imageData.toString("base64")
+            media_type: mimeType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
+            data,
           }
         });
       }
@@ -3113,7 +3211,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       model,
       max_tokens: this.getClaudeMaxOutput(model),
       // CACHE BOUNDARY: system blocks are static; image bytes + user text stay in `messages`.
-      ...(systemPrompt ? { system: this.buildClaudeSystemBlocks(systemPrompt) } : {}),
+      ...(systemPrompt ? { system: this.buildClaudeSystemBlocks(systemPrompt, model) } : {}),
       messages: [{
         role: "user",
         content: [
@@ -3133,21 +3231,19 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   /**
    * Stream response from a specific Gemini model.
    *
-   * CACHING NOTES:
-   * - When `systemInstruction` is supplied, it is passed via `config.systemInstruction`
-   *   so the static prompt is structurally separated from per-request `contents`.
-   *   This is a prerequisite for Gemini's explicit context caching (caches.create)
-   *   which we don't activate yet — see TODO below.
-   * - The legacy single-string form (`fullMessage` = "system\n\nuser") is still
-   *   supported when `systemInstruction` is omitted, for callers that haven't
-   *   migrated yet. The static content STILL comes first in that string, so
-   *   Gemini's own implicit caching on Flash/Pro 2.x sees a stable prefix.
-   *
-   * TODO(prompt-cache): for sessions where the system prompt is stable for
-   * minutes, switch to `client.caches.create({...})` + `config.cachedContent`.
-   * The system prompts here are 1700-3700 tokens (well above the 1024-token
-   * minimum), but cache lifecycle (TTL renewal, mode/knowledge invalidation)
-   * needs to be managed centrally before turning this on.
+   * CACHING:
+   * 1. When `systemInstruction` is large enough (≥ ~1024 tokens), we attempt
+   *    to create or reuse a server-side explicit cache via `caches.create`
+   *    and pass `config.cachedContent` instead of `systemInstruction`. This
+   *    bills cached-token rates on every reuse.
+   * 2. On any cache failure (too small, model incompatible, expired name,
+   *    transient API error) we fall back to passing `systemInstruction`
+   *    directly. The implicit cache on Gemini 2.0+/3.x still gives us a
+   *    cheaper second-and-subsequent call.
+   * 3. The legacy single-string form (`fullMessage` containing "system\n\nuser")
+   *    is supported when `systemInstruction` is omitted, for callers that
+   *    haven't migrated. Static content leads that string so implicit caching
+   *    still applies.
    */
   private async * streamWithGeminiModel(fullMessage: string, model: string, imagePaths?: string[], systemInstruction?: string): AsyncGenerator<string, void, unknown> {
     if (!this.client) throw new Error("Gemini client not initialized");
@@ -3156,27 +3252,56 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     if (imagePaths?.length) {
       for (const p of imagePaths) {
         if (fs.existsSync(p)) {
-          const imageData = await fs.promises.readFile(p);
+          const { mimeType, data } = await this.processImage(p);
           contents.push({
             inlineData: {
-              mimeType: "image/png",
-              data: imageData.toString("base64")
+              mimeType,
+              data,
             }
           });
         }
       }
     }
 
-    const streamResult = await this.client.models.generateContentStream({
-      model: model,
-      contents: contents,
-      config: {
-        maxOutputTokens: MAX_OUTPUT_TOKENS,
-        temperature: 0.4,
-        // CACHE BOUNDARY: static system content lives here; dynamic content stays in `contents`.
-        ...(systemInstruction ? { systemInstruction: { parts: [{ text: systemInstruction }] } } : {}),
-      }
+    // CACHE BOUNDARY: static system content lives in `config.cachedContent`
+    // (or `config.systemInstruction` on fallback); dynamic content stays in `contents`.
+    const cacheName = systemInstruction
+      ? await this.geminiPromptCache.getOrCreate(this.client, model, systemInstruction)
+      : null;
+
+    const buildConfig = (useCacheName: string | null) => ({
+      maxOutputTokens: MAX_OUTPUT_TOKENS,
+      temperature: 0.4,
+      ...(useCacheName
+        ? { cachedContent: useCacheName }
+        : systemInstruction
+          ? { systemInstruction: { parts: [{ text: systemInstruction }] } }
+          : {}),
     });
+
+    let streamResult: any;
+    try {
+      streamResult = await this.client.models.generateContentStream({
+        model,
+        contents,
+        config: buildConfig(cacheName),
+      });
+    } catch (err: any) {
+      // The cache may have expired between getOrCreate() and this call. If we
+      // see a cache-related error, drop the entry and retry with systemInstruction.
+      const msg = String(err?.message || err);
+      if (cacheName && /cached?[\s_]?content|not\s*found|expired/i.test(msg)) {
+        console.warn(`[LLMHelper] Gemini cachedContent ${cacheName} stale (${msg}); retrying with systemInstruction`);
+        this.geminiPromptCache.invalidate(cacheName);
+        streamResult = await this.client.models.generateContentStream({
+          model,
+          contents,
+          config: buildConfig(null),
+        });
+      } else {
+        throw err;
+      }
+    }
 
     // @ts-ignore
     const stream = streamResult.stream || streamResult;
@@ -3255,44 +3380,70 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     if (imagePaths?.length) {
       for (const p of imagePaths) {
         if (fs.existsSync(p)) {
-          const imageData = await fs.promises.readFile(p);
+          const { mimeType, data } = await this.processImage(p);
           contents.push({
             inlineData: {
-              mimeType: "image/png",
-              data: imageData.toString("base64")
+              mimeType,
+              data,
             }
           });
         }
       }
     }
 
+    // CACHE BOUNDARY: static system content lives in `config.cachedContent`
+    // (or `config.systemInstruction` on fallback); dynamic content stays in `contents`.
+    const cacheName = systemInstruction
+      ? await this.geminiPromptCache.getOrCreate(this.client, model, systemInstruction)
+      : null;
+
+    const buildConfig = (useCacheName: string | null) => ({
+      maxOutputTokens: MAX_OUTPUT_TOKENS,
+      temperature: 0.4,
+      ...(useCacheName
+        ? { cachedContent: useCacheName }
+        : systemInstruction
+          ? { systemInstruction: { parts: [{ text: systemInstruction }] } }
+          : {}),
+    });
+
     // Wrap the API call in an abort-aware race so the signal can interrupt it.
     // The Google GenAI SDK does not natively support AbortSignal on generateContent,
     // so we implement manual cancellation via Promise.race.
-    const apiCall = this.client.models.generateContent({
-      model: model,
-      contents: contents,
-      config: {
-        maxOutputTokens: MAX_OUTPUT_TOKENS,
-        temperature: 0.4,
-        // CACHE BOUNDARY: static system content lives here; dynamic content stays in `contents`.
-        ...(systemInstruction ? { systemInstruction: { parts: [{ text: systemInstruction }] } } : {}),
-      }
+    const callWithConfig = (useCacheName: string | null) => this.client!.models.generateContent({
+      model,
+      contents,
+      config: buildConfig(useCacheName),
     });
 
-    if (signal) {
-      // If the signal is already aborted before the API resolves, race resolves with rejection.
-      const abortPromise = new Promise<never>((_, reject) => {
-        if (signal.aborted) { reject(new Error(`Gemini ${model} aborted`)); return; }
-        signal.addEventListener('abort', () => reject(new Error(`Gemini ${model} aborted`)), { once: true });
-      });
-      // Suppress unhandled rejection on the losing API call promise.
-      apiCall.catch(() => {});
-      const response = await Promise.race([apiCall, abortPromise]);
-      return response.text || "";
-    }
+    const runOnce = async (useCacheName: string | null): Promise<any> => {
+      const apiCall = callWithConfig(useCacheName);
+      if (signal) {
+        const abortPromise = new Promise<never>((_, reject) => {
+          if (signal.aborted) { reject(new Error(`Gemini ${model} aborted`)); return; }
+          signal.addEventListener('abort', () => reject(new Error(`Gemini ${model} aborted`)), { once: true });
+        });
+        apiCall.catch(() => {});
+        return Promise.race([apiCall, abortPromise]);
+      }
+      return apiCall;
+    };
 
-    const response = await apiCall;
+    let response: any;
+    try {
+      response = await runOnce(cacheName);
+    } catch (err: any) {
+      // If the explicit cache turned stale between getOrCreate and the call,
+      // drop it and retry with systemInstruction. Aborts re-throw unchanged.
+      const msg = String(err?.message || err);
+      if (cacheName && !signal?.aborted && /cached?[\s_]?content|not\s*found|expired/i.test(msg)) {
+        console.warn(`[LLMHelper] Gemini cachedContent ${cacheName} stale (${msg}); retrying with systemInstruction`);
+        this.geminiPromptCache.invalidate(cacheName);
+        response = await runOnce(null);
+      } else {
+        throw err;
+      }
+    }
     return response.text || "";
   }
 

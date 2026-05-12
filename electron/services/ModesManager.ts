@@ -7,6 +7,8 @@ import {
     MODE_TEAM_MEET_PROMPT,
     MODE_LECTURE_PROMPT,
     MODE_TECHNICAL_INTERVIEW_PROMPT,
+    SHARED_MODE_PREFIX,
+    SHARED_MODE_PREFIX_SHORT,
 } from '../llm/prompts';
 
 export type ModeTemplateType =
@@ -120,6 +122,21 @@ const TEMPLATE_SYSTEM_PROMPTS: Record<ModeTemplateType, string> = {
     'team-meet': MODE_TEAM_MEET_PROMPT,
     lecture: MODE_LECTURE_PROMPT,
 };
+
+// Startup invariant: every MODE_*_PROMPT must begin with one of the two shared
+// prefixes so getActiveModeSystemPromptSuffix() can strip duplicated tokens.
+// If a future template diverges, we silently regress to shipping ~1.6K duplicate
+// tokens per request. Warn loudly here instead so the regression is caught at
+// app launch, not by a prod cost spike.
+for (const [templateType, prompt] of Object.entries(TEMPLATE_SYSTEM_PROMPTS)) {
+    if (!prompt.startsWith(SHARED_MODE_PREFIX) && !prompt.startsWith(SHARED_MODE_PREFIX_SHORT)) {
+        console.warn(
+            `[ModesManager] WARN: MODE template '${templateType}' does not start with ` +
+            `SHARED_MODE_PREFIX or SHARED_MODE_PREFIX_SHORT. Token deduplication will fall ` +
+            `back to sending the full template — duplicate-token regression. See prompts.ts.`
+        );
+    }
+}
 
 function rowToMode(row: any): Mode {
     return {
@@ -317,7 +334,22 @@ export class ModesManager {
     public getActiveModeSystemPromptSuffix(): string {
         const mode = this.getActiveMode();
         if (!mode) return '';
-        return TEMPLATE_SYSTEM_PROMPTS[mode.templateType] ?? '';
+        const full = TEMPLATE_SYSTEM_PROMPTS[mode.templateType] ?? '';
+        // Strip the shared prefix that's already in HARD_SYSTEM_PROMPT, otherwise
+        // CORE_IDENTITY + EXECUTION_CONTRACT + CONTEXT_INTELLIGENCE_LAYER (+
+        // SHARED_CODING_RULES for coding modes) ship twice per request — ~1.6K
+        // duplicated tokens for coding modes, ~1.2K for non-coding.
+        //
+        // Try the long (4-block) prefix first to handle coding modes, then the
+        // short (3-block) prefix for sales/recruiting/team-meet/lecture which
+        // intentionally omit SHARED_CODING_RULES. Fall back to unchanged if
+        // neither matches — safe default for future template drift.
+        for (const prefix of [SHARED_MODE_PREFIX, SHARED_MODE_PREFIX_SHORT]) {
+            if (full.startsWith(prefix)) {
+                return full.slice(prefix.length).replace(/^\s+/, '');
+            }
+        }
+        return full;
     }
 
     /**

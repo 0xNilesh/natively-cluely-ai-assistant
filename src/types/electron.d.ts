@@ -331,6 +331,10 @@ export interface ElectronAPI {
   stealthTapIsActive: () => Promise<boolean>
   stealthTapStop: () => Promise<void>
   stealthTapStart: () => Promise<boolean>
+  /** False on macOS when a composition IME (Pinyin/Hangul/Kanji/…) is
+   *  enabled — the tap captures below the IME and breaks composition, so
+   *  the renderer falls back to plain DOM focus on click. */
+  stealthTapShouldAutoEngage: () => Promise<boolean>
   onStealthTapState: (cb: (state: { active: boolean; reason?: string }) => void) => () => void
   onStealthKeyCaptured: (cb: (ev: { keyCode: number; chars: string; flags: number; isKeyDown: boolean }) => void) => () => void
 

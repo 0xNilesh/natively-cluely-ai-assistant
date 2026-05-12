@@ -590,6 +590,12 @@ a,
   cursor: default !important;
 }
 
+/* Restore keyboard focus rings that Tailwind preflight removes */
+*:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
 /* Utilities for sidebar layout */
 .app-sidebar {
   background: rgba(0, 0, 0, 0.2);
@@ -621,6 +627,16 @@ a,
 
 .animate-shine {
   animation: shine 2s infinite;
+}
+
+@keyframes whisper-dl {
+  0%   { transform: translateX(-100%) scaleX(0.4); }
+  50%  { transform: translateX(100%)  scaleX(0.8); }
+  100% { transform: translateX(350%) scaleX(0.4); }
+}
+.animate-whisper-dl {
+  animation: whisper-dl 1.4s ease-in-out infinite;
+  will-change: transform;
 }
 
 /* Force instant transitions globally during previews */

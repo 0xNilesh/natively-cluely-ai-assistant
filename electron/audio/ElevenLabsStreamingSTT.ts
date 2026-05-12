@@ -7,6 +7,11 @@ import { RECOGNITION_LANGUAGES } from '../config/languages';
 import { streamingStttWsOptions } from './dnsHelpers';
 
 const ELEVENLABS_WS_URL = 'wss://api.elevenlabs.io/v1/speech-to-text/realtime';
+// Cap reconnect attempts so a flapping network can't drive an indefinite WS
+// open-loop against ElevenLabs (storm risk + per-key rate-limit risk). After
+// the cap, emit 'error' so the orchestrator can surface a UI prompt; a
+// user-triggered restart via stop()/start() resets the counter to 0.
+const RECONNECT_MAX_ATTEMPTS = 10;
 
 export class ElevenLabsStreamingSTT extends EventEmitter {
     private apiKey: string;
@@ -308,8 +313,15 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
                     case 'auth_error':
                         console.error('[ElevenLabsStreaming] Auth error — check key scope/permissions in ElevenLabs dashboard:', msg);
                         this.emit('error', msg);
-                        // Stop reconnection loops for auth failures to save API credits
+                        // Stop reconnection loops for auth failures to save API credits.
+                        // Also clear any queued reconnect timer (write()'s lazy-connect or
+                        // a prior close-handler enqueue) so we don't get a stray connect()
+                        // attempt after the latch flips.
                         this.shouldReconnect = false;
+                        if (this.reconnectTimer) {
+                            clearTimeout(this.reconnectTimer);
+                            this.reconnectTimer = null;
+                        }
                         if (this.ws) {
                             this.ws.close();
                         }
@@ -351,11 +363,22 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
 
     private scheduleReconnect(): void {
         if (!this.shouldReconnect) return;
-        
+
+        if (this.reconnectAttempts >= RECONNECT_MAX_ATTEMPTS) {
+            console.error(`[ElevenLabsStreaming] Max reconnect attempts (${RECONNECT_MAX_ATTEMPTS}) reached — giving up`);
+            // Latch off the reconnect path so write()'s lazy-connect (line 154)
+            // cannot resurrect the storm on the next audio chunk. start() resets
+            // shouldReconnect=true so a user-triggered restart still works.
+            // Mirrors the auth_error pattern at line ~317.
+            this.shouldReconnect = false;
+            this.emit('error', new Error('ElevenLabsStreamingSTT: max reconnect attempts exceeded'));
+            return;
+        }
+
         const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
         this.reconnectAttempts++;
-        
-        console.log(`[ElevenLabsStreaming] Reconnecting in ${delay}ms...`);
+
+        console.log(`[ElevenLabsStreaming] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${RECONNECT_MAX_ATTEMPTS})...`);
         this.reconnectTimer = setTimeout(() => {
             this.reconnectTimer = null;
             if (this.shouldReconnect) {

@@ -24,6 +24,11 @@ import { streamingStttWsOptions } from './dnsHelpers';
 const SONIOX_WEBSOCKET_URL = 'wss://stt-rt.soniox.com/transcribe-websocket';
 const RECONNECT_BASE_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 30000;
+// Cap reconnect attempts so a flapping network can't drive an indefinite WS
+// open-loop against Soniox (storm risk + per-key rate-limit risk). After the
+// cap, emit 'error' so the orchestrator can surface a UI prompt; a
+// user-triggered restart via stop()/start() resets the counter to 0.
+const RECONNECT_MAX_ATTEMPTS = 10;
 const KEEPALIVE_INTERVAL_MS = 5000;
 
 export class SonioxStreamingSTT extends EventEmitter {
@@ -344,13 +349,23 @@ export class SonioxStreamingSTT extends EventEmitter {
     private scheduleReconnect(): void {
         if (!this.shouldReconnect) return;
 
+        if (this.reconnectAttempts >= RECONNECT_MAX_ATTEMPTS) {
+            console.error(`[SonioxStreaming] Max reconnect attempts (${RECONNECT_MAX_ATTEMPTS}) reached — giving up`);
+            // Latch off the reconnect path so write()'s lazy-connect (line 159)
+            // cannot resurrect the storm on the next audio chunk. start() resets
+            // shouldReconnect=true so a user-triggered restart still works.
+            this.shouldReconnect = false;
+            this.emit('error', new Error('SonioxStreamingSTT: max reconnect attempts exceeded'));
+            return;
+        }
+
         const delay = Math.min(
             RECONNECT_BASE_DELAY_MS * Math.pow(2, this.reconnectAttempts),
             RECONNECT_MAX_DELAY_MS
         );
         this.reconnectAttempts++;
 
-        console.log(`[SonioxStreaming] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})...`);
+        console.log(`[SonioxStreaming] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${RECONNECT_MAX_ATTEMPTS})...`);
 
         this.reconnectTimer = setTimeout(() => {
             this.reconnectTimer = null;

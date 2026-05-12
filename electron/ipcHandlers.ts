@@ -1965,6 +1965,136 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
+  // ==========================================
+  // Local Whisper STT Handlers
+  // ==========================================
+
+  const activeWhisperDownloads = new Set<string>();
+
+  safeHandle("local-whisper-get-models", async () => {
+    try {
+      const { getAvailableModels } = require('./audio/whisper/modelManager');
+      const models = getAvailableModels();
+      const activeModelId = SettingsManager.getInstance().get('localWhisperModel') ?? '';
+      return { models, activeModelId };
+    } catch (e: any) {
+      console.error('[IPC] local-whisper-get-models error:', e.message);
+      return { models: [], activeModelId: '' };
+    }
+  });
+
+  safeHandle("local-whisper-set-model", async (_, modelId: string) => {
+    try {
+      SettingsManager.getInstance().set('localWhisperModel', modelId);
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  // Per-channel model overrides (mic / system audio). When enabled, the two
+  // STT instances pick their own model via these slots. When disabled, both
+  // fall back to localWhisperModel (the existing global setting).
+  safeHandle("local-whisper-get-channel-config", async () => {
+    const sm = SettingsManager.getInstance();
+    return {
+      enabled: !!sm.get('localWhisperPerChannelEnabled'),
+      micModelId: sm.get('localWhisperModelMic') ?? '',
+      systemModelId: sm.get('localWhisperModelSystem') ?? '',
+      globalModelId: sm.get('localWhisperModel') ?? '',
+    };
+  });
+
+  safeHandle("local-whisper-set-channel-config", async (_, cfg: { enabled?: boolean; micModelId?: string; systemModelId?: string }) => {
+    try {
+      const sm = SettingsManager.getInstance();
+      if (typeof cfg?.enabled === 'boolean') sm.set('localWhisperPerChannelEnabled', cfg.enabled);
+      if (typeof cfg?.micModelId === 'string') sm.set('localWhisperModelMic', cfg.micModelId);
+      if (typeof cfg?.systemModelId === 'string') sm.set('localWhisperModelSystem', cfg.systemModelId);
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle("local-whisper-delete-model", async (_, modelId: string) => {
+    try {
+      const { deleteModel } = require('./audio/whisper/modelManager');
+      deleteModel(modelId);
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle("local-whisper-start-download", async (event, modelId: string) => {
+    if (activeWhisperDownloads.has(modelId)) {
+      return { success: false, error: 'already-downloading' };
+    }
+    activeWhisperDownloads.add(modelId);
+    try {
+      const { Worker } = require('worker_threads');
+      const nodePath = require('path');
+      const { buildWorkerInitMessage } = require('./audio/whisper/inferenceConfig');
+      const workerPath = nodePath.join(__dirname, 'audio', 'whisper', 'whisperWorker.js');
+      const w = new Worker(workerPath);
+      const sender = event.sender;
+      w.on('message', (msg: any) => {
+        if (sender.isDestroyed()) return;
+        if (msg.type === 'progress') {
+          sender.send('local-whisper-download-progress', { modelId, progress: msg.progress });
+        } else if (msg.type === 'ready') {
+          activeWhisperDownloads.delete(modelId);
+          sender.send('local-whisper-download-complete', { modelId });
+          w.terminate();
+        } else if (msg.type === 'error') {
+          activeWhisperDownloads.delete(modelId);
+          sender.send('local-whisper-download-error', { modelId, error: msg.message });
+          w.terminate();
+        }
+      });
+      w.on('error', (err: Error) => {
+        activeWhisperDownloads.delete(modelId);
+        if (!sender.isDestroyed()) {
+          sender.send('local-whisper-download-error', { modelId, error: err.message });
+        }
+      });
+      w.postMessage(buildWorkerInitMessage(modelId));
+      return { success: true };
+    } catch (e: any) {
+      activeWhisperDownloads.delete(modelId);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle("local-whisper-preload", async (_, modelId: string) => {
+    try {
+      const { modelPreloader } = require('./audio/whisper/modelPreloader');
+      const { isModelCached } = require('./audio/whisper/modelManager');
+      const { resolveInferenceConfig } = require('./audio/whisper/inferenceConfig');
+      const { SettingsManager } = require('./services/SettingsManager');
+      const id = modelId || SettingsManager.getInstance().get('localWhisperModel') || 'Xenova/whisper-tiny.en';
+      // Pass active dtype so the cache check verifies the SPECIFIC ONNX
+      // files (e.g. encoder_model.onnx for fp32) are present — not just
+      // "directory non-empty". Otherwise a v2-cached _quantized.onnx-only
+      // directory would be reported "available" but trigger a 142MB
+      // background fetch on first start().
+      const { dtype } = resolveInferenceConfig();
+      if (!isModelCached(id, dtype)) {
+        return { success: false, reason: 'model-not-cached' };
+      }
+      modelPreloader.preload(id);
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle("local-whisper-get-hardware", () => {
+    const { detectHardware } = require('./audio/whisper/hardwareDetect');
+    return detectHardware();
+  });
+
   safeHandle("test-llm-connection", async (_, provider: 'gemini' | 'groq' | 'openai' | 'claude', apiKey?: string) => {
     console.log(`[IPC] Received test-llm-connection request for provider: ${provider}`);
     try {

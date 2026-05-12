@@ -65,7 +65,7 @@ const ZERO_SHOT_LABEL_KEYS = Object.keys(ZERO_SHOT_LABELS);
 const SLM_CONFIDENCE_THRESHOLD = 0.35;
 
 /**
- * Singleton lazy-loaded zero-shot classifier using @xenova/transformers
+ * Singleton lazy-loaded zero-shot classifier using @huggingface/transformers
  */
 class ZeroShotClassifier {
     private static instance: ZeroShotClassifier | null = null;
@@ -98,7 +98,7 @@ class ZeroShotClassifier {
         this.loadingPromise = (async () => {
             try {
                 // Bypass TypeScript converting import() to require() for ESM packages
-                const { pipeline, env } = await new Function("return import('@xenova/transformers')")();
+                const { pipeline, env } = await new Function("return import('@huggingface/transformers')")();
 
                 // In production, use bundled model. In dev, allow remote download.
                 if (app.isPackaged) {

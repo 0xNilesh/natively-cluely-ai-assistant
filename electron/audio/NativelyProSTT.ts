@@ -331,9 +331,12 @@ export class NativelyProSTT extends EventEmitter {
                 if (msg.error) {
                     console.error('[NativelyProSTT] Server error:', msg.error, msg.message || '');
                     this.emit('error', new Error(msg.error));
-                    // Fatal errors — stop reconnecting entirely
+                    // Fatal errors — stop reconnecting entirely.
+                    // trial_expired must be here: without it the client retries every 1.5-30s
+                    // forever, hammering auth DB calls while the server rejects every attempt.
                 if (msg.error === 'auth_timeout' ||
                         msg.error === 'invalid_key_format' ||
+                        msg.error === 'trial_expired' ||
                         msg.error === 'transcription_quota_exceeded') {
                     this.isActive = false;
                 }

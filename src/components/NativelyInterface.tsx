@@ -41,6 +41,14 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
+
+// PERF: hoisted plugin arrays. ReactMarkdown receives `remarkPlugins` and
+// `rehypePlugins` as new array literals if defined inline at the call site —
+// that defeats its internal render-bailout because plugin-array identity
+// changes every render. Module-scope arrays are stable forever and shared
+// across every ReactMarkdown render in this component.
+const REMARK_PLUGINS = [remarkGfm, remarkMath];
+const REHYPE_PLUGINS = [rehypeKatex];
 import { analytics, detectProviderType } from '../lib/analytics/analytics.service';
 import { useShortcuts } from '../hooks/useShortcuts';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
@@ -299,6 +307,12 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
     // on React's render cycle for stop signals.
     const [stealthTapActive, setStealthTapActive] = useState<boolean>(false);
     const stealthTapActiveRef = useRef<boolean>(false);
+    // True when the click-to-engage stealth path is safe. False when an IME
+    // (Pinyin / Hangul / Kanji / …) is enabled in macOS HIToolbox: the tap
+    // captures below the IME so composition would never reach the chat box.
+    // Resolved once on mount via IPC (default true so non-macOS / probe
+    // failure falls back to existing behaviour).
+    const stealthAutoEngageOkRef = useRef<boolean>(true);
     // Latest-handler ref so the captured-key listener (mounted with [] deps)
     // calls the CURRENT handleManualSubmit closure — not the one captured at
     // first render, which reads inputValue="" and silently no-ops on submit.
@@ -397,14 +411,26 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
     const inputClass = `${isLightTheme ? 'focus:ring-black/10' : 'focus:ring-white/10'} overlay-input-surface overlay-input-text`;
     const controlSurfaceClass = 'overlay-control-surface overlay-text-interactive';
 
-    // PERF: hoist the two highest-frequency ReactMarkdown `components` maps to a
-    // single useMemo so their identity is stable across renders. Previously each
-    // <ReactMarkdown components={{...}}> created a fresh object literal on every
-    // render — defeating ReactMarkdown's internal render-bailout. The "standard"
-    // map fires for every plain system text bubble; "codeText" fires for every
-    // text part inside a code-bubble. Together they are the dominant render cost
-    // when answers stream. The other variants (shorten, recap, follow-up,
-    // what_to_answer) appear only in their specific intents and are left inline.
+    // PERF: hoist ReactMarkdown `components` maps for every streaming intent
+    // into a single useMemo so their identity is stable across renders. Each
+    // inline <ReactMarkdown components={{...}}> would create a fresh object
+    // literal per render — defeating ReactMarkdown's internal render-bailout.
+    //
+    // ALL 6 message-intent branches stream tokens (per IntelligenceEngine emits):
+    //   - standard:              plain system text bubbles (fallback render)
+    //   - codeText:              text parts inside a code-bubble
+    //   - whatToAnswerText:      `what_to_answer` card body (suggested_answer_token;
+    //                            emerald theme)
+    //   - recapText:             `recap` body (recap_token; indigo theme)
+    //   - followUpQuestionsText: `follow_up_questions` body
+    //                            (follow_up_questions_token; amber theme)
+    //   - shortenText:           `shorten` body — IMPORTANT: shorten streams
+    //                            via refined_answer_token with intent='shorten'
+    //                            (IntelligenceEngine.ts:406, triggered by
+    //                            handleFollowUp('shorten') at line 2657);
+    //                            cyan theme.
+    //
+    // No intent is rendered with an inline `components={{...}}` literal.
     const mdComponents = useMemo(() => ({
         standard: {
             p: ({ node, ...props }: any) => <p className="mb-2 last:mb-0 whitespace-pre-wrap" {...props} />,
@@ -429,6 +455,32 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
             code: ({ node, ...props }: any) => <code className={`overlay-inline-code-surface rounded px-1 py-0.5 text-xs font-mono whitespace-pre-wrap ${isLightTheme ? 'text-violet-700' : 'text-purple-200'}`} {...props} />,
             blockquote: ({ node, ...props }: any) => <blockquote className={`border-l-2 pl-3 italic my-2 ${isLightTheme ? 'border-violet-500/30 text-slate-600' : 'border-purple-500/50 text-slate-400'}`} {...props} />,
             a: ({ node, ...props }: any) => <a className={`hover:underline ${isLightTheme ? 'text-blue-600 hover:text-blue-700' : 'text-blue-400 hover:text-blue-300'}`} target="_blank" rel="noopener noreferrer" {...props} />,
+        },
+        whatToAnswerText: {
+            p: ({ node, ...props }: any) => <p className="mb-2 last:mb-0" {...props} />,
+            strong: ({ node, ...props }: any) => <strong className={`font-bold ${isLightTheme ? 'text-emerald-700' : 'text-emerald-100'}`} {...props} />,
+            em: ({ node, ...props }: any) => <em className={`italic ${isLightTheme ? 'text-emerald-700/80' : 'text-emerald-200/80'}`} {...props} />,
+            ul: ({ node, ...props }: any) => <ul className="list-disc ml-4 mb-2 space-y-1" {...props} />,
+            ol: ({ node, ...props }: any) => <ol className="list-decimal ml-4 mb-2 space-y-1" {...props} />,
+            li: ({ node, ...props }: any) => <li className="pl-1" {...props} />,
+        },
+        recapText: {
+            p: ({ node, ...props }: any) => <p className="mb-2 last:mb-0" {...props} />,
+            strong: ({ node, ...props }: any) => <strong className={`font-bold ${isLightTheme ? 'text-indigo-800' : 'text-indigo-100'}`} {...props} />,
+            ul: ({ node, ...props }: any) => <ul className="list-disc ml-4 mb-2" {...props} />,
+            li: ({ node, ...props }: any) => <li className="pl-1" {...props} />,
+        },
+        followUpQuestionsText: {
+            p: ({ node, ...props }: any) => <p className="mb-2 last:mb-0" {...props} />,
+            strong: ({ node, ...props }: any) => <strong className={`font-bold ${isLightTheme ? 'text-amber-800' : 'text-[#FFF9C4]'}`} {...props} />,
+            ul: ({ node, ...props }: any) => <ul className="list-disc ml-4 mb-2" {...props} />,
+            li: ({ node, ...props }: any) => <li className="pl-1" {...props} />,
+        },
+        shortenText: {
+            p: ({ node, ...props }: any) => <p className="mb-2 last:mb-0" {...props} />,
+            strong: ({ node, ...props }: any) => <strong className={`font-bold ${isLightTheme ? 'text-cyan-800' : 'text-cyan-100'}`} {...props} />,
+            ul: ({ node, ...props }: any) => <ul className="list-disc ml-4 mb-2" {...props} />,
+            li: ({ node, ...props }: any) => <li className="pl-1" {...props} />,
         },
     }), [isLightTheme]);
 
@@ -1983,8 +2035,8 @@ Provide only the answer, nothing else.`;
                             return (
                                 <div key={i} className="markdown-content">
                                     <ReactMarkdown
-                                        remarkPlugins={[remarkGfm, remarkMath]}
-                                        rehypePlugins={[rehypeKatex]}
+                                        remarkPlugins={REMARK_PLUGINS}
+                                        rehypePlugins={REHYPE_PLUGINS}
                                         components={mdComponents.codeText}
                                     >
                                         {part}
@@ -2006,12 +2058,7 @@ Provide only the answer, nothing else.`;
                         <span>Shortened</span>
                     </div>
                     <div className={`text-[13px] leading-relaxed markdown-content ${isLightTheme ? 'text-slate-800' : 'text-slate-200'}`}>
-                        <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={{
-                            p: ({ node, ...props }: any) => <p className="mb-2 last:mb-0" {...props} />,
-                            strong: ({ node, ...props }: any) => <strong className={`font-bold ${isLightTheme ? 'text-cyan-800' : 'text-cyan-100'}`} {...props} />,
-                            ul: ({ node, ...props }: any) => <ul className="list-disc ml-4 mb-2" {...props} />,
-                            li: ({ node, ...props }: any) => <li className="pl-1" {...props} />,
-                        }}>
+                        <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS} components={mdComponents.shortenText}>
                             {msg.text}
                         </ReactMarkdown>
                     </div>
@@ -2027,12 +2074,7 @@ Provide only the answer, nothing else.`;
                         <span>Recap</span>
                     </div>
                     <div className={`text-[13px] leading-relaxed markdown-content ${isLightTheme ? 'text-slate-800' : 'text-slate-200'}`}>
-                        <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={{
-                            p: ({ node, ...props }: any) => <p className="mb-2 last:mb-0" {...props} />,
-                            strong: ({ node, ...props }: any) => <strong className={`font-bold ${isLightTheme ? 'text-indigo-800' : 'text-indigo-100'}`} {...props} />,
-                            ul: ({ node, ...props }: any) => <ul className="list-disc ml-4 mb-2" {...props} />,
-                            li: ({ node, ...props }: any) => <li className="pl-1" {...props} />,
-                        }}>
+                        <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS} components={mdComponents.recapText}>
                             {msg.text}
                         </ReactMarkdown>
                     </div>
@@ -2048,12 +2090,7 @@ Provide only the answer, nothing else.`;
                         <span>Follow-Up Questions</span>
                     </div>
                     <div className={`text-[13px] leading-relaxed markdown-content ${isLightTheme ? 'text-slate-800' : 'text-slate-200'}`}>
-                        <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={{
-                            p: ({ node, ...props }: any) => <p className="mb-2 last:mb-0" {...props} />,
-                            strong: ({ node, ...props }: any) => <strong className={`font-bold ${isLightTheme ? 'text-amber-800' : 'text-[#FFF9C4]'}`} {...props} />,
-                            ul: ({ node, ...props }: any) => <ul className="list-disc ml-4 mb-2" {...props} />,
-                            li: ({ node, ...props }: any) => <li className="pl-1" {...props} />,
-                        }}>
+                        <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS} components={mdComponents.followUpQuestionsText}>
                             {msg.text}
                         </ReactMarkdown>
                     </div>
@@ -2105,19 +2142,16 @@ Provide only the answer, nothing else.`;
                                 }
                             }
                             // Regular text - Render Markdown
+                            // PERF: hoisted components map — see mdComponents useMemo
+                            // at top of component. Inline literal here would create a
+                            // fresh object on every streaming token, defeating
+                            // ReactMarkdown's internal render-bailout.
                             return (
                                 <div key={i} className="markdown-content">
                                     <ReactMarkdown
-                                        remarkPlugins={[remarkGfm, remarkMath]}
-                                        rehypePlugins={[rehypeKatex]}
-                                        components={{
-                                            p: ({ node, ...props }: any) => <p className="mb-2 last:mb-0" {...props} />,
-                                            strong: ({ node, ...props }: any) => <strong className={`font-bold ${isLightTheme ? 'text-emerald-700' : 'text-emerald-100'}`} {...props} />,
-                                            em: ({ node, ...props }: any) => <em className={`italic ${isLightTheme ? 'text-emerald-700/80' : 'text-emerald-200/80'}`} {...props} />,
-                                            ul: ({ node, ...props }: any) => <ul className="list-disc ml-4 mb-2 space-y-1" {...props} />,
-                                            ol: ({ node, ...props }: any) => <ol className="list-decimal ml-4 mb-2 space-y-1" {...props} />,
-                                            li: ({ node, ...props }: any) => <li className="pl-1" {...props} />,
-                                        }}
+                                        remarkPlugins={REMARK_PLUGINS}
+                                        rehypePlugins={REHYPE_PLUGINS}
+                                        components={mdComponents.whatToAnswerText}
                                     >
                                         {part}
                                     </ReactMarkdown>
@@ -2134,8 +2168,8 @@ Provide only the answer, nothing else.`;
         return (
             <div className="markdown-content">
                 <ReactMarkdown
-                    remarkPlugins={[remarkGfm, remarkMath]}
-                    rehypePlugins={[rehypeKatex]}
+                    remarkPlugins={REMARK_PLUGINS}
+                    rehypePlugins={REHYPE_PLUGINS}
                     components={mdComponents.standard}
                 >
                     {msg.text}
@@ -2811,8 +2845,23 @@ Provide only the answer, nothing else.`;
     useEffect(() => {
         if (!window.electronAPI?.stealthTapStart) return;
 
+        // Resolve the IME-safety policy once at mount. While the promise is in
+        // flight we keep the default (true) so users on plain ASCII layouts
+        // see no behaviour change. The probe runs on the main process via
+        // `defaults read com.apple.HIToolbox`; see electron/services/
+        // ImeDetector.ts for the reason this gate exists at all.
+        if (window.electronAPI.stealthTapShouldAutoEngage) {
+            window.electronAPI.stealthTapShouldAutoEngage()
+                .then((ok) => { stealthAutoEngageOkRef.current = !!ok; })
+                .catch(() => { /* fail open — keep default */ });
+        }
+
         const onMouseDown = (e: MouseEvent) => {
             if (stealthTapActiveRef.current) return; // already on
+            // IME present → never auto-engage. The user can still press the
+            // explicit hotkey if they want true OS-level invisible typing
+            // (they'll lose composition in that path by design).
+            if (!stealthAutoEngageOkRef.current) return;
             const target = e.target as HTMLElement | null;
             if (!target?.closest?.('[data-stealth-engage="true"]')) return;
             window.electronAPI.stealthTapStart().catch(() => {});
@@ -2853,6 +2902,12 @@ Provide only the answer, nothing else.`;
     // stealthTapStart() in capture phase, so by the time we get here, the
     // tap is engaging and DOM focus is no longer the typing path.
     const blockInputFocus = useCallback((e: React.MouseEvent<HTMLInputElement>) => {
+        // When auto-engage is disabled (composition IME present), the click
+        // does NOT engage the tap — so blocking DOM focus would leave the
+        // user with no way to type. Let the browser focus the input so the
+        // OS Text Input System can route keystrokes through the active IME
+        // and compose CJK characters normally.
+        if (!stealthAutoEngageOkRef.current) return;
         e.preventDefault();
         // Don't blur an already-focused element — that itself fires events.
         if (document.activeElement === textInputRef.current) {

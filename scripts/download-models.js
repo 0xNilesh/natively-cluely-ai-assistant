@@ -2,7 +2,7 @@ const path = require('path');
 const fs = require('fs');
 
 async function downloadModels() {
-    const { pipeline, env } = await import('@xenova/transformers');
+    const { pipeline, env } = await import('@huggingface/transformers');
     const modelsDir = path.join(__dirname, '../resources/models');
     
     // Ensure the directory exists

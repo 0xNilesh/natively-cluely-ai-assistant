@@ -105,6 +105,36 @@ DETERMINISTIC EXECUTION RULES — HIGHEST PRIORITY AFTER SECURITY:
 
 
 // ==========================================
+// SHARED MODE PREFIX — Deduplication Helper
+// ==========================================
+/**
+ * The static prefix shared verbatim by ASSIST_MODE_PROMPT (= HARD_SYSTEM_PROMPT)
+ * AND every MODE_*_PROMPT template. Exported so ModesManager can strip it from
+ * the mode suffix at injection time — otherwise CORE_IDENTITY + EXECUTION_CONTRACT
+ * + CONTEXT_INTELLIGENCE_LAYER + SHARED_CODING_RULES (~1.5–2K tokens) ship twice
+ * per request when any mode is active.
+ *
+ * Must be byte-identical to the leading interpolation block of every MODE_*_PROMPT.
+ * If a template ever diverges, ModesManager's startsWith() check falls back to
+ * sending the full template — safe by design, just costs the duplicated tokens.
+ */
+export const SHARED_MODE_PREFIX = `${CORE_IDENTITY}
+${EXECUTION_CONTRACT}
+${CONTEXT_INTELLIGENCE_LAYER}
+${SHARED_CODING_RULES}`.trim();
+
+/**
+ * Short variant for non-coding modes (SALES, RECRUITING, TEAM_MEET, LECTURE)
+ * that intentionally omit SHARED_CODING_RULES from their leading blocks.
+ * ModesManager tries SHARED_MODE_PREFIX first, then this, then leaves the
+ * suffix unchanged. Order matters — longest-match-first to avoid leaving
+ * the SHARED_CODING_RULES block undeduplicated for coding modes.
+ */
+export const SHARED_MODE_PREFIX_SHORT = `${CORE_IDENTITY}
+${EXECUTION_CONTRACT}
+${CONTEXT_INTELLIGENCE_LAYER}`.trim();
+
+// ==========================================
 // ASSIST MODE (Passive / Default)
 // ==========================================
 /**

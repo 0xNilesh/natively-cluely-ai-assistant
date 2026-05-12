@@ -76,7 +76,16 @@ interface ElectronAPI {
   onModesActiveCleared: (cb: () => void) => () => void
 
   // STT Provider Management
-  setSttProvider: (provider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively') => Promise<{ success: boolean; error?: string }>
+  setSttProvider: (provider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local-whisper') => Promise<{ success: boolean; error?: string }>
+  localWhisperGetModels: () => Promise<{ models: any[]; activeModelId: string }>
+  localWhisperSetModel: (modelId: string) => Promise<{ success: boolean }>
+  localWhisperDeleteModel: (modelId: string) => Promise<{ success: boolean; error?: string }>
+  localWhisperStartDownload: (modelId: string) => Promise<{ success: boolean; error?: string }>
+  onLocalWhisperDownloadProgress: (callback: (data: { modelId: string; progress: number }) => void) => () => void
+  onLocalWhisperDownloadComplete: (callback: (data: { modelId: string }) => void) => () => void
+  onLocalWhisperDownloadError: (callback: (data: { modelId: string; error: string }) => void) => () => void
+  localWhisperPreload: (modelId?: string) => Promise<{ success: boolean; reason?: string; error?: string }>
+  localWhisperGetHardware: () => Promise<{ arch: string; platform: string; cpuModel: string; isAppleSilicon: boolean; totalRamGb: number; tier: string; recommendation: string; recommendedModel: string }>
   getSttProvider: () => Promise<string>
   setGroqSttApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
   setOpenAiSttApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
@@ -283,6 +292,10 @@ interface ElectronAPI {
   stealthTapIsActive: () => Promise<boolean>
   stealthTapStop: () => Promise<void>
   stealthTapStart: () => Promise<boolean>
+  /** False on macOS when a composition IME (Pinyin/Hangul/Kanji/…) is
+   *  enabled — the tap captures below the IME and breaks composition, so
+   *  the renderer falls back to plain DOM focus on click. */
+  stealthTapShouldAutoEngage: () => Promise<boolean>
   onStealthTapState: (cb: (state: { active: boolean; reason?: string }) => void) => () => void
   onStealthKeyCaptured: (cb: (ev: { keyCode: number; chars: string; flags: number; isKeyDown: boolean }) => void) => () => void
 
@@ -618,7 +631,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
 
   // STT Provider Management
-  setSttProvider: (provider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively') => ipcRenderer.invoke("set-stt-provider", provider),
+  setSttProvider: (provider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local-whisper') => ipcRenderer.invoke("set-stt-provider", provider),
   getSttProvider: () => ipcRenderer.invoke("get-stt-provider"),
   setGroqSttApiKey: (apiKey: string) => ipcRenderer.invoke("set-groq-stt-api-key", apiKey),
   setOpenAiSttApiKey: (apiKey: string) => ipcRenderer.invoke("set-openai-stt-api-key", apiKey),
@@ -632,6 +645,27 @@ contextBridge.exposeInMainWorld("electronAPI", {
   setSonioxApiKey: (apiKey: string) => ipcRenderer.invoke("set-soniox-api-key", apiKey),
   setIbmWatsonRegion: (region: string) => ipcRenderer.invoke("set-ibmwatson-region", region),
   testSttConnection: (provider: 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox', apiKey: string, region?: string) => ipcRenderer.invoke("test-stt-connection", provider, apiKey, region),
+  localWhisperGetModels: () => ipcRenderer.invoke('local-whisper-get-models'),
+  localWhisperSetModel: (modelId: string) => ipcRenderer.invoke('local-whisper-set-model', modelId),
+  localWhisperDeleteModel: (modelId: string) => ipcRenderer.invoke('local-whisper-delete-model', modelId),
+  localWhisperStartDownload: (modelId: string) => ipcRenderer.invoke('local-whisper-start-download', modelId),
+  onLocalWhisperDownloadProgress: (cb: (data: { modelId: string; progress: number }) => void) => {
+    const listener = (_: any, data: any) => cb(data);
+    ipcRenderer.on('local-whisper-download-progress', listener);
+    return () => ipcRenderer.removeListener('local-whisper-download-progress', listener);
+  },
+  onLocalWhisperDownloadComplete: (cb: (data: { modelId: string }) => void) => {
+    const listener = (_: any, data: any) => cb(data);
+    ipcRenderer.on('local-whisper-download-complete', listener);
+    return () => ipcRenderer.removeListener('local-whisper-download-complete', listener);
+  },
+  onLocalWhisperDownloadError: (cb: (data: { modelId: string; error: string }) => void) => {
+    const listener = (_: any, data: any) => cb(data);
+    ipcRenderer.on('local-whisper-download-error', listener);
+    return () => ipcRenderer.removeListener('local-whisper-download-error', listener);
+  },
+  localWhisperPreload: (modelId?: string) => ipcRenderer.invoke('local-whisper-preload', modelId),
+  localWhisperGetHardware: () => ipcRenderer.invoke('local-whisper-get-hardware'),
 
   // STT Config Events (Adapted from public PR #173 — verify premium interaction)
   onSttConfigChanged: (callback: (data: { configured: boolean; provider: string }) => void) => {
@@ -1179,6 +1213,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   stealthTapIsActive: () => ipcRenderer.invoke('stealth-tap:is-active'),
   stealthTapStop: () => ipcRenderer.invoke('stealth-tap:stop'),
   stealthTapStart: () => ipcRenderer.invoke('stealth-tap:start'),
+  stealthTapShouldAutoEngage: () => ipcRenderer.invoke('stealth-tap:should-auto-engage'),
   onStealthTapState: (cb: (state: { active: boolean; reason?: string }) => void) => {
     const sub = (_: any, state: { active: boolean; reason?: string }) => cb(state)
     ipcRenderer.on('stealth-tap-state', sub)
