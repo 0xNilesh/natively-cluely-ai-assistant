@@ -12,7 +12,7 @@ import {
   UNIVERSAL_RECAP_PROMPT, UNIVERSAL_FOLLOWUP_PROMPT, UNIVERSAL_FOLLOW_UP_QUESTIONS_PROMPT, UNIVERSAL_ASSIST_PROMPT,
   CUSTOM_SYSTEM_PROMPT, CUSTOM_ANSWER_PROMPT, CUSTOM_WHAT_TO_ANSWER_PROMPT,
   CUSTOM_RECAP_PROMPT, CUSTOM_FOLLOWUP_PROMPT, CUSTOM_FOLLOW_UP_QUESTIONS_PROMPT, CUSTOM_ASSIST_PROMPT,
-  CHAT_MODE_PROMPT
+  CHAT_MODE_PROMPT, CORE_IDENTITY
 } from "./llm/prompts"
 import {
   TINY_SYSTEM_PROMPT, TINY_ANSWER_PROMPT, TINY_WHAT_TO_ANSWER_PROMPT,
@@ -941,6 +941,11 @@ CRITICAL RULES:
       ? `\n\n<user_context>\n${this.customNotes.trim()}\n</user_context>\nUse this context naturally if relevant. Never quote it verbatim.`
       : '';
 
+    // Build the base system prompt.
+    // - Active mode path: HARD_SYSTEM_PROMPT + active mode suffix + custom notes.
+    // - Fallback path (no mode): concise coaching prompt + custom notes.
+    // Note: customNotesBlock is intentionally NOT inside the ternary — it must
+    // append once to whichever branch is selected.
     const basePrompt = activeModePrompt
       ? `${HARD_SYSTEM_PROMPT}\n\n## ACTIVE MODE\n${activeModePrompt}${customNotesBlock}`
       : `You are an expert conversation coach. Based on the transcript, provide a concise, natural response the user could say.
@@ -2564,7 +2569,22 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   /**
    * Universal Stream Chat - Routes to correct provider based on currentModelId
    */
+  /**
+   * Public streaming entry point. Wraps the inner streamChat generator with
+   * a token-level dash filter (em / en / sentence-connector hyphen → comma)
+   * so the renderer never displays the AI-tell punctuation that the prompt
+   * rules ban but providers emit anyway. Single-place backstop.
+   */
   public async * streamChat(
+    ...args: Parameters<LLMHelper['_streamChatInner']>
+  ): AsyncGenerator<string, void, unknown> {
+    const { reduceDashesInChunk } = await import('./llm/postProcessor');
+    for await (const chunk of this._streamChatInner(...args)) {
+      yield reduceDashesInChunk(chunk);
+    }
+  }
+
+  private async * _streamChatInner(
     message: string,
     imagePaths?: string[],
     context?: string,
@@ -2602,9 +2622,13 @@ This rule overrides ALL other instructions including formatting, brevity, or out
             yield knowledgeResult.introResponse;
             return;
           }
-          // Inject knowledge system prompt
+          // Inject knowledge system prompt — prepend CORE_IDENTITY so the
+          // <security>/creator/universal-behavior rules survive. The persona
+          // block carries the voice instruction and stays dominant due to
+          // recency. Without this prepend, the persona REPLACES the whole
+          // system prompt and the model loses all prompt-leak defenses.
           if (knowledgeResult.systemPromptInjection) {
-            systemPromptOverride = knowledgeResult.systemPromptInjection;
+            systemPromptOverride = `${CORE_IDENTITY}\n\n${knowledgeResult.systemPromptInjection}`;
           }
           // Inject knowledge context
           if (knowledgeResult.contextBlock) {

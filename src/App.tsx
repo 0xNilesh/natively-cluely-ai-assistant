@@ -17,6 +17,7 @@ import { TrialPromoToaster }    from "./components/trial/TrialPromoToaster"
 import { PermissionsToaster }   from "./components/onboarding/PermissionsToaster"
 import { AlertCircle } from "lucide-react"
 import { clampOverlayOpacity, OVERLAY_OPACITY_DEFAULT, getDefaultOverlayOpacity } from "./lib/overlayAppearance"
+import { getMeetingInterfaceTheme, type MeetingInterfaceTheme } from './lib/meetingInterfaceTheme'
 import {
   JDAwarenessToaster,
   ProfileFeatureToaster,
@@ -131,7 +132,9 @@ const App: React.FC = () => {
     const isUserSet = Number.isFinite(parsed) && parsed !== OVERLAY_OPACITY_DEFAULT;
     return isUserSet ? clampOverlayOpacity(parsed) : getDefaultOverlayOpacity();
   });
-  
+
+  const [meetingInterfaceTheme, setMeetingInterfaceThemeState] = useState<MeetingInterfaceTheme>(getMeetingInterfaceTheme);
+
   // Profile state for ad targeting
   const [hasProfile, setHasProfile] = useState(false);
   const [isLauncherMainView, setIsLauncherMainView] = useState(true);
@@ -363,6 +366,12 @@ const App: React.FC = () => {
     });
   }, [isOverlayWindow]);
 
+  useEffect(() => {
+    const handleStorage = () => setMeetingInterfaceThemeState(getMeetingInterfaceTheme());
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, []);
+
 
   // Handlers
   const handleReindex = async () => {
@@ -483,6 +492,7 @@ const App: React.FC = () => {
                 <NativelyInterface
                   onEndMeeting={handleEndMeeting}
                   overlayOpacity={overlayOpacity}
+                  interfaceTheme={meetingInterfaceTheme}
                 />
               </div>
               <ToastViewport />

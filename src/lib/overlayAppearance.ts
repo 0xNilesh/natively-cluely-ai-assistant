@@ -152,3 +152,19 @@ export const getOverlayAppearance = (opacity: number, theme: OverlayTheme): Over
         },
     };
 };
+
+// Returns empty inline-style objects for the liquid-glass theme — CSS variable
+// overrides via [data-interface-theme="liquid-glass"] handle all visual styling.
+export const getGlassOverlayAppearance = (): OverlayAppearance => ({
+    shellStyle: {},
+    pillStyle: {},
+    transcriptStyle: {},
+    subtleStyle: {},
+    chipStyle: {},
+    inputStyle: {},
+    controlStyle: {},
+    iconStyle: {},
+    codeBlockStyle: {},
+    codeHeaderStyle: {},
+    dividerStyle: {},
+});

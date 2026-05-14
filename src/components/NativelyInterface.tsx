@@ -52,7 +52,9 @@ const REHYPE_PLUGINS = [rehypeKatex];
 import { analytics, detectProviderType } from '../lib/analytics/analytics.service';
 import { useShortcuts } from '../hooks/useShortcuts';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
-import { getOverlayAppearance, OVERLAY_OPACITY_DEFAULT } from '../lib/overlayAppearance';
+import { getOverlayAppearance, OVERLAY_OPACITY_DEFAULT, getGlassOverlayAppearance } from '../lib/overlayAppearance';
+import type { MeetingInterfaceTheme } from '../lib/meetingInterfaceTheme';
+import GlassEffectLayer from './ui/GlassEffectLayer';
 import { getCodexCliModelDisplayName } from '../utils/modelUtils';
 
 interface Message {
@@ -79,6 +81,7 @@ interface Message {
 interface NativelyInterfaceProps {
     onEndMeeting?: () => void;
     overlayOpacity?: number;
+    interfaceTheme?: MeetingInterfaceTheme;
 }
 
 // PERF: HighlightedCode renders a single fenced code block. Hoisted to module
@@ -234,8 +237,14 @@ const MessageRow = React.memo(function MessageRow({
     prev.onCopy === next.onCopy
 );
 
-const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, overlayOpacity = OVERLAY_OPACITY_DEFAULT }) => {
+const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
+    onEndMeeting,
+    overlayOpacity = OVERLAY_OPACITY_DEFAULT,
+    interfaceTheme = 'default',
+}) => {
     const isLightTheme = useResolvedTheme() === 'light';
+    const isGlassTheme = interfaceTheme === 'liquid-glass';
+    const shellRef = React.useRef<HTMLDivElement>(null);
     const [isExpanded, setIsExpanded] = useState(true);
     const [inputValue, setInputValue] = useState('');
     const { shortcuts, isShortcutPressed } = useShortcuts();
@@ -275,6 +284,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         window.addEventListener('storage', handleStorage);
         return () => window.removeEventListener('storage', handleStorage);
     }, []);
+
 
     // Sync auto-scroll setting
     useEffect(() => {
@@ -399,8 +409,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
     const codeTheme = isLightTheme ? oneLight : vscDarkPlus;
     const codeLineNumberColor = isLightTheme ? 'rgba(15,23,42,0.35)' : 'rgba(255,255,255,0.2)';
     const appearance = useMemo(
-        () => getOverlayAppearance(overlayOpacity, isLightTheme ? 'light' : 'dark'),
-        [overlayOpacity, isLightTheme]
+        () => isGlassTheme
+            ? getGlassOverlayAppearance()
+            : getOverlayAppearance(overlayOpacity, isLightTheme ? 'light' : 'dark'),
+        [overlayOpacity, isLightTheme, isGlassTheme]
     );
     const overlayPanelClass = 'overlay-text-primary';
     const subtleSurfaceClass = 'overlay-subtle-surface';
@@ -1900,6 +1912,24 @@ Provide only the answer, nothing else.`;
         setInputValue('');
         setAttachedContext([]);
 
+        // Seal any in-flight streaming rows from a previous turn before we
+        // append the new user message + placeholder. Without this, the rAF
+        // token coalescer (queueToken) can append tokens of the next stream
+        // onto the prior row whenever the streaming intent matches —
+        // surfacing as the next answer starting mid-sentence with leftover
+        // text from the previous turn. Also flush any tokens still pending
+        // in the rAF buffer so they land on the prior row, not the new one.
+        flushToken();
+        tokenBufRef.current.intent = '';
+        tokenBufRef.current.text = '';
+        if (tokenBufRef.current.raf !== null) {
+            cancelAnimationFrame(tokenBufRef.current.raf);
+            tokenBufRef.current.raf = null;
+        }
+        setMessages(prev => prev.some(m => m.isStreaming)
+            ? prev.map(m => m.isStreaming ? { ...m, isStreaming: false } : m)
+            : prev);
+
         setMessages(prev => [...prev, {
             id: Date.now().toString(),
             role: 'user',
@@ -2958,7 +2988,7 @@ Provide only the answer, nothing else.`;
     };
 
     return (
-        <div ref={contentRef} className="flex flex-col items-center w-fit mx-auto h-fit min-h-0 bg-transparent p-0 rounded-[24px] font-sans gap-2 overlay-text-primary">
+        <div ref={contentRef} data-interface-theme={isGlassTheme ? 'liquid-glass' : undefined} className="flex flex-col items-center w-fit mx-auto h-fit min-h-0 bg-transparent p-0 rounded-[24px] font-sans gap-2 overlay-text-primary">
 
             <AnimatePresence>
                 {isExpanded && (
@@ -2977,11 +3007,18 @@ Provide only the answer, nothing else.`;
                             onLogoClick={() => window.electronAPI?.setWindowMode?.('launcher')}
                         />
                         <motion.div
+                            ref={shellRef}
                             className={`relative max-w-full backdrop-blur-2xl border rounded-[24px] overflow-hidden flex flex-col draggable-area overlay-shell-surface ${overlayPanelClass}`}
-                            style={{ ...appearance.shellStyle, width: shellWidth, willChange: 'width' }}
+                            style={{
+                                ...appearance.shellStyle,
+                                width: shellWidth,
+                                // Removed will-change: 'width' — Framer Motion animates shellWidth
+                                // using transform (translateX), not CSS width, so this hint created
+                                // a ghost compositor layer with stale dimensions from the first
+                                // meeting's layout, blocking correct compositing on remount.
+                            }}
                         >
-
-
+                            {isGlassTheme && <GlassEffectLayer parentRef={shellRef} cornerRadius={24} />}
 
                             {/* System Audio Permission Warning Banner */}
                             {systemAudioWarning && (
@@ -3112,7 +3149,7 @@ Provide only the answer, nothing else.`;
                                                     </span>
                                                 </div>
                                             )}
-                                            <div className="px-3 py-2 flex gap-1.5 items-center">
+                                            <div className="px-3 py-2 flex gap-1.5 items-center bg-emerald-500/10 border border-emerald-500/20 rounded-full">
                                                 <div className="w-2 h-2 bg-emerald-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
                                                 <div className="w-2 h-2 bg-emerald-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
                                                 <div className="w-2 h-2 bg-emerald-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
@@ -3123,7 +3160,7 @@ Provide only the answer, nothing else.`;
 
                                     {isProcessing && (
                                         <div className="flex justify-start">
-                                            <div className="px-3 py-2 flex gap-1.5">
+                                            <div className="px-3 py-2 flex gap-1.5 overlay-subtle-surface rounded-full border" style={appearance.subtleStyle}>
                                                 <div className="w-2 h-2 bg-slate-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
                                                 <div className="w-2 h-2 bg-slate-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
                                                 <div className="w-2 h-2 bg-slate-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
@@ -3155,7 +3192,7 @@ Provide only the answer, nothing else.`;
                                     onClick={handleAnswerNow}
                                     className={`flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium transition-all active:scale-95 duration-200 interaction-base interaction-press min-w-[74px] whitespace-nowrap shrink-0 ${isManualRecording
                                         ? 'bg-red-500/10 text-red-400 ring-1 ring-red-500/20'
-                                        : 'overlay-chip-surface overlay-text-interactive hover:text-emerald-500 hover:bg-emerald-500/10'
+                                        : 'overlay-chip-surface overlay-text-interactive'
                                         }`}
                                     style={isManualRecording ? undefined : appearance.chipStyle}
                                 >

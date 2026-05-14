@@ -135,6 +135,8 @@ interface ElectronAPI {
   generateRecap: () => Promise<{ summary: string | null }>
   submitManualQuestion: (question: string) => Promise<{ answer: string | null; question: string }>
   getIntelligenceContext: () => Promise<{ context: string; lastAssistantMessage: string | null; activeMode: string }>
+  testInjectTranscript: (segment: { speaker: string; text: string; timestamp?: number; final?: boolean }) => Promise<{ success: boolean; error?: string }>
+  testGetModeContext: () => Promise<{ success: boolean; block?: string; suffix?: string; error?: string }>
   resetIntelligence: () => Promise<{ success: boolean; error?: string }>
 
   // Meeting Lifecycle
@@ -779,6 +781,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   generateRecap: () => ipcRenderer.invoke("generate-recap"),
   submitManualQuestion: (question: string) => ipcRenderer.invoke("submit-manual-question", question),
   getIntelligenceContext: () => ipcRenderer.invoke("get-intelligence-context"),
+  testInjectTranscript: (segment: { speaker: string; text: string; timestamp?: number; final?: boolean }) => ipcRenderer.invoke("test-inject-transcript", segment),
+  testGetModeContext: () => ipcRenderer.invoke("test-get-mode-context"),
   resetIntelligence: () => ipcRenderer.invoke("reset-intelligence"),
 
   // Action Button Mode (Dynamic Recap / Brainstorm toggle)

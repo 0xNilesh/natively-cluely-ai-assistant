@@ -32,6 +32,83 @@ const PREFIXES = [
 ];
 
 /**
+ * Reduce dash usage that betrays AI authorship. The prompt rules ban em/en
+ * dashes in spoken passages but Llama / Gemini / GPT all generate them
+ * anyway because their training distribution is saturated with them. This is
+ * the deterministic backstop that strips them before the user ever sees them.
+ *
+ * Rules (in order):
+ * - Em dash (—) with any surrounding whitespace → ", "
+ * - En dash (–) with any surrounding whitespace → ", "
+ * - ASCII hyphen used as a sentence connector ("text - more text") → ", "
+ *   (Negative lookahead/lookbehind preserves compound words like "well-known",
+ *   numeric ranges like "10-15", and line-start bullets like "- item".)
+ * - Cleanup: double commas, comma-then-period, lowercase-after-comma fixes.
+ *
+ * Preserves:
+ * - Anything inside fenced code blocks (```...```)
+ * - Anything inside inline code (`...`)
+ * - Bullet markers at line start
+ * - Compound words ("real-time"), numeric ranges ("3-5"), command flags ("--flag")
+ *
+ * Safe to call on already-clean text (idempotent).
+ */
+export function reduceDashes(text: string): string {
+    if (!text || typeof text !== "string") return "";
+
+    // Stash code so we don't touch dashes inside it
+    const codeBlocks: string[] = [];
+    let result = text.replace(/```[\s\S]*?```/g, (m) => {
+        codeBlocks.push(m);
+        return `CODE${codeBlocks.length - 1}`;
+    });
+    const inlineCodes: string[] = [];
+    result = result.replace(/`[^`\n]+`/g, (m) => {
+        inlineCodes.push(m);
+        return `INL${inlineCodes.length - 1}`;
+    });
+
+    // Em + en dash → comma. Eat any surrounding whitespace.
+    result = result.replace(/\s*[—–]\s*/g, ", ");
+
+    // ASCII hyphen as a sentence connector: space-hyphen-space mid-line,
+    // not at line start (which is bullet), not as a command-line flag prefix.
+    result = result.replace(/(?<=\S) - (?=\S)/g, ", ");
+
+    // Tidy up artifacts
+    result = result.replace(/,\s*,+/g, ",");      // double commas
+    result = result.replace(/,\s*([.!?])/g, "$1"); // comma-then-terminator
+    result = result.replace(/^,\s*/gm, "");        // line-start orphan comma
+
+    // Restore code
+    inlineCodes.forEach((c, i) => {
+        result = result.replace(`INL${i}`, c);
+    });
+    codeBlocks.forEach((c, i) => {
+        result = result.replace(`CODE${i}`, c);
+    });
+
+    return result;
+}
+
+/**
+ * Streaming-safe variant. Operates on one streamed chunk at a time.
+ * For chunk-level cleanup we accept that a dash split across chunk boundaries
+ * may slip through; the FULL post-stream string can be re-cleaned via
+ * `reduceDashes` for cases that require it.
+ */
+export function reduceDashesInChunk(chunk: string): string {
+    if (!chunk) return chunk;
+    // Only do the cheap, boundary-stable swaps. No code-block stashing — code
+    // blocks are usually emitted as their own chunks by the providers we use
+    // and any dash inside a code chunk happens to be inside a ``` boundary
+    // that we don't break.
+    return chunk
+        .replace(/\s*[—–]\s*/g, ", ")
+        .replace(/(?<=\S) - (?=\S)/g, ", ");
+}
+
+/**
  * Clamp response to strict interview copilot constraints
  * @param text - Raw LLM response
  * @param maxSentences - Maximum sentences allowed (default 3)
@@ -41,13 +118,17 @@ const PREFIXES = [
 export function clampResponse(
     text: string,
     maxSentences: number = 3,
-    maxWords: number = 60
+    maxWords: number = 45
 ): string {
     if (!text || typeof text !== "string") {
         return "";
     }
 
     let result = text.trim();
+
+    // Step 0: Reduce dashes (em/en/connector hyphen → comma). Backstop for
+    // the prompt-level anti-tell rule that providers don't fully respect.
+    result = reduceDashes(result);
 
     // Step 1: Strip markdown
     result = stripMarkdown(result);

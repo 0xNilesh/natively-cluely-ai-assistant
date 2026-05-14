@@ -27,6 +27,7 @@ import {
     OVERLAY_OPACITY_MIN,
     getDefaultOverlayOpacity,
 } from '../lib/overlayAppearance';
+import { getMeetingInterfaceTheme, setMeetingInterfaceTheme, type MeetingInterfaceTheme } from '../lib/meetingInterfaceTheme';
 import { KeyRecorder } from './ui/KeyRecorder';
 import { ProfileVisualizer, PremiumUpgradeModal } from '../premium';
 import icon from './icon.png';
@@ -374,6 +375,9 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     const [updateStatus, setUpdateStatus] = useState<'idle' | 'checking' | 'available' | 'uptodate' | 'error'>('idle');
     const themeDropdownRef = React.useRef<HTMLDivElement>(null);
     const aiLangDropdownRef = React.useRef<HTMLDivElement>(null);
+    const [meetingInterfaceTheme, setMeetingInterfaceThemeState] = useState<MeetingInterfaceTheme>(getMeetingInterfaceTheme);
+    const [isInterfaceThemeDropdownOpen, setIsInterfaceThemeDropdownOpen] = useState(false);
+    const interfaceThemeDropdownRef = React.useRef<HTMLDivElement>(null);
 
     
     const [verboseLogging, setVerboseLogging] = useState(false);
@@ -448,16 +452,19 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
             if (aiLangDropdownRef.current && !aiLangDropdownRef.current.contains(event.target as Node)) {
                 setIsAiLangDropdownOpen(false);
             }
+            if (interfaceThemeDropdownRef.current && !interfaceThemeDropdownRef.current.contains(event.target as Node)) {
+                setIsInterfaceThemeDropdownOpen(false);
+            }
         };
 
-        if (isThemeDropdownOpen || isAiLangDropdownOpen) {
+        if (isThemeDropdownOpen || isAiLangDropdownOpen || isInterfaceThemeDropdownOpen) {
             document.addEventListener('mousedown', handleClickOutside);
         }
 
         return () => {
             document.removeEventListener('mousedown', handleClickOutside);
         };
-    }, [isThemeDropdownOpen, isAiLangDropdownOpen]);
+    }, [isThemeDropdownOpen, isAiLangDropdownOpen, isInterfaceThemeDropdownOpen]);
 
     const [showTranscript, setShowTranscript] = useState(() => {
         const stored = localStorage.getItem('natively_interviewer_transcript');
@@ -764,6 +771,14 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
         const handleStorage = () => {
             const stored = localStorage.getItem('natively_auto_scroll');
             setAutoScroll(stored === 'true');
+        };
+        window.addEventListener('storage', handleStorage);
+        return () => window.removeEventListener('storage', handleStorage);
+    }, []);
+
+    useEffect(() => {
+        const handleStorage = () => {
+            setMeetingInterfaceThemeState(getMeetingInterfaceTheme());
         };
         window.addEventListener('storage', handleStorage);
         return () => window.removeEventListener('storage', handleStorage);
@@ -1632,6 +1647,65 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                                     >
                                                                         <span className={themeMode === option.mode ? 'text-text-primary' : 'text-text-secondary group-hover:text-text-primary'}>{option.icon}</span>
                                                                         <span className="font-medium">{option.label}</span>
+                                                                    </button>
+                                                                ))}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </div>
+
+                                                {/* Meeting Interface Style */}
+                                                <div className="flex items-center justify-between px-4 py-3">
+                                                    <div className="flex items-center gap-4">
+                                                        <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle flex items-center justify-center text-text-tertiary">
+                                                            <Layout size={20} />
+                                                        </div>
+                                                        <div>
+                                                            <h3 className="text-sm font-bold text-text-primary">Meeting Interface Style</h3>
+                                                            <p className="text-xs text-text-secondary mt-0.5">
+                                                                {meetingInterfaceTheme === 'liquid-glass'
+                                                                    ? 'Liquid glass — Apple-inspired transparent overlay'
+                                                                    : 'Default overlay appearance'}
+                                                            </p>
+                                                        </div>
+                                                    </div>
+
+                                                    <div className="relative" ref={interfaceThemeDropdownRef}>
+                                                        <button
+                                                            onClick={() => setIsInterfaceThemeDropdownOpen(!isInterfaceThemeDropdownOpen)}
+                                                            className="bg-bg-component hover:bg-bg-elevated border border-border-subtle text-text-primary px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-2 min-w-[130px] justify-between"
+                                                        >
+                                                            <div className="flex items-center gap-2 overflow-hidden">
+                                                                <span className="text-text-secondary shrink-0">
+                                                                    {meetingInterfaceTheme === 'liquid-glass' ? <Sparkles size={14} /> : <Layout size={14} />}
+                                                                </span>
+                                                                <span className="text-ellipsis overflow-hidden whitespace-nowrap">
+                                                                    {meetingInterfaceTheme === 'liquid-glass' ? 'Liquid Glass' : 'Default'}
+                                                                </span>
+                                                            </div>
+                                                            <ChevronDown size={12} className={`shrink-0 transition-transform ${isInterfaceThemeDropdownOpen ? 'rotate-180' : ''}`} />
+                                                        </button>
+
+                                                        {isInterfaceThemeDropdownOpen && (
+                                                            <div className="absolute right-0 top-full mt-1 min-w-full w-max bg-bg-elevated border border-border-subtle rounded-lg shadow-xl overflow-hidden z-20 p-1 animated fadeIn select-none">
+                                                                {([
+                                                                    { mode: 'default' as MeetingInterfaceTheme, label: 'Default', icon: <Layout size={14} />, desc: 'Classic overlay' },
+                                                                    { mode: 'liquid-glass' as MeetingInterfaceTheme, label: 'Liquid Glass', icon: <Sparkles size={14} />, desc: 'Apple-inspired glass' },
+                                                                ] as const).map((option) => (
+                                                                    <button
+                                                                        key={option.mode}
+                                                                        onClick={() => {
+                                                                            setMeetingInterfaceTheme(option.mode);
+                                                                            setMeetingInterfaceThemeState(option.mode);
+                                                                            setIsInterfaceThemeDropdownOpen(false);
+                                                                        }}
+                                                                        className={`w-full text-left px-2 py-1.5 rounded-md text-xs flex items-center gap-2 transition-colors ${meetingInterfaceTheme === option.mode ? 'text-text-primary bg-bg-item-active/50' : 'text-text-secondary hover:bg-bg-input hover:text-text-primary'}`}
+                                                                    >
+                                                                        <span className={meetingInterfaceTheme === option.mode ? 'text-text-primary' : 'text-text-secondary'}>{option.icon}</span>
+                                                                        <div>
+                                                                            <span className="font-medium">{option.label}</span>
+                                                                            <span className="text-text-tertiary ml-1.5">{option.desc}</span>
+                                                                        </div>
                                                                     </button>
                                                                 ))}
                                                             </div>

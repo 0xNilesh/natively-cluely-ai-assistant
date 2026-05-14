@@ -2485,12 +2485,16 @@ export function initializeIpcHandlers(appState: AppState): void {
     try {
       const intelligenceManager = appState.getIntelligenceManager();
       // Question and imagePaths are now optional - IntelligenceManager infers from transcript
-      const answer = await intelligenceManager.runWhatShouldISay(question, 0.8, imagePaths);
+      const answer = await intelligenceManager.runWhatShouldISay(question, 0.8, imagePaths, {
+        skipCooldown: process.env.NODE_ENV === 'test',
+      });
       return { answer, question: question || 'inferred from context' };
     } catch (error: any) {
-      // Return graceful fallback instead of throwing
+      console.error('[IPC] generate-what-to-say error:', error);
       return {
-        question: question || 'unknown'
+        answer: null,
+        question: question || 'unknown',
+        error: error?.message || 'unknown_error'
       };
     }
   });
@@ -2640,6 +2644,37 @@ export function initializeIpcHandlers(appState: AppState): void {
       const intelligenceManager = appState.getIntelligenceManager();
       intelligenceManager.reset();
       return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error.message };
+    }
+  });
+
+  safeHandle("test-inject-transcript", async (_, segment: { speaker: string; text: string; timestamp?: number; final?: boolean }) => {
+    try {
+      if (process.env.NODE_ENV !== 'test') return { success: false, error: 'test_only' };
+      const intelligenceManager = appState.getIntelligenceManager();
+      intelligenceManager.addTranscript({
+        speaker: segment.speaker,
+        text: segment.text,
+        timestamp: segment.timestamp ?? Date.now(),
+        final: segment.final ?? true,
+      }, true);
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error.message };
+    }
+  });
+
+  safeHandle("test-get-mode-context", async () => {
+    try {
+      if (process.env.NODE_ENV !== 'test') return { success: false, error: 'test_only' };
+      const { ModesManager } = require('./services/ModesManager');
+      const manager = ModesManager.getInstance();
+      return {
+        success: true,
+        block: manager.buildActiveModeContextBlock(),
+        suffix: manager.getActiveModeSystemPromptSuffix(),
+      };
     } catch (error: any) {
       return { success: false, error: error.message };
     }

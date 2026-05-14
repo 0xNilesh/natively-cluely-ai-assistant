@@ -40,12 +40,16 @@ const start = Date.now();
 
 build({
   entryPoints,
-  bundle: false,          // match tsc behaviour: no bundling, just transpile
+  bundle: true,           // resolve all static + dynamic imports so postProcessor
+                         // is inlined and the path rewrite works (vs bundle:false
+                         // which copies files as-is and leaves unresolved relative paths)
   outdir: outDir,
   outbase: rootDir,       // preserve directory structure (electron/main.ts → dist-electron/electron/main.js)
   platform: 'node',
   target: 'node20',
-  format: 'cjs',          // CommonJS to match tsc "module": "CommonJS"
+  format: 'cjs',          // Electron loads package.json main as CommonJS in this repo
+                          // (package.json has no "type": "module").
+  external: ['electron', 'better-sqlite3', 'keytar', 'sqlite-vec'],
   sourcemap: true,
   jsx: 'automatic',
   loader: {

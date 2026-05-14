@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { Download, Trash2, HardDrive, Check, Loader2, Zap, AlertCircle } from 'lucide-react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Download, Trash2, HardDrive, Check, Loader2, Zap, AlertCircle, ChevronDown } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
 
 interface ModelInfo {
     id: string;
@@ -31,6 +32,67 @@ interface ChannelConfig {
 }
 
 const electronAPI = (window as any).electronAPI;
+
+function PremiumSelect({ label, value, options, onChange, placeholder }: any) {
+    const [isOpen, setIsOpen] = useState(false);
+    const containerRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        const handleClickOutside = (event: MouseEvent) => {
+            if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+                setIsOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, []);
+
+    const selectedLabel = options.find((o: any) => o.id === value)?.name || placeholder;
+
+    return (
+        <div ref={containerRef} className="relative z-20">
+            {label && <label className="block text-xs font-medium text-text-secondary mb-1.5 uppercase tracking-wide">{label}</label>}
+            <button
+                onClick={() => setIsOpen(!isOpen)}
+                className={`w-full group bg-bg-input border border-border-subtle hover:border-border-muted shadow-sm rounded-xl px-3.5 py-2.5 flex items-center justify-between transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] outline-none focus:ring-2 focus:ring-accent-primary/20 ${isOpen ? 'ring-2 ring-accent-primary/20 border-accent-primary/50' : ''}`}
+            >
+                <span className="text-sm text-text-primary font-medium truncate pr-4">{selectedLabel}</span>
+                <ChevronDown size={14} className={`text-text-tertiary transition-transform duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] group-hover:text-text-secondary ${isOpen ? 'rotate-180' : ''}`} />
+            </button>
+
+            <AnimatePresence>
+                {isOpen && (
+                    <motion.div
+                        initial={{ opacity: 0, y: 4, scale: 0.98 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: 4, scale: 0.98 }}
+                        transition={{ duration: 0.15, ease: "easeOut" }}
+                        className="absolute top-full left-0 w-full mt-2 bg-bg-elevated border border-border-subtle rounded-xl shadow-xl z-50 overflow-hidden ring-1 ring-black/5"
+                    >
+                        <div className="max-h-[240px] overflow-y-auto p-1.5 space-y-0.5 custom-scrollbar">
+                            {options.map((option: any) => {
+                                const isSelected = value === option.id;
+                                return (
+                                    <button
+                                        key={option.id}
+                                        onClick={() => { onChange(option.id); setIsOpen(false); }}
+                                        className={`w-full rounded-[10px] px-3 py-2.5 flex items-center justify-between transition-all duration-200 group relative ${isSelected ? 'bg-bg-item-active text-text-primary shadow-inner' : 'hover:bg-bg-item-surface text-text-secondary hover:text-text-primary'}`}
+                                    >
+                                        <span className="text-sm font-medium">{option.name}</span>
+                                        {isSelected && <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }}><Check size={16} className="text-accent-primary" strokeWidth={3} /></motion.div>}
+                                    </button>
+                                );
+                            })}
+                            {options.length === 0 && (
+                                <div className="px-3 py-2.5 text-sm text-text-tertiary italic text-center">No models available</div>
+                            )}
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+        </div>
+    );
+}
 
 export function LocalWhisperModelPanel() {
     const [models, setModels] = useState<ModelInfo[]>([]);
@@ -165,81 +227,86 @@ export function LocalWhisperModelPanel() {
     
     return (
         <div className="space-y-4">
-            <div className="bg-bg-card rounded-xl border border-border-subtle p-4">
-                <div className="flex items-center justify-between mb-4">
-                    <div>
-                        <h3 className="text-sm font-semibold text-text-primary">Local Models</h3>
-                        <p className="text-xs text-text-secondary mt-1">Select the AI models you want to use for Speech-to-Text inference.</p>
-                    </div>
+            <div className="bg-bg-card rounded-xl border border-border-subtle p-5 shadow-sm">
+                <div className="mb-5">
+                    <h3 className="text-sm font-semibold text-text-primary">Local Engine Configuration</h3>
+                    <p className="text-xs text-text-secondary mt-1 leading-relaxed">Select the AI models you want to use for Speech-to-Text inference.</p>
                 </div>
 
-                <div className="space-y-4">
-                    <label className="flex items-center gap-2 cursor-pointer group">
-                        <input
-                            type="checkbox"
-                            className="w-4 h-4 rounded border-border-subtle text-accent-primary focus:ring-accent-primary bg-bg-input"
-                            checked={config.enabled}
-                            onChange={(e) => toggleDualChannel(e.target.checked)}
-                        />
-                        <span className="text-sm text-text-primary group-hover:text-accent-primary transition-colors">Use different models for mic and system audio</span>
-                    </label>
+                <label className="flex items-center justify-between p-3.5 rounded-xl border border-border-subtle bg-bg-elevated/30 hover:bg-bg-elevated transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] cursor-pointer group mb-5 active:scale-[0.99]">
+                    <input 
+                        type="checkbox" 
+                        className="hidden" 
+                        checked={config.enabled} 
+                        onChange={(e) => toggleDualChannel(e.target.checked)} 
+                    />
+                    <div>
+                        <span className="text-sm font-medium text-text-primary block transition-colors group-hover:text-accent-primary">Split Audio Channels</span>
+                        <span className="text-xs text-text-tertiary mt-0.5 block">Use different models for microphone and system audio</span>
+                    </div>
+                    <div className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary focus-visible:ring-opacity-75 ${config.enabled ? 'bg-accent-primary' : 'bg-border-muted'}`}>
+                        <span className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] ${config.enabled ? 'translate-x-4' : 'translate-x-0'}`} />
+                    </div>
+                </label>
 
-                    {config.enabled ? (
-                        <div className="grid grid-cols-2 gap-4">
-                            <div>
-                                <label className="block text-xs font-medium text-text-secondary mb-1.5 uppercase tracking-wide">Mic Audio Model</label>
-                                <select
-                                    className="w-full bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-sm text-text-primary focus:ring-2 focus:ring-accent-primary/20 outline-none"
-                                    value={config.micModelId}
-                                    onChange={(e) => setMicModel(e.target.value)}
-                                >
-                                    {availableModels.length === 0 && <option value="">No models installed</option>}
-                                    {availableModels.map(m => (
-                                        <option key={m.id} value={m.id}>{m.name}</option>
-                                    ))}
-                                </select>
-                            </div>
-                            <div>
-                                <label className="block text-xs font-medium text-text-secondary mb-1.5 uppercase tracking-wide">System Audio Model</label>
-                                <select
-                                    className="w-full bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-sm text-text-primary focus:ring-2 focus:ring-accent-primary/20 outline-none"
-                                    value={config.systemModelId}
-                                    onChange={(e) => setSystemModel(e.target.value)}
-                                >
-                                    {availableModels.length === 0 && <option value="">No models installed</option>}
-                                    {availableModels.map(m => (
-                                        <option key={m.id} value={m.id}>{m.name}</option>
-                                    ))}
-                                </select>
-                            </div>
-                        </div>
-                    ) : (
-                        <div>
-                            <label className="block text-xs font-medium text-text-secondary mb-1.5 uppercase tracking-wide">Global Model</label>
-                            <select
-                                className="w-full bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-sm text-text-primary focus:ring-2 focus:ring-accent-primary/20 outline-none"
-                                value={config.globalModelId}
-                                onChange={(e) => setGlobalModel(e.target.value)}
+                <div className="space-y-4 relative z-10">
+                    <AnimatePresence mode="wait">
+                        {config.enabled ? (
+                            <motion.div 
+                                key="split"
+                                initial={{ opacity: 0, y: -10 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                exit={{ opacity: 0, y: -10 }}
+                                transition={{ duration: 0.2, ease: "easeOut" }}
+                                className="grid grid-cols-2 gap-4"
                             >
-                                {availableModels.length === 0 && <option value="">No models installed</option>}
-                                {availableModels.map(m => (
-                                    <option key={m.id} value={m.id}>{m.name}</option>
-                                ))}
-                            </select>
-                        </div>
-                    )}
+                                <PremiumSelect
+                                    label="Mic Audio Model"
+                                    value={config.micModelId}
+                                    onChange={setMicModel}
+                                    options={availableModels}
+                                    placeholder="Select mic model"
+                                />
+                                <PremiumSelect
+                                    label="System Audio Model"
+                                    value={config.systemModelId}
+                                    onChange={setSystemModel}
+                                    options={availableModels}
+                                    placeholder="Select system model"
+                                />
+                            </motion.div>
+                        ) : (
+                            <motion.div 
+                                key="global"
+                                initial={{ opacity: 0, y: -10 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                exit={{ opacity: 0, y: -10 }}
+                                transition={{ duration: 0.2, ease: "easeOut" }}
+                            >
+                                <PremiumSelect
+                                    label="Global Model"
+                                    value={config.globalModelId}
+                                    onChange={setGlobalModel}
+                                    options={availableModels}
+                                    placeholder="Select global model"
+                                />
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
                 </div>
             </div>
 
-            <div className="bg-bg-card rounded-xl border border-border-subtle overflow-hidden">
-                <div className="px-4 py-3 bg-bg-elevated/50 border-b border-border-subtle flex justify-between items-center">
+            <div className="bg-bg-card rounded-xl border border-border-subtle overflow-hidden shadow-sm relative z-0">
+                <div className="px-5 py-4 bg-bg-elevated/50 border-b border-border-subtle flex justify-between items-center">
                     <h3 className="text-sm font-semibold text-text-primary">Model Manager</h3>
                     {hardware?.recommendedModel && (
-                        <span className="text-xs text-text-tertiary">Recommended for your {hardware.isAppleSilicon ? 'Mac' : 'PC'}: {models.find(m => m.id === hardware.recommendedModel)?.name}</span>
+                        <span className="text-[11px] text-text-tertiary font-medium bg-bg-input px-2 py-1 rounded-md border border-border-subtle">
+                            Recommended for your {hardware.isAppleSilicon ? 'Mac' : 'PC'}: <span className="text-text-primary">{models.find(m => m.id === hardware.recommendedModel)?.name}</span>
+                        </span>
                     )}
                 </div>
                 
-                <div className="divide-y divide-border-subtle/50">
+                <div className="p-4 space-y-3 bg-bg-elevated/20">
                     {models.map(model => {
                         const isDownloading = model.status === 'downloading' || downloadingSet.has(model.id);
                         const progress = downloadProgress[model.id] || 0;
@@ -247,41 +314,43 @@ export function LocalWhisperModelPanel() {
                         const isRecommended = hardware?.recommendedModel === model.id;
                         
                         return (
-                            <div key={model.id} className="p-4 flex items-center justify-between hover:bg-black/[0.02] dark:hover:bg-white/[0.01] transition-colors">
+                            <div key={model.id} className="p-4 flex items-center justify-between bg-bg-card border border-border-subtle rounded-[14px] hover:shadow-sm hover:border-border-muted transition-all duration-200">
                                 <div className="flex-1 min-w-0 pr-4">
-                                    <div className="flex items-center gap-2 mb-1">
-                                        <span className="text-sm font-medium text-text-primary truncate">{model.name}</span>
+                                    <div className="flex items-center gap-2 mb-1.5">
+                                        <span className="text-sm font-medium text-text-primary truncate tracking-tight">{model.name}</span>
                                         {isRecommended && (
-                                            <span className="px-1.5 py-0.5 rounded-md bg-accent-primary/10 text-accent-primary text-[9px] font-bold uppercase tracking-wider">Recommended</span>
+                                            <span className="px-1.5 py-0.5 rounded-[4px] bg-accent-primary/10 text-accent-primary text-[9px] font-bold uppercase tracking-wider">Recommended</span>
                                         )}
                                         {model.requiresAppleSilicon && (
-                                            <span className="px-1.5 py-0.5 rounded-md bg-purple-500/10 text-purple-500 text-[9px] font-bold uppercase tracking-wider">Apple Silicon</span>
+                                            <span className="px-1.5 py-0.5 rounded-[4px] bg-purple-500/10 text-purple-500 text-[9px] font-bold uppercase tracking-wider">Apple Silicon</span>
                                         )}
                                     </div>
-                                    <div className="flex items-center gap-3 text-xs text-text-tertiary">
-                                        <span className="flex items-center gap-1"><HardDrive size={12} /> {model.sizeMb} MB</span>
-                                        <span className="flex items-center gap-1"><Zap size={12} /> {model.speed}</span>
-                                        <span className="flex items-center gap-1"><Check size={12} /> {model.accuracy} acc</span>
+                                    <div className="flex items-center gap-3.5 text-xs text-text-tertiary">
+                                        <span className="flex items-center gap-1.5"><HardDrive size={13} className="opacity-70" /> {model.sizeMb} MB</span>
+                                        <span className="flex items-center gap-1.5"><Zap size={13} className="opacity-70" /> {model.speed}</span>
+                                        <span className="flex items-center gap-1.5"><Check size={13} className="opacity-70" /> {model.accuracy} acc</span>
                                     </div>
                                     
                                     {isDownloading && (
-                                        <div className="mt-3">
-                                            <div className="flex justify-between text-[10px] text-text-secondary mb-1 uppercase tracking-wider font-medium">
+                                        <div className="mt-3.5 pr-8">
+                                            <div className="flex justify-between items-center text-[10px] text-text-secondary mb-1.5 uppercase tracking-wider font-semibold">
                                                 <span>Downloading...</span>
-                                                <span>{Math.round(progress)}%</span>
+                                                <span className="text-accent-primary tabular-nums">{Math.round(progress)}%</span>
                                             </div>
-                                            <div className="w-full h-1.5 bg-bg-input rounded-full overflow-hidden">
+                                            <div className="w-full h-1.5 bg-bg-input rounded-full overflow-hidden shadow-inner ring-1 ring-inset ring-black/5 dark:ring-white/5">
                                                 <div 
-                                                    className="h-full bg-accent-primary transition-all duration-300 ease-out"
+                                                    className="h-full bg-accent-primary transition-all duration-300 ease-out relative"
                                                     style={{ width: `${progress}%` }}
-                                                />
+                                                >
+                                                    <div className="absolute inset-0 bg-white/20 animate-pulse" />
+                                                </div>
                                             </div>
                                         </div>
                                     )}
                                     
                                     {model.status === 'error' && (
-                                        <div className="mt-2 text-xs text-red-500 flex items-center gap-1">
-                                            <AlertCircle size={12} />
+                                        <div className="mt-2.5 text-xs text-red-500 flex items-center gap-1.5 font-medium bg-red-500/10 px-2.5 py-1.5 rounded-md inline-flex">
+                                            <AlertCircle size={14} />
                                             {model.errorMessage || 'Failed to download model'}
                                         </div>
                                     )}
@@ -291,16 +360,17 @@ export function LocalWhisperModelPanel() {
                                     {!isAvailable && !isDownloading && (
                                         <button
                                             onClick={() => handleDownload(model.id)}
-                                            className="px-3 py-1.5 rounded-lg bg-accent-primary/10 hover:bg-accent-primary/20 text-accent-primary text-xs font-medium transition-colors flex items-center gap-1.5"
+                                            className="group/btn relative h-[34px] px-4 flex items-center gap-1.5 rounded-[10px] bg-accent-primary/10 hover:bg-accent-primary/20 text-accent-primary text-[13px] font-semibold transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] active:scale-[0.96] shadow-sm"
                                         >
-                                            <Download size={14} /> Install
+                                            <Download size={14} className="transition-transform duration-300 group-hover/btn:-translate-y-[2px]" /> 
+                                            <span>Install</span>
                                         </button>
                                     )}
                                     
                                     {isAvailable && (
                                         <button
                                             onClick={() => handleDelete(model.id)}
-                                            className="p-1.5 rounded-lg text-text-tertiary hover:bg-red-500/10 hover:text-red-500 transition-colors"
+                                            className="p-2 rounded-[10px] text-text-tertiary hover:bg-red-500/10 hover:text-red-500 transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] active:scale-[0.96]"
                                             title="Delete model"
                                         >
                                             <Trash2 size={16} />
@@ -312,6 +382,15 @@ export function LocalWhisperModelPanel() {
                     })}
                 </div>
             </div>
+            
+            {/* ── Footer note ── */}
+            {hardware?.tier === 'limited' && (
+                <div className="pt-1 text-center">
+                    <p className="text-[10px] font-medium text-amber-500 dark:text-amber-400/80 uppercase tracking-widest">
+                        ⓘ Limited hardware — cloud STT recommended for long sessions
+                    </p>
+                </div>
+            )}
         </div>
     );
 }

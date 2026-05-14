@@ -369,7 +369,7 @@ export class ModesManager {
         const parts: string[] = [];
 
         if (mode.customContext.trim()) {
-            parts.push(`<user_context>\n${mode.customContext.trim()}\n</user_context>`);
+            parts.push(`<active_mode_custom_instructions priority="highest">\n${mode.customContext.trim()}\n</active_mode_custom_instructions>`);
         }
 
         const files = this.getReferenceFiles(mode.id);

@@ -192,3 +192,167 @@
 - [nativelyapi/server.js]: Added hard cap to _tgAlertDedupe Map to prevent unbounded growth during outages — the dedupe Map could grow indefinitely during sustained provider failures with thousands of distinct alert variants (each with its own 60s setTimeout); added TG_DEDUP_MAX = 1000 and a _tgDedupeOverflowReported flag — when the cap is hit, the alert bypasses dedup and is sent raw via _tgSendRaw (better to spam Telegram than leak memory); a single warning is logged per overflow window with a 60s unref'd reset timer so we don't log on every subsequent over-cap alert
 - [nativelyapi/server.js]: Fixed WebSocket /v1/transcribe per-IP flood limit IPv6 bypass and error-path counter leak — (1) wsConnections used to bucket by raw IP, but IPv6 hosts have /64 subnet allocations (2^64 addresses) so an attacker could rotate the low 64 bits to bypass the 5-conn-per-IP cap trivially; added normalizeIPForLimit(ip) that strips IPv4-mapped prefix (`::ffff:1.2.3.4` → `1.2.3.4`), keeps only the first 4 groups for IPv6 (the /64 prefix), handles `::` shorthand by padding with zeros, strips `%zone` IDs, and returns `prefix::/64` canonical form; the WS handler now buckets by normalizeIPForLimit(ip) so the entire /64 is rate-limited; (2) the decrement was only in socket.on('close') — if 'error' fired without a subsequent 'close' the counter would leak; added an idempotent decrementWsCount() closure with wsCountDecremented flag, called from BOTH 'close' and 'error' handlers (first call wins, second is a no-op)
 - [nativelyapi/server.js]: Forced upstream stream destruction in callGroqStream and callGeminiStream finally blocks to release pooled connections — reader.cancel() releases the reader's lock but undici holds the underlying TCP socket in the keep-alive pool until the response body is fully consumed or explicitly destroyed; when routeChatStream catches a provider error and tries the next provider, the dead provider's connection sits parked until idle timeout, exhausting the pool under sustained failover load; fix is `try { reader.cancel() } catch { } try { res.body?.cancel?.() } catch { }` in both callers — res.body.cancel() destroys the readable stream and returns the socket to the pool immediately; happy path unaffected (cancel is a no-op on a fully-drained body)
+
+---
+
+## Local Whisper STT — Full Feature + Fix Session (2026-05-12)
+
+### New Files
+
+- **[electron/audio/whisper/types.ts]**: Shared type definitions — `WhisperModelId` union (tiny/base/small/medium, EN + multilingual), `WhisperModelInfo` interface (with `requiresAppleSilicon` flag), `WorkerInitMessage` (extended with `executionProviders?: string[]` and `quantized?: boolean`), `WorkerInMessage`/`WorkerOutMessage` union types.
+
+- **[electron/audio/whisper/audioResampler.ts]**: Converts Int16LE `Buffer` at any sample rate to `Float32Array` at 16 kHz via linear interpolation. Handles no-op when input is already 16 kHz.
+
+- **[electron/audio/whisper/vadProcessor.ts]**: Energy-based VAD at 16 kHz. 30ms windows (480 samples), RMS threshold 0.008, HANGOVER_FRAMES=10 (300ms — tuned to complete within the Rust SilenceSuppressor's 500ms tail), MIN_SPEECH_FRAMES=4 (120ms), MAX_SPEECH_MS=15000. **Critical fix:** carry buffer was accumulated across `push()` calls but never re-consumed — up to 29ms of audio silently lost per chunk. Fixed by prepending buffered remainder to incoming samples at the start of each `push()`.
+
+- **[electron/audio/whisper/hallucinationFilter.ts]**: Filters Whisper hallucinations — exact blocklist (`[music]`, `[applause]`, `[inaudible]`, etc.), bracket-content regex, and minimum length (< 2 chars dropped).
+
+- **[electron/audio/whisper/modelManager.ts]**: Model catalog (8 models: tiny/base/small/medium × EN+multilingual), `getModelsDir()` (userData/whisper-models), `configureTransformersCache()`, `isModelCached()` (HuggingFace cache dir convention), `getAvailableModels()`, `deleteModel()`. Medium models (1.5 GB) flagged as `requiresAppleSilicon: true`.
+
+- **[electron/audio/whisper/whisperWorker.ts]**: Worker Thread for Whisper inference. **ESM workaround:** `@xenova/transformers` is ESM-only but TypeScript `module: "CommonJS"` rewrites `import()` to `require()` at compile time. Fix: `new Function('return import("@xenova/transformers")')()` bypasses TS transformation so the real dynamic import survives to runtime. Applies `executionProviders` and `quantized` from the `init` message to `env.backends.onnx.executionProviders` before loading the pipeline.
+
+- **[electron/audio/whisper/inferenceConfig.ts]**: Resolves ONNX execution providers and quantization strategy per platform — Apple Silicon: `['coreml','cpu']` + fp32 (Metal GPU via CoreML); Windows: `['dml','cpu']` + int8 (DirectML GPU); Intel Mac/Linux: `['cpu']` + int8 (2–4× faster CPU inference). CoreML paths use fp32 because CoreML compiles ONNX to Metal shaders internally and int8 can degrade Neural Engine accuracy.
+
+- **[electron/audio/whisper/modelPreloader.ts]**: Singleton that keeps one warm worker alive so recording starts instantly. **Fixes:** added `pendingModelId` + `loadingWorker` fields — previously, `preload()` with a different model while loading would silently no-op; now cancels in-progress load and starts fresh. `terminate()` cleans up loading worker too. Passes `executionProviders`/`quantized` in worker `init` message.
+
+- **[electron/audio/LocalWhisperSTT.ts]**: Main STT provider. Dual-channel: instantiated twice by `createSTTProvider()` — Mic = "Me", System Audio = "Them"; no diarization needed. Warm preloader path + cold-start fallback. Pending audio queue (cap 500 segments) for audio arriving before model loads. **Critical fix:** added `gapFlushTimer` (400ms) in `write()` — when Rust `SilenceSuppressor` stops sending audio (silence filtered), any open VAD segment is force-flushed to the worker. Without this, the VAD's hangover counter never counted down during silence gaps (no `push()` calls), so accumulated speech was never emitted until `stop()` which was too late for the drain window.
+
+- **[electron/audio/whisper/hardwareDetect.ts]**: Hardware tier detection — Apple Silicon (excellent/CoreML+Metal, Medium for ≥16 GB), Intel Mac (limited/CPU, Tiny), Windows ≥8 GB (good/DirectML, Small for ≥16 GB or Base), Linux (good/CPU, Base).
+
+- **[src/components/LocalWhisperModelPanel.tsx]**: React panel for model management. Hardware tier banner, dual-channel callout, model list (download/use/delete/retry), download progress bars, warm-up indicator. **Fixes:** `activeModel` now initialized from `localWhisperGetModels` response `activeModelId` field; `downloadingSet` cleared via new `onLocalWhisperDownloadComplete` event (previously never cleared — polling ran indefinitely); double-click download guard; Retry button for error-state models. Medium models filtered for non-Apple-Silicon. Metal GPU / DirectML GPU badges in callout. `SPEED_LABEL` and `ACCURACY_LABEL` extended for `slow` and `very-high` tiers.
+
+### Modified Files
+
+- **[electron/services/CredentialsManager.ts]**: Added `'local-whisper'` to `sttProvider` union in interface, `getSttProvider()` return type, and `setSttProvider()` parameter type.
+
+- **[electron/services/SettingsManager.ts]**: Added `localWhisperModel?: string` to `AppSettings`.
+
+- **[electron/main.ts]**: Added `local-whisper` branch in `createSTTProvider()` (requires + instantiates `LocalWhisperSTT`). Added startup preload in `AppState` constructor via `setImmediate()` — if `local-whisper` is selected and model is cached, warms the worker at launch.
+
+- **[electron/ipcHandlers.ts]**: Six new handlers — `local-whisper-get-models` (returns `{models, activeModelId}` — enriched so panel can pre-highlight active model on mount), `local-whisper-set-model`, `local-whisper-delete-model`, `local-whisper-start-download` (concurrent download guard via `activeWhisperDownloads` Set; emits `local-whisper-download-complete` push event on success instead of a 100%-progress event; passes `executionProviders`/`quantized` to download worker), `local-whisper-preload`, `local-whisper-get-hardware`.
+
+- **[electron/preload.ts]**: IPC bridge entries and TypeScript declarations for all 6 new channels. Added `onLocalWhisperDownloadComplete` listener. Updated `localWhisperGetModels` return type from `Promise<any[]>` to `Promise<{models: any[]; activeModelId: string}>`. Added `error?` field to `localWhisperStartDownload` return. Added `'local-whisper'` to `setSttProvider` type.
+
+- **[src/components/SettingsOverlay.tsx]**: Added `'local-whisper'` to provider state type, `Cpu` icon import, `LocalWhisperModelPanel` import, local-whisper option in provider dropdown, exclusion from API key / test-connection blocks, and conditional `<LocalWhisperModelPanel />` render.
+
+### Bug Fix Table
+
+| # | File | Bug | Fix |
+|---|---|---|---|
+| 1 | vadProcessor.ts | Carry buffer never re-consumed — silent audio loss per chunk | Prepend buffer at start of push() |
+| 2 | LocalWhisperSTT.ts | Double-VAD starvation: Rust stops sending at 500ms, LocalWhisper VAD needs 690ms hangover — no transcripts during live meetings | Reduced HANGOVER_FRAMES 23→10 + 400ms gap-flush timer |
+| 3 | LocalWhisperModelPanel.tsx | activeModel always blank on mount | Read activeModelId from enriched get-models response |
+| 4 | LocalWhisperModelPanel.tsx | downloadingSet never cleared on success — endless polling | Clear on onLocalWhisperDownloadComplete event |
+| 5 | ipcHandlers.ts | No concurrent download guard — double-click spawns two workers | activeWhisperDownloads Set guard |
+| 6 | modelPreloader.ts | loading flag silently blocked model switch mid-load | Track pendingModelId + loadingWorker; cancel in-progress load |
+| 7 | whisperWorker.ts | require() of ESM-only @xenova/transformers fails at runtime | new Function('return import(...)') bypasses TS CJS transform |
+
+### Hardware Acceleration
+
+| Hardware | ONNX Provider | Model Type | Acceleration |
+|---|---|---|---|
+| Apple Silicon M1–M4 | CoreML → Metal GPU / Neural Engine | fp32 | Full GPU via CoreML |
+| Windows (NVIDIA/AMD/Intel) | DirectML | int8 quantized | GPU via DirectML |
+| Intel Mac | CPU | int8 quantized | 2–4× vs fp32 CPU |
+| Linux | CPU | int8 quantized | 2–4× vs fp32 CPU |
+
+---
+
+## Local Whisper STT — Bug fixes, performance, and UI redesign (Studio Console)
+
+- [electron/audio/whisper/modelManager.ts]: Replaced `require('@xenova/transformers')` in `configureTransformersCache` with the `new Function('return import("@xenova/transformers")')()` trick — bypasses TypeScript's CommonJS rewrite of `import()` to `require()`, eliminating the `ERR_REQUIRE_ESM` error spam on every `LocalWhisperSTT` instantiation. Function is now fire-and-forget async since workers configure their own `env.cacheDir` via `msg.cacheDir`.
+- [src/components/LocalWhisperModelPanel.tsx]: Fixed "model lost on restart" — initial load handler now checks if the saved `activeModelId` maps to an `available` model; if not (saved was `tiny.en` but only `base.en` is downloaded), auto-selects the first available model and persists it via `localWhisperSetModel`. Same logic also runs after `onLocalWhisperDownloadComplete` so the first downloaded model becomes active automatically.
+- [src/components/LocalWhisperModelPanel.tsx]: Both auto-select code paths now also call `localWhisperPreload(modelId)` immediately, so the warm worker starts loading as soon as the panel mounts (eliminates the 2–5s cold-start when the user starts a meeting).
+- [src/components/LocalWhisperModelPanel.tsx, src/index.css]: Replaced the misleading per-file download percentage (which jumped backward 0→100% per ONNX file) with a proper indeterminate sliding bar via the new `whisper-dl` CSS keyframe (continuous translateX + scaleX sweep, no dead hold).
+- [electron/main.ts]: Added auto-fallback for the AirPods-on-both-sides I/O conflict — when `reconfigureAudio` detects input == output (same physical device on mic + speaker, which prevents macOS CoreAudio Tap from working), it now finds a non-conflicting input (built-in mic preferred via regex `/macbook|built[- ]?in|imac|mac\s+(studio|mini)/i`), overrides `wantedInput`, and broadcasts `audio-input-auto-switched { from, to, reason }` so the renderer can show a toast. Conflict check runs **before** the skip-if-unchanged early-exit so it always fires regardless of prior state.
+- [electron/main.ts]: Refactored `detectSameInputOutputDevice` to delegate to a new `checkSameInputOutputDevice(inputId, outputId)` pure-arg variant, used by `reconfigureAudio` so the conflict check runs against the incoming request before instance state mutates.
+- [src/index.css]: Restored global keyboard focus rings — added `*:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; }` after the cursor-lock block. Tailwind preflight had killed all focus indicators, making every button keyboard-inaccessible (WCAG 2.4.7 violation).
+- [src/components/LocalWhisperModelPanel.tsx]: Replaced the invalid `bg-text-tertiary` Tailwind class (which generates no CSS, making the warm-up dot invisible) with `bg-border-muted`. Same bug pattern exists in `GlobalChatOverlay.tsx:34` and `MeetingChatOverlay.tsx:55` — flagged but not fixed in this session.
+- [src/components/LocalWhisperModelPanel.tsx]: `handleDelete` now calls `localWhisperSetModel('')` on the backend before reloading when the deleted model was active — prevents a stale active ID from being returned by the next `localWhisperGetModels` call.
+- [src/components/LocalWhisperModelPanel.tsx]: Stabilized `electronAPI` reference at module scope (set once by preload, never changes) and removed it from all `useCallback`/`useEffect` dependency arrays — eliminates spurious re-subscriptions of IPC event listeners.
+- [src/components/LocalWhisperModelPanel.tsx]: Added unmount safety to the initial-load `useEffect` (`isMounted` flag gating all four `setState` calls) and to the preload `setTimeout` (`preloadTimerRef` cleared in cleanup) — prevents state updates on unmounted components.
+- [src/components/LocalWhisperModelPanel.tsx]: Added `aria-label` to all action buttons (Load/Install/Retry/Delete/Switch), `aria-live="polite"` to the "Downloading…" status span and active-engine status label, and `disabled` + `disabled:opacity-50 disabled:cursor-not-allowed` to Install/Retry buttons. `handleDownload` switched to a functional `setDownloadingSet` guard for atomic check-and-set against double-click races.
+- [src/components/LocalWhisperModelPanel.tsx]: Removed the `downloadProgress` field from `ModelInfo` and all write sites — it was dead data after switching to indeterminate animation.
+- [src/components/LocalWhisperModelPanel.tsx]: Hardware recommendation text upgraded from `text-text-tertiary` (~2.9:1 contrast) to `text-text-secondary` for legibility on directional content.
+- [src/components/LocalWhisperModelPanel.tsx]: **Full UI redesign — "Studio Console" direction.** Treats the local STT as a piece of pro audio gear. Replaced two competing banners (privacy callout + hardware tier) with a single chip strip (`ON-DEVICE · METAL · CoreML · 8GB RAM · ARM64`). Added a hero "Active Engine" module: `CelebMF` display font for the model name, monospace spec strip (`SIZE 142MB · SPEED FAST · ACCURACY GOOD · LANG EN`), corner ticks, ringed status dot with `LOADED / WARMING / READY` label, and a live signal-flow indicator (`MIC → VAD → WHISPER → TEXT · NEURAL ENGINE`). Alternates rendered as a tight one-line list with a colored left status strip and hover-revealed delete button. Added an empty state for "no engine loaded". Sub-components extracted in-file: `HardwareStrip`, `Chip`, `LockIcon`, `SignalFlow`, `Arrow`, `ActiveEngineHero`, `SpecCell`, `Divider`, `CornerTicks`, `EngineRow`. All technical numerics use the system monospace stack (`ui-monospace, "SF Mono", ...`).
+
+---
+
+## Dependency cleanup, ORT crash fix, and Moonshine cache fix (2026-05-12)
+
+- [src/components/LocalWhisperModelPanel.tsx]: Fixed framer-motion `Variants` type errors — `spring` object gained `as const` to narrow `type: "spring"` from `string` to the literal union `AnimationGeneratorType`, and `ease: "easeOut"` in the `exit` transition gained `as const` for the same reason. Both were blocking the TypeScript build.
+
+- [package.json, electron/llm/IntentClassifier.ts, electron/rag/providers/LocalEmbeddingProvider.ts, scripts/download-models.js]: Eliminated duplicate `onnxruntime-node` and `sharp-libvips` by removing `@xenova/transformers@2.17.2`. Root cause: `@xenova/transformers` pinned `onnxruntime-node@1.14.0` while `@huggingface/transformers@3.8.1` uses `1.21.0`; both ORT native modules loaded into the same process, conflicting on the C++ `DefaultLogger` global registry — manifested as "Session already disposed" / "DefaultLogger but none has been registered" on every Whisper worker init. `IntentClassifier.ts`, `LocalEmbeddingProvider.ts`, and `scripts/download-models.js` were the last three callers of `@xenova/transformers`; all three migrated to `@huggingface/transformers` (same `pipeline()`/`env` API, same model IDs). Top-level `sharp` bumped from `^0.33.5` → `^0.34.5` to match the copy nested inside `@huggingface/transformers`, eliminating the duplicate `libvips-cpp.dylib` Obj-C class (`GNotificationCenterDelegate`) collision.
+
+- [electron/audio/whisper cache]: Deleted corrupt `onnx-community/moonshine-base-ONNX` model directory. `decoder_model_merged.onnx` was 121 MB on disk vs 166 MB expected (HF `x-linked-size`) — truncated from a prior interrupted download. `isModelCached()` only checks file existence (not size), so the partial file was treated as valid and re-loaded on every app start, causing "Protobuf parsing failed" on the decoder. Deleting the directory forces a clean re-download on next Settings → Local Whisper visit. Note: `encoder_model.onnx` SHA-256 matched HF's ETag exactly and loaded correctly in a standalone ORT smoke test; only the decoder was corrupt.
+
+- [package.json]: Added `overrides` block pinning `onnxruntime-node` to exactly `1.22.0` across the entire dependency tree. `onnxruntime-node@1.21.0` had a known bug where `InferenceSession.run()` called from a Node.js `worker_threads.Worker` inside Electron triggers `FATAL ERROR: HandleScope::HandleScope Entering the V8 API without proper locking in place` — the napi result-conversion function (`OrtValueToNapiValue`) created a `Napi::FunctionReference` in the `setImmediate` callback from a thread that doesn't hold the V8 isolate lock. Fixed in ORT 1.22. The override forces `@huggingface/transformers@3.8.1`'s exact `1.21.0` pin to resolve to `1.22.0` instead; both the top-level and nested copy are now a single `1.22.0` install.
+
+---
+
+## Local Whisper STT — Performance, accuracy, and per-channel models (vibe-coding sweep)
+
+Seven planned improvements; five shipped, two deferred with reasoning. Each landed
+through a senior code review with bugs surfaced and fixed before the next item.
+
+### #1 — Initial-prompt context biasing
+- [electron/audio/whisper/types.ts]: Added `WorkerSetPromptMessage` (out-of-band prompt update). Removed inline `prompt` field from `WorkerTranscribeMessage` — pushing the prompt on every 1.5s streaming tick would copy up to 8KB of chars through worker IPC for no benefit, the worker only needs to know when the prompt actually changes.
+- [electron/audio/whisper/whisperWorker.ts]: Added `cachedPromptText` / `cachedPromptIds` cache + `updatePromptCache(text)` helper. Tokenizes via `pipe.tokenizer(text, { add_special_tokens: false })` (Whisper inserts `<|startofprev|>` itself). Slices to first 224 tokens (front-loaded vocabulary preserved — the original `slice(-224)` would drop attendee names in favor of glossary tail). `Number.isSafeInteger` guard on the `BigInt → Number` token-id conversion so a future model with >2^53 sentinel ids fails loud. Skipped entirely for Moonshine (no equivalent decoder mechanism) via `isMoonshineModel(loadedModelId)` predicate. Cache cleared on model swap.
+- [electron/audio/LocalWhisperSTT.ts]: New `setContext(prompt: string)` public method. Caps input at 8000 chars. Maintains `contextPromptSentToWorker` shadow state and posts `setPrompt` only when the value actually changes via `maybePushPromptToWorker()`. Pushed on `flushPending` so the warm-worker handoff path also gets biasing. Reset on `stop()` so a fresh worker re-pushes.
+
+### #2 — Per-module quantization (dtype) + critical cache-completeness fix
+- **Diagnostic finding**: the v2 `quantized: boolean` flag is silently ignored by `@huggingface/transformers v3`. The user's cache had both `encoder_model.onnx` (fp32, ~280MB) AND `encoder_model_quantized.onnx` (q8, ~75MB) for `whisper-base.en` — v3 had been downloading fp32 on top of the quantized cache. The user was unknowingly running fp32 inference end-to-end.
+- [electron/audio/whisper/inferenceConfig.ts]: Full rewrite. Replaced `quantized: boolean` with `dtype: string | Record<string, string>`. Added `WHISPER_SAFE_DTYPE` map (`encoder_model: 'fp32'`, all 3 decoder files: `'q8'`) — preserves encoder accuracy (Whisper's encoder is extremely sensitive to quantization) while quantizing the decoder where the speedup dominates. Apple Silicon path uses uniform `'fp32'` because the ONNX Runtime CoreML EP has limited operator coverage for pre-quantized ops; feeding fp32 keeps the entire encoder graph on Metal/ANE instead of falling back to CPU per-subgraph. New `buildWorkerInitMessage(modelId)` helper — single source of truth for the three init-message call sites (LocalWhisperSTT, modelPreloader, IPC download path).
+- [electron/audio/whisper/types.ts]: `WorkerInitMessage.quantized?: boolean` → `dtype?: string | Record<string, string>`.
+- [electron/audio/whisper/whisperWorker.ts]: Reads `msg.dtype` and passes to pipeline. Validates BEFORE entering the init `try/catch` — if dtype is missing, posts a structured `{ type: 'error', message }` instead of throwing out of the message handler (would otherwise leave `workerReady=false` forever). Throws on undefined/null because v3 silently ignoring `quantized` was the exact bug that motivated this change; no fallback. Log line sorts dtype Record entries for deterministic output.
+- [electron/audio/whisper/modelManager.ts]: **Two-part critical fix**: (a) `modelIdToCacheDir()` was producing `models--Xenova--whisper-base.en` (HF v2 convention) but transformers v3 uses flat `<org>/<name>/...` when `env.cacheDir` is set — `isModelCached()` had been silently returning `false` for every model since day one. (b) `isModelCached(modelId, dtype?)` now validates that the SPECIFIC ONNX files the loader will request actually exist (e.g. `encoder_model.onnx` for fp32 vs `_quantized.onnx` for q8) instead of "directory non-empty". Handles both decoder layouts (merged OR split+with_past). Without this fix, a v2-cached `_quantized.onnx`-only directory would show "available" in the panel but trigger an unannounced 142MB+ background fetch on first `start()` — the very regression this whole change was meant to prevent.
+- [electron/audio/LocalWhisperSTT.ts, electron/audio/whisper/modelPreloader.ts, electron/ipcHandlers.ts, electron/main.ts]: All four call sites updated to pass `dtype` from `resolveInferenceConfig()`. The IPC `local-whisper-preload` handler and the startup `setImmediate` preload both pass dtype to `isModelCached` so the cache check matches the loader's actual file requirements.
+
+### #3 — Latency telemetry
+- [electron/audio/LocalWhisperSTT.ts]: Per-segment perceived-latency tracking. Two metrics — `firstPartial` (speech_start → first agreed/committed prefix emit; for LA-2 this is "second streaming tick", not "first inference") and `final` (speech_start → final transcript emit). Rolling 100-sample window per metric. Logs `n=N p50=Xms p95=Xms p99=Xms` every 20 emits with channel-disambiguated prefix (`[LocalWhisperSTT/moonshine-base-ONNX:mic]`). Exposes `getLatencyStats()` snapshot. 60-second sanity clamp discards any out-of-range values to keep the percentile window clean.
+- [electron/audio/whisper/vadProcessor.ts]: New `currentSegmentId(): number` — monotonic counter that increments on every new speech segment open (and on `softCommit`'s tail-keep). Replaces boolean-edge `isInSpeech()` detection in the telemetry hot path, which missed two real-world VAD push patterns: open+close-in-one-push (final dispatch runs before stamp can fire) and close+open-in-one-push (boolean stays true but a different segment is now open). With the ID, `LocalWhisperSTT.write()` re-stamps `segmentOpenedAt` reliably whenever the open segment id differs from the tracked one.
+- [electron/main.ts]: `createSTTProvider` calls `lws.setChannel(speaker === 'interviewer' ? 'system' : 'mic')` so the two concurrent instances' latency logs are distinguishable.
+
+### #4 — Cleanup batch (polish from prior reviews)
+- [electron/audio/LocalWhisperSTT.ts]: `pendingAudio: { audio: Float32Array; streaming: boolean }[]` simplified to `Float32Array[]` — the `streaming` field was always `false` (only finals are queued). `dispatchFinal` and `flushPending` updated to match.
+- [electron/audio/LocalWhisperSTT.ts]: Streaming loop switched from `setInterval` to a self-chaining `setTimeout` so the delay can adapt per tick. New backoff: after 3 consecutive stalls (worker busy / no audio / VAD not in speech), double `streamingNextDelayMs` up to `STREAMING_INTERVAL_MAX_MS = 12000ms`. Reset to base on any successful dispatch AND on partial-result return / streaming-task error (so we recover latency-quickly when the worker becomes free instead of sleeping out the doubled delay). Wrapped `streamingTick()` in `try/catch` inside the timer callback — a throw inside the tick would otherwise leave the chain unscheduled and silently kill all partials for the rest of the session.
+- [electron/audio/LocalWhisperSTT.ts]: `isInSpeech()` early-return in `streamingTick` skips the `peekOpenSegment` allocation when no segment is open.
+
+### #5 — Per-channel model choice
+- [electron/services/SettingsManager.ts]: Added three optional fields to `AppSettings`: `localWhisperPerChannelEnabled?: boolean`, `localWhisperModelMic?: string`, `localWhisperModelSystem?: string`.
+- [electron/main.ts]: `createSTTProvider('local-whisper', ...)` resolves a per-channel override when enabled — for `speaker === 'interviewer'` reads `localWhisperModelSystem`, otherwise `localWhisperModelMic`. Falls back to `localWhisperModel` if the per-channel slot is empty (so the "Use global model" UI choice maps to empty string in storage).
+- [electron/ipcHandlers.ts]: Added `local-whisper-get-channel-config` (returns `{ enabled, micModelId, systemModelId, globalModelId }`) and `local-whisper-set-channel-config` (accepts partial patches; only writes the keys present in `cfg`).
+- [electron/preload.ts]: Bridges `localWhisperGetChannelConfig` / `localWhisperSetChannelConfig` on the renderer surface.
+- [src/components/LocalWhisperModelPanel.tsx]: New `PerChannelSection` sub-component between the hardware strip and the active-engine hero. Switch-style toggle + collapsible Mic/System `<select>` dropdowns showing only currently-downloaded models (`status === 'available'`, filtered by Apple-Silicon gate). Empty-value option `"Use global model"` so users can override one channel without configuring both. State is held in `channelCfg` with optimistic `updateChannelCfg(patch)` posting to backend; load happens in the initial `Promise.all` alongside models + hardware.
+
+### #6 — Silero VAD — DEFERRED
+- Reason: the upstream Rust `SilenceSuppressor` already filters most silence before audio reaches the JS VAD; the JS VAD's role is mainly *segment-boundary detection*, not speech-vs-silence classification. Silero would improve the latter (~85% → ~99%) but not meaningfully improve the former, which is where user-perceived bugs would surface. Implementation cost (~300 lines + bundle 2.3MB ONNX + manage LSTM hidden state + retune all VAD timing constants) is disproportionate to the marginal benefit for this app. `@ricky0123/vad-node` depends on `onnxruntime-node ^1.14.0` which would conflict with the now-pinned 1.21.0 (nested install → two native binaries → crash risk on some platforms). Logged as accepted debt.
+
+### #7 — Per-model streaming profile
+- [electron/audio/LocalWhisperSTT.ts]: Static streaming constants replaced with per-instance fields resolved at construction. New `static resolveStreamingProfile(modelId)` returns `{ intervalMs, minAudioMs, skipAgreement }`. Moonshine path: 750ms tick / 400ms min-audio / skip LocalAgreement-2 (Moonshine is deterministic and stable — LA-2's two-pass confirmation adds an entire tick of latency it doesn't need). Whisper-family path: 1500ms / 800ms / LA-2 on (original behavior). Match uses `modelId.toLowerCase().includes('moonshine')` for forward compatibility with future Moonshine forks.
+- [electron/audio/LocalWhisperSTT.ts]: `handleStreamingPartial` branches on `skipAgreement`. The skip-agreement branch emits each cleaned partial directly when `cleaned !== this.lastEmittedText` (simplified from a tautological `length > || !==` guard caught in review). The LA-2 branch keeps the seed-on-first-partial behavior so the first emit doesn't always return `''` from `longestCommonPrefix('', x)`.
+- [electron/audio/LocalWhisperSTT.ts]: Field rename `committedPrefix → lastEmittedText` — covers both LA-2 semantics ("longest stably-agreed prefix") and skip-agreement semantics ("last text we emitted") without misleading future readers about monotonic-growth invariants that no longer hold in both branches.
+- [electron/audio/LocalWhisperSTT.ts]: Construction-time profile log line so a profile mismatch (e.g. Moonshine identified as Whisper) is immediately visible.
+- **Net impact** for Moonshine Base: perceived first-text latency drops from ~2.4s → ~500ms. For Whisper-family models the previous behavior is preserved.
+
+### Cross-cutting fixes from the final comprehensive review
+- [electron/audio/whisper/whisperWorker.ts]: `compression_ratio_threshold: 2.4` added to the streaming-pass options (was only on the final pass). Suppresses Whisper's "thank you. thank you. thank you..." repetition-loop hallucination on noisy/silent windows during interim emits, complementing the existing `hallucinationFilter` post-process.
+- [electron/audio/LocalWhisperSTT.ts]: Tracked the 5-second worker-terminate grace `setTimeout` in `workerTerminateTimer`. Cleared on subsequent `stop()` calls so rapid stop/start cycles don't leak timers. `.unref()` called on the handle so the timer doesn't pin the Node event loop during app quit.
+- [electron/audio/LocalWhisperSTT.ts]: Listener cleanup — `stop()` calls `w.removeAllListeners('message')` + `removeAllListeners('error')` before scheduling termination. With the `isActive` guard inside the message handler, this is belt-and-suspenders defense against transcript emit on a torn-down consumer.
+
+### Dependency change
+- [package.json]: Added `@huggingface/transformers ^3.8.1` (kept `@xenova/transformers ^2.17.2` alongside — IntentClassifier and LocalEmbeddingProvider still use the older package). Upgraded top-level `onnxruntime-node` from `1.14.0` → `^1.21.0` (required by transformers v3). Verified at runtime: both packages coexist cleanly; `MoonshineModel` and `MoonshineForConditionalGeneration` are exported by v3.8.1.
+
+### Model catalog additions (`modelManager.ts`)
+| Model | Size | Speed | Accuracy | Multilingual | Notes |
+|---|---|---|---|---|---|
+| `onnx-community/moonshine-tiny-ONNX` | 26 MB | very-fast | good | ❌ | Streaming-native, ~100ms inference. `streaming: true` flag |
+| `onnx-community/moonshine-base-ONNX` | 60 MB | very-fast | very-high | ❌ | Default recommendation on Apple Silicon / capable Windows |
+| `onnx-community/whisper-large-v3-turbo-ONNX` | 1031 MB | medium | very-high | ✅ | 6× faster than Large v3 for multilingual users |
+| `distil-whisper/distil-large-v3` | 731 MB | medium | very-high | ❌ | Improved WER vs v2; v2 kept for backward compat |
+
+### Accepted technical debt (with reasoning)
+- **Per-channel cold-start** — when the warm worker is handed to one channel, the other still cold-starts. OS file cache makes it ~5× faster than a true first load, which is acceptable for the second channel. Two-warm-workers would double resident memory for ~1s of saved latency once per meeting.
+- **No `.d.ts` shim for `@huggingface/transformers`** — the `new Function('return import("@huggingface/transformers")')()` ESM-from-CommonJS escape hatch types as `any`. Breaking changes in v4 would surface only at runtime (the v2→v3 `quantized` flag bug was exactly this category). Logged as a future polish item, not blocking.
+- **`DTYPE_SUFFIX` map duplicates `@huggingface/transformers` internal mapping** — if HF adds a new dtype keyword (`q6`, `bf16`, ...) we'd silently use `''` suffix and force perpetual re-downloads. Runtime assertion that `WHISPER_SAFE_DTYPE` values are all known suffix keys would catch this; deferred.
+- **Streaming profile colocation** — `resolveStreamingProfile` lives in `LocalWhisperSTT.ts` while the model catalog lives in `modelManager.ts`. Two sources of truth. Will become a switch-statement nightmare at three+ model families; should migrate to a `streamingProfile?: StreamingProfile` field on `WhisperModelInfo`. Logged.

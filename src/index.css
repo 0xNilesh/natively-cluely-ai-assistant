@@ -210,6 +210,614 @@
   -webkit-backdrop-filter: blur(40px) saturate(180%);
 }
 
+/* ── Meeting Interface: Liquid Glass Theme ──────────────────────────────────
+   Inspired by Apple's visionOS / macOS Sequoia liquid glass aesthetic.
+   Applied via data-interface-theme="liquid-glass" on the NativelyInterface
+   outer container. Works by overriding CSS variables so all overlay-* classes
+   automatically adopt the glass look without changing their definitions.
+   The transparent-window Electron context means backdrop-filter shows real
+   screen content — giving authentic glass refraction for free.
+   ─────────────────────────────────────────────────────────────────────── */
+[data-interface-theme="liquid-glass"],
+[data-theme='light'] [data-interface-theme="liquid-glass"] {
+  /* Force white text regardless of system theme — glass always reads dark */
+  --overlay-text-primary:     rgba(255, 255, 255, 0.96);
+  --overlay-text-secondary:   rgba(255, 255, 255, 0.82);
+  --overlay-text-muted:       rgba(255, 255, 255, 0.60);
+  --overlay-text-placeholder: rgba(255, 255, 255, 0.40);
+  --overlay-text-strong:      #ffffff;
+
+  /* Glass surfaces — near-transparent white tints */
+  --overlay-panel-bg:           rgba(255, 255, 255, 0.055);
+  --overlay-border:             rgba(255, 255, 255, 0.18);
+  --overlay-border-soft:        rgba(255, 255, 255, 0.10);
+  --overlay-chip-bg:            rgba(255, 255, 255, 0.10);
+  --overlay-chip-hover-bg:      rgba(255, 255, 255, 0.18);
+  --overlay-input-bg:           rgba(255, 255, 255, 0.07);
+  --overlay-input-hover-bg:     rgba(255, 255, 255, 0.12);
+  --overlay-input-focus-bg:     rgba(255, 255, 255, 0.14);
+  --overlay-control-bg:         rgba(255, 255, 255, 0.07);
+  --overlay-control-hover-bg:   rgba(255, 255, 255, 0.13);
+  --overlay-icon-bg:            rgba(255, 255, 255, 0.07);
+  --overlay-icon-hover-bg:      rgba(255, 255, 255, 0.15);
+  --overlay-code-bg:            rgba(0, 0, 0, 0.22);
+  --overlay-code-border:        rgba(255, 255, 255, 0.08);
+  --overlay-code-header-bg:     rgba(0, 0, 0, 0.18);
+  --overlay-inline-code-bg:     rgba(255, 255, 255, 0.10);
+  --overlay-panel-shadow:       rgba(0, 0, 0, 0.28);
+  --overlay-pill-shadow:        rgba(0, 0, 0, 0.20);
+  --overlay-shell-blur:         48px;
+  --overlay-pill-blur:          28px;
+}
+
+/* Glass shell — pure CSS liquid-glass.
+   No SVG filters (they expand paint area in compositor space → window overflow).
+   No child backdrop-filter (blocked by shell's compositing layer).
+   No multi-layer border-gradient (interior bleed-through).
+
+   Chromatic aberration delivered via directional inset box-shadows:
+     • Positive offset (x,y) → shadow paints on TOP-LEFT edge only.
+     • Negative offset (-x,-y) → shadow paints on BOTTOM-RIGHT edge only.
+     • Shadow extent is bounded by offset distance, never bleeds into interior.
+   Layered pink (top-left) + blue (bottom-right) inset shadows = the classic
+   Apple vision-pro prismatic edge dispersion without runtime cost.
+
+   contain:paint forces the compositor to clip painting to element bounds
+   so nothing escapes the Electron window boundary. */
+/* Liquid-glass shell — CSS-only frosted approach.
+   Layer recipe:
+     1. Deep-navy base (rgba 12/18/32 0.70) — high enough alpha to guarantee
+        text contrast on any desktop backdrop; navy undertone gives the panel
+        a cool "deep glass" colour identity without reading as solid blue.
+     2. White diagonal sheen — specular highlight feel (slightly stronger now
+        since the darker base needs more contrast at the top to read as wet).
+     3. SVG fractal-noise texture (::before) — frosted pixel grain.
+     4. Backdrop-filter blur — bonus for any in-window content underneath.
+     5. Inset rim highlights + drop shadow for depth. */
+[data-interface-theme="liquid-glass"] .overlay-shell-surface {
+  background:
+    linear-gradient(135deg,
+      rgba(255, 255, 255, 0.16) 0%,
+      rgba(255, 255, 255, 0.07) 45%,
+      rgba(255, 255, 255, 0.04) 65%,
+      rgba(255, 255, 255, 0.12) 100%
+    ),
+    rgba(12, 18, 32, 0.70) !important;
+  border-color: transparent !important;
+  backdrop-filter: blur(20px) saturate(165%) !important;
+  -webkit-backdrop-filter: blur(20px) saturate(165%) !important;
+  box-shadow:
+    inset 0 1.5px 0 rgba(255, 255, 255, 0.44),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.13),
+    0 28px 72px rgba(0, 0, 0, 0.55),
+    0 8px 22px rgba(0, 0, 0, 0.30) !important;
+  position: relative;
+}
+
+/* Frosted noise texture — feTurbulence rendered to a data: URI, overlaid via
+   ::before with low alpha. This is what gives the panel its "ground glass"
+   tactile feel — bytes of randomness that real blur produces by averaging
+   neighbouring pixels.  mix-blend-mode: overlay lets it brighten/darken the
+   underlying gradient without dominating it.  pointer-events: none so it
+   never intercepts clicks. */
+[data-interface-theme="liquid-glass"] .overlay-shell-surface::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  opacity: 0.35;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.6 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+}
+
+/* ───────────────────────────────────────────────────────────────────────
+   Jelly-clay × Liquid-glass UI elements (glass mode only).
+   ───────────────────────────────────────────────────────────────────────
+   Every interactive surface gets the same recipe so the UI reads as ONE
+   continuous material — buttons, chips, inputs, pills feel like little
+   liquid lozenges floating on the frosted panel.
+
+   Recipe (per surface):
+     • Layered background: diagonal white sheen gradient + low-alpha base.
+     • Inset top highlight  → bright specular sheen (jelly wet look).
+     • Inset bottom shadow  → subtle depth so the surface looks rounded,
+                              not flat (clay roundness).
+     • Inset rim            → thin 1px white border at low alpha (glass).
+     • Outer drop shadow    → soft float above the panel.
+     • Smooth springy transition → tactile press feel on hover/active.
+
+   Hover lifts the top highlight + softens the outer shadow → feels like
+   the element is being touched. Active presses it back inward.
+   ─────────────────────────────────────────────────────────────────────── */
+
+/* TopPill — pronounced jelly look, the most prominent floating element */
+[data-interface-theme="liquid-glass"] .overlay-pill-surface {
+  background:
+    linear-gradient(180deg,
+      rgba(255, 255, 255, 0.16) 0%,
+      rgba(255, 255, 255, 0.06) 45%,
+      rgba(255, 255, 255, 0.10) 100%
+    ),
+    rgba(255, 255, 255, 0.06) !important;
+  border-color: transparent !important;
+  backdrop-filter: blur(20px) saturate(170%) !important;
+  -webkit-backdrop-filter: blur(20px) saturate(170%) !important;
+  box-shadow:
+    inset 0 1.5px 0 rgba(255, 255, 255, 0.55),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.10),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.14),
+    0 14px 36px rgba(0, 0, 0, 0.38),
+    0 4px 10px rgba(0, 0, 0, 0.18) !important;
+}
+
+/* Transcript divider — subtle rule */
+[data-interface-theme="liquid-glass"] .overlay-transcript-surface {
+  border-bottom-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+/* Code blocks — dark tinted glass with jelly rim, for code readability */
+[data-interface-theme="liquid-glass"] .overlay-code-block-surface {
+  background:
+    linear-gradient(180deg, rgba(0, 0, 0, 0.20) 0%, rgba(0, 0, 0, 0.28) 100%),
+    rgba(0, 0, 0, 0.22) !important;
+  border-color: rgba(255, 255, 255, 0.08) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.10),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.30),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.06) !important;
+}
+
+[data-interface-theme="liquid-glass"] .overlay-code-header-surface {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05) 0%, rgba(0, 0, 0, 0.10) 100%),
+    rgba(0, 0, 0, 0.18) !important;
+  border-bottom-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+/* Chip buttons (What to answer, Clarify, Recap, Follow-up, Answer, etc.) */
+[data-interface-theme="liquid-glass"] .overlay-chip-surface {
+  background:
+    linear-gradient(180deg,
+      rgba(255, 255, 255, 0.16) 0%,
+      rgba(255, 255, 255, 0.04) 60%,
+      rgba(255, 255, 255, 0.08) 100%
+    ),
+    rgba(255, 255, 255, 0.05) !important;
+  border-color: transparent !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.45),
+    inset 0 -0.5px 0 rgba(0, 0, 0, 0.08),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.13),
+    0 4px 12px rgba(0, 0, 0, 0.22),
+    0 1px 3px rgba(0, 0, 0, 0.12) !important;
+  transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1),
+              box-shadow 0.18s ease-out,
+              background 0.18s ease-out !important;
+}
+
+[data-interface-theme="liquid-glass"] .overlay-chip-surface:hover {
+  background:
+    linear-gradient(180deg,
+      rgba(255, 255, 255, 0.22) 0%,
+      rgba(255, 255, 255, 0.06) 60%,
+      rgba(255, 255, 255, 0.12) 100%
+    ),
+    rgba(255, 255, 255, 0.08) !important;
+  border-color: transparent !important;
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.60),
+    inset 0 -0.5px 0 rgba(0, 0, 0, 0.08),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.20),
+    0 8px 20px rgba(0, 0, 0, 0.28),
+    0 2px 5px rgba(0, 0, 0, 0.14) !important;
+}
+
+[data-interface-theme="liquid-glass"] .overlay-chip-surface:active {
+  transform: translateY(0) scale(0.97);
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.15),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.10),
+    0 1px 2px rgba(0, 0, 0, 0.10) !important;
+}
+
+/* Chat input — flatter than chips but same material */
+[data-interface-theme="liquid-glass"] .overlay-input-surface {
+  background:
+    linear-gradient(180deg,
+      rgba(255, 255, 255, 0.10) 0%,
+      rgba(255, 255, 255, 0.03) 50%,
+      rgba(255, 255, 255, 0.06) 100%
+    ),
+    rgba(255, 255, 255, 0.04) !important;
+  border-color: transparent !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.30),
+    inset 0 -0.5px 0 rgba(0, 0, 0, 0.08),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.10),
+    0 2px 8px rgba(0, 0, 0, 0.16) !important;
+}
+
+[data-interface-theme="liquid-glass"] .overlay-input-surface:hover {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.40),
+    inset 0 -0.5px 0 rgba(0, 0, 0, 0.08),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.16),
+    0 3px 10px rgba(0, 0, 0, 0.20) !important;
+}
+
+[data-interface-theme="liquid-glass"] .overlay-input-surface:focus,
+[data-interface-theme="liquid-glass"] .overlay-input-surface:focus-within {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.50),
+    inset 0 -0.5px 0 rgba(0, 0, 0, 0.10),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.24),
+    0 4px 14px rgba(0, 0, 0, 0.26) !important;
+}
+
+/* Control surfaces (mode dropdown, secondary buttons) */
+[data-interface-theme="liquid-glass"] .overlay-control-surface {
+  background:
+    linear-gradient(180deg,
+      rgba(255, 255, 255, 0.14) 0%,
+      rgba(255, 255, 255, 0.04) 55%,
+      rgba(255, 255, 255, 0.08) 100%
+    ),
+    rgba(255, 255, 255, 0.05) !important;
+  border-color: transparent !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.40),
+    inset 0 -0.5px 0 rgba(0, 0, 0, 0.08),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.12),
+    0 3px 10px rgba(0, 0, 0, 0.20) !important;
+  transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1),
+              box-shadow 0.18s ease-out,
+              background 0.18s ease-out !important;
+}
+
+[data-interface-theme="liquid-glass"] .overlay-control-surface:hover {
+  background:
+    linear-gradient(180deg,
+      rgba(255, 255, 255, 0.20) 0%,
+      rgba(255, 255, 255, 0.05) 55%,
+      rgba(255, 255, 255, 0.10) 100%
+    ),
+    rgba(255, 255, 255, 0.07) !important;
+  transform: translateY(-0.5px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    inset 0 -0.5px 0 rgba(0, 0, 0, 0.08),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.18),
+    0 5px 14px rgba(0, 0, 0, 0.26) !important;
+}
+
+/* Icon buttons — small round jelly lozenges */
+[data-interface-theme="liquid-glass"] .overlay-icon-surface {
+  background:
+    radial-gradient(ellipse at 50% 25%,
+      rgba(255, 255, 255, 0.22) 0%,
+      rgba(255, 255, 255, 0.06) 60%,
+      rgba(255, 255, 255, 0.10) 100%
+    ),
+    rgba(255, 255, 255, 0.06) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.50),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.10),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.14),
+    0 3px 10px rgba(0, 0, 0, 0.24),
+    0 1px 3px rgba(0, 0, 0, 0.12) !important;
+  transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1),
+              box-shadow 0.18s ease-out,
+              background 0.18s ease-out !important;
+}
+
+[data-interface-theme="liquid-glass"] .overlay-icon-surface-hover:hover,
+[data-interface-theme="liquid-glass"] .overlay-icon-surface:hover {
+  background:
+    radial-gradient(ellipse at 50% 25%,
+      rgba(255, 255, 255, 0.30) 0%,
+      rgba(255, 255, 255, 0.08) 60%,
+      rgba(255, 255, 255, 0.14) 100%
+    ),
+    rgba(255, 255, 255, 0.10) !important;
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.68),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.10),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.22),
+    0 6px 16px rgba(0, 0, 0, 0.32),
+    0 2px 5px rgba(0, 0, 0, 0.16) !important;
+}
+
+[data-interface-theme="liquid-glass"] .overlay-icon-surface:active {
+  transform: translateY(0) scale(0.94);
+  box-shadow:
+    inset 0 1.5px 3px rgba(0, 0, 0, 0.18),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.10),
+    0 1px 2px rgba(0, 0, 0, 0.10) !important;
+}
+
+/* STT error surface — soft jelly with warm tint preserved by inheritance */
+[data-interface-theme="liquid-glass"] .stt-error-surface {
+  background:
+    linear-gradient(180deg,
+      rgba(255, 255, 255, 0.10) 0%,
+      rgba(255, 255, 255, 0.03) 60%,
+      rgba(255, 255, 255, 0.06) 100%
+    ),
+    rgba(255, 255, 255, 0.05) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.30),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.10),
+    0 4px 12px rgba(0, 0, 0, 0.22) !important;
+}
+
+/* ─── DIFFERENTIATION OVERRIDES ──────────────────────────────────────────
+   Default jelly recipe is uniform across all surfaces; these overrides
+   walk back two cases where uniformity removes hierarchy:
+     1. Hotkey kbd badges → make them flat indicators, not buttons.
+     2. Primary send button (iOS blue) → preserve the blue, add jelly shine
+        on top so it reads as the dominant action.
+   ─────────────────────────────────────────────────────────────────────── */
+
+/* Hotkey kbd: ⌘ ⇧ H badges — visual indicators, not interactive jelly.
+   Override the inherited overlay-control-surface jelly with a flat thin
+   chip. No springy hover, no lift, no inset highlight — just a quiet
+   bordered pill that reads as "this is a key", not "press me". */
+[data-interface-theme="liquid-glass"] kbd,
+[data-interface-theme="liquid-glass"] kbd.overlay-control-surface,
+[data-interface-theme="liquid-glass"] kbd.overlay-icon-surface {
+  background: rgba(255, 255, 255, 0.06) !important;
+  border: 1px solid rgba(255, 255, 255, 0.14) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.10),
+    0 1px 2px rgba(0, 0, 0, 0.12) !important;
+  transform: none !important;
+  transition: none !important;
+}
+
+[data-interface-theme="liquid-glass"] kbd:hover {
+  transform: none !important;
+  background: rgba(255, 255, 255, 0.06) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.10),
+    0 1px 2px rgba(0, 0, 0, 0.12) !important;
+}
+
+/* Primary send button — Tailwind `bg-[#007AFF]` class kept; layered with a
+   jelly sheen + blue-tinted outer glow so it stays unmistakably the primary
+   action while wearing the same material vocabulary as the rest of the UI. */
+[data-interface-theme="liquid-glass"] button[class~="bg-[#007AFF]"] {
+  background:
+    linear-gradient(180deg,
+      rgba(255, 255, 255, 0.32) 0%,
+      rgba(255, 255, 255, 0.00) 45%,
+      rgba(0, 0, 0, 0.12) 100%
+    ),
+    #007AFF !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.22),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.22),
+    0 6px 18px rgba(0, 122, 255, 0.45),
+    0 2px 5px rgba(0, 0, 0, 0.22) !important;
+  transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1),
+              box-shadow 0.18s ease-out,
+              background 0.18s ease-out !important;
+}
+
+[data-interface-theme="liquid-glass"] button[class~="bg-[#007AFF]"]:hover {
+  background:
+    linear-gradient(180deg,
+      rgba(255, 255, 255, 0.42) 0%,
+      rgba(255, 255, 255, 0.00) 45%,
+      rgba(0, 0, 0, 0.12) 100%
+    ),
+    #0071E3 !important;
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.68),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.22),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.30),
+    0 10px 24px rgba(0, 122, 255, 0.55),
+    0 3px 7px rgba(0, 0, 0, 0.24) !important;
+}
+
+[data-interface-theme="liquid-glass"] button[class~="bg-[#007AFF]"]:active {
+  transform: translateY(0) scale(0.96);
+  box-shadow:
+    inset 0 1px 3px rgba(0, 0, 0, 0.25),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.15),
+    0 1px 3px rgba(0, 122, 255, 0.30) !important;
+}
+
+/* User chat-message bubble — the bluish question card the user types.
+   Uses Tailwind `bg-blue-500/10` (light) or `bg-blue-600/20` (dark) so we
+   target via attribute selector. Layered with same jelly recipe: a wet top
+   highlight, a soft bottom shadow, blue-tinted outer glow → reads as the
+   same material as the send button (both are user/primary blue). */
+[data-interface-theme="liquid-glass"] [class*="bg-blue-500/10"],
+[data-interface-theme="liquid-glass"] [class*="bg-blue-600/20"] {
+  background:
+    linear-gradient(180deg,
+      rgba(255, 255, 255, 0.18) 0%,
+      rgba(255, 255, 255, 0.00) 45%,
+      rgba(0, 0, 0, 0.08) 100%
+    ),
+    rgba(0, 122, 255, 0.22) !important;
+  border-color: rgba(120, 170, 255, 0.32) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.38),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.14),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.10),
+    0 6px 16px rgba(0, 122, 255, 0.22),
+    0 2px 4px rgba(0, 0, 0, 0.18) !important;
+}
+
+/* AI response cards (Follow-Up Questions, Recap, What to Answer, Shorten,
+   code, latent-context attachment preview) — they all share the
+   .overlay-subtle-surface class. Generic neutral jelly so the colored
+   accent from the card's header icon/text stays the focus. */
+[data-interface-theme="liquid-glass"] .overlay-subtle-surface {
+  background:
+    linear-gradient(180deg,
+      rgba(255, 255, 255, 0.13) 0%,
+      rgba(255, 255, 255, 0.03) 50%,
+      rgba(255, 255, 255, 0.07) 100%
+    ),
+    rgba(255, 255, 255, 0.04) !important;
+  border-color: transparent !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.34),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.10),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.10),
+    0 4px 12px rgba(0, 0, 0, 0.22),
+    0 1px 3px rgba(0, 0, 0, 0.12) !important;
+}
+
+/* Colour-tinted notification banners — preserve the semantic tint, layer
+   jelly highlights/shadows + tint-matched outer glow on top. */
+
+/* Yellow — system-audio permission warning */
+[data-interface-theme="liquid-glass"] [class*="bg-yellow-500/10"] {
+  background:
+    linear-gradient(180deg,
+      rgba(255, 255, 255, 0.20) 0%,
+      rgba(255, 255, 255, 0.00) 45%,
+      rgba(0, 0, 0, 0.08) 100%
+    ),
+    rgba(234, 179, 8, 0.18) !important;
+  border-color: rgba(234, 179, 8, 0.30) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.40),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.10),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.10),
+    0 5px 14px rgba(234, 179, 8, 0.22),
+    0 1px 3px rgba(0, 0, 0, 0.16) !important;
+}
+
+/* Orange — STT warning */
+[data-interface-theme="liquid-glass"] [class*="bg-orange-500/10"] {
+  background:
+    linear-gradient(180deg,
+      rgba(255, 255, 255, 0.20) 0%,
+      rgba(255, 255, 255, 0.00) 45%,
+      rgba(0, 0, 0, 0.08) 100%
+    ),
+    rgba(249, 115, 22, 0.18) !important;
+  border-color: rgba(249, 115, 22, 0.30) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.40),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.10),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.10),
+    0 5px 14px rgba(249, 115, 22, 0.22),
+    0 1px 3px rgba(0, 0, 0, 0.16) !important;
+}
+
+/* Emerald — live transcription / "listening" bubble */
+[data-interface-theme="liquid-glass"] [class*="bg-emerald-500/10"] {
+  background:
+    linear-gradient(180deg,
+      rgba(255, 255, 255, 0.20) 0%,
+      rgba(255, 255, 255, 0.00) 45%,
+      rgba(0, 0, 0, 0.08) 100%
+    ),
+    rgba(16, 185, 129, 0.18) !important;
+  border-color: rgba(16, 185, 129, 0.32) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.40),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.10),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.12),
+    0 5px 14px rgba(16, 185, 129, 0.22),
+    0 1px 3px rgba(0, 0, 0, 0.16) !important;
+}
+
+/* Rose — hotkey conflict callout */
+[data-interface-theme="liquid-glass"] [class*="bg-rose-500/10"] {
+  background:
+    linear-gradient(180deg,
+      rgba(255, 255, 255, 0.20) 0%,
+      rgba(255, 255, 255, 0.00) 45%,
+      rgba(0, 0, 0, 0.08) 100%
+    ),
+    rgba(244, 63, 94, 0.18) !important;
+  border-color: rgba(244, 63, 94, 0.32) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.40),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.10),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.12),
+    0 5px 14px rgba(244, 63, 94, 0.22),
+    0 1px 3px rgba(0, 0, 0, 0.16) !important;
+}
+
+/* Amber — secondary warning callouts */
+[data-interface-theme="liquid-glass"] [class*="bg-amber-500/10"] {
+  background:
+    linear-gradient(180deg,
+      rgba(255, 255, 255, 0.20) 0%,
+      rgba(255, 255, 255, 0.00) 45%,
+      rgba(0, 0, 0, 0.08) 100%
+    ),
+    rgba(245, 158, 11, 0.18) !important;
+  border-color: rgba(245, 158, 11, 0.32) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.40),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.10),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.12),
+    0 5px 14px rgba(245, 158, 11, 0.22),
+    0 1px 3px rgba(0, 0, 0, 0.16) !important;
+}
+
+/* Red — Stop button (active recording) and any red callouts.
+   Springy hover/active because the Stop button is an interactive control,
+   unlike the static warning banners above. */
+[data-interface-theme="liquid-glass"] [class*="bg-red-500/10"] {
+  background:
+    linear-gradient(180deg,
+      rgba(255, 255, 255, 0.22) 0%,
+      rgba(255, 255, 255, 0.00) 45%,
+      rgba(0, 0, 0, 0.10) 100%
+    ),
+    rgba(239, 68, 68, 0.22) !important;
+  border-color: rgba(239, 68, 68, 0.34) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.45),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.12),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.14),
+    0 5px 14px rgba(239, 68, 68, 0.28),
+    0 1px 3px rgba(0, 0, 0, 0.16) !important;
+  transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1),
+              box-shadow 0.18s ease-out,
+              background 0.18s ease-out !important;
+}
+
+[data-interface-theme="liquid-glass"] button[class*="bg-red-500/10"]:hover {
+  background:
+    linear-gradient(180deg,
+      rgba(255, 255, 255, 0.30) 0%,
+      rgba(255, 255, 255, 0.00) 45%,
+      rgba(0, 0, 0, 0.10) 100%
+    ),
+    rgba(239, 68, 68, 0.30) !important;
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.60),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.12),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.22),
+    0 9px 22px rgba(239, 68, 68, 0.40),
+    0 2px 5px rgba(0, 0, 0, 0.20) !important;
+}
+
+[data-interface-theme="liquid-glass"] button[class*="bg-red-500/10"]:active {
+  transform: translateY(0) scale(0.96);
+  box-shadow:
+    inset 0 1px 3px rgba(0, 0, 0, 0.20),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.12),
+    0 1px 3px rgba(239, 68, 68, 0.24) !important;
+}
+
 /* ─── Light mode elevation system ────────────────────────────────────────
    Top product designers (Linear, Vercel, Stripe) separate surfaces with
    SHADOW — not borders. This creates depth without visual clutter.
