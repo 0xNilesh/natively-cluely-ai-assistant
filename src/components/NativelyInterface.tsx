@@ -328,7 +328,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     // without this synchronous signal, blockInputFocus cannot distinguish "tap
     // not yet active" (macOS: block anyway) from "tap not available" (Windows:
     // never block, or the input becomes permanently trapped).
-    const isCgEventTapAvailableRef = useRef<boolean>(false);
+    // Set synchronously from preload — platform is known immediately at render time.
+    const isCgEventTapAvailableRef = useRef<boolean>(window.electronAPI?.platform === "darwin");
     // Latest-handler ref so the captured-key listener (mounted with [] deps)
     // calls the CURRENT handleManualSubmit closure — not the one captured at
     // first render, which reads inputValue="" and silently no-ops on submit.
