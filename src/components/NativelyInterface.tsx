@@ -2887,10 +2887,13 @@ Provide only the answer, nothing else.`;
         // see no behaviour change. The probe runs on the main process via
         // `defaults read com.apple.HIToolbox`; see electron/services/
         // ImeDetector.ts for the reason this gate exists at all.
+        // Probe for IME state (Pinyin, Hangul, Kanji). Result refines
+        // stealthAutoEngageOkRef from its safe-true default; we do NOT
+        // need to re-check CGEventTap availability here — the synchronous
+        // window.electronAPI.platform guard above already covers that.
         if (window.electronAPI.stealthTapShouldAutoEngage) {
             window.electronAPI.stealthTapShouldAutoEngage()
                 .then((ok) => { stealthAutoEngageOkRef.current = !!ok; })
-                .then(() => window.electronAPI.stealthTapAvailable?.().then((v) => { isCgEventTapAvailableRef.current = !!v; }))
                 .catch(() => { /* fail open — keep default */ });
         }
 
