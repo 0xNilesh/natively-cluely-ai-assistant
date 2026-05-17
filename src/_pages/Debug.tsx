@@ -1,6 +1,6 @@
 // Debug.tsx
 import React, { useState, useEffect, useRef } from "react"
-import { useQuery, useQueryClient } from "react-query"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter"
 import { dracula } from "react-syntax-highlighter/dist/esm/styles/prism"
 import ScreenshotQueue from "../components/Queue/ScreenshotQueue"
@@ -257,7 +257,7 @@ const Debug: React.FC<DebugProps> = ({ isProcessing, setIsProcessing }) => {
   const [isTooltipVisible, setIsTooltipVisible] = useState(false)
   const [tooltipHeight, setTooltipHeight] = useState(0)
 
-  const { data: extraScreenshots = [], refetch } = useQuery({
+  const { data: extraScreenshots = [], refetch } = useQuery<Array<{ path: string; preview: string }>, Error>({
     queryKey: ["extras"],
     queryFn: async () => {
       try {
@@ -269,7 +269,7 @@ const Debug: React.FC<DebugProps> = ({ isProcessing, setIsProcessing }) => {
       }
     },
     staleTime: Infinity,
-    cacheTime: Infinity
+    gcTime: Infinity
   })
 
   const showToast = (

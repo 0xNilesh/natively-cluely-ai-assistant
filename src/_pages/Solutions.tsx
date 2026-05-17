@@ -1,6 +1,6 @@
 // Solutions.tsx — Rolling Interview Script / Teleprompter UI
 import React, { useState, useEffect, useRef } from "react"
-import { useQuery, useQueryClient } from "react-query"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter"
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism"
 
@@ -112,17 +112,18 @@ const Solutions: React.FC<SolutionsProps> = ({ setView }) => {
   const [tooltipHeight, setTooltipHeight] = useState(0)
   const [isResetting, setIsResetting] = useState(false)
 
-  const { data: extraScreenshots = [], refetch } = useQuery<Array<{ path: string; preview: string }>, Error>(
-    ["extras"],
-    async () => {
+  const { data: extraScreenshots = [], refetch } = useQuery<Array<{ path: string; preview: string }>, Error>({
+    queryKey: ["extras"],
+    queryFn: async () => {
       try {
         return await window.electronAPI.getScreenshots()
       } catch {
         return []
       }
     },
-    { staleTime: Infinity, cacheTime: Infinity }
-  )
+    staleTime: Infinity,
+    gcTime: Infinity
+  })
 
   const showToast = (title: string, description: string, variant: ToastVariant) => {
     setToastMessage({ title, description, variant })
@@ -172,8 +173,8 @@ const Solutions: React.FC<SolutionsProps> = ({ setView }) => {
         setIsResetting(true)
         setSolution(null)
         setIsGenerating(false)
-        queryClient.removeQueries(["solution"])
-        queryClient.removeQueries(["new_solution"])
+        queryClient.removeQueries({ queryKey: ["solution"] })
+        queryClient.removeQueries({ queryKey: ["new_solution"] })
         refetch()
         setTimeout(() => setIsResetting(false), 0)
       }),

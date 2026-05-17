@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react"
-import { useQuery } from "react-query"
+import { useQuery } from "@tanstack/react-query"
 import ScreenshotQueue from "../components/Queue/ScreenshotQueue"
 import {
   Toast,
@@ -45,9 +45,9 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
 
   const barRef = useRef<HTMLDivElement>(null)
 
-  const { data: screenshots = [], refetch } = useQuery<Array<{ path: string; preview: string }>, Error>(
-    ["screenshots"],
-    async () => {
+  const { data: screenshots = [], refetch } = useQuery<Array<{ path: string; preview: string }>, Error>({
+    queryKey: ["screenshots"],
+    queryFn: async () => {
       try {
         const existing = await window.electronAPI.getScreenshots()
         return existing
@@ -57,13 +57,11 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
         return []
       }
     },
-    {
-      staleTime: Infinity,
-      cacheTime: Infinity,
-      refetchOnWindowFocus: true,
-      refetchOnMount: true
-    }
-  )
+    staleTime: Infinity,
+    gcTime: Infinity,
+    refetchOnWindowFocus: true,
+    refetchOnMount: true
+  })
 
   const showToast = (
     title: string,

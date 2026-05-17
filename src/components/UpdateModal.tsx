@@ -92,7 +92,7 @@ const UpdateModal: React.FC<UpdateModalProps> = ({
     // Auto-scroll logic
     const scrollContainerRef = React.useRef<HTMLDivElement>(null);
     const isUserInteractionRef = React.useRef(false);
-    const animationFrameRef = React.useRef<number>();
+    const animationFrameRef = React.useRef<number>(null!);
 
     React.useEffect(() => {
         // Only run if not downloading/error and we have notes
