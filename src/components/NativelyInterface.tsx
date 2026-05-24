@@ -361,6 +361,13 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     // Resolved once on mount via IPC (default true so non-macOS / probe
     // failure falls back to existing behaviour).
     const stealthAutoEngageOkRef = useRef<boolean>(true);
+    // True when CGEventTap is available on this platform. Set once at mount
+    // via IPC. Used to decide whether to block DOM focus in blockInputFocus -
+    // without this synchronous signal, blockInputFocus cannot distinguish "tap
+    // not yet active" (macOS: block anyway) from "tap not available" (Windows:
+    // never block, or the input becomes permanently trapped).
+    // Set synchronously from preload — platform is known immediately at render time.
+    const isCgEventTapAvailableRef = useRef<boolean>(window.electronAPI?.platform === "darwin");
     // Latest-handler ref so the captured-key listener (mounted with [] deps)
     // calls the CURRENT handleManualSubmit closure — not the one captured at
     // first render, which reads inputValue="" and silently no-ops on submit.
@@ -2956,6 +2963,10 @@ Provide only the answer, nothing else.`;
         // see no behaviour change. The probe runs on the main process via
         // `defaults read com.apple.HIToolbox`; see electron/services/
         // ImeDetector.ts for the reason this gate exists at all.
+        // Probe for IME state (Pinyin, Hangul, Kanji). Result refines
+        // stealthAutoEngageOkRef from its safe-true default; we do NOT
+        // need to re-check CGEventTap availability here — the synchronous
+        // window.electronAPI.platform guard above already covers that.
         if (window.electronAPI.stealthTapShouldAutoEngage) {
             window.electronAPI.stealthTapShouldAutoEngage()
                 .then((ok) => { stealthAutoEngageOkRef.current = !!ok; })
@@ -3014,6 +3025,11 @@ Provide only the answer, nothing else.`;
         // OS Text Input System can route keystrokes through the active IME
         // and compose CJK characters normally.
         if (!stealthAutoEngageOkRef.current) return;
+        // Only block DOM focus when CGEventTap is available on this platform.
+        // On Windows, CGEventTap is never available so this guard exits early
+        // and allows normal input focus. On macOS, the tap is available so we
+        // block focus to prevent the panel from becoming key window.
+        if (!isCgEventTapAvailableRef.current) return;
         e.preventDefault();
         // Don't blur an already-focused element — that itself fires events.
         if (document.activeElement === textInputRef.current) {
