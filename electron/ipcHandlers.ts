@@ -11,11 +11,12 @@ import { AudioDevices } from "./audio/AudioDevices";
 import { PhoneMirrorService } from "./services/PhoneMirrorService";
 import { CodexCliService } from "./services/CodexCliService";
 import { SettingsManager } from "./services/SettingsManager";
+import { SkillsManager } from "./services/SkillsManager";
 
 
 import { RECOGNITION_LANGUAGES, AI_RESPONSE_LANGUAGES } from "./config/languages"
 import { TRIAL_SENTINEL_KEY } from "./config/constants"
-import { CHAT_MODE_PROMPT } from "./llm/prompts"
+import { CHAT_MODE_PROMPT, HARD_SYSTEM_PROMPT } from "./llm/prompts"
 
 export function initializeIpcHandlers(appState: AppState): void {
   const safeHandle = (channel: string, listener: (event: any, ...args: any[]) => Promise<any> | any) => {
@@ -462,7 +463,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   const IDENTITY_PROBE_RE = /^\s*(who\s+(are|r)\s+(you|u|this|natively)|what\s+(are|r)\s+(you|u)|are\s+you\s+(chatgpt|gpt[-\s]?\d?|claude|gemini|llama|an?\s+(ai|bot|llm|model|assistant))|what('?s|\s+is)\s+your\s+(name|model)|which\s+(ai|model|llm)\s+are\s+you|who\s+(made|built|created|developed|trained)\s+(you|this|natively)|what\s+model\s+(are\s+you|do\s+you\s+use)|introduce\s+yourself)\s*\??\s*$/i;
   const CREATOR_PROBE_RE = /^\s*(who\s+(made|built|created|developed|trained)\s+(you|this|natively))\s*\??\s*$/i;
 
-  safeHandle("gemini-chat-stream", async (event, message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean, ignoreKnowledgeMode?: boolean }) => {
+  safeHandle("gemini-chat-stream", async (event, message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean, ignoreKnowledgeMode?: boolean, skipModeInjection?: boolean, skillId?: string }) => {
     try {
       console.log("[IPC] gemini-chat-stream started using LLMHelper.streamChat");
       const llmHelper = appState.processingHelper.getLLMHelper();
@@ -534,11 +535,26 @@ export function initializeIpcHandlers(appState: AppState): void {
       // framing in HARD_SYSTEM_PROMPT/ASSIST_MODE_PROMPT that was causing coding
       // questions to be answered with "At Aetherbot AI, I was responsible for..."
       // (resume hijack via CONTEXT_INTELLIGENCE_LAYER's "you ARE the user").
-      const systemPromptOverride: string | undefined = options?.skipSystemPrompt ? "" : CHAT_MODE_PROMPT;
+      let systemPromptOverride: string | undefined = options?.skipSystemPrompt ? "" : CHAT_MODE_PROMPT;
+      let ignoreKnowledgeMode = !!options?.ignoreKnowledgeMode;
+
+      // When a skill is invoked, the skill's instructions REPLACE the chat-mode
+      // framing and we skip RAG knowledge-mode retrieval — the skill is the
+      // entire intent, mixing in the regular context just dilutes it.
+      if (options?.skillId) {
+        const skill = SkillsManager.getInstance().getSkill(options.skillId);
+        if (!skill) {
+          event.sender.send("gemini-stream-error", `Skill not found: ${options.skillId}`);
+          event.sender.send("gemini-stream-done");
+          return null;
+        }
+        systemPromptOverride = `${HARD_SYSTEM_PROMPT}\n\n## ACTIVE SKILL\n${SkillsManager.getInstance().buildPromptBlock(skill)}`;
+        ignoreKnowledgeMode = true;
+      }
 
       try {
         // USE streamChat which handles routing
-        const stream = llmHelper.streamChat(message, imagePaths, context, systemPromptOverride, options?.ignoreKnowledgeMode);
+        const stream = llmHelper.streamChat(message, imagePaths, context, systemPromptOverride, ignoreKnowledgeMode);
 
         for await (const token of stream) {
           // Bail if a newer stream has taken over (user triggered a new request)
@@ -2592,9 +2608,28 @@ export function initializeIpcHandlers(appState: AppState): void {
   // here to run Tesseract OCR before answering. That path is now removed from the runtime —
   // Natively answers from the image directly via a vision-capable provider. Do not re-introduce
   // OCR here unless a future explicit OCR-only mode is reintroduced.
-  safeHandle("generate-what-to-say", async (_, question?: string, imagePaths?: string[], options?: { promptInstruction?: string }) => {
+  safeHandle("generate-what-to-say", async (_, question?: string, imagePaths?: string[], options?: { promptInstruction?: string; skillId?: string }) => {
     try {
       let screenContext: any;
+      let resolvedSkill: { id: string; name: string; promptBlock: string } | undefined;
+      let skillName: string | undefined;
+
+      if (options?.skillId) {
+        const skill = SkillsManager.getInstance().getSkill(options.skillId);
+        if (!skill) {
+          return {
+            answer: null,
+            question: question || 'unknown',
+            error: `Skill not found: ${options.skillId}`,
+          };
+        }
+        skillName = skill.name;
+        resolvedSkill = {
+          id: skill.id,
+          name: skill.name,
+          promptBlock: SkillsManager.getInstance().buildPromptBlock(skill),
+        };
+      }
       let screenContextStatus: 'not_available' | 'available' | 'failed' = 'not_available';
       let visionProviderUsed: string | undefined;
       let visionModelUsed: string | undefined;
@@ -2680,6 +2715,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         skipCooldown: process.env.NODE_ENV === 'test',
         screenContext,
         promptInstruction: typeof options?.promptInstruction === 'string' ? options.promptInstruction : undefined,
+        activeSkill: resolvedSkill,
       });
       return {
         answer,
@@ -2691,6 +2727,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         visionFailureReason,
         imageCount: validatedImagePaths?.length || 0,
         usedImageInput: Boolean(validatedImagePaths?.length),
+        skillName,
       };
     } catch (error: any) {
       console.error('[IPC] generate-what-to-say error:', error);
@@ -4141,5 +4178,27 @@ export function initializeIpcHandlers(appState: AppState): void {
       console.error('[IPC] phone-mirror:rotate-token error:', e);
       return { error: e?.message || 'failed to rotate token' };
     }
+  });
+
+  // ── Skills ────────────────────────────────────────────────────────────
+  // Local SKILL.md instructions discovered from userData/skills + bundled
+  // built-ins. SkillsManager handles disk IO; these handlers are thin.
+
+  safeHandle("skills:list", async () => {
+    return SkillsManager.getInstance().listSkills();
+  });
+
+  safeHandle("skills:get", async (_, id: string) => {
+    if (typeof id !== 'string' || id.trim().length === 0) return null;
+    return SkillsManager.getInstance().getSkill(id);
+  });
+
+  // listSkills() re-reads from disk each call, so refresh is just a re-list.
+  safeHandle("skills:refresh", async () => {
+    return SkillsManager.getInstance().listSkills();
+  });
+
+  safeHandle("skills:open-folder", async () => {
+    return SkillsManager.getInstance().openSkillsFolder();
   });
 }

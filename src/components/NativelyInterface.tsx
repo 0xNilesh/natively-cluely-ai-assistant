@@ -362,13 +362,24 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     // Resolved once on mount via IPC (default true so non-macOS / probe
     // failure falls back to existing behaviour).
     const stealthAutoEngageOkRef = useRef<boolean>(true);
-    // True when CGEventTap is available on this platform. Set once at mount
-    // via IPC. Used to decide whether to block DOM focus in blockInputFocus -
-    // without this synchronous signal, blockInputFocus cannot distinguish "tap
-    // not yet active" (macOS: block anyway) from "tap not available" (Windows:
-    // never block, or the input becomes permanently trapped).
-    // Set synchronously from preload — platform is known immediately at render time.
-    const isCgEventTapAvailableRef = useRef<boolean>(window.electronAPI?.platform === "darwin");
+    // True when the CGEventTap is actually loadable AND Accessibility is granted.
+    // Three failure modes silently re-trap the chat input if this is only a
+    // platform check (the original PR #250 bug it fixed for Windows, latent
+    // for macOS):
+    //   1. Native binary loaded without StealthKeyboardTap (older build, partial
+    //      rebuild) → isAvailable() returns false, but a platform-only ref
+    //      would stay true and blockInputFocus would block every click.
+    //   2. Accessibility permission revoked at runtime → stealthTapStart() fails,
+    //      banner shows, but input is trapped until app restart.
+    //   3. Future toggle that disables stealth — same trap.
+    // Default is FALSE (safe — input remains clickable) until the main process
+    // confirms availability via stealth-tap:available. The race window before
+    // the IPC resolves is ~50 ms on cold start; a real user moving their mouse
+    // to the input cannot beat that. Also flipped to false when the
+    // stealth-tap-state broadcast reports {active:false, reason:'permission'}
+    // and re-promoted to true on {active:true} (belt-and-braces in case the
+    // initial probe rejected).
+    const isCgEventTapAvailableRef = useRef<boolean>(false);
     // Latest-handler ref so the captured-key listener (mounted with [] deps)
     // calls the CURRENT handleManualSubmit closure — not the one captured at
     // first render, which reads inputValue="" and silently no-ops on submit.
@@ -2851,9 +2862,19 @@ Provide only the answer, nothing else.`;
                 setIsExpanded(true);
                 setStealthPermissionMissing(false);
                 escSuppressUntilNextActive = false;
+                // Tap engaged → availability is confirmed. Belt-and-braces
+                // in case the initial stealth-tap:available probe rejected or
+                // returned a stale false at mount.
+                isCgEventTapAvailableRef.current = true;
             }
             if (!active && reason === 'permission') {
                 setStealthPermissionMissing(true);
+                // Accessibility revoked at runtime → flip the availability ref
+                // off so blockInputFocus stops blocking DOM focus. The tap can
+                // no longer engage; leaving the guard active would re-trap the
+                // input until app restart (the exact symptom PR #250 fixed
+                // for Windows).
+                isCgEventTapAvailableRef.current = false;
             }
         });
 
@@ -2974,13 +2995,42 @@ Provide only the answer, nothing else.`;
         // `defaults read com.apple.HIToolbox`; see electron/services/
         // ImeDetector.ts for the reason this gate exists at all.
         // Probe for IME state (Pinyin, Hangul, Kanji). Result refines
-        // stealthAutoEngageOkRef from its safe-true default; we do NOT
-        // need to re-check CGEventTap availability here — the synchronous
-        // window.electronAPI.platform guard above already covers that.
+        // stealthAutoEngageOkRef from its safe-true default.
         if (window.electronAPI.stealthTapShouldAutoEngage) {
             window.electronAPI.stealthTapShouldAutoEngage()
                 .then((ok) => { stealthAutoEngageOkRef.current = !!ok; })
                 .catch(() => { /* fail open — keep default */ });
+        }
+
+        // Resolve actual CGEventTap availability (native binary loaded AND
+        // Accessibility granted). isCgEventTapAvailableRef defaults to false;
+        // this promotes it to true only when both conditions hold. The .catch
+        // logs the rejection — without that, an IPC reject silently keeps the
+        // ref at false for the whole session on macOS too. The state listener's
+        // active:true branch is a belt-and-braces re-promotion path.
+        if (window.electronAPI.stealthTapAvailable) {
+            window.electronAPI.stealthTapAvailable()
+                .then((ok) => { isCgEventTapAvailableRef.current = !!ok; })
+                .catch((err) => {
+                    console.warn('[stealth] stealthTapAvailable IPC rejected — ref stays false until tap engages via hotkey', err);
+                });
+        }
+
+        // Refresh IME detection on window focus so users who add a Pinyin/
+        // Hangul input source mid-session don't silently break CJK input the
+        // next time the tap would auto-engage. Darwin-only: on Windows/Linux
+        // the IPC unconditionally returns true and refreshImeDetection is a
+        // no-op, so wiring the listener would just be a per-focus IPC tax.
+        // isMac is computed from window.electronAPI?.platform in platformUtils.
+        let removeFocusRefresh: (() => void) | undefined;
+        if (isMac && window.electronAPI?.stealthTapRefreshIme) {
+            const onFocusRefresh = () => {
+                window.electronAPI?.stealthTapRefreshIme?.()
+                    .then((ok) => { stealthAutoEngageOkRef.current = !!ok; })
+                    .catch(() => {});
+            };
+            window.addEventListener('focus', onFocusRefresh);
+            removeFocusRefresh = () => window.removeEventListener('focus', onFocusRefresh);
         }
 
         const onMouseDown = (e: MouseEvent) => {
@@ -2989,13 +3039,26 @@ Provide only the answer, nothing else.`;
             // explicit hotkey if they want true OS-level invisible typing
             // (they'll lose composition in that path by design).
             if (!stealthAutoEngageOkRef.current) return;
+            // Symmetric with blockInputFocus below. Without this, on Windows
+            // (and on macOS when the native tap is missing) we fire a
+            // stealthTapStart IPC per input click — harmless today, fragile
+            // tomorrow if anyone adds a side-effect to the Windows handler.
+            if (!isCgEventTapAvailableRef.current) return;
             const target = e.target as HTMLElement | null;
             if (!target?.closest?.('[data-stealth-engage="true"]')) return;
-            window.electronAPI.stealthTapStart().catch(() => {});
+            // Surface IPC failures so dev tools show when the tap fails to
+            // engage; the user sees the explicit-permission banner via the
+            // state listener so silent ignoring would be misleading.
+            window.electronAPI.stealthTapStart().catch((err) => {
+                console.warn('[stealth] tap start IPC failed', err);
+            });
         };
 
         document.addEventListener('mousedown', onMouseDown, true); // capture phase
-        return () => document.removeEventListener('mousedown', onMouseDown, true);
+        return () => {
+            document.removeEventListener('mousedown', onMouseDown, true);
+            removeFocusRefresh?.();
+        };
     }, []);
 
     // ── ModelSelector click-outside close ──

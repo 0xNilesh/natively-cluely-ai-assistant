@@ -424,33 +424,51 @@ export class AppState {
     // flow + queries availability/state; the tap itself is toggled by the
     // global shortcut handler above. Only registered on macOS — on other
     // platforms these handlers no-op so the renderer can render fallback UI.
+    //
+    // removeHandler-then-handle on each channel is defensive against a
+    // second `app.ready` firing (rare but possible during dev HMR / single-
+    // instance second-launch path) — `ipcMain.handle` throws on duplicate
+    // registration, which would propagate as a renderer IPC rejection and
+    // silently leave isCgEventTapAvailableRef at its safe-false default.
+    const registerStealthHandler = (channel: string, fn: (...args: any[]) => any) => {
+      ipcMain.removeHandler(channel);
+      ipcMain.handle(channel, fn);
+    };
     if (process.platform === 'darwin') {
       const { StealthKeyboardManager } = require('./services/StealthKeyboardManager');
       const stealth = StealthKeyboardManager.getInstance();
-      ipcMain.handle('stealth-tap:available', () => stealth.isAvailable());
-      ipcMain.handle('stealth-tap:permission-granted', () => stealth.isPermissionGranted());
-      ipcMain.handle('stealth-tap:request-permission', () => stealth.requestPermission());
-      ipcMain.handle('stealth-tap:open-settings', () => { stealth.openSettings(); });
-      ipcMain.handle('stealth-tap:is-active', () => stealth.isActive());
-      ipcMain.handle('stealth-tap:stop', () => { stealth.stop(); });
-      ipcMain.handle('stealth-tap:start', () => stealth.start());
+      registerStealthHandler('stealth-tap:available', () => stealth.isAvailable());
+      registerStealthHandler('stealth-tap:open-settings', () => { stealth.openSettings(); });
+      registerStealthHandler('stealth-tap:stop', () => { stealth.stop(); });
+      registerStealthHandler('stealth-tap:start', () => stealth.start());
       // IME users (Pinyin, Hangul, Kanji, …) cannot compose under the tap
       // because CGEventTap fires below TIS. Renderer consults this before
       // click-to-engage so it can fall back to plain DOM focus when an IME
       // is in play. See electron/services/ImeDetector.ts for the rationale.
-      ipcMain.handle('stealth-tap:should-auto-engage', () => {
+      registerStealthHandler('stealth-tap:should-auto-engage', () => {
         const { shouldAutoEngageStealthTap } = require('./services/ImeDetector');
         return shouldAutoEngageStealthTap();
       });
+      // Force a fresh IME probe and return the refined value. Renderer calls
+      // this on window focus so users who add a Pinyin/Hangul source mid-
+      // session don't silently break CJK composition the next time the tap
+      // would auto-engage (the cached value from mount-time would be stale).
+      registerStealthHandler('stealth-tap:refresh-ime', () => {
+        const { refreshImeDetection, shouldAutoEngageStealthTap } = require('./services/ImeDetector');
+        refreshImeDetection();
+        return shouldAutoEngageStealthTap();
+      });
     } else {
-      ipcMain.handle('stealth-tap:available', () => false);
-      ipcMain.handle('stealth-tap:permission-granted', () => false);
-      ipcMain.handle('stealth-tap:request-permission', () => false);
-      ipcMain.handle('stealth-tap:open-settings', () => {});
-      ipcMain.handle('stealth-tap:is-active', () => false);
-      ipcMain.handle('stealth-tap:stop', () => {});
-      ipcMain.handle('stealth-tap:start', () => false);
-      ipcMain.handle('stealth-tap:should-auto-engage', () => true);
+      registerStealthHandler('stealth-tap:available', () => false);
+      registerStealthHandler('stealth-tap:open-settings', () => {});
+      registerStealthHandler('stealth-tap:stop', () => {});
+      registerStealthHandler('stealth-tap:start', () => false);
+      // Non-darwin: returns true so the renderer's stealthAutoEngageOkRef
+      // stays true and the explicit isCgEventTapAvailableRef guard (added in
+      // PR #250) is what actually gates blockInputFocus. Inverted relative
+      // to availability on purpose — see ImeDetector.ts:67.
+      registerStealthHandler('stealth-tap:should-auto-engage', () => true);
+      registerStealthHandler('stealth-tap:refresh-ime', () => true);
     }
 
     keybindManager.onShortcutTriggered(async (actionId) => {
@@ -3610,6 +3628,12 @@ export class AppState {
     this.settingsWindowHelper.setContentProtection(state)
     this.modelSelectorWindowHelper.setContentProtection(state)
     this.cropperWindowHelper.setContentProtection(state)
+
+    if (process.platform === 'win32') {
+      this.windowHelper.syncOverlayActivationPolicy();
+      this.settingsWindowHelper.syncActivationPolicy();
+      this.modelSelectorWindowHelper.syncActivationPolicy();
+    }
 
     // Persist state via SettingsManager
     SettingsManager.getInstance().set('isUndetectable', state);
