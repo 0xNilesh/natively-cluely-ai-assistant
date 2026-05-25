@@ -549,112 +549,6 @@ export const AIProvidersSettings: React.FC = () => {
 
     return (
         <div className="space-y-5 animated fadeIn pb-10">
-            {/* Screen Understanding — vision-first routing */}
-            <div className="bg-bg-item-surface rounded-xl border border-border-subtle px-4 py-3">
-                <h3 className="text-sm font-bold text-text-primary mb-1">Screen understanding</h3>
-                <p className="text-xs text-text-secondary mb-3">Pick how Natively reads what is on your screen. All paths use the vision-capable AI provider directly; OCR is no longer used.</p>
-                <div className="flex flex-col gap-2">
-                    {([
-                        {
-                            value: 'vision_first' as const,
-                            label: 'Vision first',
-                            description: 'Recommended. Try every configured vision provider in order; first success wins.',
-                        },
-                        {
-                            value: 'vision_only' as const,
-                            label: 'Vision only',
-                            description: 'Stricter. Require a vision-capable provider; never silently drop the screenshot.',
-                        },
-                        {
-                            value: 'private_vision' as const,
-                            label: 'Private vision (local only)',
-                            description: 'Use a local vision model (Ollama) only. Never call cloud vision. Clear error if no local provider is configured.',
-                        },
-                    ]).map(({ value, label, description }) => {
-                        const selected = screenUnderstandingMode === value;
-                        return (
-                            <div
-                                key={value}
-                                onClick={() => {
-                                    setScreenUnderstandingMode(value);
-                                    window.electronAPI?.setScreenUnderstandingMode?.(value);
-                                }}
-                                className={`px-3 py-2 rounded-lg border cursor-pointer transition-colors ${selected ? 'border-emerald-500/50 bg-emerald-500/10' : 'border-border-subtle hover:border-border-muted bg-bg-item-surface'}`}
-                                role="radio"
-                                aria-checked={selected}
-                            >
-                                <div className="flex items-center justify-between gap-3">
-                                    <div className="flex flex-col">
-                                        <span className={`text-xs font-semibold ${selected ? 'text-emerald-300' : 'text-text-primary'}`}>{label}</span>
-                                        <span className="text-[11px] text-text-secondary leading-snug mt-0.5">{description}</span>
-                                    </div>
-                                    <div className={`w-4 h-4 rounded-full border-2 shrink-0 ${selected ? 'border-emerald-400 bg-emerald-400' : 'border-border-muted'}`} />
-                                </div>
-                            </div>
-                        );
-                    })}
-                </div>
-                <div className="flex items-center justify-between mt-3 pt-3 border-t border-border-subtle">
-                    <div className="flex flex-col">
-                        <span className="text-xs text-text-primary font-semibold">Technical interview direct vision</span>
-                        <span className="text-[11px] text-text-secondary leading-snug">Use the highest-resolution image profile so code text stays sharp in interview mode.</span>
-                    </div>
-                    <div
-                        onClick={() => {
-                            const next = !technicalInterviewVisionFirst;
-                            setTechnicalInterviewVisionFirst(next);
-                            const api: any = window.electronAPI;
-                            if (api?.setTechnicalInterviewVisionFirst) {
-                                api.setTechnicalInterviewVisionFirst(next);
-                            } else {
-                                window.electronAPI?.setTechnicalInterviewDirectVision?.(next);
-                            }
-                        }}
-                        className={`w-9 h-5 rounded-full relative transition-colors cursor-pointer ${technicalInterviewVisionFirst ? 'bg-emerald-500' : 'bg-bg-toggle-switch border border-border-muted'}`}
-                        role="switch"
-                        aria-checked={technicalInterviewVisionFirst}
-                    >
-                        <div className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${technicalInterviewVisionFirst ? 'translate-x-4' : 'translate-x-0'}`} />
-                    </div>
-                </div>
-            </div>
-
-            {/* Cloud Provider Data Scopes — fail-closed cloud share controls */}
-            <div className="bg-bg-item-surface rounded-xl border border-border-subtle px-4 py-3">
-                <h3 className="text-sm font-bold text-text-primary mb-1">Cloud provider data scopes</h3>
-                <p className="text-xs text-text-secondary mb-3">Disable any data type to block it from being sent to cloud LLM providers. Local providers are unaffected.</p>
-                <div className="flex flex-col gap-2">
-                    {([
-                        { key: 'transcript', label: 'Transcripts' },
-                        { key: 'screenshots', label: 'Screenshots' },
-                        { key: 'reference_files', label: 'Reference files' },
-                        { key: 'profile_history', label: 'Profile history' },
-                        { key: 'embeddings', label: 'Cloud embeddings' },
-                        { key: 'post_call_summary', label: 'Post-call summaries' },
-                    ] as const).map(({ key, label }) => {
-                        const allowed = providerDataScopes[key] !== false;
-                        return (
-                            <div key={key} className="flex items-center justify-between">
-                                <span className="text-xs text-text-secondary">{label}</span>
-                                <div
-                                    onClick={() => {
-                                        const next = { ...providerDataScopes, [key]: !allowed };
-                                        setProviderDataScopes(next);
-                                        window.electronAPI?.setProviderDataScopes?.(next);
-                                    }}
-                                    className={`w-9 h-5 rounded-full relative transition-colors cursor-pointer ${allowed ? 'bg-emerald-500' : 'bg-bg-toggle-switch border border-border-muted'}`}
-                                    role="switch"
-                                    aria-checked={allowed}
-                                    aria-label={`Allow ${label} to cloud providers`}
-                                >
-                                    <div className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${allowed ? 'translate-x-4' : 'translate-x-0'}`} />
-                                </div>
-                            </div>
-                        );
-                    })}
-                </div>
-            </div>
-
             {/* Default Model for Chat */}
             <div className="space-y-5">
                 <div>
@@ -1200,6 +1094,120 @@ export const AIProvidersSettings: React.FC = () => {
                         )}
                     </div>
                 )}
+
+            {/* Screen Understanding — vision-first routing */}
+            <div className="space-y-5">
+                <div>
+                    <h3 className="text-sm font-bold text-text-primary mb-1">Screen understanding</h3>
+                    <p className="text-xs text-text-secondary mb-2">Pick how Natively reads what is on your screen. All paths use the vision-capable AI provider directly; OCR is no longer used.</p>
+                </div>
+                <div className="bg-bg-item-surface rounded-xl p-4 border border-border-subtle flex flex-col gap-2">
+                    {([
+                        {
+                            value: 'vision_first' as const,
+                            label: 'Vision first',
+                            description: 'Recommended. Try every configured vision provider in order; first success wins.',
+                        },
+                        {
+                            value: 'vision_only' as const,
+                            label: 'Vision only',
+                            description: 'Stricter. Require a vision-capable provider; never silently drop the screenshot.',
+                        },
+                        {
+                            value: 'private_vision' as const,
+                            label: 'Private vision (local only)',
+                            description: 'Use a local vision model (Ollama) only. Never call cloud vision. Clear error if no local provider is configured.',
+                        },
+                    ]).map(({ value, label, description }) => {
+                        const selected = screenUnderstandingMode === value;
+                        return (
+                            <div
+                                key={value}
+                                onClick={() => {
+                                    setScreenUnderstandingMode(value);
+                                    window.electronAPI?.setScreenUnderstandingMode?.(value);
+                                }}
+                                className={`px-3 py-2 rounded-lg border cursor-pointer transition-colors ${selected ? 'border-emerald-500/50 bg-emerald-500/10' : 'border-border-subtle hover:border-border-muted bg-bg-elevated/50'}`}
+                                role="radio"
+                                aria-checked={selected}
+                            >
+                                <div className="flex items-center justify-between gap-3">
+                                    <div className="flex flex-col">
+                                        <span className={`text-xs font-semibold ${selected ? 'text-emerald-300' : 'text-text-primary'}`}>{label}</span>
+                                        <span className="text-[11px] text-text-secondary leading-snug mt-0.5">{description}</span>
+                                    </div>
+                                    <div className={`w-4 h-4 rounded-full border-2 shrink-0 ${selected ? 'border-emerald-400 bg-emerald-400' : 'border-border-muted'}`} />
+                                </div>
+                            </div>
+                        );
+                    })}
+                    <div className="flex items-center justify-between pt-2 mt-1 border-t border-border-subtle">
+                        <div className="flex flex-col">
+                            <span className="text-xs text-text-primary font-semibold">Technical interview direct vision</span>
+                            <span className="text-[11px] text-text-secondary leading-snug mt-0.5">Use the highest-resolution image profile so code text stays sharp in interview mode.</span>
+                        </div>
+                        <div
+                            onClick={() => {
+                                const next = !technicalInterviewVisionFirst;
+                                setTechnicalInterviewVisionFirst(next);
+                                const api: any = window.electronAPI;
+                                if (api?.setTechnicalInterviewVisionFirst) {
+                                    api.setTechnicalInterviewVisionFirst(next);
+                                } else {
+                                    window.electronAPI?.setTechnicalInterviewDirectVision?.(next);
+                                }
+                            }}
+                            className={`w-9 h-5 rounded-full relative transition-colors cursor-pointer shrink-0 ${technicalInterviewVisionFirst ? 'bg-emerald-500' : 'bg-bg-toggle-switch border border-border-muted'}`}
+                            role="switch"
+                            aria-checked={technicalInterviewVisionFirst}
+                        >
+                            <div className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${technicalInterviewVisionFirst ? 'translate-x-4' : 'translate-x-0'}`} />
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            {/* Cloud Provider Data Scopes — fail-closed cloud share controls */}
+            <div className="space-y-5">
+                <div>
+                    <h3 className="text-sm font-bold text-text-primary mb-1">Cloud provider data scopes</h3>
+                    <p className="text-xs text-text-secondary mb-2">Control what data cloud AI providers can access. Disabled types are handled locally for privacy.</p>
+                </div>
+                <div className="bg-bg-item-surface rounded-xl p-4 border border-border-subtle flex flex-col gap-2">
+                    {([
+                        { key: 'transcript', label: 'Transcripts' },
+                        { key: 'screenshots', label: 'Screenshots' },
+                        { key: 'reference_files', label: 'Reference files' },
+                        { key: 'profile_history', label: 'Profile history' },
+                        { key: 'embeddings', label: 'Cloud embeddings' },
+                        { key: 'post_call_summary', label: 'Post-call summaries' },
+                    ] as const).map(({ key, label }) => {
+                        const allowed = providerDataScopes[key] !== false;
+                        return (
+                            <div key={key} className="flex items-center justify-between">
+                                <span className="text-xs text-text-secondary">{label}</span>
+                                <div
+                                    onClick={() => {
+                                        const next = { ...providerDataScopes, [key]: !allowed };
+                                        setProviderDataScopes(next);
+                                        window.electronAPI?.setProviderDataScopes?.(next);
+                                    }}
+                                    className={`w-9 h-5 rounded-full relative transition-colors cursor-pointer ${allowed ? 'bg-emerald-500' : 'bg-bg-toggle-switch border border-border-muted'}`}
+                                    role="switch"
+                                    aria-checked={allowed}
+                                    aria-label={`Allow ${label} to cloud providers`}
+                                >
+                                    <div className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${allowed ? 'translate-x-4' : 'translate-x-0'}`} />
+                                </div>
+                            </div>
+                        );
+                    })}
+                    <div className="flex items-start gap-2 mt-1 pt-3 border-t border-border-subtle">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-text-tertiary shrink-0 mt-0.5"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+                        <p className="text-[11px] text-text-tertiary leading-relaxed">When a data type is disabled, Natively falls back to the best available local model to keep that data on-device.</p>
+                    </div>
+                </div>
+            </div>
             </div>
         </div>
     );
