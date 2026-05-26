@@ -32,6 +32,8 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneLight, vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 // import { ModelSelector } from './ui/ModelSelector'; // REMOVED
 import 'katex/dist/katex.min.css';
+import DOMPurify from 'dompurify';
+import { marked } from 'marked';
 import ReactMarkdown from 'react-markdown';
 import rehypeKatex from 'rehype-katex';
 import remarkGfm from 'remark-gfm';
@@ -1123,6 +1125,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         tokenBufRef.current.raf = null;
         tokenBufRef.current.text = '';
       }
+      // Also reset imperative streaming refs on unmount so stale DOM
+      // node refs don't fire after the component is gone.
+      streamingNodeRef.current = null;
+      streamingTextRef.current = '';
+      streamingMsgIdRef.current = null;
     };
   }, []);
   // ────────────────────────────────────────────────────────────────────────
@@ -1238,117 +1245,145 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // emits ~200–400 tok/s, so a 400-token answer triggered 400 React renders
   // — each one cloning the messages array and re-rendering every prior row.
   //
-  // queueToken accumulates incoming tokens for a given intent into a ref-
-  // backed buffer; the FIRST token in a frame schedules a single
-  // requestAnimationFrame that flushes the buffer with one setMessages.
-  // Result: at most ~60 setMessages/sec regardless of token rate.
+  // ── Imperative Streaming (Option 2: RAF-throttled markdown) ──────────────
   //
-  // flushToken() is called by the "final answer" handlers BEFORE they apply
-  // their own setMessages, so any tokens still pending in the buffer are
-  // committed to the streaming row first — guarantees no token is lost on
-  // stream completion.
+  // Architecture overview:
+  //   • queueToken() writes each token directly to DOM via ref.textContent
+  //     — zero React renders per token. A pending RAF schedules a markdown
+  //     render (via marked + DOMPurify) at up to 60fps so the user sees
+  //     formatted output throughout the stream.
+  //   • Only the FIRST token of a new stream calls setMessages() to mount
+  //     the bubble. The bubble's ref-callback wires streamingNodeRef.
+  //   • flushToken() resets the imperative refs so the final-answer
+  //     setMessages() takes ownership of the rendered row via React.
+  //   • tokenBufRef is kept for the legacy sentinel/negotiation-coaching path
+  //     and for the cleanup effect above.
   //
-  // Single-buffer design (not per-intent) is fine because LLM streams never
-  // overlap by intent in this app. If the intent changes mid-stream we
-  // synchronously flush the previous intent's buffer before queuing.
+  // Tradeoff: marked parses the FULL accumulated text each RAF tick (not
+  // incremental). In practice this is <1ms for typical LLM responses and
+  // invisible at 60fps. If a response grows beyond ~20 KB we can throttle
+  // the RAF to every other frame.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // Legacy buffer kept for sentinel/negotiation-coaching reset path.
   const tokenBufRef = useRef<{ intent: string; text: string; raf: number | null }>({
     intent: '',
     text: '',
     raf: null,
   });
 
-  // Sprint 13: React 18 concurrent mode — wrap streaming setMessages in
-  // reactStartTransition (React's startTransition, aliased to avoid the
-  // name clash with the local shell-width tween helper) so user input
-  // (clicks, keypresses, scrolling) gets higher render priority than
-  // streaming reconciliation. React can interrupt and resume the messages
-  // render between frames if a higher-priority update arrives. Negligible
-  // cost on small renders, real win when long history is in flight.
+  // Imperative streaming refs
+  const streamingNodeRef   = useRef<HTMLDivElement | null>(null);
+  const streamingTextRef   = useRef<string>('');
+  const streamingMsgIdRef  = useRef<string | null>(null);
+  const streamingRafRef    = useRef<number | null>(null);
+
+  // Helper: render accumulated markdown to the streaming DOM node via RAF.
+  // Called after every token write. Schedules at most one RAF per frame.
+  const scheduleMarkdownRender = useCallback(() => {
+    if (streamingRafRef.current !== null) return; // already pending
+    streamingRafRef.current = requestAnimationFrame(() => {
+      streamingRafRef.current = null;
+      const node = streamingNodeRef.current;
+      if (!node || !streamingTextRef.current) return;
+      // marked.parse is sync and fast (<1ms for typical LLM chunks).
+      // DOMPurify strips any script/event-handler injection.
+      const rawHtml = marked.parse(streamingTextRef.current, { async: false }) as string;
+      node.innerHTML = DOMPurify.sanitize(rawHtml);
+    });
+  }, []);
+
+  // queueToken: imperative DOM write per token + RAF markdown render.
+  // Only the FIRST token of a stream calls setMessages (to mount the bubble).
+  // Subsequent tokens bypass React entirely — zero re-renders mid-stream.
   const queueToken = useCallback((intent: string, token: string) => {
-    const buf = tokenBufRef.current;
-    // If the intent changed, flush the prior buffer immediately so we don't
-    // append text from one stream onto another.
-    if (buf.text && buf.intent !== intent) {
-      const oldIntent = buf.intent;
-      const oldText = buf.text;
-      buf.text = '';
-      if (buf.raf !== null) {
-        cancelAnimationFrame(buf.raf);
-        buf.raf = null;
+    // If a new stream intent arrives while one is active, flush the current
+    // stream into React state so the rows don't bleed into each other.
+    if (streamingMsgIdRef.current !== null && streamingTextRef.current) {
+      const prevText = streamingTextRef.current;
+      const prevId   = streamingMsgIdRef.current;
+      streamingNodeRef.current  = null;
+      streamingTextRef.current  = '';
+      streamingMsgIdRef.current = null;
+      if (streamingRafRef.current !== null) {
+        cancelAnimationFrame(streamingRafRef.current);
+        streamingRafRef.current = null;
       }
       reactStartTransition(() => {
         setMessages((prev) => {
-          const lastMsg = prev[prev.length - 1];
-          if (lastMsg && lastMsg.isStreaming && lastMsg.intent === oldIntent) {
+          const idx = prev.findLastIndex((m) => m.id === prevId);
+          if (idx !== -1) {
             const updated = [...prev];
-            updated[prev.length - 1] = { ...lastMsg, text: lastMsg.text + oldText };
+            updated[idx] = { ...updated[idx], text: prevText };
             return updated;
           }
-          return [
-            ...prev,
-            {
-              id: Date.now().toString(),
-              role: 'system',
-              text: oldText,
-              intent: oldIntent,
-              isStreaming: true,
-            },
-          ];
+          return prev;
         });
       });
     }
-    buf.intent = intent;
-    buf.text += token;
-    if (buf.raf === null) {
-      buf.raf = requestAnimationFrame(() => {
-        buf.raf = null;
-        const text = buf.text;
-        const i = buf.intent;
-        buf.text = '';
-        if (!text) return;
-        reactStartTransition(() => {
-          setMessages((prev) => {
-            const lastMsg = prev[prev.length - 1];
-            if (lastMsg && lastMsg.isStreaming && lastMsg.intent === i) {
-              const updated = [...prev];
-              updated[prev.length - 1] = { ...lastMsg, text: lastMsg.text + text };
-              return updated;
-            }
-            return [
-              ...prev,
-              { id: Date.now().toString(), role: 'system', text, intent: i, isStreaming: true },
-            ];
-          });
-        });
-      });
+
+    streamingTextRef.current += token;
+
+    if (streamingMsgIdRef.current !== null) {
+      // Mid-stream: write directly to DOM, schedule markdown render.
+      if (streamingNodeRef.current) {
+        // Fast path: update textContent immediately so the user sees the
+        // new character without waiting for the RAF, then let the RAF
+        // upgrade it to rendered HTML. This gives sub-frame latency for
+        // plain text and up-to-60fps latency for markdown.
+        streamingNodeRef.current.textContent = streamingTextRef.current;
+      }
+      scheduleMarkdownRender();
+      return;
     }
-  }, []);
+
+    // First token: mount the bubble via setMessages, then RAF will render.
+    const id = Date.now().toString();
+    streamingMsgIdRef.current = id;
+    reactStartTransition(() => {
+      setMessages((prev) => [
+        ...prev,
+        { id, role: 'system', text: token, intent, isStreaming: true },
+      ]);
+    });
+    scheduleMarkdownRender();
+  }, [scheduleMarkdownRender]);
+
+  // registerStreamingNode: ref-callback wired to the streaming bubble's div.
+  // Called by React when the node mounts/unmounts.
+  const registerStreamingNode = useCallback((msgId: string, el: HTMLDivElement | null) => {
+    if (msgId !== streamingMsgIdRef.current) return;
+    streamingNodeRef.current = el;
+    if (el && streamingTextRef.current) {
+      // Push any text that arrived before the DOM node was ready.
+      scheduleMarkdownRender();
+    }
+  }, [scheduleMarkdownRender]);
 
   const flushToken = useCallback(() => {
-    const buf = tokenBufRef.current;
-    if (buf.raf !== null) {
-      cancelAnimationFrame(buf.raf);
-      buf.raf = null;
+    // Cancel any pending markdown RAF — the final-answer setMessages is
+    // about to take ownership of the row with fully rendered content.
+    if (streamingRafRef.current !== null) {
+      cancelAnimationFrame(streamingRafRef.current);
+      streamingRafRef.current = null;
     }
-    if (!buf.text) return;
-    const text = buf.text;
-    const intent = buf.intent;
-    buf.text = '';
-    // NOT wrapped in startTransition — flush is called synchronously
-    // before a final-answer setMessages, and we want the trailing tokens
-    // to be in DOM before the final state is committed (so React's batch
-    // doesn't reorder them after the final). The ordering must hold.
+    const text   = streamingTextRef.current;
+    const msgId  = streamingMsgIdRef.current;
+    // Reset imperative refs BEFORE setMessages so the streaming short-circuit
+    // in renderMessageText is no longer active when React re-renders the row.
+    streamingNodeRef.current  = null;
+    streamingTextRef.current  = '';
+    streamingMsgIdRef.current = null;
+    if (!text || !msgId) return;
+    // NOT wrapped in startTransition — ordering must hold.
     setMessages((prev) => {
-      const lastMsg = prev[prev.length - 1];
-      if (lastMsg && lastMsg.isStreaming && lastMsg.intent === intent) {
+      const idx = prev.findLastIndex((m) => m.id === msgId);
+      if (idx !== -1) {
         const updated = [...prev];
-        updated[prev.length - 1] = { ...lastMsg, text: lastMsg.text + text };
+        updated[idx] = { ...updated[idx], text };
         return updated;
       }
-      return [
-        ...prev,
-        { id: Date.now().toString(), role: 'system', text, intent, isStreaming: true },
-      ];
+      return prev;
     });
   }, []);
   // ──────────────────────────────────────────────────────────────────────────
@@ -2484,6 +2519,26 @@ Provide only the answer, nothing else.`;
   // other deps so its inclusion is mostly defensive.
   const renderMessageText = useCallback(
     (msg: Message) => {
+      // ── Imperative streaming short-circuit ──────────────────────────────
+      // While the message is mid-stream, render a plain div with a ref so
+      // queueToken can write rendered markdown HTML directly to the DOM node
+      // without going through React reconciliation.
+      // On stream completion, flushToken() resets streamingMsgIdRef and the
+      // next render falls through to the normal intent-specific path below.
+      if (msg.isStreaming && msg.role === 'system' && !msg.isNegotiationCoaching
+          && msg.id === streamingMsgIdRef.current) {
+        return (
+          <div
+            ref={(el) => registerStreamingNode(msg.id, el)}
+            className="markdown-content whitespace-pre-wrap"
+          >
+            {/* Initial text shown before the RAF fires for the first time */}
+            {msg.text}
+          </div>
+        );
+      }
+      // ────────────────────────────────────────────────────────────────────
+
       // Negotiation coaching card takes priority
       if (msg.isNegotiationCoaching && msg.negotiationCoachingData) {
         return (
