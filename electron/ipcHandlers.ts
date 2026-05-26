@@ -3667,7 +3667,14 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
 
     const abortController = new AbortController();
-    const queryKey = `live-${Date.now()}`;
+    // Date.now() alone collides when two queries fire in the same ms — the
+    // second `set` would overwrite the first AbortController, the first
+    // stream would become un-cancellable, and the `finally` `delete` would
+    // evict the wrong entry. UUID guarantees uniqueness.
+    // (Note: rag:cancel-query only matches `meeting-` and `global` prefixes,
+    // so `live-` keys aren't cancellable through that path — pre-existing
+    // behaviour, not regressed by this change.)
+    const queryKey = `live-${crypto.randomUUID()}`;
     activeRAGQueries.set(queryKey, abortController);
 
     try {
@@ -3706,7 +3713,8 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
 
     const abortController = new AbortController();
-    const queryKey = `global-${Date.now()}`;
+    // See live-${...} comment above for why Date.now() alone is unsafe.
+    const queryKey = `global-${crypto.randomUUID()}`;
     activeRAGQueries.set(queryKey, abortController);
 
     try {
@@ -4315,7 +4323,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         const appStateIntMgr = appState.getIntelligenceManager();
         if (appStateIntMgr && activeMode) {
           appStateIntMgr.setDynamicActionContext({
-            sessionId: `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+            sessionId: `session_${crypto.randomUUID()}`,
             modeId: activeMode.id,
             modeTemplateType: activeMode.templateType,
           });

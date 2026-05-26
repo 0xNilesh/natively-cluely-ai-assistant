@@ -49,6 +49,7 @@ import {
 } from '../lib/overlayAppearance';
 import { NegotiationCoachingCard } from '../premium';
 import type { DynamicActionPayload } from '../types/electron';
+import { genMessageId } from '../utils/messageId';
 import { getCodexCliModelDisplayName } from '../utils/modelUtils';
 import { getModifierSymbol, isMac } from '../utils/platformUtils';
 import { DynamicActionBar } from './dynamic-actions/DynamicActionBar';
@@ -1338,7 +1339,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     }
 
     // First token: mount the bubble via setMessages, then RAF will render.
-    const id = Date.now().toString();
+    const id = genMessageId();
     streamingMsgIdRef.current = id;
     reactStartTransition(() => {
       setMessages((prev) => [
@@ -1485,7 +1486,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         setMessages((prev) => [
           ...prev,
           {
-            id: Date.now().toString(),
+            id: genMessageId(),
             role: 'system',
             text: data.suggestion,
           },
@@ -1499,7 +1500,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         setMessages((prev) => [
           ...prev,
           {
-            id: Date.now().toString(),
+            id: genMessageId(),
             role: 'system',
             text: `Error: ${err.error}`,
           },
@@ -1537,7 +1538,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           return [
             ...prev,
             {
-              id: Date.now().toString(),
+              id: genMessageId(),
               role: 'system',
               text: data.answer,
               intent: 'what_to_answer',
@@ -1604,7 +1605,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           return [
             ...prev,
             {
-              id: Date.now().toString(),
+              id: genMessageId(),
               role: 'system',
               text: '',
               intent: 'what_to_answer',
@@ -1642,7 +1643,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           return [
             ...prev,
             {
-              id: Date.now().toString(),
+              id: genMessageId(),
               role: 'system',
               text: data.answer,
               intent: data.intent,
@@ -1677,7 +1678,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           return [
             ...prev,
             {
-              id: Date.now().toString(),
+              id: genMessageId(),
               role: 'system',
               text: data.summary,
               intent: 'recap',
@@ -1724,7 +1725,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           return [
             ...prev,
             {
-              id: Date.now().toString(),
+              id: genMessageId(),
               role: 'system',
               text: data.questions,
               intent: 'follow_up_questions',
@@ -1740,7 +1741,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         setMessages((prev) => [
           ...prev,
           {
-            id: Date.now().toString(),
+            id: genMessageId(),
             role: 'system',
             text: `🎯 **Answer:**\n\n${data.answer}`,
           },
@@ -1754,7 +1755,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         setMessages((prev) => [
           ...prev,
           {
-            id: Date.now().toString(),
+            id: genMessageId(),
             role: 'system',
             text: `❌ Error (${data.mode}): ${data.error}`,
           },
@@ -1803,7 +1804,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         return [
           ...prev,
           {
-            id: Date.now().toString(),
+            id: genMessageId(),
             role: 'system' as const,
             text: data.clarification,
             intent: 'clarify',
@@ -1852,7 +1853,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       setMessages((prev) => [
         ...prev,
         {
-          id: Date.now().toString(),
+          id: genMessageId(),
           role: 'user',
           text: 'What should I say about this?',
           hasScreenshot: true,
@@ -1881,7 +1882,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       setMessages((prev) => [
         ...prev,
         {
-          id: Date.now().toString(),
+          id: genMessageId(),
           role: 'system',
           text: `Error: ${err}`,
         },
@@ -1902,7 +1903,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       setMessages((prev) => [
         ...prev,
         {
-          id: Date.now().toString(),
+          id: genMessageId(),
           role: 'system',
           text: `Error: ${err}`,
         },
@@ -1923,7 +1924,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       setMessages((prev) => [
         ...prev,
         {
-          id: Date.now().toString(),
+          id: genMessageId(),
           role: 'system',
           text: `Error: ${err}`,
         },
@@ -1944,7 +1945,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       setMessages((prev) => [
         ...prev,
         {
-          id: Date.now().toString(),
+          id: genMessageId(),
           role: 'system',
           text: `Error: ${err}`,
         },
@@ -1965,7 +1966,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       setMessages((prev) => [
         ...prev,
         {
-          id: Date.now().toString(),
+          id: genMessageId(),
           role: 'system',
           text: `Error: ${err}`,
         },
@@ -1987,7 +1988,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       setMessages((prev) => [
         ...prev,
         {
-          id: Date.now().toString(),
+          id: genMessageId(),
           role: 'user',
           text: 'Give me a code hint for this',
           hasScreenshot: true,
@@ -2008,7 +2009,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       setMessages((prev) => [
         ...prev,
         {
-          id: Date.now().toString(),
+          id: genMessageId(),
           role: 'system',
           text: `Error: ${err}`,
         },
@@ -2030,7 +2031,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       setMessages((prev) => [
         ...prev,
         {
-          id: Date.now().toString(),
+          id: genMessageId(),
           role: 'user',
           text: 'Brainstorm with this context',
           hasScreenshot: true,
@@ -2051,7 +2052,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       setMessages((prev) => [
         ...prev,
         {
-          id: Date.now().toString(),
+          id: genMessageId(),
           role: 'system',
           text: `Error: ${err}`,
         },
@@ -2129,7 +2130,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           return [
             ...prev,
             {
-              id: Date.now().toString(),
+              id: genMessageId(),
               role: 'system',
               text: `❌ Error: ${error}`,
             },
@@ -2144,13 +2145,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       window.electronAPI.onPhoneMirrorIncomingChat(({ message }) => {
         flushToken();
         requestStartTimeRef.current = Date.now();
-        const userId = Date.now().toString();
-        const placeholderId = `${userId}-reply`;
         setMessages((prev) => [
           ...prev,
-          { id: userId, role: 'user', text: message },
+          { id: genMessageId(), role: 'user', text: message },
           {
-            id: placeholderId,
+            id: genMessageId(),
             role: 'system',
             text: '',
             intent: 'chat',
@@ -2262,7 +2261,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           setMessages((prev) => [
             ...prev,
             {
-              id: Date.now().toString(),
+              id: genMessageId(),
               role: 'system',
               text: `❌ STT Error: ${sttUserError}`,
             },
@@ -2271,7 +2270,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           setMessages((prev) => [
             ...prev,
             {
-              id: Date.now().toString(),
+              id: genMessageId(),
               role: 'system',
               text: '⏳ STT is reconnecting, try again in a moment.',
             },
@@ -2280,7 +2279,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           setMessages((prev) => [
             ...prev,
             {
-              id: Date.now().toString(),
+              id: genMessageId(),
               role: 'system',
               text: '⚠️ No speech detected. Try speaking closer to your microphone.',
             },
@@ -2293,7 +2292,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       setMessages((prev) => [
         ...prev,
         {
-          id: Date.now().toString(),
+          id: genMessageId(),
           role: 'user',
           text: question,
           hasScreenshot: currentAttachments.length > 0,
@@ -2310,7 +2309,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       setMessages((prev) => [
         ...prev,
         {
-          id: Date.now().toString(),
+          id: genMessageId(),
           role: 'system',
           text: '',
           intent: 'chat',
@@ -2368,7 +2367,7 @@ Provide only the answer, nothing else.`;
           // If we just added the empty streaming placeholder, remove it or fill it with error
           if (last && last.isStreaming && last.text === '') {
             return prev.slice(0, -1).concat({
-              id: Date.now().toString(),
+              id: genMessageId(),
               role: 'system',
               text: `❌ Error starting stream: ${err}`,
             });
@@ -2376,7 +2375,7 @@ Provide only the answer, nothing else.`;
           return [
             ...prev,
             {
-              id: Date.now().toString(),
+              id: genMessageId(),
               role: 'system',
               text: `❌ Error: ${err}`,
             },
@@ -2434,7 +2433,7 @@ Provide only the answer, nothing else.`;
     setMessages((prev) => [
       ...prev,
       {
-        id: Date.now().toString(),
+        id: genMessageId(),
         role: 'user',
         text: userText || (currentAttachments.length > 0 ? 'Analyze this screenshot' : ''),
         hasScreenshot: currentAttachments.length > 0,
@@ -2451,7 +2450,7 @@ Provide only the answer, nothing else.`;
     setMessages((prev) => [
       ...prev,
       {
-        id: Date.now().toString(),
+        id: genMessageId(),
         role: 'system',
         text: '',
         intent: 'chat',
@@ -2486,7 +2485,7 @@ Provide only the answer, nothing else.`;
         if (last && last.isStreaming && last.text === '') {
           // remove the empty placeholder
           return prev.slice(0, -1).concat({
-            id: Date.now().toString(),
+            id: genMessageId(),
             role: 'system',
             text: `❌ Error starting stream: ${err}`,
           });
@@ -2494,7 +2493,7 @@ Provide only the answer, nothing else.`;
         return [
           ...prev,
           {
-            id: Date.now().toString(),
+            id: genMessageId(),
             role: 'system',
             text: `❌ Error: ${err}`,
           },

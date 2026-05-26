@@ -1170,15 +1170,18 @@ ANSWER DIRECTLY:`;
     this.negotiationCoachingHandler = handler;
   }
 
-  // Issue #272: gate live-negotiation coaching by active mode template so the
-  // premium tracker can never overwrite a technical-interview / team-meet /
-  // lecture answer with a salary card. Default to true if ModesManager is
-  // unavailable so we never regress modes that legitimately need coaching
-  // (looking-for-work, sales, recruiting, general).
-  private isNegotiationCoachingAllowed(): boolean {
+  // Issue #272: gate the ENTIRE premium knowledge intercept by active mode
+  // template so the tracker can never overwrite a technical-interview /
+  // team-meet / lecture answer with premium-flavored content. This closes
+  // three sibling bug vectors at once: (a) negotiation coaching card emission,
+  // (b) intro-question canned response, and (c) premium system-prompt /
+  // context-block injection into a downstream LLM call. Default to true if
+  // ModesManager is unavailable so we never regress modes that legitimately
+  // use the intercept (looking-for-work, sales, recruiting, general).
+  private isPremiumKnowledgeInterceptAllowed(): boolean {
     try {
       const { ModesManager } = require('./services/ModesManager');
-      return ModesManager.getInstance().isNegotiationCoachingAllowed();
+      return ModesManager.getInstance().isPremiumKnowledgeInterceptAllowed();
     } catch (_err) {
       return true;
     }
@@ -1341,17 +1344,17 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           this.knowledgeOrchestrator.feedForDepthScoring(message);
 
           const knowledgeResult = await this.knowledgeOrchestrator.processQuestion(message);
-          if (knowledgeResult) {
+          // Issue #272: gate ALL premium-intercept side-effects (coaching,
+          // intro shortcut, prompt/context injection) by active mode. The
+          // depth scorer above stays unconditional so it keeps getting signal.
+          // When the gate blocks, fall through entirely so the call proceeds
+          // as a normal LLM request with no premium-flavored injection.
+          if (knowledgeResult && this.isPremiumKnowledgeInterceptAllowed()) {
             // Live negotiation coaching short-circuit — bypass second LLM call.
             // Coaching payload travels on the dedicated handler channel, NOT
             // through the chat() return value. We return an empty string so
             // the caller emits no normal answer.
-            //
-            // Issue #272: suppress coaching for modes where salary is out of
-            // scope (technical-interview, team-meet, lecture). The tracker
-            // still receives utterances so depth scoring is unaffected, but a
-            // misfire can no longer overwrite a technical answer.
-            if (knowledgeResult.liveNegotiationResponse && this.isNegotiationCoachingAllowed()) {
+            if (knowledgeResult.liveNegotiationResponse) {
               this.negotiationCoachingHandler?.(knowledgeResult.liveNegotiationResponse);
               return '';
             }
@@ -2853,16 +2856,16 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         this.knowledgeOrchestrator.feedForDepthScoring(message);
 
         const knowledgeResult = await this.knowledgeOrchestrator.processQuestion(message);
-        if (knowledgeResult) {
+        // Issue #272: gate ALL premium-intercept side-effects (coaching, intro
+        // shortcut, prompt/context injection) by active mode. The depth scorer
+        // above stays unconditional so it keeps getting signal. When the gate
+        // blocks, fall through entirely so the stream proceeds as a normal LLM
+        // call with no premium-flavored injection.
+        if (knowledgeResult && this.isPremiumKnowledgeInterceptAllowed()) {
           // Live negotiation coaching short-circuit — bypass second LLM call.
           // Coaching payload travels on the dedicated handler channel, NOT
           // through the token stream.
-          //
-          // Issue #272: suppress coaching for modes where salary is out of
-          // scope (technical-interview, team-meet, lecture). Without this gate
-          // a misfire from the premium negotiation tracker would replace the
-          // user's expected technical answer with a salary card.
-          if (knowledgeResult.liveNegotiationResponse && this.isNegotiationCoachingAllowed()) {
+          if (knowledgeResult.liveNegotiationResponse) {
             this.negotiationCoachingHandler?.(knowledgeResult.liveNegotiationResponse);
             return;
           }
