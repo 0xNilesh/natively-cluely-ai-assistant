@@ -132,8 +132,9 @@ export class NativelyProSTT extends EventEmitter {
 
         // 'auto' is a sentinel — send it as-is so the backend does parallel batch detection.
         if (key === 'auto') {
+            const config = RECOGNITION_LANGUAGES.auto;
             this.languageBcp47      = 'auto';
-            this.languageAlternates = [];
+            this.languageAlternates = config.alternates ?? [];
             console.log('[NativelyProSTT] Language set to auto-detect mode');
         } else {
             const config = RECOGNITION_LANGUAGES[key];
@@ -192,8 +193,9 @@ export class NativelyProSTT extends EventEmitter {
         // Without this, a language_detected reconnect would leave languageBcp47 = 'fr-FR'
         // and the next meeting would start with French pinned instead of 'auto'.
         if (this.configuredLanguageKey === 'auto') {
-            this.languageBcp47     = 'auto';
-            this.languageAlternates = [];
+            const config = RECOGNITION_LANGUAGES.auto;
+            this.languageBcp47      = 'auto';
+            this.languageAlternates = config.alternates ?? [];
         }
 
         if (this.reconnectTimer) {
