@@ -100,7 +100,7 @@ export class OpenAIStreamingSTT extends EventEmitter {
     private keepAliveTimer: NodeJS.Timeout | null = null;
     private connectionTimeoutTimer: NodeJS.Timeout | null = null;
     private sessionSetupTimer: NodeJS.Timeout | null = null;
-    private isSessionReady = false;     // set after transcription_session.created
+    private isSessionReady = false;     // set on inbound transcription_session.created (GA)
 
     // Audio batching state
     private pcmAccumulator: Int16Array[] = [];
@@ -113,6 +113,8 @@ export class OpenAIStreamingSTT extends EventEmitter {
     // Used to avoid losing speech at the start of a WS session or during fallback
     private ringBuffer: Buffer[] = [];
     private ringBufferBytes = 0;
+    private ringEvictedThisSession = false;
+    private ringEvictedBytes = 0;
 
     // REST fallback state
     private restChunks: Buffer[]   = [];
@@ -183,6 +185,8 @@ export class OpenAIStreamingSTT extends EventEmitter {
         this.wsModelIndex   = 0;
         this.wsFailures     = 0;
         this.reconnectAttempts = 0;
+        this.ringEvictedThisSession = false;
+        this.ringEvictedBytes = 0;
 
         // Custom endpoints (e.g. Speaches) don't implement OpenAI's Realtime WebSocket
         // protocol. Go straight to REST mode for them.
@@ -206,6 +210,9 @@ export class OpenAIStreamingSTT extends EventEmitter {
         // don't silently drop up to ~250ms of speech at the end of a session.
         // Then commit the input buffer so the server transcribes the trailing
         // audio even if its VAD hasn't tripped on the silence yet.
+        // Split append/commit into separate try blocks: a failed append must NOT
+        // bypass the commit — the server still has buffered audio from prior
+        // _sendWsAudioChunk calls that should be transcribed.
         if (this.mode === 'ws' && this.ws?.readyState === WebSocket.OPEN &&
             this.isSessionReady) {
             try {
@@ -221,8 +228,15 @@ export class OpenAIStreamingSTT extends EventEmitter {
                         audio: Buffer.from(combined.buffer).toString('base64'),
                     }));
                 }
+            } catch (err) {
+                console.warn('[OpenAIStreaming][WS] Stop append failed (continuing to commit):', err);
+            }
+            try {
                 this.ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
-            } catch { /* ignore — we're closing anyway */ }
+                console.log('[OpenAIStreaming][WS] Stop — committed input buffer');
+            } catch (err) {
+                console.warn('[OpenAIStreaming][WS] Stop commit failed:', err);
+            }
         }
 
         this._clearTimers();
@@ -281,6 +295,9 @@ export class OpenAIStreamingSTT extends EventEmitter {
         }
         if (this.ws?.readyState !== WebSocket.OPEN || !this.isSessionReady) return;
 
+        // Split append/commit into separate try blocks — a failed append must
+        // not bypass the commit; server-buffered audio from earlier chunks
+        // should still be transcribed.
         try {
             if (this.pcmAccumulatorLen > 0) {
                 const combined = new Int16Array(this.pcmAccumulatorLen);
@@ -296,10 +313,14 @@ export class OpenAIStreamingSTT extends EventEmitter {
                     audio: Buffer.from(combined.buffer).toString('base64'),
                 }));
             }
+        } catch (err) {
+            console.error('[OpenAIStreaming][WS] Finalize append failed (continuing to commit):', err);
+        }
+        try {
             this.ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
             console.log('[OpenAIStreaming][WS] Finalize — committed input buffer');
         } catch (err) {
-            console.error('[OpenAIStreaming][WS] Finalize append/commit failed:', err);
+            console.error('[OpenAIStreaming][WS] Finalize commit failed:', err);
         }
     }
 
@@ -377,7 +398,18 @@ export class OpenAIStreamingSTT extends EventEmitter {
 
         this.ws.on('message', (raw: WebSocket.Data) => {
             try {
-                const msg = JSON.parse(raw.toString());
+                // WebSocket.Data is `Buffer | ArrayBuffer | Buffer[]`. On fragmented
+                // frames `ws` delivers an array of Buffers — calling `.toString()`
+                // on the array would yield "buf1,buf2" (Array.prototype.toString),
+                // failing JSON.parse silently. Normalize first.
+                const text = Array.isArray(raw)
+                    ? Buffer.concat(raw).toString('utf8')
+                    : Buffer.isBuffer(raw)
+                        ? raw.toString('utf8')
+                        : raw instanceof ArrayBuffer
+                            ? Buffer.from(raw).toString('utf8')
+                            : String(raw);
+                const msg = JSON.parse(text);
                 this._handleWsMessage(msg);
             } catch (err) {
                 console.error('[OpenAIStreaming] WS parse error:', err);
@@ -437,7 +469,6 @@ export class OpenAIStreamingSTT extends EventEmitter {
     private _handleWsMessage(msg: Record<string, any>): void {
         switch (msg.type) {
             case 'transcription_session.created':
-            case 'session.created':
                 if (this.sessionSetupTimer) {
                     clearTimeout(this.sessionSetupTimer);
                     this.sessionSetupTimer = null;
@@ -447,6 +478,14 @@ export class OpenAIStreamingSTT extends EventEmitter {
                 this.wsFailures     = 0; // Reset failures on successful session
                 this._startKeepAlive();
                 this._flushRingBuffer();
+                break;
+
+            case 'session.created':
+                // Belongs to the general realtime intent (not intent=transcription).
+                // We connect with ?intent=transcription, so the server should only emit
+                // transcription_session.created. If we see this, the server response shape
+                // has changed — make it visible rather than silently activating the wrong path.
+                console.warn('[OpenAIStreaming] Unexpected session.created on transcription intent — ignoring (expected transcription_session.created)');
                 break;
 
             case 'conversation.item.input_audio_transcription.delta':
@@ -482,7 +521,12 @@ export class OpenAIStreamingSTT extends EventEmitter {
                 break;
 
             case 'error': {
-                const errMsg = msg.error?.message ?? JSON.stringify(msg);
+                const rawErrMsg = msg.error?.message ?? JSON.stringify(msg);
+                // Defensive scrub: if the server ever echoes back the Authorization
+                // header (or any 'Bearer sk-…' string) inside an error body, do not
+                // log or propagate the secret. Mirrors the STT key scrubbing posture
+                // from the May 24 telemetry change.
+                const errMsg = OpenAIStreamingSTT._scrubBearerTokens(rawErrMsg);
                 console.error(`[OpenAIStreaming] Server error: ${errMsg}`);
                 this.emit('error', new Error(errMsg));
                 break;
@@ -533,12 +577,39 @@ export class OpenAIStreamingSTT extends EventEmitter {
     }
 
     private _closeWs(graceful: boolean): void {
+        // Always tear down the keepalive interval first so an in-flight tick
+        // can't fire against a stale (or about-to-be-replaced) socket.
+        this._clearKeepAlive();
         if (!this.ws) return;
-        try {
-            if (graceful && this.ws.readyState === WebSocket.OPEN) {
-                this.ws.send(JSON.stringify({ type: 'session.close' }));
+        // GA transcription intent has no client→server session.close — that event
+        // only exists for the translation subresource. Sending it on intent=transcription
+        // produces a server `error` (unknown_type) which would bubble as a meeting-end
+        // error on every language change. TCP-level close is sufficient.
+        // For a graceful tear-down (language change) we flush any pending PCM and
+        // commit the input buffer before closing so server-buffered audio isn't dropped.
+        if (graceful && this.ws.readyState === WebSocket.OPEN && this.isSessionReady) {
+            try {
+                if (this.pcmAccumulatorLen > 0) {
+                    const combined = new Int16Array(this.pcmAccumulatorLen);
+                    let offset = 0;
+                    for (const arr of this.pcmAccumulator) {
+                        combined.set(arr, offset);
+                        offset += arr.length;
+                    }
+                    this.ws.send(JSON.stringify({
+                        type:  'input_audio_buffer.append',
+                        audio: Buffer.from(combined.buffer).toString('base64'),
+                    }));
+                }
+            } catch (err) {
+                console.warn('[OpenAIStreaming][WS] Graceful append failed:', err);
             }
-        } catch { /* ignore */ }
+            try {
+                this.ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
+            } catch (err) {
+                console.warn('[OpenAIStreaming][WS] Graceful commit failed:', err);
+            }
+        }
         this.ws.removeAllListeners();
         this.ws.close();
         this.ws = null;
@@ -576,6 +647,13 @@ export class OpenAIStreamingSTT extends EventEmitter {
 
     /** 8 bytes of PCM silence (4 samples × 2 bytes) — safest keepalive for the Realtime API */
     private static readonly KEEPALIVE_AUDIO_B64 = Buffer.alloc(8).toString('base64');
+
+    /** Strip Bearer / sk-… tokens from any string we might log or propagate upstream. */
+    private static _scrubBearerTokens(s: string): string {
+        return s
+            .replace(/Bearer\s+[A-Za-z0-9_\-.]+/g, 'Bearer [REDACTED]')
+            .replace(/sk-[A-Za-z0-9_\-]{10,}/g, 'sk-[REDACTED]');
+    }
 
     private _startKeepAlive(): void {
         this._clearKeepAlive();
@@ -623,9 +701,30 @@ export class OpenAIStreamingSTT extends EventEmitter {
         this.ringBufferBytes += chunk.length;
 
         // Evict oldest chunks when over limit
+        let evictedBytesThisCall = 0;
         while (this.ringBufferBytes > MAX_RING_BUFFER_BYTES && this.ringBuffer.length > 0) {
             const evicted = this.ringBuffer.shift()!;
             this.ringBufferBytes -= evicted.length;
+            evictedBytesThisCall += evicted.length;
+        }
+
+        if (evictedBytesThisCall > 0) {
+            this.ringEvictedBytes += evictedBytesThisCall;
+            // Log + emit a non-fatal warning once per session so upstream telemetry
+            // can surface that leading speech was dropped while waiting for the WS
+            // handshake. After the first hit we accumulate silently to avoid log spam.
+            if (!this.ringEvictedThisSession) {
+                this.ringEvictedThisSession = true;
+                console.warn(
+                    `[OpenAIStreaming] Ring buffer evicted ${evictedBytesThisCall} bytes ` +
+                    `(cap=${MAX_RING_BUFFER_BYTES}). Session not yet ready — leading audio dropped.`
+                );
+                this.emit('warning', {
+                    code: 'ring_buffer_eviction',
+                    message: 'Leading audio dropped while waiting for STT session to become ready',
+                    droppedBytes: evictedBytesThisCall,
+                });
+            }
         }
     }
 

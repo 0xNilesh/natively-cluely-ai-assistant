@@ -299,4 +299,13 @@ export class SettingsWindowHelper {
             this.settingsWindow.setContentProtection(enable);
         }
     }
+
+    public syncActivationPolicy(): void {
+        if (process.platform !== 'win32') return;
+        if (!this.settingsWindow || this.settingsWindow.isDestroyed()) return;
+        this.settingsWindow.setContentProtection(this.contentProtection);
+        if (this.settingsWindow.isVisible()) {
+            this.settingsWindow.setOpacity(1);
+        }
+    }
 }

@@ -7,6 +7,7 @@ import { IntentResult } from "./IntentClassifier";
 import { ScreenContext } from "../services/screen/ScreenContextService";
 import { PromptAssembler } from "../services/context/PromptAssembler";
 import { checkAnswerForCodeBugs } from "./CodeSanityCheck";
+import type { ProviderDataScope } from "./ProviderRouter";
 
 // Dynamically imported to avoid circular dependency at module load time
 type ModesManagerType = {
@@ -125,13 +126,29 @@ ANSWER SHAPE: ${intentResult.answerShape}
                     // are unavailable, so we just need a single await here.
                     // Sync lexical method remains as the second-line fallback in
                     // case the hybrid method is missing (older module shape).
-                    if (typeof this.modesManager.buildRetrievedActiveModeContextBlockHybrid === 'function') {
-                        modeContextBlock = await this.modesManager.buildRetrievedActiveModeContextBlockHybrid(
-                            cleanedTranscript, cleanedTranscript, 1800,
-                        );
+                    let referenceFilesAllowed = true;
+                    try {
+                        const { SettingsManager } = require('../services/SettingsManager');
+                        const policy = SettingsManager.getInstance().get('providerDataScopes');
+                        referenceFilesAllowed = policy?.reference_files !== false;
+                    } catch (_scopeErr: any) {
+                        referenceFilesAllowed = false;
+                        console.warn('[ScopeFallback] reference_files policy unavailable; Ollama unavailable, omitting from context');
                     }
-                    if (!modeContextBlock) {
+                    if (referenceFilesAllowed) {
+                        if (typeof this.modesManager.buildRetrievedActiveModeContextBlockHybrid === 'function') {
+                            modeContextBlock = await this.modesManager.buildRetrievedActiveModeContextBlockHybrid(
+                                cleanedTranscript, cleanedTranscript, 1800,
+                            );
+                        }
+                        if (!modeContextBlock) {
+                            modeContextBlock = this.modesManager.buildRetrievedActiveModeContextBlock(cleanedTranscript, cleanedTranscript, 1800);
+                        }
+                    } else if (await this.llmHelper.canUseLocalFallback(false)) {
+                        console.warn('[ScopeFallback] reference_files denied for cloud; routing to Ollama');
                         modeContextBlock = this.modesManager.buildRetrievedActiveModeContextBlock(cleanedTranscript, cleanedTranscript, 1800);
+                    } else {
+                        console.warn('[ScopeFallback] reference_files denied; Ollama unavailable, omitting from context');
                     }
                 } catch (_err: any) {
                     console.warn('[WhatToAnswerLLM] ModesManager unavailable:', _err?.message);
@@ -199,7 +216,10 @@ ANSWER SHAPE: ${intentResult.answerShape}
             // Buffering does not delay the user's perceived latency because we
             // still yield every token as it arrives; the buffer is just appended.
             const streamedBuffer: string[] = [];
-            for await (const token of this.llmHelper.streamChat(packet.userMessage, imagePaths, undefined, finalPromptOverride, true, true)) {
+            const packetScopes: ProviderDataScope[] = [];
+            if (modeContextBlock) packetScopes.push('reference_files');
+            if (temporalContext?.hasRecentResponses && temporalContext.previousResponses.length > 0) packetScopes.push('profile_history');
+            for await (const token of this.llmHelper.streamChat(packet.userMessage, imagePaths, undefined, finalPromptOverride, true, true, packetScopes)) {
                 if (MEASURE) {
                     const now = performance.now();
                     if (tPrevToken > 0) interTokenLatencies.push(now - tPrevToken);

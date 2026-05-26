@@ -11,7 +11,12 @@ export const SkillsSettings: React.FC = () => {
     const loadSkills = useCallback(async () => {
         setLoading(true);
         try {
-            const list = await window.electronAPI?.skillsRefresh?.();
+            if (typeof window.electronAPI?.skillsRefresh !== 'function') {
+                setStatus('Skills IPC bridge not detected on window.electronAPI — preload may be missing.');
+                setSkills([]);
+                return;
+            }
+            const list = await window.electronAPI.skillsRefresh();
             setSkills(Array.isArray(list) ? list : []);
             setStatus(null);
         } catch (error: any) {
@@ -27,7 +32,11 @@ export const SkillsSettings: React.FC = () => {
 
     const openFolder = async () => {
         try {
-            const result = await window.electronAPI?.skillsOpenFolder?.();
+            if (typeof window.electronAPI?.skillsOpenFolder !== 'function') {
+                setStatus('Skills IPC bridge not detected on window.electronAPI — preload may be missing.');
+                return;
+            }
+            const result = await window.electronAPI.skillsOpenFolder();
             if (result?.path) setSkillsPath(result.path);
             if (!result?.success && result?.error) setStatus(result.error);
         } catch (error: any) {

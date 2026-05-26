@@ -467,6 +467,10 @@ export interface ElectronAPI {
   // Platform
   platform: NodeJS.Platform;
 
+  // Skills
+  skillsRefresh: () => Promise<SkillSummary[]>;
+  skillsOpenFolder: () => Promise<{ success: boolean; path: string; error?: string }>;
+
   // Phone Mirror
   phoneMirrorGetInfo: () => Promise<PhoneMirrorInfo>;
   phoneMirrorEnable: (exposeOnLan: boolean) => Promise<PhoneMirrorInfo | { error: string }>;
@@ -477,6 +481,13 @@ export interface ElectronAPI {
   onPhoneMirrorIncomingChat: (
     callback: (data: { message: string; streamId: string }) => void,
   ) => () => void;
+}
+
+export interface SkillSummary {
+  id: string;
+  name: string;
+  description: string;
+  source: 'builtin' | 'userData';
 }
 
 export interface PhoneMirrorInfo {

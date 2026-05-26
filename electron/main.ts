@@ -1290,6 +1290,16 @@ export class AppState {
       }
     });
 
+    // Non-fatal telemetry from providers (e.g. OpenAIStreamingSTT emits this
+    // when the pre-session ring buffer evicts leading audio while waiting for
+    // the WebSocket handshake). Surface it in the main-process log so the
+    // signal isn't silently dropped — the event is informational, not a status
+    // change, so we don't push it through the stt-status channel.
+    stt.on('warning', (w: { code?: string; message?: string; droppedBytes?: number }) => {
+      console.warn(`[Main] STT (${speaker}) warning: ${w?.code ?? 'unknown'}`,
+        { provider: sttProvider, message: w?.message, droppedBytes: w?.droppedBytes });
+    });
+
     // Auto language detection: NativelyProSTT emits 'languageDetected' when the
     // backend resolves the language from the first audio batch. Notify the renderer
     // so the settings UI can show what was detected.
@@ -3630,7 +3640,7 @@ export class AppState {
     this.cropperWindowHelper.setContentProtection(state)
 
     if (process.platform === 'win32') {
-      this.windowHelper.syncOverlayActivationPolicy();
+      this.windowHelper.syncOverlayInteractionPolicy();
       this.settingsWindowHelper.syncActivationPolicy();
       this.modelSelectorWindowHelper.syncActivationPolicy();
     }

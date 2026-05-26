@@ -963,6 +963,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     };
   },
 
+  // Skills — local SKILL.md instructions surfaced in Settings and the overlay.
+  skillsRefresh: () => ipcRenderer.invoke('skills:list'),
+  skillsOpenFolder: () => ipcRenderer.invoke('skills:open-folder'),
+
   // Phone Mirror — stream live AI responses to a paired phone over the LAN.
   phoneMirrorGetInfo: () => ipcRenderer.invoke('phone-mirror:get-info'),
   phoneMirrorEnable: (exposeOnLan: boolean) =>

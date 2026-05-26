@@ -11,6 +11,7 @@ import { AppState } from './main';
 import { CodexCliService } from './services/CodexCliService';
 import { PhoneMirrorService } from './services/PhoneMirrorService';
 import { SettingsManager } from './services/SettingsManager';
+import { SkillsManager } from './services/SkillsManager';
 
 import { TRIAL_SENTINEL_KEY } from './config/constants';
 import { AI_RESPONSE_LANGUAGES, RECOGNITION_LANGUAGES } from './config/languages';
@@ -2926,6 +2927,14 @@ export function initializeIpcHandlers(appState: AppState): void {
             const settings = SettingsManager.getInstance();
             const credentials = CredentialsManager.getInstance();
             const providerScopes = settings.get('providerDataScopes') || {};
+            const localVisionAvailable = credentials.anyLocalVisionProviderConfigured?.() ?? false;
+            if (providerScopes.screenshots === false) {
+              console.warn(
+                localVisionAvailable
+                  ? '[ScopeFallback] screenshots denied for cloud; routing to Ollama'
+                  : '[ScopeFallback] screenshots denied; Ollama unavailable, omitting from context',
+              );
+            }
 
             const sur = await sus.understand({
               modeId: 'what-to-say',
@@ -2939,7 +2948,7 @@ export function initializeIpcHandlers(appState: AppState): void {
                 localOnly: settings.getScreenUnderstandingMode() === 'private_vision',
                 allowScreenshots: providerScopes.screenshots !== false,
                 visionAvailable: credentials.anyVisionProviderConfigured?.() ?? true,
-                localVisionAvailable: credentials.anyLocalVisionProviderConfigured?.() ?? false,
+                localVisionAvailable,
               },
             });
 
@@ -4620,6 +4629,24 @@ export function initializeIpcHandlers(appState: AppState): void {
       settingsWin?.webContents?.send('phone-mirror:status', info);
     } catch (_) {
       /* settings window may not exist yet */
+    }
+  });
+
+  safeHandle('skills:list', () => {
+    try {
+      return SkillsManager.getInstance().listSkills();
+    } catch (e: any) {
+      console.warn('[IPC] skills:list error:', e?.message || e);
+      return [];
+    }
+  });
+
+  safeHandle('skills:open-folder', async () => {
+    try {
+      return await SkillsManager.getInstance().openSkillsFolder();
+    } catch (e: any) {
+      console.warn('[IPC] skills:open-folder error:', e?.message || e);
+      return { success: false, path: '', error: e?.message || 'failed to open skills folder' };
     }
   });
 

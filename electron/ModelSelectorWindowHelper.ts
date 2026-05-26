@@ -288,4 +288,13 @@ export class ModelSelectorWindowHelper {
             this.window.setContentProtection(enable);
         }
     }
+
+    public syncActivationPolicy(): void {
+        if (process.platform !== 'win32') return;
+        if (!this.window || this.window.isDestroyed()) return;
+        this.window.setContentProtection(this.contentProtection);
+        if (this.window.isVisible()) {
+            this.window.setOpacity(1);
+        }
+    }
 }

@@ -3,7 +3,7 @@ import { OpenAIEmbeddingProvider } from './providers/OpenAIEmbeddingProvider';
 import { GeminiEmbeddingProvider } from './providers/GeminiEmbeddingProvider';
 import { OllamaEmbeddingProvider } from './providers/OllamaEmbeddingProvider';
 import { LocalEmbeddingProvider } from './providers/LocalEmbeddingProvider';
-import { assertProviderDataScopes, type ProviderDataScopePolicy } from '../llm/ProviderRouter';
+import { ProviderScopeError, assertProviderDataScopes, type ProviderDataScopePolicy } from '../llm/ProviderRouter';
 
 export interface AppAPIConfig {
   openaiKey?: string;
@@ -21,25 +21,39 @@ export class EmbeddingProviderResolver {
   static async resolve(config: AppAPIConfig): Promise<IEmbeddingProvider> {
     const candidates: IEmbeddingProvider[] = [];
 
+    let embeddingsDenied = false;
+
     if (config.openaiKey) {
       try {
         assertProviderDataScopes('openai_embeddings', ['embeddings'], config.providerDataScopes);
         candidates.push(new OpenAIEmbeddingProvider(config.openaiKey));
-      } catch {
-        console.log('[EmbeddingProviderResolver] OpenAI embeddings disabled by provider data scope policy');
+      } catch (error) {
+        if (error instanceof ProviderScopeError) {
+          embeddingsDenied = true;
+          console.warn('[ScopeFallback] embeddings denied for cloud; routing to Ollama');
+        } else {
+          throw error;
+        }
       }
     }
     if (config.geminiKey) {
       try {
         assertProviderDataScopes('gemini_embeddings', ['embeddings'], config.providerDataScopes);
         candidates.push(new GeminiEmbeddingProvider(config.geminiKey));
-      } catch {
-        console.log('[EmbeddingProviderResolver] Gemini embeddings disabled by provider data scope policy');
+      } catch (error) {
+        if (error instanceof ProviderScopeError) {
+          embeddingsDenied = true;
+          console.warn('[ScopeFallback] embeddings denied for cloud; routing to Ollama');
+        } else {
+          throw error;
+        }
       }
     }
-    
+
     candidates.push(new OllamaEmbeddingProvider(config.ollamaUrl || 'http://localhost:11434'));
-    candidates.push(new LocalEmbeddingProvider()); // always last, always works
+    if (!embeddingsDenied) {
+      candidates.push(new LocalEmbeddingProvider()); // always last, always works
+    }
 
     for (const provider of candidates) {
       const available = await provider.isAvailable();
@@ -50,7 +64,12 @@ export class EmbeddingProviderResolver {
       console.log(`[EmbeddingProviderResolver] Provider ${provider.name} unavailable, trying next...`);
     }
 
-    // This should never happen since LocalEmbeddingProvider.isAvailable() 
+    if (embeddingsDenied) {
+      console.warn('[ScopeFallback] embeddings denied; Ollama unavailable, using bundled local embedding model');
+      return new LocalEmbeddingProvider();
+    }
+
+    // This should never happen since LocalEmbeddingProvider.isAvailable()
     // only returns false if the bundled model is corrupted — a fatal install error
     throw new Error('No embedding provider available. The bundled model may be corrupted. Please reinstall.');
   }

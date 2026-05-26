@@ -128,8 +128,8 @@ test('preload and renderer types expose provider data scope controls', () => {
   assert.match(types, /setProviderDataScopes:\s*\(scopes:/);
 });
 
-test('SettingsOverlay renders cloud provider data scope controls wired to real IPC', () => {
-  const src = read('src/components/SettingsOverlay.tsx');
+test('AIProvidersSettings renders cloud provider data scope controls wired to real IPC', () => {
+  const src = read('src/components/settings/AIProvidersSettings.tsx');
 
   assert.match(src, /Cloud provider data scopes/);
   assert.match(src, /getProviderDataScopes\?\.\(\)\.then\(setProviderDataScopes\)/);
