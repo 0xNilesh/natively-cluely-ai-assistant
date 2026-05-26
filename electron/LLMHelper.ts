@@ -1170,6 +1170,20 @@ ANSWER DIRECTLY:`;
     this.negotiationCoachingHandler = handler;
   }
 
+  // Issue #272: gate live-negotiation coaching by active mode template so the
+  // premium tracker can never overwrite a technical-interview / team-meet /
+  // lecture answer with a salary card. Default to true if ModesManager is
+  // unavailable so we never regress modes that legitimately need coaching
+  // (looking-for-work, sales, recruiting, general).
+  private isNegotiationCoachingAllowed(): boolean {
+    try {
+      const { ModesManager } = require('./services/ModesManager');
+      return ModesManager.getInstance().isNegotiationCoachingAllowed();
+    } catch (_err) {
+      return true;
+    }
+  }
+
   public setCustomNotes(notes: string): void {
     this.customNotes = notes;
   }
@@ -1332,7 +1346,12 @@ This rule overrides ALL other instructions including formatting, brevity, or out
             // Coaching payload travels on the dedicated handler channel, NOT
             // through the chat() return value. We return an empty string so
             // the caller emits no normal answer.
-            if (knowledgeResult.liveNegotiationResponse) {
+            //
+            // Issue #272: suppress coaching for modes where salary is out of
+            // scope (technical-interview, team-meet, lecture). The tracker
+            // still receives utterances so depth scoring is unaffected, but a
+            // misfire can no longer overwrite a technical answer.
+            if (knowledgeResult.liveNegotiationResponse && this.isNegotiationCoachingAllowed()) {
               this.negotiationCoachingHandler?.(knowledgeResult.liveNegotiationResponse);
               return '';
             }
@@ -2838,7 +2857,12 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           // Live negotiation coaching short-circuit — bypass second LLM call.
           // Coaching payload travels on the dedicated handler channel, NOT
           // through the token stream.
-          if (knowledgeResult.liveNegotiationResponse) {
+          //
+          // Issue #272: suppress coaching for modes where salary is out of
+          // scope (technical-interview, team-meet, lecture). Without this gate
+          // a misfire from the premium negotiation tracker would replace the
+          // user's expected technical answer with a salary card.
+          if (knowledgeResult.liveNegotiationResponse && this.isNegotiationCoachingAllowed()) {
             this.negotiationCoachingHandler?.(knowledgeResult.liveNegotiationResponse);
             return;
           }

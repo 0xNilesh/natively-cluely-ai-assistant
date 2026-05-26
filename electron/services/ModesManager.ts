@@ -221,6 +221,31 @@ export class ModesManager {
         return row ? rowToMode(row) : null;
     }
 
+    // Mode templates where a salary-negotiation coaching card would replace the
+    // user's expected answer with off-topic content. Technical interviews are
+    // coding/system-design only; team meetings and lectures have no salary
+    // scope. Issue #272: technical-interview users were getting one-line salary
+    // coaching cards instead of technical answers from the "What to Answer"
+    // button because the premium negotiation tracker fires on any interviewer
+    // utterance regardless of the active mode.
+    private static readonly NEGOTIATION_INCOMPATIBLE_TEMPLATES: ReadonlySet<ModeTemplateType> = new Set([
+        'technical-interview',
+        'team-meet',
+        'lecture',
+    ]);
+
+    /**
+     * True when negotiation coaching is contextually appropriate for the active
+     * mode. False for technical-interview, team-meet, and lecture — modes where
+     * a salary card mid-conversation overwrites the user's expected answer.
+     * Defaults to true when no mode is active.
+     */
+    public isNegotiationCoachingAllowed(): boolean {
+        const mode = this.getActiveMode();
+        if (!mode) return true;
+        return !ModesManager.NEGOTIATION_INCOMPATIBLE_TEMPLATES.has(mode.templateType);
+    }
+
     public createMode(params: { name: string; templateType: ModeTemplateType }): Mode {
         const id = `mode_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         DatabaseManager.getInstance().createMode({

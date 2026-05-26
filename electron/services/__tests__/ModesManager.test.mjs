@@ -275,6 +275,47 @@ test('reference context skips empty files and truncates large files with complet
   assert.ok(block.length < longContent.length);
 });
 
+test('isNegotiationCoachingAllowed suppresses salary cards in modes where salary is out of scope (issue #272)', () => {
+  // No active mode — default to allowed so we never regress modes that
+  // legitimately need coaching (the open-source side cannot inspect the
+  // premium tracker, so we fail open when nothing is selected).
+  installDb(makeDb());
+  assert.equal(
+    ModesManager.getInstance().isNegotiationCoachingAllowed(),
+    true,
+    'with no active mode the gate must default open',
+  );
+
+  const COACHING_ALLOWED = new Set(['general', 'sales', 'recruiting', 'looking-for-work']);
+  const COACHING_BLOCKED = new Set(['technical-interview', 'team-meet', 'lecture']);
+
+  // Every production mode must land on one side of the gate — guards against
+  // a future template silently inheriting the wrong default.
+  assert.deepEqual(
+    new Set([...COACHING_ALLOWED, ...COACHING_BLOCKED]),
+    new Set(EXPECTED_MODE_TYPES),
+    'every production mode must be classified explicitly',
+  );
+
+  for (const templateType of COACHING_ALLOWED) {
+    installDb(makeDb({ modes: [modeRow({ id: `${templateType}-mode`, template_type: templateType, is_active: 1 })] }));
+    assert.equal(
+      ModesManager.getInstance().isNegotiationCoachingAllowed(),
+      true,
+      `${templateType} should allow negotiation coaching`,
+    );
+  }
+
+  for (const templateType of COACHING_BLOCKED) {
+    installDb(makeDb({ modes: [modeRow({ id: `${templateType}-mode`, template_type: templateType, is_active: 1 })] }));
+    assert.equal(
+      ModesManager.getInstance().isNegotiationCoachingAllowed(),
+      false,
+      `${templateType} must NOT allow negotiation coaching — would overwrite the user's expected answer with a salary card (issue #272)`,
+    );
+  }
+});
+
 test('context assembly stays within low local latency budget for large active-mode files', () => {
   const files = Array.from({ length: 6 }, (_, i) => referenceRow({
     id: `file-${i}`,
