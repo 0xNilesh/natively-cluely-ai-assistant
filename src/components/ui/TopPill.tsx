@@ -22,11 +22,11 @@ export default function TopPill({
             <div
                 className="
           draggable-area
-          flex items-center gap-2
+          flex items-center gap-5
           rounded-full
           overlay-pill-surface
           backdrop-blur-md
-          pl-1.5 pr-1.5 py-1.5
+          pl-2.5 pr-2.5 py-1.5
           transition-all duration-300 ease-sculpted
         "
                 style={appearance.pillStyle}
