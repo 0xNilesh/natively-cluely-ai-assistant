@@ -132,11 +132,34 @@ export class MicrophoneCapture extends EventEmitter {
         console.log('[MicrophoneCapture] Stopping capture (deferred native teardown)...');
         this.isRecording = false;
         const monitor = this.monitor;
+        // Null the field so any caller that wins the race against the setImmediate
+        // below sees a clean slate. The setImmediate callback will eagerly
+        // reconstruct a fresh Rust monitor before the next meeting starts.
+        this.monitor = null;
         setImmediate(() => {
             try {
                 monitor?.stop();
             } catch (e) {
                 console.error('[MicrophoneCapture] Error stopping (deferred):', e);
+            }
+            // Pre-warm the next start. Without this, the next meeting's
+            // start() would run `new RustMicCapture(...)` synchronously on the
+            // Electron main thread WHILE SystemAudioCapture's CoreAudio Tap is
+            // still initialising on its Rust background thread — both grab the
+            // CoreAudio HAL property-listener lock, deadlocking the main thread
+            // and freezing the UI mid-paint. Doing the cpal stream construction
+            // here, after the prior monitor.stop() has fully released its HAL
+            // resources and BEFORE any Tap init is in flight, sidesteps the
+            // race entirely. The defensive branch in start() (line ~64) remains
+            // as a safety net for the rare case the user re-starts within the
+            // ~250ms window before this callback fires.
+            if (RustMicCapture && !this.monitor) {
+                try {
+                    console.log('[MicrophoneCapture] Pre-warming native monitor for next meeting...');
+                    this.monitor = new RustMicCapture(this.deviceId);
+                } catch (e) {
+                    console.error('[MicrophoneCapture] Pre-warm failed (next start() will retry):', e);
+                }
             }
         });
         this.emit('stop');

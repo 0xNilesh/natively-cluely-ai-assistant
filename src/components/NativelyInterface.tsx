@@ -329,6 +329,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 }) => {
   const isLightTheme = useResolvedTheme() === 'light';
   const isGlassTheme = interfaceTheme === 'liquid-glass';
+  const isModernTheme = interfaceTheme === 'modern';
   const shellRef = React.useRef<HTMLDivElement>(null);
   const [isExpanded, setIsExpanded] = useState(true);
   const [inputValue, setInputValue] = useState('');
@@ -350,6 +351,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const [conversationContext, setConversationContext] = useState<string>('');
   const [isManualRecording, setIsManualRecording] = useState(false);
   const isRecordingRef = useRef(false); // Ref to track recording state (avoids stale closure)
+  const isExpandedEffectInitializedRef = useRef(false);
+  const hasRenderedExpandedRef = useRef(false);
   const [manualTranscript, setManualTranscript] = useState('');
   const manualTranscriptRef = useRef<string>('');
   const [showTranscript, setShowTranscript] = useState(() => {
@@ -472,7 +475,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // Active mode name (shown as a badge near the Modes button)
   const [activeModeLabel, setActiveModeLabel] = useState<string | null>(null);
   const [llmProviderLabel, setLlmProviderLabel] = useState<string>('unknown');
-  const [llmPrivacyLabel, setLlmPrivacyLabel] = useState<string>('Checking privacy route');
+  const [llmPrivacyLabel, setLlmPrivacyLabel] = useState<string | null>(null);
   const [screenContextStatus, setScreenContextStatus] = useState<
     'not_available' | 'available' | 'failed'
   >('not_available');
@@ -512,7 +515,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           ? 'Local/private route'
           : config.provider === 'custom'
             ? 'Custom endpoint route'
-            : 'Cloud LLM route',
+            : null,
       );
     };
     loadLlmRoute();
@@ -848,11 +851,25 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   };
   const [systemAudioWarning, setSystemAudioWarning] = useState<SystemAudioWarning | null>(null);
   useEffect(() => {
-    const unsub = window.electronAPI?.onSystemAudioPermissionDenied?.((message: string) => {
+    let mounted = true;
+    const showPermissionWarning = (message: string) => {
       setSystemAudioWarning({ kind: 'screen-recording-permission', message });
-      setIsExpanded(true); // Force overlay open so user sees the warning
+      setIsExpanded(true);
+    };
+
+    window.electronAPI?.getSystemAudioPermissionWarning?.()
+      .then((message) => {
+        if (mounted && message) showPermissionWarning(message);
+      })
+      .catch(() => {});
+
+    const unsub = window.electronAPI?.onSystemAudioPermissionDenied?.((message: string) => {
+      showPermissionWarning(message);
     });
-    return () => unsub?.();
+    return () => {
+      mounted = false;
+      unsub?.();
+    };
   }, []);
 
   useEffect(() => {
@@ -1159,6 +1176,12 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 
   // Sync Window Visibility with Expanded State
   useEffect(() => {
+    if (!isExpandedEffectInitializedRef.current) {
+      isExpandedEffectInitializedRef.current = true;
+      isStealthRef.current = false;
+      return;
+    }
+
     if (isExpanded) {
       window.electronAPI.showWindow(isStealthRef.current);
       isStealthRef.current = false; // Reset back to default
@@ -1389,7 +1412,25 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   }, []);
   // ──────────────────────────────────────────────────────────────────────────
 
-  // Connect to Native Audio Backend
+  // Connect to Native Audio Backend.
+  //
+  // Mount-only by design. This effect previously depended on `[isExpanded]`,
+  // tearing down and re-registering ~20 IPC subscriptions on every expand or
+  // collapse toggle. Two real failure modes that produced:
+  //   1. Listener leak under React 18 strict-mode cleanup ordering — the
+  //      cleanup function could run AFTER the next effect schedule, removing
+  //      the NEW subscription instead of the old one. Stacked, this produced
+  //      duplicate streaming tokens, double transcripts, stuck isProcessing.
+  //   2. Lost events in the teardown gap — an IPC delivered between the
+  //      cleanup forEach and the next set of `electronAPI.on*` registrations
+  //      went to a dead handler. The screenshot and clarify-streaming
+  //      listeners below were already pulled out for exactly this reason
+  //      (comments at L1791+/L1808+); the ~20 here had the same hazard.
+  //
+  // None of the handlers in this effect read `isExpanded` directly — anything
+  // that needs the current expanded state already reads `isExpandedRef.current`
+  // (the ref is maintained by the separate effect at L915). So this is safe to
+  // run once at mount and tear down at unmount only.
   useEffect(() => {
     const cleanups: (() => void)[] = [];
 
@@ -1763,7 +1804,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       }),
     );
     return () => cleanups.forEach((fn) => fn());
-  }, [isExpanded]);
+  }, []);
 
   // Stable mount-only effect for screenshot listeners.
   // These MUST NOT be inside the [isExpanded] effect — when a screenshot is
@@ -2589,7 +2630,7 @@ Provide only the answer, nothing else.`;
                     const code = match[2].trim();
                     return (
                       <HighlightedCode
-                        key={i}
+                        key={`${msg.id}-${i}`}
                         code={code}
                         lang={lang}
                         isLightTheme={isLightTheme}
@@ -2605,7 +2646,7 @@ Provide only the answer, nothing else.`;
                 }
                 // Regular text - Render with Markdown
                 return (
-                  <div key={i} className="markdown-content">
+                  <div key={`${msg.id}-${i}`} className="markdown-content">
                     <ReactMarkdown
                       remarkPlugins={REMARK_PLUGINS}
                       rehypePlugins={REHYPE_PLUGINS}
@@ -2738,7 +2779,7 @@ Provide only the answer, nothing else.`;
 
                     return (
                       <HighlightedCode
-                        key={i}
+                        key={`${msg.id}-${i}`}
                         code={code}
                         lang={lang}
                         isLightTheme={isLightTheme}
@@ -2758,7 +2799,7 @@ Provide only the answer, nothing else.`;
                 // fresh object on every streaming token, defeating
                 // ReactMarkdown's internal render-bailout.
                 return (
-                  <div key={i} className="markdown-content">
+                  <div key={`${msg.id}-${i}`} className="markdown-content">
                     <ReactMarkdown
                       remarkPlugins={REMARK_PLUGINS}
                       rehypePlugins={REHYPE_PLUGINS}
@@ -3517,7 +3558,12 @@ Provide only the answer, nothing else.`;
       if (!stealthAutoEngageOkRef.current) return;
       const target = e.target as HTMLElement | null;
       if (!target?.closest?.('[data-stealth-engage="true"]')) return;
-      window.electronAPI.stealthTapStart().catch(() => {});
+      window.electronAPI.stealthTapStart().catch((err) => {
+        // m5: failures must be visible in dev tools, not silently swallowed —
+        // a dropped IPC here leaves the user typing into a window that thinks
+        // the tap engaged when it didn't.
+        console.warn('[stealth] tap start IPC failed', err);
+      });
     };
 
     document.addEventListener('mousedown', onMouseDown, true); // capture phase
@@ -3589,6 +3635,13 @@ Provide only the answer, nothing else.`;
   );
   const statusPillBaseClass = `flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-medium shadow-sm backdrop-blur-xl ${isLightTheme ? 'bg-white/55 border-black/10' : 'bg-black/20 border-white/10'}`;
 
+  const expandedMotionInitial = hasRenderedExpandedRef.current
+    ? { opacity: 0, y: 20, scale: 0.95 }
+    : false;
+  const markExpandedRendered = useCallback(() => {
+    hasRenderedExpandedRef.current = true;
+  }, []);
+
   const copyDiagnostics = async () => {
     const version = import.meta.env.VITE_APP_VERSION || 'unknown';
     const [arch, osVersion] = await Promise.all([
@@ -3633,16 +3686,17 @@ Provide only the answer, nothing else.`;
   return (
     <div
       ref={contentRef}
-      data-interface-theme={isGlassTheme ? 'liquid-glass' : undefined}
+      data-interface-theme={isGlassTheme ? 'liquid-glass' : isModernTheme ? 'modern' : undefined}
       className="flex flex-col items-center w-fit mx-auto h-fit min-h-0 bg-transparent p-0 rounded-[24px] font-sans gap-2 overlay-text-primary"
     >
       <AnimatePresence>
         {isExpanded && (
           <motion.div
-            initial={{ opacity: 0, y: 20, scale: 0.95 }}
+            initial={expandedMotionInitial}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 20, scale: 0.95 }}
             transition={{ duration: 0.3, ease: 'easeInOut' }}
+            onAnimationComplete={markExpandedRendered}
             className="flex flex-col items-center gap-2 w-full"
           >
             <TopPill
@@ -3667,22 +3721,24 @@ Provide only the answer, nothing else.`;
               {isGlassTheme && <GlassEffectLayer parentRef={shellRef} cornerRadius={24} />}
 
               <div className="relative no-drag flex flex-wrap items-center justify-center gap-1.5 px-4 pt-3 pb-1">
-                <div
-                  className={`${statusPillBaseClass} overlay-text-primary`}
-                  title={
-                    activeModeLabel ? `Active mode: ${activeModeLabel}` : 'No active mode selected'
-                  }
-                >
-                  <LayoutGrid className="h-3 w-3 opacity-70" />
-                  <span>{activeModeLabel ? `Mode: ${activeModeLabel}` : 'General mode'}</span>
-                </div>
-                <div
-                  className={`${statusPillBaseClass} ${getStatusToneClass(sttSummary.tone)}`}
-                  title={sttSummary.detail}
-                >
-                  <Mic className="h-3 w-3 opacity-70" />
-                  <span>{sttSummary.label}</span>
-                </div>
+                {activeModeLabel && (
+                  <div
+                    className={`${statusPillBaseClass} overlay-text-primary`}
+                    title={`Active mode: ${activeModeLabel}`}
+                  >
+                    <LayoutGrid className="h-3 w-3 opacity-70" />
+                    <span>{`Mode: ${activeModeLabel}`}</span>
+                  </div>
+                )}
+                {sttSummary.tone !== 'ok' && (
+                  <div
+                    className={`${statusPillBaseClass} ${getStatusToneClass(sttSummary.tone)}`}
+                    title={sttSummary.detail}
+                  >
+                    <Mic className="h-3 w-3 opacity-70" />
+                    <span>{sttSummary.label}</span>
+                  </div>
+                )}
                 {(() => {
                   // Vision-first status chip. Order of preference for what to show:
                   //   1. attached screenshots queued for this turn
@@ -3729,6 +3785,7 @@ Provide only the answer, nothing else.`;
                       : latestVisionProviderUsed
                         ? `Latest answer used ${latestVisionProviderUsed} vision on the screenshot`
                         : 'The latest answer received direct image input from the attached screen';
+                  if (attachedContext.length === 0 && !visionFailed && !visionSucceeded) return null;
                   return (
                     <div
                       className={`${statusPillBaseClass} ${visionFailed ? getStatusToneClass('warn') : visionSucceeded ? getStatusToneClass('ok') : 'overlay-text-primary'}`}
@@ -3737,9 +3794,7 @@ Provide only the answer, nothing else.`;
                           ? 'Attached screenshots will be sent to the vision provider when you send this turn'
                           : visionFailed
                             ? failureTitle
-                            : visionSucceeded
-                              ? providerTitle
-                              : 'No screen context attached'
+                            : providerTitle
                       }
                     >
                       <Monitor className="h-3 w-3 opacity-70" />
@@ -3748,20 +3803,20 @@ Provide only the answer, nothing else.`;
                           ? `${attachedContext.length} screen attached`
                           : visionFailed
                             ? failureLabel
-                            : visionSucceeded
-                              ? providerLabel
-                              : 'No screen context'}
+                            : providerLabel}
                       </span>
                     </div>
                   );
                 })()}
-                <div
-                  className={`${statusPillBaseClass} overlay-text-primary`}
-                  title={`${llmPrivacyLabel}: ${llmProviderLabel}`}
-                >
-                  <ShieldCheck className="h-3 w-3 opacity-70" />
-                  <span>{llmPrivacyLabel}</span>
-                </div>
+                {llmPrivacyLabel && (
+                  <div
+                    className={`${statusPillBaseClass} overlay-text-primary`}
+                    title={`${llmPrivacyLabel}: ${llmProviderLabel}`}
+                  >
+                    <ShieldCheck className="h-3 w-3 opacity-70" />
+                    <span>{llmPrivacyLabel}</span>
+                  </div>
+                )}
               </div>
 
               {/* System Audio / Screen Recording Warning Banner */}
@@ -4251,7 +4306,7 @@ Provide only the answer, nothing else.`;
                         const x = window.screenX + buttonRect.left;
                         const y = window.screenY + contentRect.bottom + GAP;
 
-                        window.electronAPI.toggleModelSelector({ x, y });
+                        window.electronAPI.toggleModelSelector({ x, y, activate: false });
                       }}
                       className={`
                                                 flex items-center gap-2 px-3 py-1.5

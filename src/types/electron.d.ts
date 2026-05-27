@@ -172,6 +172,7 @@ export interface ElectronAPI {
   getAiResponseLanguage: () => Promise<string>
   onSttLanguageAutoDetected: (callback: (bcp47: string) => void) => () => void
   onSystemAudioPermissionDenied: (callback: (message: string) => void) => () => void
+  getSystemAudioPermissionWarning: () => Promise<string | null>
   onDeviceSelectionApplied: (callback: (payload: { kind: 'input' | 'output'; requested: string | null; actual: string | null; fellBack: boolean; reason?: string }) => void) => () => void
   onAudioCaptureFailed: (callback: (payload: { channel: 'system' | 'mic'; message: string; attempt: number; maxAttempts: number; terminal?: boolean; stuck?: boolean }) => void) => () => void
 
@@ -227,6 +228,17 @@ export interface ElectronAPI {
   modesDeleteNoteSection: (id: string) => Promise<{ success: boolean; error?: string }>
   modesRemoveAllNoteSections: (modeId: string) => Promise<{ success: boolean; error?: string }>
 
+  // Meeting interface theme — cross-window propagation via IPC. localStorage's
+  // `storage` event does not cross Electron BrowserWindow boundaries, so without
+  // this hop the overlay window's React state stays pinned to its mount-time
+  // theme value, causing a half-paint freeze on the next meeting start.
+  setMeetingInterfaceTheme: (theme: string) => void
+  onMeetingInterfaceThemeChanged: (callback: (theme: string) => void) => () => void
+
+  // Cancel the in-flight gemini-chat-stream. Renderer wires this to "drop
+  // the current answer" user actions (Escape, navigation, chat-overlay unmount).
+  cancelChatStream: () => void
+
   // Meeting Lifecycle
   startMeeting: (metadata?: any) => Promise<{ success: boolean; error?: string }>
   endMeeting: () => Promise<{ success: boolean; error?: string }>
@@ -277,7 +289,7 @@ export interface ElectronAPI {
   getDefaultModel: () => Promise<{ model: string }>;
   setModel: (modelId: string) => Promise<{ success: boolean; error?: string }>;
   setDefaultModel: (modelId: string) => Promise<{ success: boolean; error?: string }>;
-  toggleModelSelector: (coords: { x: number; y: number }) => Promise<void>;
+  toggleModelSelector: (coords: { x: number; y: number; activate?: boolean }) => Promise<void>;
   modelSelectorCloseIfOpen: () => Promise<void>;
   forceRestartOllama: () => Promise<void>;
 
@@ -375,12 +387,12 @@ export interface ElectronAPI {
   onKeybindRegistrationFailed: (callback: (data: { id: string; accelerator: string }) => void) => () => void
   onGlobalShortcut: (callback: (data: { action: string }) => void) => () => void
 
-  // CGEventTap-backed stealth typing (macOS only — graceful degradation elsewhere)
+  // CGEventTap-backed stealth typing (macOS only — graceful degradation elsewhere).
+  // M5 cleanup: three pre-existing dead query-style IPCs were dropped — no
+  // main-side handler ever registered them and the renderer reads tap state
+  // via onStealthTapState instead.
   stealthTapAvailable: () => Promise<boolean>
-  stealthTapPermissionGranted: () => Promise<boolean>
-  stealthTapRequestPermission: () => Promise<boolean>
   stealthTapOpenSettings: () => Promise<void>
-  stealthTapIsActive: () => Promise<boolean>
   stealthTapStop: () => Promise<void>
   stealthTapStart: () => Promise<boolean>
   /** False on macOS when a composition IME (Pinyin/Hangul/Kanji/…) is

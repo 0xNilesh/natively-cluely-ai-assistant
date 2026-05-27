@@ -129,10 +129,24 @@ async function resolveMacScreenCaptureCapabilityTEST(
   appIsPackaged: boolean,
   getStatusFn: (type: 'microphone' | 'screen') => string,
   getSourcesFn: () => Promise<Array<{ id: string }>>
-): Promise<{ status: ScreenStatus; capturable: boolean; effectiveDenied: boolean; sourceCount: number; error?: string }> {
+): Promise<{ status: ScreenStatus; capturable: boolean; effectiveDenied: boolean; sourceCount: number; message?: string; error?: string }> {
   const status = getMacScreenCaptureStatusTEST(appIsPackaged, getStatusFn);
 
-  if (!appIsPackaged || status !== 'denied') {
+  if (!appIsPackaged) {
+    return { status, capturable: true, effectiveDenied: false, sourceCount: 0 };
+  }
+
+  if (status === 'restricted') {
+    return {
+      status,
+      capturable: false,
+      effectiveDenied: true,
+      sourceCount: 0,
+      message: 'Screen Recording is restricted by device policy. Interviewer audio will not be captured. Contact your administrator to allow screen capture for Natively.',
+    };
+  }
+
+  if (status !== 'denied') {
     return { status, capturable: true, effectiveDenied: false, sourceCount: 0 };
   }
 
@@ -146,6 +160,7 @@ async function resolveMacScreenCaptureCapabilityTEST(
       capturable: false,
       effectiveDenied: true,
       sourceCount: 0,
+      message: 'Screen Recording permission denied. Interviewer audio will not be captured. Enable in System Settings → Privacy & Security → Screen Recording, then restart the app.',
       error: error instanceof Error ? error.message : String(error),
     };
   }
@@ -390,6 +405,30 @@ async function testDeniedAndProbeErrorBlocksSystemAudio() {
   return pass;
 }
 
+async function testRestrictedBlocksWithPolicyMessage() {
+  console.log();
+  console.log('─'.repeat(60));
+  console.log('TEST: restricted screen status blocks with device-policy message');
+  console.log('─'.repeat(60));
+
+  mockPrefs.screenStatus = 'restricted';
+
+  const capability = await resolveMacScreenCaptureCapabilityTEST(
+    true,
+    mockSystemPreferences.getMediaAccessStatus.bind(mockSystemPreferences),
+    mockDesktopCapturer.getSources.bind(mockDesktopCapturer)
+  );
+  const pass = capability.status === 'restricted'
+    && !capability.capturable
+    && capability.effectiveDenied
+    && capability.message?.includes('device policy');
+  console.log(`  Capability: ${JSON.stringify(capability)}`);
+  console.log(`  ✅ PASS: ${pass ? 'YES' : 'NO'}`);
+
+  mockPrefs.screenStatus = 'granted';
+  return pass;
+}
+
 async function testMicAccessDenied() {
   console.log();
   console.log('─'.repeat(60));
@@ -445,6 +484,7 @@ async function main() {
     await testDeniedButCapturableAllowsSystemAudio(),
     await testDeniedAndProbeEmptyBlocksSystemAudio(),
     await testDeniedAndProbeErrorBlocksSystemAudio(),
+    await testRestrictedBlocksWithPolicyMessage(),
     await testMicAccessDenied(),
     await testMicAccessGranted(),
   ];

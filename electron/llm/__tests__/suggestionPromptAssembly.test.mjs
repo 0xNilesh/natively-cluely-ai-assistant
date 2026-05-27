@@ -37,23 +37,44 @@ test('generateSuggestion keeps active mode suffix in system prompt without user 
   assert.doesNotMatch(generateSuggestionSource, /\$\{activeModePrompt\}\$\{customNotesBlock\}/);
 });
 
-test('generateSuggestion sends custom notes and mode context as user message content', () => {
+test('generateSuggestion routes custom notes and mode context through the user-content side', () => {
+  // Security-critical invariant from issue #272: customNotesBlock travels
+  // via suggestionContext (user-content augmentation), never spliced into
+  // basePrompt / systemPrompt.
   assert.match(generateSuggestionSource, /const suggestionContext = \[customNotesBlock, enrichedContext\]\.filter\(Boolean\)\.join\('\\n\\n'\);/);
-  const streamChatMatches = generateSuggestionSource.match(/streamChat\(promptMessage, undefined, undefined, basePrompt, true\)/g) ?? [];
-  assert.equal(streamChatMatches.length, 2);
-  assert.match(generateSuggestionSource, /generateWithCodexCli\(promptMessage, basePrompt\)/);
+  // Commit e1e1ca7 deliberately switched the streamChat context arg from
+  // `undefined` to `suggestionContext` so custom notes flow with the user
+  // message instead of the system prompt.
+  const streamChatMatches = generateSuggestionSource.match(/streamChat\(promptMessage, undefined, suggestionContext, basePrompt, true\)/g) ?? [];
+  assert.equal(streamChatMatches.length, 2, 'both streamChat branches must forward suggestionContext');
+  // The Codex-CLI branch now routes through chatWithGemini (same commit)
+  // because generateWithCodexCli doesn't accept a context arg and would
+  // drop the custom-notes signal.
+  assert.match(generateSuggestionSource, /chatWithGemini\(promptMessage, undefined, suggestionContext, true\)/);
   assert.match(generateSuggestionSource, /callOllama\(promptMessage, undefined, systemPrompt\)/);
   assert.doesNotMatch(generateSuggestionSource, /generateWithFlash\(\[\{ text: `\$\{systemPrompt\}/);
   assert.doesNotMatch(generateSuggestionSource, /\$\{systemPrompt\}\\n\\n\$\{promptMessage\}/);
 });
 
 test('generateSuggestion does not append custom notes to any system prompt branch', () => {
-  assert.doesNotMatch(generateSuggestionSource, /basePrompt[\s\S]*customNotesBlock/);
+  // The most important invariant: customNotesBlock must NEVER land in
+  // basePrompt (the system prompt). Custom notes are unvalidated user
+  // input — splicing them into the system role is the original issue #272
+  // attack surface.
+  assert.doesNotMatch(generateSuggestionSource, /basePrompt[\s\S]*?customNotesBlock/);
   assert.doesNotMatch(generateSuggestionSource, /Never hedge\. Never say "it depends"\.\$\{customNotesBlock\}/);
 });
 
 test('WhatToAnswerLLM does not append active mode context to system prompt override', () => {
-  assert.match(whatToAnswerSource, /const finalPromptOverride = modePromptSuffix[\s\S]*## ACTIVE MODE\\n\$\{modePromptSuffix\}/);
+  // After the skills-overlay refactor (c41e329 + follow-ups) the prompt
+  // override is computed as `activeSkill ? skillPrompt : modePromptSuffix`.
+  // Accept either branch shape; the security invariant is that
+  // modeContextBlock is NOT concatenated into the system prompt.
+  assert.match(
+    whatToAnswerSource,
+    /const finalPromptOverride = [\s\S]*?\$\{modePromptSuffix\}/,
+    'finalPromptOverride must read modePromptSuffix into the system-prompt slot',
+  );
   assert.doesNotMatch(whatToAnswerSource, /activeModePromptParts = \[modePromptSuffix, modeContextBlock\]/);
   assert.doesNotMatch(whatToAnswerSource, /modeContextBlock\]\.filter\(Boolean\)/);
 });
@@ -78,6 +99,12 @@ test('WhatToAnswerLLM sends mode context only through user content at runtime', 
     getCapabilities: () => ({ outputBudgetTokens: 2000 }),
     getPromptTier: () => 'full',
     fitContextForCurrentModel: text => text,
+    // Phase 4 retrieval path consults canUseLocalFallback when the
+    // provider-data-scope policy is unavailable (the SettingsManager singleton
+    // isn't reachable from a node-test process). Return true so the
+    // reference_files retrieval still resolves through the lexical
+    // buildRetrievedActiveModeContextBlock path the test mocks below.
+    canUseLocalFallback: async () => true,
     async *streamChat(...args) {
       calls.push(args);
       yield 'ok';
@@ -122,6 +149,11 @@ test('WhatToAnswerLLM does not dump raw active mode context when retrieval misse
     getCapabilities: () => ({ outputBudgetTokens: 2000 }),
     getPromptTier: () => 'full',
     fitContextForCurrentModel: text => text,
+    // See sibling test — Phase 4 path consults canUseLocalFallback when
+    // SettingsManager is unavailable. Returning true keeps the retrieval
+    // path live so we can verify that an empty retrieval result does not
+    // trigger the raw-dump fallback.
+    canUseLocalFallback: async () => true,
     async *streamChat(...args) {
       calls.push(args);
       yield 'ok';

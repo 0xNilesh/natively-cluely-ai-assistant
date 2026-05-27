@@ -2826,7 +2826,15 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     ...args: Parameters<LLMHelper['_streamChatInner']>
   ): AsyncGenerator<string, void, unknown> {
     const { reduceDashesInChunk } = await import('./llm/postProcessor');
+    // Pull the optional abort signal (always the last positional arg).
+    // Use `instanceof AbortSignal` rather than duck-typing — duck-typing on
+    // `.aborted` is ambiguous because future params (extraDataScopes, options
+    // objects) could accidentally satisfy the shape. instanceof is exact and
+    // requires Node ≥17 (Electron's runtime is well past that).
+    const lastArg = args[args.length - 1];
+    const abortSignal = lastArg instanceof AbortSignal ? lastArg : undefined;
     for await (const chunk of this._streamChatInner(...args)) {
+      if (abortSignal?.aborted) return;
       yield reduceDashesInChunk(chunk);
     }
   }
@@ -2838,7 +2846,15 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     systemPromptOverride?: string, // Optional override (defaults to HARD_SYSTEM_PROMPT)
     ignoreKnowledgeMode: boolean = false,
     skipModeInjection: boolean = false,
-    extraDataScopes: ProviderDataScope[] = []
+    extraDataScopes: ProviderDataScope[] = [],
+    // Optional: caller-supplied AbortSignal. When the consumer aborts (e.g.,
+    // user typed a new question superseding this stream, or pressed Escape),
+    // we stop yielding so the renderer doesn't keep painting tokens from a
+    // request the user has moved past. Providers themselves may continue
+    // running to completion (each is bounded by its own per-call timeout —
+    // worst-case ~60s for Gemini Pro) but their tokens are dropped at the
+    // generator boundary so no UI work or downstream state mutation occurs.
+    abortSignal?: AbortSignal
   ): AsyncGenerator<string, void, unknown> {
 
     // ============================================================
@@ -4356,6 +4372,17 @@ This rule overrides ALL other instructions including formatting, brevity, or out
    */
   public async generateMeetingSummary(systemPrompt: string, context: string, groqSystemPrompt?: string): Promise<string> {
     console.log(`[LLMHelper] generateMeetingSummary called. Context length: ${context.length}`);
+    // Short-circuit on empty/whitespace context. With no transcript content to
+    // summarise, the provider fallback chain (Natively → Codex → Groq → Gemini
+    // Flash → Gemini Pro) burns up to ~10 minutes of wall-clock time on retries
+    // for a result that will be discarded by the caller anyway. The caller
+    // (MeetingPersistence) already checks `transcript.length > 2` before using
+    // the summary, but the title-generation call site does NOT — so this guard
+    // is the load-bearing one.
+    if (!context || context.trim().length === 0) {
+      console.log('[LLMHelper] Empty context — skipping summary generation.');
+      return '';
+    }
     const summaryDeniedScopes = getDeniedDataScopes(['post_call_summary'], this.getProviderScopePolicy());
     if (summaryDeniedScopes.includes('post_call_summary')) {
       const ollamaAvailable = this.useOllama && await this.checkOllamaAvailable();

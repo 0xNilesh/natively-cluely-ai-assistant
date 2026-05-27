@@ -46,7 +46,7 @@ export class ModelSelectorWindowHelper {
 
     public showWindow(x: number, y: number, options: WindowActivationOptions = {}): void {
         if (!this.window || this.window.isDestroyed()) {
-            this.createWindow(x, y)
+            this.createWindow(x, y, true, options)
             return
         }
 
@@ -106,7 +106,7 @@ export class ModelSelectorWindowHelper {
         }
     }
 
-    public toggleWindow(x: number, y: number): void {
+    public toggleWindow(x: number, y: number, options: WindowActivationOptions = {}): void {
         if (this.window && !this.window.isDestroyed()) {
             // Fix: If window was just closed by blur (e.g. clicking the toggle button), don't re-open immediately
             if (!this.window.isVisible() && (Date.now() - this.lastBlurTime < 250)) {
@@ -116,10 +116,10 @@ export class ModelSelectorWindowHelper {
             if (this.window.isVisible()) {
                 this.hideWindow()
             } else {
-                this.showWindow(x, y)
+                this.showWindow(x, y, options)
             }
         } else {
-            this.createWindow(x, y)
+            this.createWindow(x, y, true, options)
         }
     }
 
@@ -127,7 +127,12 @@ export class ModelSelectorWindowHelper {
         this.hideWindow();
     }
 
-    private createWindow(x?: number, y?: number, showWhenReady: boolean = true): void {
+    private createWindow(
+        x?: number,
+        y?: number,
+        showWhenReady: boolean = true,
+        showOptions: WindowActivationOptions = {},
+    ): void {
         const isMac = process.platform === 'darwin';
         const windowSettings: Electron.BrowserWindowConstructorOptions = {
             width: 140,
@@ -214,7 +219,11 @@ export class ModelSelectorWindowHelper {
                 }
             }
             if (showWhenReady) {
-                this.showWindow(this.window?.getBounds().x || 0, this.window?.getBounds().y || 0)
+                this.showWindow(
+                    this.window?.getBounds().x || 0,
+                    this.window?.getBounds().y || 0,
+                    showOptions,
+                )
             }
         })
 
@@ -282,6 +291,10 @@ export class ModelSelectorWindowHelper {
     }
 
     public setContentProtection(enable: boolean): void {
+        // Dedupe: see WindowHelper.setContentProtection rationale — repeated
+        // identical calls are common (toggle IPC fans out across helpers) and
+        // produce DWM affinity churn on Windows.
+        if (this.contentProtection === enable && this.window && !this.window.isDestroyed()) return;
         console.log(`[ModelSelectorWindowHelper] Setting content protection to: ${enable}`);
         this.contentProtection = enable;
         if (this.window && !this.window.isDestroyed()) {

@@ -172,6 +172,13 @@ export class SystemAudioCapture extends EventEmitter {
         console.log('[SystemAudioCapture] Stopping capture (deferred native teardown)...');
         this.isRecording = false;
         const monitor = this.monitor;
+        // Null the field synchronously so the next start() takes the lazy-init
+        // branch and constructs a fresh Rust monitor. The Rust monitor.stop()
+        // tears down the CoreAudio Tap / aggregate device — calling start() on
+        // the same Rust instance afterwards leaves the Tap in a half-initialised
+        // state that produces zero chunks for 5–8s (manifest symptom on second
+        // meeting: "produced 0 chunks in 8s" + STT handshake timeout).
+        this.monitor = null;
         // Defer the blocking native call. setImmediate runs after the current
         // poll iteration completes, which is enough to release the Electron main
         // thread back to the IPC caller before the native teardown begins.

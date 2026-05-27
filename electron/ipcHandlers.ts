@@ -500,6 +500,12 @@ export function initializeIpcHandlers(appState: AppState): void {
   // Each new invocation increments the ID; any in-flight iteration bails as soon as it detects
   // that a newer stream has taken over.
   let _chatStreamId = 0;
+  // The current stream's AbortController. Supersession aborts it so the
+  // generator inside LLMHelper.streamChat stops yielding to the renderer
+  // immediately instead of running to completion in the background while its
+  // tokens are silently discarded. Also exposed via gemini-chat-stream-stop
+  // so the renderer can cancel explicitly (e.g., user pressed Escape).
+  let _chatStreamController: AbortController | null = null;
 
   // Matches narrow identity/meta probes only. Kept tight so coding/normal asks don't trip it.
   // Prevents the small fast-mode model from over-firing the "I'm Natively" canned reply
@@ -524,6 +530,15 @@ export function initializeIpcHandlers(appState: AppState): void {
 
         // Claim a new stream ID — any prior stream will detect this and stop emitting.
         const myStreamId = ++_chatStreamId;
+        // Abort any prior in-flight controller so its generator stops yielding
+        // tokens that nobody is consuming. The for-await supersession check
+        // below is still kept as a defense-in-depth backstop for the case
+        // where streamChat's caller didn't honor the signal.
+        if (_chatStreamController) {
+          try { _chatStreamController.abort(); } catch { /* noop */ }
+        }
+        const myController = new AbortController();
+        _chatStreamController = myController;
 
         const intelligenceManager = appState.getIntelligenceManager();
 
@@ -622,13 +637,20 @@ export function initializeIpcHandlers(appState: AppState): void {
           : CHAT_MODE_PROMPT;
 
         try {
-          // USE streamChat which handles routing
+          // USE streamChat which handles routing. Pass the abort signal as
+          // the trailing arg so the generator stops yielding when this stream
+          // is superseded or explicitly cancelled via gemini-chat-stream-stop.
+          // The signature accepts a final optional `abortSignal?: AbortSignal`
+          // that streamChat extracts from its variadic args.
           const stream = llmHelper.streamChat(
             message,
             imagePaths,
             context,
             systemPromptOverride,
             options?.ignoreKnowledgeMode,
+            false, // skipModeInjection
+            [],    // extraDataScopes
+            myController.signal,
           );
 
           for await (const token of stream) {
@@ -686,9 +708,31 @@ export function initializeIpcHandlers(appState: AppState): void {
       } catch (error: any) {
         console.error('[IPC] Error in gemini-chat-stream setup:', error);
         throw error;
+      } finally {
+        // Null the module-scope controller reference if it still points at
+        // ours. Without this, a normally-completed controller lingers as the
+        // "current" one; a subsequent cancelChatStream() would abort a
+        // finished controller (harmless but misleading), and the
+        // already-resolved controller object itself is retained in memory.
+        // Identity-check so we don't clobber a successor controller that a
+        // newer stream installed during our cleanup.
+        if (_chatStreamController === myController) {
+          _chatStreamController = null;
+        }
       }
     },
   );
+
+  // Renderer-driven cancellation for the active chat stream. The renderer
+  // wires this to Escape, navigation, and component unmount so a half-typed
+  // answer doesn't keep streaming to a UI that's gone away. Idempotent —
+  // safe to call when no stream is active.
+  ipcMain.on('gemini-chat-stream-stop', () => {
+    if (_chatStreamController) {
+      try { _chatStreamController.abort(); } catch { /* noop */ }
+      _chatStreamController = null;
+    }
+  });
 
   safeHandle('quit-app', () => {
     app.quit();
@@ -981,6 +1025,25 @@ export function initializeIpcHandlers(appState: AppState): void {
     const tag =
       level === 'error' ? '[RENDERER-ERROR]' : level === 'warn' ? '[RENDERER-WARN]' : '[RENDERER]';
     console.log(`${tag} ${msg}`);
+  });
+
+  // Meeting interface theme cross-window broadcast. The settings window writes
+  // localStorage + sends this IPC; main re-broadcasts to every renderer so the
+  // overlay window's React state updates without depending on the same-origin
+  // `storage` event (which does not cross BrowserWindow boundaries in Electron).
+  // Without this, switching the meeting interface theme while the overlay is
+  // hidden leaves it with stale CSS on the next meeting start — manifest as a
+  // half-painted UI that requires force-quit.
+  ipcMain.on('interface-theme:set', (_event, theme: string) => {
+    if (typeof theme !== 'string') return;
+    BrowserWindow.getAllWindows().forEach((win) => {
+      if (win.isDestroyed()) return;
+      try {
+        win.webContents.send('interface-theme:changed', theme);
+      } catch {
+        // Renderer may be tearing down between isDestroyed() and send.
+      }
+    });
   });
 
   safeHandle('get-arch', async () => {
@@ -2679,16 +2742,16 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   // --- Model Selector Window IPC ---
 
-  safeHandle('show-model-selector', (_, coords: { x: number; y: number }) => {
-    appState.modelSelectorWindowHelper.showWindow(coords.x, coords.y);
+  safeHandle('show-model-selector', (_, coords: { x: number; y: number; activate?: boolean }) => {
+    appState.modelSelectorWindowHelper.showWindow(coords.x, coords.y, { activate: coords.activate });
   });
 
   safeHandle('hide-model-selector', () => {
     appState.modelSelectorWindowHelper.hideWindow();
   });
 
-  safeHandle('toggle-model-selector', (_, coords: { x: number; y: number }) => {
-    appState.modelSelectorWindowHelper.toggleWindow(coords.x, coords.y);
+  safeHandle('toggle-model-selector', (_, coords: { x: number; y: number; activate?: boolean }) => {
+    appState.modelSelectorWindowHelper.toggleWindow(coords.x, coords.y, { activate: coords.activate });
   });
 
   // ROUND 3 FIX (#4): click-outside close for ModelSelector. With panel-

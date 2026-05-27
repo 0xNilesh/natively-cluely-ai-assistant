@@ -61,6 +61,13 @@ export class NativelyProSTT extends EventEmitter {
     private reconnectTimer: NodeJS.Timeout | null = null;
     // Cleared only after 5 s of stable connection so backoff actually increases on rapid 1006 loops
     private stabilityTimer: NodeJS.Timeout | null = null;
+    // The three 250ms reconnect setTimeouts in setSampleRate, setRecognitionLanguage,
+    // and the language_detected handler used to be untracked. If stop() then start()
+    // ran within that 250ms window, the orphan timer fired against the NEW session
+    // and triggered a duplicate connect — one ws would lose the race, emit close, and
+    // kick off a reconnect cascade that briefly dropped transcripts. Track them so
+    // start()/stop() can cancel any in-flight inline timer.
+    private pendingConnectTimer: NodeJS.Timeout | null = null;
 
     private readonly BACKEND_URL = 'wss://api.natively.software/v1/transcribe';
 
@@ -114,7 +121,11 @@ export class NativelyProSTT extends EventEmitter {
             this.closeUpstream();
             // Same 250ms gap pattern as setRecognitionLanguage to avoid the
             // server's concurrent_session_blocked race.
-            setTimeout(() => { if (this.isActive) this.connect(); }, 250);
+            if (this.pendingConnectTimer) clearTimeout(this.pendingConnectTimer);
+            this.pendingConnectTimer = setTimeout(() => {
+                this.pendingConnectTimer = null;
+                if (this.isActive) this.connect();
+            }, 250);
         }
     }
 
@@ -163,7 +174,11 @@ export class NativelyProSTT extends EventEmitter {
             this.closeUpstream();
             // Small delay so the server processes the old socket's close event before
             // the new connection arrives — prevents concurrent_session_blocked race.
-            setTimeout(() => { if (this.isActive) this.connect(); }, 250);
+            if (this.pendingConnectTimer) clearTimeout(this.pendingConnectTimer);
+            this.pendingConnectTimer = setTimeout(() => {
+                this.pendingConnectTimer = null;
+                if (this.isActive) this.connect();
+            }, 250);
         }
     }
 
@@ -181,6 +196,21 @@ export class NativelyProSTT extends EventEmitter {
         if (this.isActive) return;
         this.isActive         = true;
         this.reconnectAttempts = 0;
+        // Defense in depth: the fatal-error branch at L353 (auth_timeout /
+        // invalid_key_format / trial_expired / transcription_quota_exceeded)
+        // flips isActive=false WITHOUT going through stop(), so it never clears
+        // these counters. Reset on start so a session that follows a fatal
+        // error doesn't inherit stale overflow state.
+        this.bufferDroppedChunks = 0;
+        this.bufferOverflowReported = false;
+        // Cancel any orphan inline reconnect timer left over from a prior
+        // setSampleRate/setRecognitionLanguage/language_detected that closed
+        // the upstream and scheduled a 250 ms reconnect. Without this, the
+        // orphan would fire inside the new session and double-connect.
+        if (this.pendingConnectTimer) {
+            clearTimeout(this.pendingConnectTimer);
+            this.pendingConnectTimer = null;
+        }
         this.connect();
     }
 
@@ -206,8 +236,22 @@ export class NativelyProSTT extends EventEmitter {
             clearTimeout(this.stabilityTimer);
             this.stabilityTimer = null;
         }
+        // Cancel orphan inline reconnect timer so it doesn't fire and call
+        // connect() while the stream is meant to be torn down. The 'isActive'
+        // check inside the timer would also catch it, but cancelling is cheaper
+        // than letting a setTimeout sit in libuv's queue for 250 ms.
+        if (this.pendingConnectTimer) {
+            clearTimeout(this.pendingConnectTimer);
+            this.pendingConnectTimer = null;
+        }
         this.closeUpstream();
         this.buffer = [];
+        // Reset overflow counters so the next session's logs reflect its own
+        // outage state, not stale numbers from the prior session — otherwise a
+        // brand-new reconnect prints e.g. "47 chunks dropped during outage"
+        // referring to an outage from a meeting that already ended.
+        this.bufferDroppedChunks = 0;
+        this.bufferOverflowReported = false;
     }
 
     private _chunksSent = 0;
@@ -261,7 +305,13 @@ export class NativelyProSTT extends EventEmitter {
             if (staggerMs > 0) {
                 this.isConnecting = true; // Hold the slot while waiting
                 console.log(`[NativelyProSTT:${this.channel}] Staggering connection ${staggerMs}ms (concurrent key collision prevention)`);
-                setTimeout(() => {
+                // Track in the same pendingConnectTimer slot used by inline
+                // reconnect setTimeouts. stop()/start() cancel it, so a stop+start
+                // sequence during the stagger window doesn't leave an orphan timer
+                // that would later call connect(true) inside the next session.
+                if (this.pendingConnectTimer) clearTimeout(this.pendingConnectTimer);
+                this.pendingConnectTimer = setTimeout(() => {
+                    this.pendingConnectTimer = null;
                     this.isConnecting = false;
                     if (this.isActive) this.connect(true);
                 }, staggerMs);
@@ -388,7 +438,11 @@ export class NativelyProSTT extends EventEmitter {
                     if (this.isActive && this.ws) {
                         this.intentionalClose = true;
                         this.closeUpstream();
-                        setTimeout(() => { if (this.isActive) this.connect(); }, 250);
+                        if (this.pendingConnectTimer) clearTimeout(this.pendingConnectTimer);
+                        this.pendingConnectTimer = setTimeout(() => {
+                            this.pendingConnectTimer = null;
+                            if (this.isActive) this.connect();
+                        }, 250);
                     }
                     return;
                 }

@@ -493,6 +493,59 @@
     0 5px 14px rgba(0, 0, 0, 0.26) !important;
 }
 
+[data-interface-theme="liquid-glass"] .glass-popup-row,
+[data-interface-theme="liquid-glass"] .model-selector-row {
+  color: var(--overlay-text-secondary) !important;
+}
+
+[data-interface-theme="liquid-glass"] .glass-popup-row:hover,
+[data-interface-theme="liquid-glass"] .model-selector-row:hover {
+  color: var(--overlay-text-primary) !important;
+  background: var(--overlay-control-hover-bg) !important;
+}
+
+[data-interface-theme="liquid-glass"] .model-selector-row-selected {
+  color: var(--overlay-text-primary) !important;
+  background: var(--overlay-control-bg) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.36),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.12) !important;
+}
+
+[data-interface-theme="liquid-glass"] .glass-shortcut-key,
+[data-interface-theme="liquid-glass"] .glass-toggle-track {
+  background: var(--overlay-control-bg) !important;
+  border-color: var(--overlay-border-soft) !important;
+  color: var(--overlay-text-secondary) !important;
+}
+
+[data-interface-theme="modern"] .glass-popup-row,
+[data-interface-theme="modern"] .model-selector-row {
+  color: var(--overlay-text-secondary) !important;
+}
+
+[data-interface-theme="modern"] .glass-popup-row:hover,
+[data-interface-theme="modern"] .model-selector-row:hover {
+  color: var(--overlay-text-primary) !important;
+  background: var(--overlay-control-hover-bg) !important;
+}
+
+[data-interface-theme="modern"] .model-selector-row-selected {
+  color: var(--overlay-text-primary) !important;
+  background: var(--overlay-control-bg) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.12),
+    0 2px 8px rgba(0, 0, 0, 0.18) !important;
+}
+
+[data-interface-theme="modern"] .glass-shortcut-key,
+[data-interface-theme="modern"] .glass-toggle-track {
+  background: var(--overlay-control-bg) !important;
+  border-color: var(--overlay-border-soft) !important;
+  color: var(--overlay-text-secondary) !important;
+}
+
 /* Icon buttons — small round jelly lozenges */
 [data-interface-theme="liquid-glass"] .overlay-icon-surface {
   background:
@@ -816,6 +869,637 @@
     inset 0 1px 3px rgba(0, 0, 0, 0.20),
     inset 0 0 0 1px rgba(255, 255, 255, 0.12),
     0 1px 3px rgba(239, 68, 68, 0.24) !important;
+}
+
+/* ── Meeting Interface: Modern Theme ────────────────────────────────────────
+   Polished dark slate/graphite glass with white gloss highlights and a cobalt
+   blue primary action. Modeled after the marketing-site NativelyInterfaceCard
+   (DARK_GLASS recipe). Distinct from liquid-glass: this panel is intentionally
+   opaque-ish (low backdrop blur, 0.88–0.97 alpha base) rather than refractive.
+   Applied via data-interface-theme="modern" on the NativelyInterface outer
+   container. CSS variables drive everything else; per-surface jelly recipes
+   below mirror the website card's gloss-strip pattern.
+   ─────────────────────────────────────────────────────────────────────── */
+[data-interface-theme="modern"],
+[data-theme='light'] [data-interface-theme="modern"] {
+  /* Force white text regardless of system theme — slate base reads dark */
+  --overlay-text-primary:     rgba(255, 255, 255, 0.96);
+  --overlay-text-secondary:   rgba(255, 255, 255, 0.88);
+  --overlay-text-muted:       rgba(255, 255, 255, 0.74);
+  --overlay-text-placeholder: rgba(255, 255, 255, 0.50);
+  --overlay-text-strong:      #ffffff;
+
+  /* Slate/graphite surfaces — the DARK_GLASS gradient */
+  --overlay-panel-bg:           linear-gradient(160deg, rgba(90, 90, 108, 0.88) 0%, rgba(55, 55, 70, 0.93) 50%, rgba(36, 36, 50, 0.97) 100%);
+  --overlay-pill-bg:            linear-gradient(160deg, rgba(90, 90, 108, 0.68) 0%, rgba(55, 55, 70, 0.72) 50%, rgba(36, 36, 50, 0.76) 100%);
+  --overlay-border:             rgba(255, 255, 255, 0.20);
+  --overlay-border-soft:        rgba(255, 255, 255, 0.10);
+  --overlay-chip-bg:            linear-gradient(160deg, rgba(90, 90, 108, 0.88) 0%, rgba(55, 55, 70, 0.93) 50%, rgba(36, 36, 50, 0.97) 100%);
+  --overlay-chip-hover-bg:      linear-gradient(160deg, rgba(108, 108, 128, 0.92) 0%, rgba(70, 70, 88, 0.95) 50%, rgba(46, 46, 64, 0.98) 100%);
+  --overlay-input-bg:           rgba(255, 255, 255, 0.05);
+  --overlay-input-hover-bg:     rgba(255, 255, 255, 0.08);
+  --overlay-input-focus-bg:     rgba(255, 255, 255, 0.10);
+  --overlay-control-bg:         rgba(255, 255, 255, 0.05);
+  --overlay-control-hover-bg:   rgba(255, 255, 255, 0.10);
+  --overlay-icon-bg:            linear-gradient(160deg, rgba(90, 90, 108, 0.88) 0%, rgba(55, 55, 70, 0.93) 50%, rgba(36, 36, 50, 0.97) 100%);
+  --overlay-icon-hover-bg:      linear-gradient(160deg, rgba(108, 108, 128, 0.92) 0%, rgba(70, 70, 88, 0.95) 50%, rgba(46, 46, 64, 0.98) 100%);
+  --overlay-code-bg:            rgba(255, 255, 255, 0.06);
+  --overlay-code-border:        rgba(255, 255, 255, 0.08);
+  --overlay-code-header-bg:     rgba(255, 255, 255, 0.04);
+  --overlay-inline-code-bg:     rgba(255, 255, 255, 0.10);
+  --overlay-panel-shadow:       rgba(0, 0, 0, 0.50);
+  --overlay-pill-shadow:        rgba(0, 0, 0, 0.30);
+  --overlay-shell-blur:         3px;   /* Intentionally LIGHT — panel is opaque-ish, not refractive */
+  --overlay-pill-blur:          3px;
+
+  /* Focus ring — lifted cobalt to clear WCAG 2.2 SC 2.4.11 (3:1) against
+     the LIGHTEST gradient stop rgba(90,90,108,0.88) (top-left of the
+     panel), not just the dark stops. The brand cobalt #5B8EF0 measures
+     2.40:1 there; #8FB4F7 measures 3.76:1 worst-case while staying in the
+     same hue family. Scoped to the overlay subtree via the attribute
+     selector — never applied to Launcher/Settings/ModelSelector windows
+     (App.tsx wrappers carry no data-interface-theme). */
+  --accent-primary: #8FB4F7;
+}
+
+/* Modern shell — DARK_GLASS gradient + multi-layer shadow.
+   Recipe per website card:
+     • Slate gradient 160deg (lightest top-left → darkest bottom-right)
+     • 1px rgba(255,255,255,0.20) border
+     • 24px corner radius
+     • Triple shadow: drop, inset top highlight, hairline outer rim
+     • Top 45% gloss strip painted via ::before */
+[data-interface-theme="modern"] .overlay-shell-surface {
+  background: linear-gradient(160deg,
+      rgba(90, 90, 108, 0.88) 0%,
+      rgba(55, 55, 70, 0.93) 50%,
+      rgba(36, 36, 50, 0.97) 100%
+    ) !important;
+  border-color: rgba(255, 255, 255, 0.20) !important;
+  backdrop-filter: blur(3px) !important;
+  -webkit-backdrop-filter: blur(3px) !important;
+  box-shadow:
+    0 12px 40px rgba(0, 0, 0, 0.50),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 0 0 0.5px rgba(255, 255, 255, 0.08) !important;
+  position: relative;
+}
+
+/* Jelly gloss — the top 45% wet-look highlight strip. Sits ABOVE background
+   but BELOW content via z-index/pointer-events. Inset 4px on x-axis so it
+   doesn't paint over the rounded corners. */
+[data-interface-theme="modern"] .overlay-shell-surface::before {
+  content: '';
+  position: absolute;
+  inset: 2px 4px auto 4px;
+  height: 45%;
+  border-radius: inherit;
+  background: linear-gradient(to bottom,
+      rgba(255, 255, 255, 0.20) 0%,
+      rgba(255, 255, 255, 0.00) 100%
+    );
+  filter: blur(0.5px);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* TopPill — same DARK_GLASS recipe but more transparent base so it floats
+   visibly above the panel below. Slightly softer gloss. */
+[data-interface-theme="modern"] .overlay-pill-surface {
+  background: linear-gradient(160deg,
+      rgba(90, 90, 108, 0.68) 0%,
+      rgba(55, 55, 70, 0.72) 50%,
+      rgba(36, 36, 50, 0.76) 100%
+    ) !important;
+  border-color: rgba(255, 255, 255, 0.20) !important;
+  backdrop-filter: blur(3px) !important;
+  -webkit-backdrop-filter: blur(3px) !important;
+  box-shadow:
+    0 4px 20px rgba(0, 0, 0, 0.30),
+    inset 0 1px 0 rgba(255, 255, 255, 0.11) !important;
+  position: relative;
+}
+
+[data-interface-theme="modern"] .overlay-pill-surface::before {
+  content: '';
+  position: absolute;
+  inset: 2px 4px auto 4px;
+  height: 45%;
+  border-radius: inherit;
+  background: linear-gradient(to bottom,
+      rgba(255, 255, 255, 0.20) 0%,
+      rgba(255, 255, 255, 0.00) 100%
+    );
+  filter: blur(0.5px);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Transcript divider — quiet hairline */
+[data-interface-theme="modern"] .overlay-transcript-surface {
+  border-bottom-color: rgba(255, 255, 255, 0.10) !important;
+}
+
+/* Code blocks — flat white-tinted panel inside the slate shell, cyan text
+   inherited from the markdown renderer. */
+[data-interface-theme="modern"] .overlay-code-block-surface {
+  background: rgba(255, 255, 255, 0.06) !important;
+  border-color: rgba(255, 255, 255, 0.08) !important;
+  box-shadow: none !important;
+}
+
+[data-interface-theme="modern"] .overlay-code-header-surface {
+  background: rgba(255, 255, 255, 0.04) !important;
+  border-bottom-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+/* Inline code — match the block style, slightly lighter for inline flow */
+[data-interface-theme="modern"] .overlay-inline-code-surface {
+  background: rgba(255, 255, 255, 0.10) !important;
+  border-color: rgba(255, 255, 255, 0.10) !important;
+  color: rgba(255, 255, 255, 0.96) !important;
+}
+
+/* ───────────────────────────────────────────────────────────────────────
+   Modern jelly-gloss surfaces.
+   ───────────────────────────────────────────────────────────────────────
+   Per-surface DARK_GLASS recipe scaled down (less shadow, tighter radius).
+   The ::before gloss strip is the visual signature — top 45%, blurred 0.5px,
+   white-to-transparent gradient.
+   ─────────────────────────────────────────────────────────────────────── */
+
+/* Chip buttons (What to answer, Clarify, Recap, Follow-up, Answer, etc.) */
+[data-interface-theme="modern"] .overlay-chip-surface {
+  background: linear-gradient(160deg,
+      rgba(90, 90, 108, 0.88) 0%,
+      rgba(55, 55, 70, 0.93) 50%,
+      rgba(36, 36, 50, 0.97) 100%
+    ) !important;
+  border-color: rgba(255, 255, 255, 0.20) !important;
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.25),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 0 0 0.5px rgba(255, 255, 255, 0.08) !important;
+  position: relative;
+  overflow: hidden;
+  transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1),
+              box-shadow 0.18s ease-out,
+              background 0.18s ease-out !important;
+}
+
+[data-interface-theme="modern"] .overlay-chip-surface::before {
+  content: '';
+  position: absolute;
+  inset: 2px 4px auto 4px;
+  height: 45%;
+  border-radius: inherit;
+  background: linear-gradient(to bottom,
+      rgba(255, 255, 255, 0.20) 0%,
+      rgba(255, 255, 255, 0.00) 100%
+    );
+  filter: blur(0.5px);
+  pointer-events: none;
+  z-index: 0;
+}
+
+[data-interface-theme="modern"] .overlay-chip-surface:hover {
+  background: linear-gradient(160deg,
+      rgba(108, 108, 128, 0.92) 0%,
+      rgba(70, 70, 88, 0.95) 50%,
+      rgba(46, 46, 64, 0.98) 100%
+    ) !important;
+  transform: translateY(-1px);
+  box-shadow:
+    0 6px 16px rgba(0, 0, 0, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    0 0 0 0.5px rgba(255, 255, 255, 0.14) !important;
+}
+
+[data-interface-theme="modern"] .overlay-chip-surface:active {
+  transform: translateY(0) scale(0.97);
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.20),
+    0 1px 3px rgba(0, 0, 0, 0.15) !important;
+}
+
+/* Chat input — flat white-tinted, 12px radius per website card */
+[data-interface-theme="modern"] .overlay-input-surface {
+  background: rgba(255, 255, 255, 0.05) !important;
+  border-color: rgba(255, 255, 255, 0.10) !important;
+  border-radius: 12px !important;
+  box-shadow: none !important;
+}
+
+[data-interface-theme="modern"] .overlay-input-surface:hover {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border-color: rgba(255, 255, 255, 0.14) !important;
+}
+
+[data-interface-theme="modern"] .overlay-input-surface:focus,
+[data-interface-theme="modern"] .overlay-input-surface:focus-within {
+  background: rgba(255, 255, 255, 0.10) !important;
+  border-color: rgba(255, 255, 255, 0.20) !important;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.10) !important;
+}
+
+/* Control surfaces (mode dropdown, secondary buttons) — DARK_GLASS w/ gloss */
+[data-interface-theme="modern"] .overlay-control-surface {
+  background: linear-gradient(160deg,
+      rgba(90, 90, 108, 0.88) 0%,
+      rgba(55, 55, 70, 0.93) 50%,
+      rgba(36, 36, 50, 0.97) 100%
+    ) !important;
+  border-color: rgba(255, 255, 255, 0.20) !important;
+  box-shadow:
+    0 3px 10px rgba(0, 0, 0, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 0 0 0.5px rgba(255, 255, 255, 0.08) !important;
+  position: relative;
+  overflow: hidden;
+  transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1),
+              box-shadow 0.18s ease-out,
+              background 0.18s ease-out !important;
+}
+
+[data-interface-theme="modern"] .overlay-control-surface::before {
+  content: '';
+  position: absolute;
+  inset: 2px 4px auto 4px;
+  height: 45%;
+  border-radius: inherit;
+  background: linear-gradient(to bottom,
+      rgba(255, 255, 255, 0.20) 0%,
+      rgba(255, 255, 255, 0.00) 100%
+    );
+  filter: blur(0.5px);
+  pointer-events: none;
+  z-index: 0;
+}
+
+[data-interface-theme="modern"] .overlay-control-surface:hover {
+  background: linear-gradient(160deg,
+      rgba(108, 108, 128, 0.92) 0%,
+      rgba(70, 70, 88, 0.95) 50%,
+      rgba(46, 46, 64, 0.98) 100%
+    ) !important;
+  transform: translateY(-0.5px);
+  box-shadow:
+    0 5px 14px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    0 0 0 0.5px rgba(255, 255, 255, 0.14) !important;
+}
+
+/* Icon buttons — small round DARK_GLASS lozenges */
+[data-interface-theme="modern"] .overlay-icon-surface {
+  background: linear-gradient(160deg,
+      rgba(90, 90, 108, 0.88) 0%,
+      rgba(55, 55, 70, 0.93) 50%,
+      rgba(36, 36, 50, 0.97) 100%
+    ) !important;
+  border: 1px solid rgba(255, 255, 255, 0.20) !important;
+  box-shadow:
+    0 3px 10px rgba(0, 0, 0, 0.25),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 0 0 0.5px rgba(255, 255, 255, 0.08) !important;
+  position: relative;
+  overflow: hidden;
+  transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1),
+              box-shadow 0.18s ease-out,
+              background 0.18s ease-out !important;
+}
+
+[data-interface-theme="modern"] .overlay-icon-surface::before {
+  content: '';
+  position: absolute;
+  inset: 2px 4px auto 4px;
+  height: 45%;
+  border-radius: inherit;
+  background: linear-gradient(to bottom,
+      rgba(255, 255, 255, 0.20) 0%,
+      rgba(255, 255, 255, 0.00) 100%
+    );
+  filter: blur(0.5px);
+  pointer-events: none;
+  z-index: 0;
+}
+
+[data-interface-theme="modern"] .overlay-icon-surface-hover:hover,
+[data-interface-theme="modern"] .overlay-icon-surface:hover {
+  background: linear-gradient(160deg,
+      rgba(108, 108, 128, 0.92) 0%,
+      rgba(70, 70, 88, 0.95) 50%,
+      rgba(46, 46, 64, 0.98) 100%
+    ) !important;
+  transform: translateY(-1px);
+  box-shadow:
+    0 6px 16px rgba(0, 0, 0, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    0 0 0 0.5px rgba(255, 255, 255, 0.14) !important;
+}
+
+[data-interface-theme="modern"] .overlay-icon-surface:active {
+  transform: translateY(0) scale(0.94);
+  box-shadow:
+    inset 0 1.5px 3px rgba(0, 0, 0, 0.22),
+    0 1px 2px rgba(0, 0, 0, 0.12) !important;
+}
+
+/* AI response cards (Follow-Up Questions, Recap, What to Answer, Shorten,
+   code, latent-context attachment preview) — they all share the
+   .overlay-subtle-surface class. Neutral white-tinted panel so the colored
+   accent on each card's header stays the focus. */
+[data-interface-theme="modern"] .overlay-subtle-surface {
+  background: rgba(255, 255, 255, 0.05) !important;
+  border-color: rgba(255, 255, 255, 0.10) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 2px 8px rgba(0, 0, 0, 0.18) !important;
+}
+
+/* ─── DIFFERENTIATION OVERRIDES ──────────────────────────────────────────
+   Same two cases as liquid-glass: quiet kbd badges + dominant blue send
+   button + matching user-question bubble.
+   ─────────────────────────────────────────────────────────────────────── */
+
+/* Hotkey kbd: ⌘ ⇧ H badges — flat quiet pills, not interactive jelly.
+   Override the inherited overlay-control-surface jelly. */
+[data-interface-theme="modern"] kbd,
+[data-interface-theme="modern"] kbd.overlay-control-surface,
+[data-interface-theme="modern"] kbd.overlay-icon-surface {
+  background: rgba(255, 255, 255, 0.06) !important;
+  border: 1px solid rgba(255, 255, 255, 0.14) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.10),
+    0 1px 2px rgba(0, 0, 0, 0.18) !important;
+  transform: none !important;
+  transition: none !important;
+}
+
+[data-interface-theme="modern"] kbd::before,
+[data-interface-theme="modern"] kbd.overlay-control-surface::before,
+[data-interface-theme="modern"] kbd.overlay-icon-surface::before {
+  /* Suppress the inherited jelly gloss strip on flat kbd indicators. */
+  content: none !important;
+}
+
+[data-interface-theme="modern"] kbd:hover {
+  transform: none !important;
+  background: rgba(255, 255, 255, 0.06) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.10),
+    0 1px 2px rgba(0, 0, 0, 0.18) !important;
+}
+
+/* Primary send button — Tailwind `bg-[#007AFF]` class kept; replace the iOS
+   blue fill with the cobalt 160deg gradient, deeper outer glow, white drop
+   so it stays unmistakably the primary action. */
+[data-interface-theme="modern"] button[class~="bg-[#007AFF]"] {
+  background: linear-gradient(160deg,
+      #5B8EF0 0%,
+      #3B6FE8 50%,
+      #2D5FD4 100%
+    ) !important;
+  border: 1px solid rgba(255, 255, 255, 0.20) !important;
+  box-shadow:
+    0 8px 20px rgba(37, 99, 235, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.30),
+    0 0 0 0.5px rgba(255, 255, 255, 0.10) !important;
+  position: relative;
+  overflow: hidden;
+  transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1),
+              box-shadow 0.18s ease-out,
+              background 0.18s ease-out !important;
+}
+
+/* Brighter, denser gloss strip on the primary action — reads as "wet". */
+[data-interface-theme="modern"] button[class~="bg-[#007AFF]"]::before {
+  content: '';
+  position: absolute;
+  inset: 2px 4px auto 4px;
+  height: 45%;
+  border-radius: inherit;
+  background: linear-gradient(to bottom,
+      rgba(255, 255, 255, 0.70) 0%,
+      rgba(255, 255, 255, 0.05) 100%
+    );
+  filter: blur(0.5px);
+  pointer-events: none;
+  z-index: 0;
+}
+
+[data-interface-theme="modern"] button[class~="bg-[#007AFF]"]:hover {
+  background: linear-gradient(160deg,
+      #6B9CF5 0%,
+      #4A7BEC 50%,
+      #3568D8 100%
+    ) !important;
+  transform: translateY(-1px);
+  box-shadow:
+    0 10px 26px rgba(37, 99, 235, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.40),
+    0 0 0 0.5px rgba(255, 255, 255, 0.16) !important;
+}
+
+[data-interface-theme="modern"] button[class~="bg-[#007AFF]"]:active {
+  transform: translateY(0) scale(0.96);
+  box-shadow:
+    inset 0 1px 3px rgba(0, 0, 0, 0.25),
+    0 2px 6px rgba(37, 99, 235, 0.32) !important;
+}
+
+/* User chat-message bubble — the bluish question card the user types.
+   Targets Tailwind `bg-blue-500/10` (light) / `bg-blue-600/20` (dark) so the
+   bubble adopts the same cobalt gradient as the send button. Matching color
+   identity per the website card. */
+[data-interface-theme="modern"] [class*="bg-blue-500/10"],
+[data-interface-theme="modern"] [class*="bg-blue-600/20"] {
+  background: linear-gradient(160deg,
+      #5B8EF0 0%,
+      #3B6FE8 50%,
+      #2D5FD4 100%
+    ) !important;
+  border-color: rgba(255, 255, 255, 0.20) !important;
+  color: #ffffff !important;
+  box-shadow:
+    0 8px 20px rgba(37, 99, 235, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.20),
+    0 0 0 0.5px rgba(255, 255, 255, 0.08) !important;
+  position: relative;
+  overflow: hidden;
+}
+
+[data-interface-theme="modern"] [class*="bg-blue-500/10"]::before,
+[data-interface-theme="modern"] [class*="bg-blue-600/20"]::before {
+  content: '';
+  position: absolute;
+  inset: 2px 4px auto 4px;
+  height: 45%;
+  border-radius: inherit;
+  background: linear-gradient(to bottom,
+      rgba(255, 255, 255, 0.70) 0%,
+      rgba(255, 255, 255, 0.05) 100%
+    );
+  filter: blur(0.5px);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Emerald — live-transcription "listening" bubble.
+   Default Tailwind bg-emerald-500/10 (rgba 16,185,129,0.10) composites to
+   muddy olive over the slate panel and loses its semantic "live mic" cue.
+   Lift to 0.22 alpha and add the same jelly gloss recipe the cobalt user
+   bubble uses so it reads as a distinct emerald lozenge. */
+[data-interface-theme="modern"] [class*="bg-emerald-500/10"] {
+  background:
+    linear-gradient(160deg,
+      rgba(255, 255, 255, 0.18) 0%,
+      rgba(255, 255, 255, 0.00) 45%,
+      rgba(0, 0, 0, 0.08) 100%
+    ),
+    rgba(16, 185, 129, 0.22) !important;
+  border-color: rgba(110, 220, 175, 0.32) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.38),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.14),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.10),
+    0 6px 16px rgba(16, 185, 129, 0.28),
+    0 2px 5px rgba(0, 0, 0, 0.18) !important;
+}
+
+/* Yellow — system-audio permission warning. Mirrors Liquid Glass recipe
+   but uses the 160deg sheen direction Modern adopts elsewhere. */
+[data-interface-theme="modern"] [class*="bg-yellow-500/10"] {
+  background:
+    linear-gradient(160deg,
+      rgba(255, 255, 255, 0.18) 0%,
+      rgba(255, 255, 255, 0.00) 45%,
+      rgba(0, 0, 0, 0.08) 100%
+    ),
+    rgba(234, 179, 8, 0.22) !important;
+  border-color: rgba(234, 179, 8, 0.32) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.38),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.14),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.10),
+    0 6px 16px rgba(234, 179, 8, 0.28),
+    0 2px 5px rgba(0, 0, 0, 0.18) !important;
+}
+
+/* Orange — STT warning callout. */
+[data-interface-theme="modern"] [class*="bg-orange-500/10"] {
+  background:
+    linear-gradient(160deg,
+      rgba(255, 255, 255, 0.18) 0%,
+      rgba(255, 255, 255, 0.00) 45%,
+      rgba(0, 0, 0, 0.08) 100%
+    ),
+    rgba(249, 115, 22, 0.22) !important;
+  border-color: rgba(249, 115, 22, 0.32) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.38),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.14),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.10),
+    0 6px 16px rgba(249, 115, 22, 0.28),
+    0 2px 5px rgba(0, 0, 0, 0.18) !important;
+}
+
+/* Rose — hotkey conflict callout. */
+[data-interface-theme="modern"] [class*="bg-rose-500/10"] {
+  background:
+    linear-gradient(160deg,
+      rgba(255, 255, 255, 0.18) 0%,
+      rgba(255, 255, 255, 0.00) 45%,
+      rgba(0, 0, 0, 0.08) 100%
+    ),
+    rgba(244, 63, 94, 0.22) !important;
+  border-color: rgba(244, 63, 94, 0.32) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.38),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.14),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.10),
+    0 6px 16px rgba(244, 63, 94, 0.28),
+    0 2px 5px rgba(0, 0, 0, 0.18) !important;
+}
+
+/* Amber — secondary warning callouts. */
+[data-interface-theme="modern"] [class*="bg-amber-500/10"] {
+  background:
+    linear-gradient(160deg,
+      rgba(255, 255, 255, 0.18) 0%,
+      rgba(255, 255, 255, 0.00) 45%,
+      rgba(0, 0, 0, 0.08) 100%
+    ),
+    rgba(245, 158, 11, 0.22) !important;
+  border-color: rgba(245, 158, 11, 0.32) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.38),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.14),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.10),
+    0 6px 16px rgba(245, 158, 11, 0.28),
+    0 2px 5px rgba(0, 0, 0, 0.18) !important;
+}
+
+/* Red — Stop button (active recording) and red callouts. Interactive
+   springy hover/active because the Stop button is a control. */
+[data-interface-theme="modern"] [class*="bg-red-500/10"] {
+  background:
+    linear-gradient(160deg,
+      rgba(255, 255, 255, 0.20) 0%,
+      rgba(255, 255, 255, 0.00) 45%,
+      rgba(0, 0, 0, 0.10) 100%
+    ),
+    rgba(239, 68, 68, 0.24) !important;
+  border-color: rgba(239, 68, 68, 0.34) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.42),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.16),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.12),
+    0 6px 16px rgba(239, 68, 68, 0.32),
+    0 2px 5px rgba(0, 0, 0, 0.18) !important;
+  transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1),
+              box-shadow 0.18s ease-out,
+              background 0.18s ease-out !important;
+}
+
+[data-interface-theme="modern"] button[class*="bg-red-500/10"]:hover {
+  background:
+    linear-gradient(160deg,
+      rgba(255, 255, 255, 0.28) 0%,
+      rgba(255, 255, 255, 0.00) 45%,
+      rgba(0, 0, 0, 0.10) 100%
+    ),
+    rgba(239, 68, 68, 0.32) !important;
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.16),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.20),
+    0 10px 22px rgba(239, 68, 68, 0.42),
+    0 3px 6px rgba(0, 0, 0, 0.22) !important;
+}
+
+[data-interface-theme="modern"] button[class*="bg-red-500/10"]:active {
+  transform: translateY(0) scale(0.96);
+  box-shadow:
+    inset 0 1px 3px rgba(0, 0, 0, 0.22),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.12),
+    0 1px 3px rgba(239, 68, 68, 0.26) !important;
+}
+
+/* STT error surface — quiet white-tinted lozenge so warm tint preserved by
+   inheritance reads cleanly on the slate panel. */
+[data-interface-theme="modern"] .stt-error-surface {
+  background:
+    linear-gradient(180deg,
+      rgba(255, 255, 255, 0.10) 0%,
+      rgba(255, 255, 255, 0.03) 60%,
+      rgba(255, 255, 255, 0.06) 100%
+    ),
+    rgba(255, 255, 255, 0.05) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.30),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.10),
+    0 4px 12px rgba(0, 0, 0, 0.28) !important;
 }
 
 /* ─── Light mode elevation system ────────────────────────────────────────

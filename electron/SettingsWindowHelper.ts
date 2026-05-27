@@ -292,6 +292,11 @@ export class SettingsWindowHelper {
     private contentProtection: boolean = false; // Track state
 
     public setContentProtection(enable: boolean): void {
+        // Dedupe: avoid redundant DWM affinity churn on Windows when the same
+        // value is reapplied (settings IPC + show events + global toggles all
+        // converge here). The first call still hits both the in-memory state
+        // and the native window; later identical calls no-op.
+        if (this.contentProtection === enable && this.settingsWindow && !this.settingsWindow.isDestroyed()) return;
         console.log(`[SettingsWindowHelper] Setting content protection to: ${enable}`);
         this.contentProtection = enable;
 

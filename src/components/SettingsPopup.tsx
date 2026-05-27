@@ -181,22 +181,23 @@ const SettingsPopup = () => {
         ? 'bg-[#F3F4F6]/92 border-black/10 shadow-black/10'
         : 'bg-[#1E1E1E]/80 border-white/10 shadow-black/40';
     const itemHoverClass = isLightTheme ? 'hover:bg-black/[0.04]' : 'hover:bg-white/5';
+    const glassRowClass = 'glass-popup-row';
     const labelInactiveClass = isLightTheme ? 'text-slate-700 group-hover:text-slate-900' : 'text-slate-400 group-hover:text-slate-200';
     const iconInactiveClass = isLightTheme ? 'text-slate-500 group-hover:text-slate-700' : 'text-slate-500 group-hover:text-slate-300';
     const dividerClass = isLightTheme ? 'bg-black/[0.06]' : 'bg-white/[0.04]';
     const shortcutKeyClass = isLightTheme
-        ? 'border-black/10 bg-black/[0.04] text-slate-600'
-        : 'border-white/10 bg-white/5 text-slate-500';
-    const defaultToggleTrackClass = isLightTheme ? 'bg-black/[0.22]' : 'bg-white/10';
+        ? 'border-black/10 bg-black/[0.04] text-slate-600 glass-shortcut-key'
+        : 'border-white/10 bg-white/5 text-slate-500 glass-shortcut-key';
+    const defaultToggleTrackClass = isLightTheme ? 'bg-black/[0.22] glass-toggle-track' : 'bg-white/10 glass-toggle-track';
     const toggleKnobClass = isLightTheme ? 'bg-white shadow-[0_1px_4px_rgba(0,0,0,0.18)]' : 'bg-black shadow-sm';
 
     return (
         <div className="w-fit h-fit bg-transparent flex flex-col">
-            <div ref={contentRef} className={`w-[200px] max-h-[280px] backdrop-blur-md border rounded-[16px] overflow-hidden shadow-2xl p-2 flex flex-col animate-scale-in origin-top-left ${popupPanelClass}`}>
-                <div className="flex-1 overflow-y-auto scrollbar-hide flex flex-col min-h-0">
+            <div ref={contentRef} className={`w-[200px] max-h-[280px] backdrop-blur-md border rounded-[16px] overflow-hidden shadow-2xl p-2 flex flex-col animate-scale-in origin-top-left overlay-shell-surface ${popupPanelClass}`}>
+                <div className="relative z-[1] flex-1 overflow-y-auto scrollbar-hide flex flex-col min-h-0">
 
                 {/* Undetectability */}
-                <div className={`flex items-center justify-between px-3 py-2 rounded-lg transition-colors duration-200 group cursor-default ${itemHoverClass}`}>
+                <div className={`flex items-center justify-between px-3 py-2 rounded-lg transition-colors duration-200 group cursor-default ${itemHoverClass} ${glassRowClass}`}>
                     <div className="flex items-center gap-3">
                         <CustomGhost
                             className={`w-4 h-4 transition-colors ${isUndetectable ? (isLightTheme ? 'text-slate-900' : 'text-white') : iconInactiveClass}`}
@@ -223,7 +224,7 @@ const SettingsPopup = () => {
 
 
                 {/* Groq (Fast Text) Toggle — enabled with Groq key OR Natively API key */}
-                <div className={`flex items-center justify-between px-3 py-2 rounded-lg transition-colors duration-200 group ${!(hasStoredKey.groq || hasStoredKey.natively) ? 'opacity-50 grayscale cursor-not-allowed' : `${itemHoverClass} cursor-default`}`} title={!(hasStoredKey.groq || hasStoredKey.natively) ? "Requires Groq or Natively API key" : ""}>
+                <div className={`flex items-center justify-between px-3 py-2 rounded-lg transition-colors duration-200 group ${!(hasStoredKey.groq || hasStoredKey.natively) ? 'opacity-50 grayscale cursor-not-allowed' : `${itemHoverClass} ${glassRowClass} cursor-default`}`} title={!(hasStoredKey.groq || hasStoredKey.natively) ? "Requires Groq or Natively API key" : ""}>
                     <div className="flex items-center gap-3">
                         <Zap
                             className={`w-4 h-4 transition-colors ${useGroqFastText ? 'text-orange-500' : iconInactiveClass}`}
@@ -244,7 +245,7 @@ const SettingsPopup = () => {
                 </div>
 
                 {/* Interviewer Transcript Toggle */}
-                <div className={`flex items-center justify-between px-3 py-2 rounded-lg transition-colors duration-200 group cursor-default ${itemHoverClass}`}>
+                <div className={`flex items-center justify-between px-3 py-2 rounded-lg transition-colors duration-200 group cursor-default ${itemHoverClass} ${glassRowClass}`}>
                     <div className="flex items-center gap-3">
                         <MessageSquare
                             className={`w-3.5 h-3.5 transition-colors ${showTranscript ? 'text-emerald-400' : iconInactiveClass}`}
@@ -267,7 +268,7 @@ const SettingsPopup = () => {
                 </div>
 
                 {/* Interview Mode (Brainstorm) Toggle */}
-                <div className={`flex items-center justify-between px-3 py-2 rounded-lg transition-colors duration-200 group cursor-default ${itemHoverClass}`}>
+                <div className={`flex items-center justify-between px-3 py-2 rounded-lg transition-colors duration-200 group cursor-default ${itemHoverClass} ${glassRowClass}`}>
                     <div className="flex items-center gap-3">
                         <svg
                             xmlns="http://www.w3.org/2000/svg"
@@ -303,7 +304,7 @@ const SettingsPopup = () => {
 
                 {/* Profile Mode Toggle */}
                 {hasProfile && (
-                    <div className={`flex items-center justify-between px-3 py-2 rounded-lg transition-colors duration-200 group ${!isPremium ? 'opacity-50 grayscale cursor-not-allowed' : `${itemHoverClass} cursor-default`}`} title={!isPremium ? 'Requires Pro license to be active' : ''}>
+                    <div className={`flex items-center justify-between px-3 py-2 rounded-lg transition-colors duration-200 group ${!isPremium ? 'opacity-50 grayscale cursor-not-allowed' : `${itemHoverClass} ${glassRowClass} cursor-default`}`} title={!isPremium ? 'Requires Pro license to be active' : ''}>
                         <div className="flex items-center gap-3">
                             <User
                                 className={`w-3.5 h-3.5 transition-colors ${profileMode && isPremium ? 'text-accent-primary' : iconInactiveClass}`}
@@ -332,7 +333,7 @@ const SettingsPopup = () => {
                 <div className={`h-px my-0.5 mx-2 ${dividerClass}`} />
 
                 {/* Show/Hide Natively */}
-                <div className={`flex items-center justify-between px-3 py-2 rounded-lg transition-colors duration-200 group interaction-base interaction-press ${itemHoverClass}`}>
+                <div className={`flex items-center justify-between px-3 py-2 rounded-lg transition-colors duration-200 group interaction-base interaction-press ${itemHoverClass} ${glassRowClass}`}>
                     <div className="flex items-center gap-3">
                         <MessageSquare className={`w-3.5 h-3.5 transition-colors ${iconInactiveClass}`} />
                         <span className={`text-[12px] transition-colors ${labelInactiveClass}`}>Show/Hide</span>
@@ -348,7 +349,7 @@ const SettingsPopup = () => {
                 </div>
 
                 {/* Screenshot */}
-                <div className={`flex items-center justify-between px-3 py-2 rounded-lg transition-colors duration-200 group interaction-base interaction-press ${itemHoverClass}`}>
+                <div className={`flex items-center justify-between px-3 py-2 rounded-lg transition-colors duration-200 group interaction-base interaction-press ${itemHoverClass} ${glassRowClass}`}>
                     <div className="flex items-center gap-3">
                         <Camera className={`w-3.5 h-3.5 transition-colors ${iconInactiveClass}`} />
                         <span className={`text-[12px] transition-colors ${labelInactiveClass}`}>Screenshot</span>
@@ -369,7 +370,7 @@ const SettingsPopup = () => {
                 <div
                     // @ts-ignore
                     onClick={() => window.electronAPI.openExternal('https://buymeacoffee.com/evinjohnn')}
-                    className="flex items-center justify-between px-3 py-2 hover:bg-pink-500/10 rounded-lg transition-colors duration-200 group interaction-base interaction-press"
+                    className="flex items-center justify-between px-3 py-2 hover:bg-pink-500/10 rounded-lg transition-colors duration-200 group interaction-base interaction-press glass-popup-row"
                 >
                     <div className="flex items-center gap-3">
                         <Heart className="w-3.5 h-3.5 text-pink-400 group-hover:fill-pink-400 transition-all duration-300" />
