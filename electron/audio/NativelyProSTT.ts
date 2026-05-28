@@ -71,11 +71,6 @@ export class NativelyProSTT extends EventEmitter {
 
     private readonly BACKEND_URL = 'wss://api.natively.software/v1/transcribe';
 
-    // Static: stagger concurrent connections with the same key so both instances
-    // don't hit the server (and its upstream Deepgram key rotation) simultaneously.
-    private static readonly nextSlotByKey = new Map<string, number>();
-    private static readonly SLOT_INTERVAL_MS = 3000;
-
     constructor(apiKey: string, channel: 'system' | 'mic' = 'system') {
         super();
         this.apiKey  = apiKey;
@@ -106,14 +101,14 @@ export class NativelyProSTT extends EventEmitter {
         //                                   thing — the open handler reads the
         //                                   updated rate.
         // Reconnecting in either of these states tears down a connection that
-        // was about to use the right value anyway, costs us a 3s stagger
-        // round-trip (concurrent-key collision prevention), and surfaces an
-        // unsightly "WebSocket was closed before the connection was
-        // established" error in the logs. The system-channel STT was hitting
-        // this on every meeting start because Rust publishes its real device
-        // rate (48kHz on macOS CoreAudio Tap) ~5-7s after start(), which is
-        // exactly when the first chunk arrives — long before the server has
-        // confirmed the handshake.
+        // was about to use the right value anyway, costs us a fresh TLS
+        // handshake round-trip, and surfaces an unsightly "WebSocket was
+        // closed before the connection was established" error in the logs.
+        // The system-channel STT was hitting this on every meeting start
+        // because Rust publishes its real device rate (48kHz on macOS
+        // CoreAudio Tap) ~5-7s after start(), which is exactly when the first
+        // chunk arrives — long before the server has confirmed the
+        // handshake.
         if (this.isActive && this.isConnected) {
             console.log(`[NativelyProSTT:${this.channel}] Rate changed mid-stream — reconnecting WS so server uses the new declared rate.`);
             this.reconnectAttempts = 0;     // fresh session — reset backoff
@@ -290,34 +285,19 @@ export class NativelyProSTT extends EventEmitter {
 
     // ── Internal ──────────────────────────────────────────────
 
-    private connect(skipStagger = false): void {
+    private connect(_skipStagger = false): void {
         if (this.isConnecting || !this.isActive) return;
 
-        if (!skipStagger) {
-            // Stagger connections for the same key to avoid concurrent server collisions.
-            // If the server received two connections within SLOT_INTERVAL_MS, it (or its
-            // upstream Deepgram key pool) can fail both with 1006.
-            const now = Date.now();
-            const reserved = NativelyProSTT.nextSlotByKey.get(this.apiKey) ?? 0;
-            const staggerMs = Math.max(0, reserved - now);
-            NativelyProSTT.nextSlotByKey.set(this.apiKey, Math.max(now, reserved) + NativelyProSTT.SLOT_INTERVAL_MS);
-
-            if (staggerMs > 0) {
-                this.isConnecting = true; // Hold the slot while waiting
-                console.log(`[NativelyProSTT:${this.channel}] Staggering connection ${staggerMs}ms (concurrent key collision prevention)`);
-                // Track in the same pendingConnectTimer slot used by inline
-                // reconnect setTimeouts. stop()/start() cancel it, so a stop+start
-                // sequence during the stagger window doesn't leave an orphan timer
-                // that would later call connect(true) inside the next session.
-                if (this.pendingConnectTimer) clearTimeout(this.pendingConnectTimer);
-                this.pendingConnectTimer = setTimeout(() => {
-                    this.pendingConnectTimer = null;
-                    this.isConnecting = false;
-                    if (this.isActive) this.connect(true);
-                }, staggerMs);
-                return;
-            }
-        }
+        // Per-key stagger removed (was 3000 ms between any two connects on the
+        // same apiKey). It was added under the assumption the server serialised
+        // by API key — it does not. Server-side concurrency is project-quota
+        // based (HTTP 429 on overflow), and the system + mic channels are
+        // explicitly supported as concurrent streams disambiguated by the
+        // `channel` field in the auth frame. Re-introducing any per-key serial
+        // gate here will reintroduce the 3–8 s mic-activation regression.
+        // The `_skipStagger` parameter is kept for ABI stability with existing
+        // callers (250 ms reconnect debounces in setSampleRate /
+        // setRecognitionLanguage / language_detected); it is now a no-op.
 
         this.isConnecting = true;
         this.isConnected  = false;
@@ -413,6 +393,7 @@ export class NativelyProSTT extends EventEmitter {
                     this.isConnecting = false;
                     this.isConnected  = true;
                     console.log(`[NativelyProSTT] Connected via ${msg.provider}`);
+                    this.emit('connected', { provider: msg.provider, channel: this.channel });
                     // Delay resetting reconnectAttempts: only reset after 5 s of stability.
                     // An immediate reset means every rapid 1006 loop re-uses the minimum
                     // 1500 ms delay, causing an infinite tight reconnect storm.
@@ -558,6 +539,21 @@ export class NativelyProSTT extends EventEmitter {
     private closeUpstream(): void {
         this.isConnected  = false;
         this.isConnecting = false;
+
+        // Clear every owned timer here, not just at stop()/start() boundaries.
+        // Any path that tears down the upstream connection (intentional close,
+        // setSampleRate, setRecognitionLanguage, language_detected, fatal-error
+        // branch) used to leave reconnectTimer / stabilityTimer alive — they
+        // would then fire against a torn-down session and either call
+        // connect() (orphan reconnect) or clobber reconnectAttempts on the
+        // next session (stability timer surviving across sessions). The 250ms
+        // inline reconnect paths immediately re-assign pendingConnectTimer
+        // AFTER calling closeUpstream(), so clearing it here is safe — they
+        // intentionally overwrite it.
+        if (this.reconnectTimer)     { clearTimeout(this.reconnectTimer);     this.reconnectTimer = null; }
+        if (this.stabilityTimer)     { clearTimeout(this.stabilityTimer);     this.stabilityTimer = null; }
+        if (this.pendingConnectTimer) { clearTimeout(this.pendingConnectTimer); this.pendingConnectTimer = null; }
+
         if (this.ws) {
             const dying = this.ws;
             this.ws = null;

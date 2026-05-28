@@ -332,22 +332,22 @@
    the element is being touched. Active presses it back inward.
    ─────────────────────────────────────────────────────────────────────── */
 
-/* TopPill — pronounced jelly look, the most prominent floating element */
+/* TopPill — match the main liquid-glass panel material */
 [data-interface-theme="liquid-glass"] .overlay-pill-surface {
   background:
-    linear-gradient(180deg,
+    linear-gradient(135deg,
       rgba(255, 255, 255, 0.16) 0%,
-      rgba(255, 255, 255, 0.06) 45%,
-      rgba(255, 255, 255, 0.10) 100%
+      rgba(255, 255, 255, 0.07) 45%,
+      rgba(255, 255, 255, 0.04) 65%,
+      rgba(255, 255, 255, 0.12) 100%
     ),
-    rgba(255, 255, 255, 0.06) !important;
+    rgba(12, 18, 32, 0.70) !important;
   border-color: transparent !important;
-  backdrop-filter: blur(20px) saturate(170%) !important;
-  -webkit-backdrop-filter: blur(20px) saturate(170%) !important;
+  backdrop-filter: blur(20px) saturate(165%) !important;
+  -webkit-backdrop-filter: blur(20px) saturate(165%) !important;
   box-shadow:
-    inset 0 1.5px 0 rgba(255, 255, 255, 0.55),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.10),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.14),
+    inset 0 1.5px 0 rgba(255, 255, 255, 0.44),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.13),
     0 14px 36px rgba(0, 0, 0, 0.38),
     0 4px 10px rgba(0, 0, 0, 0.18) !important;
 }
@@ -963,20 +963,20 @@
   z-index: 0;
 }
 
-/* TopPill — same DARK_GLASS recipe but more transparent base so it floats
-   visibly above the panel below. Slightly softer gloss. */
+/* TopPill — match the main modern panel material */
 [data-interface-theme="modern"] .overlay-pill-surface {
   background: linear-gradient(160deg,
-      rgba(90, 90, 108, 0.68) 0%,
-      rgba(55, 55, 70, 0.72) 50%,
-      rgba(36, 36, 50, 0.76) 100%
+      rgba(90, 90, 108, 0.88) 0%,
+      rgba(55, 55, 70, 0.93) 50%,
+      rgba(36, 36, 50, 0.97) 100%
     ) !important;
   border-color: rgba(255, 255, 255, 0.20) !important;
   backdrop-filter: blur(3px) !important;
   -webkit-backdrop-filter: blur(3px) !important;
   box-shadow:
-    0 4px 20px rgba(0, 0, 0, 0.30),
-    inset 0 1px 0 rgba(255, 255, 255, 0.11) !important;
+    0 12px 40px rgba(0, 0, 0, 0.50),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 0 0 0.5px rgba(255, 255, 255, 0.08) !important;
   position: relative;
 }
 
@@ -1944,4 +1944,1049 @@ html[data-platform="win32"] body,
 html[data-platform="linux"] body {
   border-radius: 8px !important;
   overflow: hidden;
+}
+
+/* ───────────────────────────────────────────────────────────────────────
+   Natively API - New Interactive Pricing switchboard (Liquid Glass)
+   ─────────────────────────────────────────────────────────────────────── */
+
+[data-interface-theme="liquid-glass"] .natively-api-selector-bar {
+  background: rgba(255, 255, 255, 0.03) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.05),
+    0 4px 12px rgba(0, 0, 0, 0.15) !important;
+  backdrop-filter: blur(10px) !important;
+  -webkit-backdrop-filter: blur(10px) !important;
+}
+
+[data-interface-theme="liquid-glass"] .natively-api-selector-tab {
+  position: relative;
+  background: transparent !important;
+  border: none !important;
+  color: var(--text-secondary) !important;
+  padding: 8px 12px !important;
+  font-size: 11.5px !important;
+  font-weight: 500 !important;
+  text-align: center !important;
+  cursor: pointer !important;
+  transition: color 0.2s ease-out, transform 0.15s cubic-bezier(0.23, 1, 0.32, 1) !important;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+[data-interface-theme="liquid-glass"] .natively-api-selector-tab:hover {
+  color: var(--text-primary) !important;
+}
+
+[data-interface-theme="liquid-glass"] .natively-api-selector-tab:active {
+  transform: scale(0.96) !important;
+}
+
+[data-interface-theme="liquid-glass"] .natively-api-selector-tab.active {
+  color: #ffffff !important;
+  font-weight: 600 !important;
+}
+
+[data-interface-theme="liquid-glass"] .natively-api-selector-tab .tab-name {
+  font-size: 11.5px !important;
+  letter-spacing: -0.01em;
+}
+
+[data-interface-theme="liquid-glass"] .natively-api-selector-tab .tab-price {
+  font-size: 9.5px !important;
+  opacity: 0.65;
+  margin-top: 1px;
+}
+
+[data-interface-theme="liquid-glass"] .natively-api-selector-pill {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.18) 0%, rgba(255, 255, 255, 0.04) 100%),
+    rgba(255, 255, 255, 0.08) !important;
+  border: 1px solid rgba(255, 255, 255, 0.15) !important;
+  border-radius: 12px !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.35),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.10),
+    0 3px 8px rgba(0, 0, 0, 0.20) !important;
+}
+
+/* Double-Bezel layout */
+[data-interface-theme="liquid-glass"] .natively-api-detail-shell {
+  background: rgba(0, 0, 0, 0.16) !important;
+  border: 1px solid rgba(255, 255, 255, 0.05) !important;
+  box-shadow:
+    inset 0 3px 6px rgba(0, 0, 0, 0.35),
+    0 12px 36px rgba(0, 0, 0, 0.25) !important;
+  border-radius: 32px !important;
+  overflow: hidden !important;
+}
+
+/* Hardware-Accelerated Reveal Keyframes */
+@keyframes natively-api-card-reveal {
+  0% {
+    opacity: 0;
+    transform: scale(0.985) translateY(6px);
+    filter: blur(4px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+    filter: blur(0);
+  }
+}
+
+[data-interface-theme="liquid-glass"] .natively-api-detail-card {
+  border-radius: 26px !important;
+  backdrop-filter: blur(30px) saturate(210%) !important;
+  -webkit-backdrop-filter: blur(30px) saturate(210%) !important;
+  border: 1.5px solid transparent !important;
+  position: relative !important;
+  overflow: hidden !important;
+  transition: transform 180ms cubic-bezier(0.23, 1, 0.32, 1),
+              box-shadow 180ms cubic-bezier(0.23, 1, 0.32, 1),
+              border-color 180ms cubic-bezier(0.23, 1, 0.32, 1) !important;
+}
+
+/* Glass shine gloss highlight on liquid glass detail cards */
+[data-interface-theme="liquid-glass"] .natively-api-detail-card::before {
+  content: '' !important;
+  display: block !important;
+  position: absolute !important;
+  inset: 1px !important;
+  height: 45% !important;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0) 100%) !important;
+  border-radius: 25px 25px 0 0 !important;
+  pointer-events: none !important;
+  z-index: 2 !important;
+}
+
+/* Blueprint tech grid overlay on detail cards */
+[data-interface-theme="liquid-glass"] .natively-api-detail-card::after,
+[data-interface-theme="modern"] .natively-api-detail-card::after {
+  content: '' !important;
+  position: absolute !important;
+  inset: 0 !important;
+  background-image: 
+    linear-gradient(rgba(255, 255, 255, 0.012) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.012) 1px, transparent 1px) !important;
+  background-size: 24px 24px !important;
+  pointer-events: none !important;
+  z-index: 1 !important;
+  opacity: 0.55 !important;
+  transition: opacity 180ms cubic-bezier(0.23, 1, 0.32, 1) !important;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .natively-api-detail-card:hover::after {
+    opacity: 0.8 !important;
+  }
+}
+
+/* Card Specific color variations (Liquid Glass) */
+/* Standard - Cool Slate / Blue */
+[data-interface-theme="liquid-glass"] .natively-api-detail-card-standard {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.16), transparent 50%),
+    radial-gradient(circle at 100% 100%, rgba(148, 163, 184, 0.20), transparent 60%),
+    linear-gradient(135deg, rgba(148, 163, 184, 0.12) 0%, rgba(45, 55, 75, 0.40) 100%) !important;
+  box-shadow:
+    inset 0 2.5px 0 rgba(255, 255, 255, 0.42),
+    inset 0 -3px 8px rgba(0, 0, 0, 0.20),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.14),
+    0 12px 30px rgba(0, 0, 0, 0.15) !important;
+}
+
+/* Pro - Deep Violet / Indigo */
+[data-interface-theme="liquid-glass"] .natively-api-detail-card-pro {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.28) 0%, transparent 60%),
+    radial-gradient(circle at 100% 100%, rgba(139, 92, 246, 0.35) 0%, transparent 60%),
+    linear-gradient(135deg, rgba(55, 30, 95, 0.50) 0%, rgba(20, 10, 36, 0.65) 100%) !important;
+  border-color: rgba(139, 92, 246, 0.32) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(139, 92, 246, 0.60),
+    inset 0 2.5px 0 rgba(255, 255, 255, 0.35),
+    inset 0 -3px 8px rgba(0, 0, 0, 0.30),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.14),
+    0 14px 34px rgba(139, 92, 246, 0.22),
+    0 6px 18px rgba(0, 0, 0, 0.22) !important;
+}
+
+/* Max - Indigo / Deep Blue */
+[data-interface-theme="liquid-glass"] .natively-api-detail-card-max {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.25) 0%, transparent 60%),
+    radial-gradient(circle at 100% 100%, rgba(59, 130, 246, 0.32) 0%, transparent 60%),
+    linear-gradient(135deg, rgba(30, 48, 80, 0.50) 0%, rgba(15, 23, 42, 0.65) 100%) !important;
+  border-color: rgba(59, 130, 246, 0.32) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(59, 130, 246, 0.55),
+    inset 0 2.5px 0 rgba(255, 255, 255, 0.35),
+    inset 0 -3px 8px rgba(0, 0, 0, 0.30),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.14),
+    0 14px 34px rgba(59, 130, 246, 0.20),
+    0 6px 18px rgba(0, 0, 0, 0.22) !important;
+}
+
+/* Ultra - Sunset / Magenta Accent */
+[data-interface-theme="liquid-glass"] .natively-api-detail-card-ultra {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.28) 0%, transparent 60%),
+    radial-gradient(circle at 100% 100%, rgba(249, 115, 22, 0.30) 0%, transparent 60%),
+    linear-gradient(135deg, rgba(70, 40, 30, 0.50) 0%, rgba(25, 12, 16, 0.65) 100%) !important;
+  border-color: rgba(249, 115, 22, 0.32) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(249, 115, 22, 0.55),
+    inset 0 2.5px 0 rgba(255, 255, 255, 0.35),
+    inset 0 -3px 8px rgba(0, 0, 0, 0.30),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.14),
+    0 14px 34px rgba(249, 115, 22, 0.20),
+    0 6px 18px rgba(0, 0, 0, 0.22) !important;
+}
+
+/* Active State overrides */
+[data-interface-theme="liquid-glass"] .natively-api-detail-card[data-active="true"] {
+  border-color: rgba(52, 211, 153, 0.45) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(52, 211, 153, 0.60),
+    inset 0 2px 6px rgba(255, 255, 255, 0.25),
+    inset 0 -3px 8px rgba(0, 0, 0, 0.6),
+    0 16px 36px rgba(52, 211, 153, 0.15),
+    0 4px 12px rgba(0, 0, 0, 0.35) !important;
+}
+
+/* Hover effect on detail cards */
+@media (hover: hover) and (pointer: fine) {
+  [data-interface-theme="liquid-glass"] .natively-api-detail-card:hover {
+    transform: translateY(-2px) !important;
+    box-shadow:
+      inset 0 2.5px 0 rgba(255, 255, 255, 0.45),
+      inset 0 -3px 8px rgba(0, 0, 0, 0.20),
+      0 20px 45px rgba(0, 0, 0, 0.35) !important;
+  }
+}
+
+/* CTA buttons for Natively API pricing cards */
+[data-interface-theme="liquid-glass"] .natively-api-pricing-cta {
+  border-radius: 9999px !important;
+  padding: 12px 24px !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  text-align: center !important;
+  transition: transform 150ms cubic-bezier(0.23, 1, 0.32, 1), 
+              box-shadow 150ms cubic-bezier(0.23, 1, 0.32, 1), 
+              background-color 150ms cubic-bezier(0.23, 1, 0.32, 1) !important;
+  cursor: pointer !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 6px !important;
+  width: 100% !important;
+  border: 1.5px solid transparent !important;
+}
+
+[data-interface-theme="liquid-glass"] .natively-api-pricing-cta-neutral {
+  background: linear-gradient(180deg, #ffffff 0%, #f1f5f9 100%) !important;
+  color: rgba(15, 23, 42, 0.95) !important;
+  box-shadow:
+    inset 0 1px 2px rgba(255, 255, 255, 1),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.12),
+    0 4px 12px rgba(0, 0, 0, 0.15) !important;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  [data-interface-theme="liquid-glass"] .natively-api-pricing-cta-neutral:hover {
+    background: linear-gradient(180deg, #ffffff 0%, #e2e8f0 100%) !important;
+    transform: translateY(-1px) !important;
+    box-shadow:
+      inset 0 1.5px 3px rgba(255, 255, 255, 1),
+      inset 0 -2px 4px rgba(0, 0, 0, 0.12),
+      0 6px 16px rgba(0, 0, 0, 0.20) !important;
+  }
+}
+
+[data-interface-theme="liquid-glass"] .natively-api-pricing-cta-pro {
+  background:
+    linear-gradient(180deg,
+      rgba(255, 255, 255, 0.35) 0%,
+      rgba(255, 255, 255, 0.05) 50%,
+      rgba(0, 0, 0, 0.24) 100%
+    ),
+    #8b5cf6 !important;
+  color: #ffffff !important;
+  box-shadow:
+    inset 0 2px 3px rgba(255, 255, 255, 0.45),
+    inset 0 -2px 6px rgba(0, 0, 0, 0.35),
+    0 6px 18px rgba(139, 92, 246, 0.30) !important;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  [data-interface-theme="liquid-glass"] .natively-api-pricing-cta-pro:hover {
+    background:
+      linear-gradient(180deg,
+        rgba(255, 255, 255, 0.45) 0%,
+        rgba(255, 255, 255, 0.05) 50%,
+        rgba(0, 0, 0, 0.24) 100%
+      ),
+      #7c3aed !important;
+    transform: translateY(-1px) !important;
+    box-shadow:
+      inset 0 2px 3px rgba(255, 255, 255, 0.55),
+      inset 0 -2px 6px rgba(0, 0, 0, 0.35),
+      0 10px 22px rgba(139, 92, 246, 0.45) !important;
+  }
+}
+
+[data-interface-theme="liquid-glass"] .natively-api-pricing-cta:active {
+  transform: translateY(0) scale(0.97) !important;
+}
+
+/* Premium micro-pills */
+[data-interface-theme="liquid-glass"] .natively-api-pricing-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px !important;
+  border-radius: 9999px !important;
+  font-size: 9.5px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.03em !important;
+  text-transform: uppercase !important;
+  background:
+    linear-gradient(180deg,
+      rgba(255, 255, 255, 0.22) 0%,
+      rgba(0, 0, 0, 0.06) 100%
+    ),
+    rgba(255, 255, 255, 0.08) !important;
+  border: 1px solid rgba(255, 255, 255, 0.15) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.40),
+    0 1px 2px rgba(0, 0, 0, 0.10) !important;
+}
+
+[data-interface-theme="liquid-glass"] .natively-api-pricing-badge-recommended {
+  background:
+    linear-gradient(180deg,
+      rgba(255, 255, 255, 0.26) 0%,
+      rgba(255, 255, 255, 0.00) 45%,
+      rgba(0, 0, 0, 0.08) 100%
+    ),
+    rgba(139, 92, 246, 0.22) !important;
+  border-color: rgba(196, 181, 253, 0.35) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.50),
+    0 3px 8px rgba(139, 92, 246, 0.20) !important;
+}
+
+/* ─── Natively API Pricing Card System - Modern Theme ─────────────────── */
+
+[data-interface-theme="modern"] .natively-api-selector-bar {
+  background: rgba(0, 0, 0, 0.20) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.3) !important;
+}
+
+[data-interface-theme="modern"] .natively-api-selector-tab {
+  position: relative;
+  background: transparent !important;
+  border: none !important;
+  color: var(--text-secondary) !important;
+  padding: 8px 12px !important;
+  font-size: 11.5px !important;
+  font-weight: 500 !important;
+  text-align: center !important;
+  cursor: pointer !important;
+  transition: color 0.2s ease-out, transform 0.15s cubic-bezier(0.23, 1, 0.32, 1) !important;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+[data-interface-theme="modern"] .natively-api-selector-tab:hover {
+  color: var(--text-primary) !important;
+}
+
+[data-interface-theme="modern"] .natively-api-selector-tab:active {
+  transform: scale(0.96) !important;
+}
+
+[data-interface-theme="modern"] .natively-api-selector-tab.active {
+  color: #ffffff !important;
+  font-weight: 600 !important;
+}
+
+[data-interface-theme="modern"] .natively-api-selector-tab .tab-name {
+  font-size: 11.5px !important;
+  letter-spacing: -0.01em;
+}
+
+[data-interface-theme="modern"] .natively-api-selector-tab .tab-price {
+  font-size: 9.5px !important;
+  opacity: 0.65;
+  margin-top: 1px;
+}
+
+[data-interface-theme="modern"] .natively-api-selector-pill {
+  background: rgba(255, 255, 255, 0.10) !important;
+  border-radius: 12px !important;
+  box-shadow: 
+    inset 0 1px 0 rgba(255, 255, 255, 0.15),
+    0 1px 3px rgba(0, 0, 0, 0.20) !important;
+}
+
+/* Double-Bezel layout (Modern) */
+[data-interface-theme="modern"] .natively-api-detail-shell {
+  background: rgba(0, 0, 0, 0.22) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35) !important;
+  border-radius: 32px !important;
+  overflow: hidden !important;
+}
+
+[data-interface-theme="modern"] .natively-api-detail-card {
+  border-radius: 26px !important;
+  border: 1.5px solid transparent !important;
+  position: relative !important;
+  overflow: hidden !important;
+  transition: transform 180ms cubic-bezier(0.23, 1, 0.32, 1),
+              box-shadow 180ms cubic-bezier(0.23, 1, 0.32, 1),
+              border-color 180ms cubic-bezier(0.23, 1, 0.32, 1) !important;
+}
+
+/* Card Specific color variations (Modern) */
+/* Standard - Slate */
+[data-interface-theme="modern"] .natively-api-detail-card-standard {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.16), transparent 50%),
+    linear-gradient(160deg, rgba(100, 112, 132, 0.65) 0%, rgba(60, 68, 88, 0.75) 50%, rgba(35, 40, 55, 0.85) 100%) !important;
+  box-shadow:
+    inset 0 2px 3px rgba(255, 255, 255, 0.25),
+    inset 0 -3px 8px rgba(0, 0, 0, 0.30),
+    0 12px 32px rgba(0, 0, 0, 0.35) !important;
+}
+
+/* Pro - Deep Violet */
+[data-interface-theme="modern"] .natively-api-detail-card-pro {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.22), transparent 50%),
+    linear-gradient(160deg, rgba(130, 110, 180, 0.65) 0%, rgba(80, 65, 125, 0.75) 50%, rgba(45, 35, 80, 0.85) 100%) !important;
+  border-color: rgba(139, 92, 246, 0.32) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(139, 92, 246, 0.45),
+    inset 0 2px 3px rgba(255, 255, 255, 0.28),
+    inset 0 -3px 8px rgba(0, 0, 0, 0.35),
+    0 16px 36px rgba(0, 0, 0, 0.35),
+    0 4px 12px rgba(110, 90, 155, 0.15) !important;
+}
+
+/* Max - Indigo / Deep Blue */
+[data-interface-theme="modern"] .natively-api-detail-card-max {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.18), transparent 50%),
+    linear-gradient(160deg, rgba(85, 110, 165, 0.65) 0%, rgba(50, 68, 115, 0.75) 50%, rgba(30, 40, 75, 0.85) 100%) !important;
+  border-color: rgba(59, 130, 246, 0.32) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(59, 130, 246, 0.45),
+    inset 0 2px 3px rgba(255, 255, 255, 0.25),
+    inset 0 -3px 8px rgba(0, 0, 0, 0.32),
+    0 14px 34px rgba(0, 0, 0, 0.35) !important;
+}
+
+/* Ultra - Sunset Accent */
+[data-interface-theme="modern"] .natively-api-detail-card-ultra {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.22), transparent 50%),
+    linear-gradient(160deg, rgba(155, 110, 125, 0.65) 0%, rgba(95, 58, 95, 0.75) 50%, rgba(55, 32, 60, 0.85) 100%) !important;
+  border-color: rgba(249, 115, 22, 0.32) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(249, 115, 22, 0.45),
+    inset 0 2px 3px rgba(255, 255, 255, 0.28),
+    inset 0 -3px 8px rgba(0, 0, 0, 0.35),
+    0 15px 35px rgba(0, 0, 0, 0.35),
+    0 4px 12px rgba(135, 90, 105, 0.10) !important;
+}
+
+/* Active State overrides (Modern) */
+[data-interface-theme="modern"] .natively-api-detail-card[data-active="true"] {
+  border-color: rgba(52, 211, 153, 0.45) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(52, 211, 153, 0.50),
+    inset 0 2px 3px rgba(255, 255, 255, 0.25),
+    inset 0 -3px 8px rgba(0, 0, 0, 0.40),
+    0 16px 36px rgba(0, 0, 0, 0.55),
+    0 0 16px rgba(52, 211, 153, 0.10) !important;
+}
+
+/* Hover effect on detail cards (Modern) */
+@media (hover: hover) and (pointer: fine) {
+  [data-interface-theme="modern"] .natively-api-detail-card:hover {
+    transform: translateY(-2px) !important;
+    box-shadow:
+      inset 0 2px 3px rgba(255, 255, 255, 0.25),
+      inset 0 -3px 8px rgba(0, 0, 0, 0.30),
+      0 20px 45px rgba(0, 0, 0, 0.50) !important;
+  }
+}
+
+/* CTA buttons for Natively API pricing cards (Modern) */
+[data-interface-theme="modern"] .natively-api-pricing-cta {
+  border-radius: 9999px !important;
+  padding: 12px 24px !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  text-align: center !important;
+  transition: transform 150ms cubic-bezier(0.23, 1, 0.32, 1), 
+              box-shadow 150ms cubic-bezier(0.23, 1, 0.32, 1), 
+              background-color 150ms cubic-bezier(0.23, 1, 0.32, 1) !important;
+  cursor: pointer !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 6px !important;
+  width: 100% !important;
+  border: 1.5px solid transparent !important;
+}
+
+/* Neutral bright CTA (Modern) */
+[data-interface-theme="modern"] .natively-api-pricing-cta-neutral {
+  background: linear-gradient(180deg, #ffffff 0%, #f1f5f9 100%) !important;
+  color: rgba(15, 23, 42, 0.95) !important;
+  box-shadow:
+    inset 0 1px 2px rgba(255, 255, 255, 1),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.12),
+    0 4px 12px rgba(0, 0, 0, 0.15) !important;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  [data-interface-theme="modern"] .natively-api-pricing-cta-neutral:hover {
+    background: linear-gradient(180deg, #ffffff 0%, #e2e8f0 100%) !important;
+    transform: translateY(-1px) !important;
+    box-shadow:
+      inset 0 1.5px 3px rgba(255, 255, 255, 1),
+      inset 0 -2px 4px rgba(0, 0, 0, 0.12),
+      0 6px 16px rgba(0, 0, 0, 0.20) !important;
+  }
+}
+
+/* Colored Pro CTA (Modern) */
+[data-interface-theme="modern"] .natively-api-pricing-cta-pro {
+  background:
+    linear-gradient(180deg,
+      rgba(255, 255, 255, 0.35) 0%,
+      rgba(255, 255, 255, 0.05) 50%,
+      rgba(0, 0, 0, 0.24) 100%
+    ),
+    #8b5cf6 !important;
+  color: #ffffff !important;
+  box-shadow:
+    inset 0 2px 3px rgba(255, 255, 255, 0.45),
+    inset 0 -2px 6px rgba(0, 0, 0, 0.35),
+    0 6px 18px rgba(139, 92, 246, 0.30) !important;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  [data-interface-theme="modern"] .natively-api-pricing-cta-pro:hover {
+    background:
+      linear-gradient(180deg,
+        rgba(255, 255, 255, 0.45) 0%,
+        rgba(255, 255, 255, 0.05) 50%,
+        rgba(0, 0, 0, 0.24) 100%
+      ),
+      #7c3aed !important;
+    transform: translateY(-1px) !important;
+    box-shadow:
+      inset 0 2px 3px rgba(255, 255, 255, 0.55),
+      inset 0 -2px 6px rgba(0, 0, 0, 0.35),
+      0 10px 22px rgba(139, 92, 246, 0.45) !important;
+  }
+}
+
+[data-interface-theme="modern"] .natively-api-pricing-cta:active {
+  transform: translateY(0) scale(0.97) !important;
+}
+
+/* Premium micro-pills (Modern) */
+[data-interface-theme="modern"] .natively-api-pricing-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px !important;
+  border-radius: 9999px !important;
+  font-size: 9.5px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.03em !important;
+  text-transform: uppercase !important;
+  background: rgba(255, 255, 255, 0.08) !important;
+  border: 1px solid rgba(255, 255, 255, 0.15) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.20),
+    0 1px 2px rgba(0, 0, 0, 0.15) !important;
+}
+
+[data-interface-theme="modern"] .natively-api-pricing-badge-recommended {
+  background: rgba(139, 92, 246, 0.25) !important;
+  border-color: rgba(196, 181, 253, 0.35) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.25),
+    0 3px 8px rgba(139, 92, 246, 0.20) !important;
+}
+
+/* Layout Stabilization - Enforce Identical Sizing for All Plans */
+@media (min-width: 768px) {
+  .natively-api-details-wrapper {
+    height: 370px !important;
+  }
+  .natively-api-detail-shell {
+    height: 100% !important;
+  }
+  .natively-api-detail-card {
+    height: 100% !important;
+    display: flex !important;
+    flex-direction: column !important;
+    box-sizing: border-box !important;
+  }
+}
+
+@media (max-width: 767px) {
+  .natively-api-details-wrapper {
+    min-height: 520px !important;
+  }
+  .natively-api-detail-shell {
+    height: 100% !important;
+  }
+  .natively-api-detail-card {
+    min-height: 100% !important;
+    display: flex !important;
+    flex-direction: column !important;
+  }
+}
+
+.natively-api-detail-card > .grid {
+  flex: 1 !important;
+}
+
+.natively-api-pricing-cta,
+.natively-api-pricing-active-tag {
+  height: 44px !important;
+  box-sizing: border-box !important;
+}
+
+/* ───────────────────────────────────────────────────────────────────────
+   Natively Pro Purchase UI Redesign (Tactile 3D Jelly-Clay / Liquid-Glass)
+   ─────────────────────────────────────────────────────────────────────── */
+
+.perspective-1000 {
+  perspective: 1000px !important;
+}
+
+/* Blueprint tech grid overlay on both Yearly and Lifetime cards */
+[data-interface-theme="liquid-glass"] .pricing-card-yearly::after,
+[data-interface-theme="liquid-glass"] .pricing-card-lifetime::after,
+[data-interface-theme="modern"] .pricing-card-yearly::after,
+[data-interface-theme="modern"] .pricing-card-lifetime::after {
+  content: '' !important;
+  position: absolute !important;
+  inset: 0 !important;
+  background-image: 
+    linear-gradient(rgba(255, 255, 255, 0.012) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.012) 1px, transparent 1px) !important;
+  background-size: 24px 24px !important;
+  pointer-events: none !important;
+  z-index: 1 !important;
+  opacity: 0.55 !important;
+  transition: opacity 180ms cubic-bezier(0.23, 1, 0.32, 1) !important;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .pricing-card-yearly:hover::after,
+  .pricing-card-lifetime:hover::after {
+    opacity: 0.8 !important;
+  }
+}
+
+/* --- LIQUID GLASS THEME --- */
+[data-interface-theme="liquid-glass"] .pricing-card-yearly {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(59, 130, 246, 0.28) 0%, transparent 60%),
+    linear-gradient(135deg, rgba(30, 48, 80, 0.50) 0%, rgba(15, 23, 42, 0.65) 100%) !important;
+  backdrop-filter: blur(24px) saturate(140%) !important;
+  -webkit-backdrop-filter: blur(24px) saturate(140%) !important;
+  border: 1px solid rgba(255, 255, 255, 0.16) !important;
+  border-radius: 28px !important;
+  position: relative;
+  overflow: hidden;
+  transition: transform 180ms cubic-bezier(0.23, 1, 0.32, 1),
+              box-shadow 180ms cubic-bezier(0.23, 1, 0.32, 1),
+              border-color 180ms cubic-bezier(0.23, 1, 0.32, 1) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(59, 130, 246, 0.5),
+    inset 0 2px 4px rgba(255, 255, 255, 0.22),
+    inset 0 -3px 8px rgba(0, 0, 0, 0.4),
+    0 4px 16px rgba(0, 0, 0, 0.2) !important;
+}
+
+[data-interface-theme="liquid-glass"] .pricing-card-yearly::before {
+  content: '' !important;
+  display: block !important;
+  position: absolute !important;
+  inset: 1px !important;
+  height: 45% !important;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.16) 0%, rgba(255, 255, 255, 0) 100%) !important;
+  border-radius: 27px 27px 0 0 !important;
+  pointer-events: none !important;
+  z-index: 2 !important;
+}
+
+[data-interface-theme="liquid-glass"] .pricing-card-yearly[data-active="true"],
+[data-interface-theme="liquid-glass"] .pricing-card-yearly[data-active="false"] {
+  transform: scale(1) !important;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  [data-interface-theme="liquid-glass"] .pricing-card-yearly:hover {
+    border-color: rgba(59, 130, 246, 0.48) !important;
+    box-shadow:
+      inset 0 1px 0 rgba(59, 130, 246, 0.6),
+      inset 0 2px 6px rgba(255, 255, 255, 0.3),
+      inset 0 -3px 8px rgba(0, 0, 0, 0.4),
+      0 12px 32px rgba(59, 130, 246, 0.2),
+      0 4px 12px rgba(0, 0, 0, 0.25) !important;
+  }
+}
+
+/* Lifetime card — premium slate-violet plaque */
+[data-interface-theme="liquid-glass"] .pricing-card-lifetime {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(139, 92, 246, 0.35) 0%, transparent 60%),
+    linear-gradient(135deg, rgba(55, 30, 95, 0.50) 0%, rgba(20, 10, 36, 0.65) 100%) !important;
+  backdrop-filter: blur(24px) saturate(140%) !important;
+  -webkit-backdrop-filter: blur(24px) saturate(140%) !important;
+  border: 1px solid rgba(139, 92, 246, 0.35) !important;
+  border-radius: 28px !important;
+  position: relative;
+  overflow: hidden;
+  transition: transform 180ms cubic-bezier(0.23, 1, 0.32, 1),
+              box-shadow 180ms cubic-bezier(0.23, 1, 0.32, 1),
+              border-color 180ms cubic-bezier(0.23, 1, 0.32, 1) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(139, 92, 246, 0.6),
+    inset 0 2px 4px rgba(255, 255, 255, 0.22),
+    inset 0 -3px 8px rgba(0, 0, 0, 0.4),
+    0 4px 16px rgba(0, 0, 0, 0.2) !important;
+}
+
+[data-interface-theme="liquid-glass"] .pricing-card-lifetime::before {
+  content: '' !important;
+  display: block !important;
+  position: absolute !important;
+  inset: 1px !important;
+  height: 45% !important;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0) 100%) !important;
+  border-radius: 27px 27px 0 0 !important;
+  pointer-events: none !important;
+  z-index: 2 !important;
+}
+
+[data-interface-theme="liquid-glass"] .pricing-card-lifetime[data-active="true"],
+[data-interface-theme="liquid-glass"] .pricing-card-lifetime[data-active="false"] {
+  transform: scale(1) !important;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  [data-interface-theme="liquid-glass"] .pricing-card-lifetime:hover {
+    border-color: rgba(139, 92, 246, 0.48) !important;
+    box-shadow:
+      inset 0 1px 0 rgba(139, 92, 246, 0.6),
+      inset 0 2px 6px rgba(255, 255, 255, 0.25),
+      inset 0 -3px 8px rgba(0, 0, 0, 0.6),
+      0 12px 32px rgba(139, 92, 246, 0.2),
+      0 4px 12px rgba(0, 0, 0, 0.35) !important;
+  }
+}
+
+/* Plan-toggle active sliding pill */
+[data-interface-theme="liquid-glass"] .plan-toggle-active-pill {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 2px 4px rgba(0, 0, 0, 0.15) !important;
+}
+
+/* Yearly CTA — solid white button */
+[data-interface-theme="liquid-glass"] .pricing-cta-yearly {
+  background: radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 1) 0%, rgba(241, 245, 249, 1) 100%) !important;
+  color: #0f172a !important;
+  border: 1px solid rgba(255, 255, 255, 0.8) !important;
+  box-shadow: 
+    inset 0 2px 3px rgba(255, 255, 255, 0.9), 
+    inset 0 -2.5px 3px rgba(15, 23, 42, 0.12), 
+    0 3px 8px rgba(0, 0, 0, 0.15) !important;
+  transition: background-color 150ms cubic-bezier(0.23, 1, 0.32, 1),
+              transform 150ms cubic-bezier(0.23, 1, 0.32, 1),
+              box-shadow 150ms cubic-bezier(0.23, 1, 0.32, 1) !important;
+}
+@media (hover: hover) and (pointer: fine) {
+  [data-interface-theme="liquid-glass"] .pricing-cta-yearly:hover {
+    background: radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 1) 0%, rgba(248, 250, 252, 1) 100%) !important;
+    transform: translateY(-1px) !important;
+    box-shadow: 
+      inset 0 2px 3px rgba(255, 255, 255, 0.95), 
+      inset 0 -2.5px 3px rgba(15, 23, 42, 0.16), 
+      0 6px 14px rgba(0, 0, 0, 0.22) !important;
+  }
+}
+[data-interface-theme="liquid-glass"] .pricing-cta-yearly:active {
+  transform: translateY(0) scale(0.97) !important;
+  box-shadow: 
+    inset 0 1px 2px rgba(0, 0, 0, 0.2), 
+    0 2px 4px rgba(0, 0, 0, 0.1) !important;
+}
+
+/* Lifetime CTA — solid brand violet button */
+[data-interface-theme="liquid-glass"] .pricing-cta-lifetime {
+  background: radial-gradient(circle at 50% 0%, rgba(129, 140, 248, 1) 0%, rgba(79, 70, 229, 1) 100%) !important;
+  color: #ffffff !important;
+  border: 1px solid rgba(255, 255, 255, 0.25) !important;
+  box-shadow: 
+    inset 0 2.5px 3px rgba(255, 255, 255, 0.45), 
+    inset 0 -2.5px 3px rgba(0, 0, 0, 0.35), 
+    0 3px 10px rgba(99, 102, 241, 0.25) !important;
+  transition: background-color 150ms cubic-bezier(0.23, 1, 0.32, 1),
+              transform 150ms cubic-bezier(0.23, 1, 0.32, 1),
+              box-shadow 150ms cubic-bezier(0.23, 1, 0.32, 1) !important;
+}
+@media (hover: hover) and (pointer: fine) {
+  [data-interface-theme="liquid-glass"] .pricing-cta-lifetime:hover {
+    background: radial-gradient(circle at 50% 0%, rgba(147, 157, 255, 1) 0%, rgba(67, 56, 202, 1) 100%) !important;
+    transform: translateY(-1px) !important;
+    box-shadow: 
+      inset 0 3px 4px rgba(255, 255, 255, 0.55), 
+      inset 0 -3px 4px rgba(0, 0, 0, 0.4), 
+      0 6px 16px rgba(99, 102, 241, 0.35) !important;
+  }
+}
+[data-interface-theme="liquid-glass"] .pricing-cta-lifetime:active {
+  transform: translateY(0) scale(0.97) !important;
+  box-shadow: 
+    inset 0 1px 2px rgba(0, 0, 0, 0.2), 
+    0 2px 4px rgba(99, 102, 241, 0.15) !important;
+}
+
+/* Feature icon chip — small slate square */
+[data-interface-theme="liquid-glass"] .feature-icon-chip {
+  background: rgba(255, 255, 255, 0.04) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02) !important;
+  border-radius: 8px !important;
+}
+
+/* "Best value" badge on Lifetime card */
+[data-interface-theme="liquid-glass"] .badge-best-value {
+  background: rgba(139, 92, 246, 0.15) !important;
+  border: 1px solid rgba(139, 92, 246, 0.25) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05) !important;
+}
+
+/* Tier label pills (Pro · Yearly / Pro · Lifetime) */
+[data-interface-theme="liquid-glass"] .badge-tier-label {
+  background: rgba(255, 255, 255, 0.05) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03) !important;
+  color: rgba(255, 255, 255, 0.75) !important;
+}
+
+
+/* --- MODERN THEME --- */
+[data-interface-theme="modern"] .pricing-card-yearly {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(59, 130, 246, 0.28) 0%, transparent 60%),
+    linear-gradient(135deg, rgba(30, 48, 80, 0.50) 0%, rgba(15, 23, 42, 0.65) 100%) !important;
+  backdrop-filter: blur(24px) saturate(140%) !important;
+  -webkit-backdrop-filter: blur(24px) saturate(140%) !important;
+  border: 1px solid rgba(255, 255, 255, 0.16) !important;
+  border-radius: 28px !important;
+  position: relative;
+  overflow: hidden;
+  transition: transform 180ms cubic-bezier(0.23, 1, 0.32, 1),
+              box-shadow 180ms cubic-bezier(0.23, 1, 0.32, 1),
+              border-color 180ms cubic-bezier(0.23, 1, 0.32, 1) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(59, 130, 246, 0.5),
+    inset 0 2px 4px rgba(255, 255, 255, 0.22),
+    inset 0 -3px 8px rgba(0, 0, 0, 0.4),
+    0 4px 16px rgba(0, 0, 0, 0.2) !important;
+}
+
+[data-interface-theme="modern"] .pricing-card-yearly::before {
+  content: '' !important;
+  display: block !important;
+  position: absolute !important;
+  inset: 1px !important;
+  height: 45% !important;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.16) 0%, rgba(255, 255, 255, 0) 100%) !important;
+  border-radius: 27px 27px 0 0 !important;
+  pointer-events: none !important;
+  z-index: 2 !important;
+}
+
+[data-interface-theme="modern"] .pricing-card-yearly[data-active="true"],
+[data-interface-theme="modern"] .pricing-card-yearly[data-active="false"] {
+  transform: scale(1) !important;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  [data-interface-theme="modern"] .pricing-card-yearly:hover {
+    border-color: rgba(59, 130, 246, 0.48) !important;
+    box-shadow:
+      inset 0 1px 0 rgba(59, 130, 246, 0.6),
+      inset 0 2px 6px rgba(255, 255, 255, 0.3),
+      inset 0 -3px 8px rgba(0, 0, 0, 0.4),
+      0 12px 32px rgba(59, 130, 246, 0.2),
+      0 4px 12px rgba(0, 0, 0, 0.25) !important;
+  }
+}
+
+/* Lifetime card — premium slate-violet plaque */
+[data-interface-theme="modern"] .pricing-card-lifetime {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(139, 92, 246, 0.35) 0%, transparent 60%),
+    linear-gradient(135deg, rgba(55, 30, 95, 0.50) 0%, rgba(20, 10, 36, 0.65) 100%) !important;
+  backdrop-filter: blur(24px) saturate(140%) !important;
+  -webkit-backdrop-filter: blur(24px) saturate(140%) !important;
+  border: 1px solid rgba(139, 92, 246, 0.35) !important;
+  border-radius: 28px !important;
+  position: relative;
+  overflow: hidden;
+  transition: transform 180ms cubic-bezier(0.23, 1, 0.32, 1),
+              box-shadow 180ms cubic-bezier(0.23, 1, 0.32, 1),
+              border-color 180ms cubic-bezier(0.23, 1, 0.32, 1) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(139, 92, 246, 0.6),
+    inset 0 2px 4px rgba(255, 255, 255, 0.22),
+    inset 0 -3px 8px rgba(0, 0, 0, 0.4),
+    0 4px 16px rgba(0, 0, 0, 0.2) !important;
+}
+
+[data-interface-theme="modern"] .pricing-card-lifetime::before {
+  content: '' !important;
+  display: block !important;
+  position: absolute !important;
+  inset: 1px !important;
+  height: 45% !important;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0) 100%) !important;
+  border-radius: 27px 27px 0 0 !important;
+  pointer-events: none !important;
+  z-index: 2 !important;
+}
+
+[data-interface-theme="modern"] .pricing-card-lifetime[data-active="true"],
+[data-interface-theme="modern"] .pricing-card-lifetime[data-active="false"] {
+  transform: scale(1) !important;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  [data-interface-theme="modern"] .pricing-card-lifetime:hover {
+    border-color: rgba(139, 92, 246, 0.48) !important;
+    box-shadow:
+      inset 0 1px 0 rgba(139, 92, 246, 0.6),
+      inset 0 2px 6px rgba(255, 255, 255, 0.25),
+      inset 0 -3px 8px rgba(0, 0, 0, 0.6),
+      0 12px 32px rgba(139, 92, 246, 0.2),
+      0 4px 12px rgba(0, 0, 0, 0.35) !important;
+  }
+}
+
+/* Plan-toggle active sliding pill */
+[data-interface-theme="modern"] .plan-toggle-active-pill {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 2px 4px rgba(0, 0, 0, 0.15) !important;
+}
+
+/* Yearly CTA — solid white button */
+[data-interface-theme="modern"] .pricing-cta-yearly {
+  background: radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 1) 0%, rgba(241, 245, 249, 1) 100%) !important;
+  color: #0f172a !important;
+  border: 1px solid rgba(255, 255, 255, 0.8) !important;
+  box-shadow: 
+    inset 0 2px 3px rgba(255, 255, 255, 0.9), 
+    inset 0 -2.5px 3px rgba(15, 23, 42, 0.12), 
+    0 3px 8px rgba(0, 0, 0, 0.15) !important;
+  transition: background-color 150ms cubic-bezier(0.23, 1, 0.32, 1),
+              transform 150ms cubic-bezier(0.23, 1, 0.32, 1),
+              box-shadow 150ms cubic-bezier(0.23, 1, 0.32, 1) !important;
+}
+@media (hover: hover) and (pointer: fine) {
+  [data-interface-theme="modern"] .pricing-cta-yearly:hover {
+    background: radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 1) 0%, rgba(248, 250, 252, 1) 100%) !important;
+    transform: translateY(-1px) !important;
+    box-shadow: 
+      inset 0 2px 3px rgba(255, 255, 255, 0.95), 
+      inset 0 -2.5px 3px rgba(15, 23, 42, 0.16), 
+      0 6px 14px rgba(0, 0, 0, 0.22) !important;
+  }
+}
+[data-interface-theme="modern"] .pricing-cta-yearly:active {
+  transform: translateY(0) scale(0.97) !important;
+  box-shadow: 
+    inset 0 1px 2px rgba(0, 0, 0, 0.2), 
+    0 2px 4px rgba(0, 0, 0, 0.1) !important;
+}
+
+/* Lifetime CTA — solid brand violet button */
+[data-interface-theme="modern"] .pricing-cta-lifetime {
+  background: radial-gradient(circle at 50% 0%, rgba(129, 140, 248, 1) 0%, rgba(79, 70, 229, 1) 100%) !important;
+  color: #ffffff !important;
+  border: 1px solid rgba(255, 255, 255, 0.25) !important;
+  box-shadow: 
+    inset 0 2.5px 3px rgba(255, 255, 255, 0.45), 
+    inset 0 -2.5px 3px rgba(0, 0, 0, 0.35), 
+    0 3px 10px rgba(99, 102, 241, 0.25) !important;
+  transition: background-color 150ms cubic-bezier(0.23, 1, 0.32, 1),
+              transform 150ms cubic-bezier(0.23, 1, 0.32, 1),
+              box-shadow 150ms cubic-bezier(0.23, 1, 0.32, 1) !important;
+}
+@media (hover: hover) and (pointer: fine) {
+  [data-interface-theme="modern"] .pricing-cta-lifetime:hover {
+    background: radial-gradient(circle at 50% 0%, rgba(147, 157, 255, 1) 0%, rgba(67, 56, 202, 1) 100%) !important;
+    transform: translateY(-1px) !important;
+    box-shadow: 
+      inset 0 3px 4px rgba(255, 255, 255, 0.55), 
+      inset 0 -3px 4px rgba(0, 0, 0, 0.4), 
+      0 6px 16px rgba(99, 102, 241, 0.35) !important;
+  }
+}
+[data-interface-theme="modern"] .pricing-cta-lifetime:active {
+  transform: translateY(0) scale(0.97) !important;
+  box-shadow: 
+    inset 0 1px 2px rgba(0, 0, 0, 0.2), 
+    0 2px 4px rgba(99, 102, 241, 0.15) !important;
+}
+
+/* Feature icon chip — small slate square */
+[data-interface-theme="modern"] .feature-icon-chip {
+  background: rgba(255, 255, 255, 0.04) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02) !important;
+  border-radius: 8px !important;
+}
+
+/* "Best value" badge on Lifetime card */
+[data-interface-theme="modern"] .badge-best-value {
+  background: rgba(139, 92, 246, 0.15) !important;
+  border: 1px solid rgba(139, 92, 246, 0.25) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05) !important;
+}
+
+/* Tier label pills (Pro · Yearly / Pro · Lifetime) */
+[data-interface-theme="modern"] .badge-tier-label {
+  background: rgba(255, 255, 255, 0.05) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03) !important;
+  color: rgba(255, 255, 255, 0.75) !important;
 }

@@ -25,7 +25,7 @@
 //     dispatch which, with no providers configured, will throw — we catch
 //     that and assert only on the handler-invocation flag.
 
-import { test, beforeEach, before } from 'node:test';
+import { test, beforeEach, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
@@ -37,6 +37,8 @@ import { createRequire } from 'node:module';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '../../..');
+
+let isolatedDistDir = null;
 
 // The default `npm run build:electron` produces a single esbuild bundle per
 // entry point, which inlines ModesManager into LLMHelper. That makes the
@@ -50,28 +52,23 @@ const distDir = (() => {
     fs.readFileSync(bundledLLMHelper, 'utf8').includes('init_ModesManager');
   if (!isBundled) return path.resolve(repoRoot, 'dist-electron');
 
-  const target = path.resolve(repoRoot, 'dist-electron-test-isolated');
-  // Only re-emit when missing or when our two source files are newer than the
-  // compiled outputs — keep the test cheap on the happy path.
-  const llmTsMtime = fs.statSync(path.resolve(repoRoot, 'electron/LLMHelper.ts')).mtimeMs;
-  const modesTsMtime = fs.statSync(path.resolve(repoRoot, 'electron/services/ModesManager.ts')).mtimeMs;
-  const compiledLLM = path.join(target, 'electron/LLMHelper.js');
-  const compiledModes = path.join(target, 'electron/services/ModesManager.js');
-  const stale = !fs.existsSync(compiledLLM) || !fs.existsSync(compiledModes) ||
-    fs.statSync(compiledLLM).mtimeMs < llmTsMtime ||
-    fs.statSync(compiledModes).mtimeMs < modesTsMtime;
-  if (stale) {
-    // tsc exits non-zero on pre-existing type errors in unrelated test files,
-    // but still emits JS for files that compile cleanly. We swallow the
-    // non-zero status and verify post-hoc that LLMHelper.js was produced.
-    try {
-      execSync(`node node_modules/.bin/tsc -p electron/tsconfig.json --outDir ${target}`, {
-        cwd: repoRoot,
-        stdio: 'pipe',
-      });
-    } catch (_tscErr) {
-      // expected — tsc returns 1 on type errors elsewhere
-    }
+  const target = fs.mkdtempSync(path.join(os.tmpdir(), 'llmhelper-gate-dist-'));
+  isolatedDistDir = target;
+  fs.symlinkSync(
+    path.join(repoRoot, 'node_modules'),
+    path.join(target, 'node_modules'),
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
+  // tsc exits non-zero on pre-existing type errors in unrelated test files,
+  // but still emits JS for files that compile cleanly. We swallow the
+  // non-zero status and verify post-hoc that LLMHelper.js was produced.
+  try {
+    execSync(`node node_modules/.bin/tsc -p electron/tsconfig.json --outDir ${target}`, {
+      cwd: repoRoot,
+      stdio: 'pipe',
+    });
+  } catch (_tscErr) {
+    // expected — tsc returns 1 on type errors elsewhere
   }
   if (!fs.existsSync(path.join(target, 'electron/LLMHelper.js'))) {
     throw new Error('tsc emission failed — LLMHelper.js missing from isolated tree');
@@ -176,6 +173,12 @@ async function callChat(helper, message) {
     return null;
   }
 }
+
+after(() => {
+  if (isolatedDistDir) {
+    fs.rmSync(isolatedDistDir, { recursive: true, force: true });
+  }
+});
 
 beforeEach(() => {
   installActiveMode(null);

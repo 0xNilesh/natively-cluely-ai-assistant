@@ -1950,8 +1950,24 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                             <Eye size={13} className="text-text-secondary" />
                                                             Interface Opacity
                                                         </label>
+                                                        {/*
+                                                         * Render previewOverlayOpacity (live drag value), NOT
+                                                         * overlayOpacity (committed). The drag handler at
+                                                         * handleOpacityChange does an imperative
+                                                         *   document.querySelectorAll('.opacity-percent-label')
+                                                         *     .forEach(el => el.textContent = percentText)
+                                                         * for sub-frame latency, then calls setPreviewOverlayOpacity(val).
+                                                         * That setter queues a React re-render — if this JSX read
+                                                         * `overlayOpacity` (the un-committed pre-drag value), React
+                                                         * would clobber the imperative text back to the stale value
+                                                         * on the next commit, producing a visible flicker every
+                                                         * drag tick. Reading previewOverlayOpacity keeps React's
+                                                         * render and the imperative write in agreement — the
+                                                         * imperative write still wins the sub-frame race, React's
+                                                         * commit just confirms the same value.
+                                                         */}
                                                         <span className="opacity-percent-label text-xs font-semibold text-text-primary tabular-nums">
-                                                            {Math.round(overlayOpacity * 100)}%
+                                                            {Math.round(previewOverlayOpacity * 100)}%
                                                         </span>
                                                     </div>
 

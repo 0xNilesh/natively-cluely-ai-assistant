@@ -2499,6 +2499,7 @@ export class AppState {
     console.log(`[DefaultOutputWatcher] Started. Initial default output: ${this._lastObservedDefaultOutputId || '(none)'}`);
 
     this._defaultOutputWatcherInterval = setInterval(() => {
+      if (this._isQuitting) return;
       if (!this.isMeetingActive) return;
       // Only watch when we're on the default route. If the user explicitly
       // picked an output device, respect that choice.
@@ -2541,6 +2542,7 @@ export class AppState {
   }
 
   private async handleDefaultOutputChanged(): Promise<void> {
+    if (this._isQuitting) return;
     if (this._defaultOutputSwitchInProgress) return;
     // Cross-flow mutex: also bail if the recovery handler is mid-rebuild.
     // Both flows destroy + recreate `this.systemAudioCapture` and both await
@@ -2569,6 +2571,7 @@ export class AppState {
       this._systemAudioConsecutiveFailures = 0;
 
       const screenCapability = await resolveMacScreenCaptureCapability('default output route change');
+      if (this._isQuitting) return;
       if (screenCapability.effectiveDenied) {
         this.broadcast('system-audio-permission-denied', screenCapability.message ?? formatPermissionMessage('screen-recording-denied'));
         this.broadcastDeviceSelection({

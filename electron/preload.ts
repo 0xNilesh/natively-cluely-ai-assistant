@@ -64,7 +64,27 @@ interface ElectronAPI {
   setGroqApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>;
   setOpenaiApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>;
   setClaudeApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>;
+  setDeepseekApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>;
   setNativelyApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>;
+  getNativelyPricing: () => Promise<{
+    ok: boolean;
+    currency?: string;
+    fetchedAt?: string;
+    stale?: boolean;
+    products?: Record<string, {
+      id: string;
+      dodoProductId: string;
+      name: string;
+      amount: number | null;
+      currency: string;
+      formattedPrice: string | null;
+      interval: 'month' | 'year' | 'lifetime';
+      checkoutUrl: string;
+      coupon: { code: string; eligible: boolean; discountPercent: number; reason?: string };
+    }>;
+    error?: string;
+    status?: number;
+  }>;
   getNativelyUsage: () => Promise<{
     ok: boolean;
     plan?: string;
@@ -83,6 +103,7 @@ interface ElectronAPI {
     hasGroqKey: boolean;
     hasOpenaiKey: boolean;
     hasClaudeKey: boolean;
+    hasDeepseekKey: boolean;
     hasNativelyKey: boolean;
     googleServiceAccountPath: string | null;
     sttProvider: string;
@@ -249,7 +270,7 @@ interface ElectronAPI {
   // STT Status Events
   onSttStatusChanged: (
     callback: (data: {
-      state: 'connected' | 'reconnecting' | 'failed';
+      state: 'connected' | 'reconnecting' | 'failed' | 'awaiting-audio';
       provider: string;
       error?: string;
       channel: 'user' | 'interviewer';
@@ -1031,7 +1052,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('switch-to-ollama', model, url),
   switchToGemini: (apiKey?: string, modelId?: string) =>
     ipcRenderer.invoke('switch-to-gemini', apiKey, modelId),
-  testLlmConnection: (provider: 'gemini' | 'groq' | 'openai' | 'claude', apiKey: string) =>
+  testLlmConnection: (provider: 'gemini' | 'groq' | 'openai' | 'claude' | 'deepseek', apiKey: string) =>
     ipcRenderer.invoke('test-llm-connection', provider, apiKey),
   selectServiceAccount: () => ipcRenderer.invoke('select-service-account'),
 
@@ -1040,7 +1061,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setGroqApiKey: (apiKey: string) => ipcRenderer.invoke('set-groq-api-key', apiKey),
   setOpenaiApiKey: (apiKey: string) => ipcRenderer.invoke('set-openai-api-key', apiKey),
   setClaudeApiKey: (apiKey: string) => ipcRenderer.invoke('set-claude-api-key', apiKey),
+  setDeepseekApiKey: (apiKey: string) => ipcRenderer.invoke('set-deepseek-api-key', apiKey),
   setNativelyApiKey: (apiKey: string) => ipcRenderer.invoke('set-natively-api-key', apiKey),
+  getNativelyPricing: () => ipcRenderer.invoke('get-natively-pricing'),
   getNativelyUsage: () => ipcRenderer.invoke('get-natively-usage'),
   getStoredCredentials: () => ipcRenderer.invoke('get-stored-credentials'),
 
@@ -1833,9 +1856,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setTavilyApiKey: (apiKey: string) => ipcRenderer.invoke('set-tavily-api-key', apiKey),
 
   // Dynamic Model Discovery
-  fetchProviderModels: (provider: 'gemini' | 'groq' | 'openai' | 'claude', apiKey: string) =>
+  fetchProviderModels: (provider: 'gemini' | 'groq' | 'openai' | 'claude' | 'deepseek', apiKey: string) =>
     ipcRenderer.invoke('fetch-provider-models', provider, apiKey),
-  setProviderPreferredModel: (provider: 'gemini' | 'groq' | 'openai' | 'claude', modelId: string) =>
+  setProviderPreferredModel: (provider: 'gemini' | 'groq' | 'openai' | 'claude' | 'deepseek', modelId: string) =>
     ipcRenderer.invoke('set-provider-preferred-model', provider, modelId),
 
   // License Management

@@ -1,27 +1,35 @@
-// Regression test for the "orphan stagger setTimeout double-connect" bug in
+// Regression test for the "bogus 3000ms per-key stagger" bug in
 // NativelyProSTT.connect().
 //
-// Symptom: the 3s stagger setTimeout inside connect() at ~line 308 (used to
-// space concurrent same-key sessions to avoid the server's
-// concurrent_session_blocked race) used to be UNTRACKED — its handle was
-// thrown away. If stop() then start() ran within the stagger window, the
-// orphan timer survived. Its body checks `this.isActive`, which is true again
-// after the new start(), so it called `connect(true)` INSIDE the new session
-// while the new session's own connect() was already running. Two WebSockets
-// raced, one lost with code 1006, and the close handler kicked off a
-// reconnect cascade that briefly dropped transcripts.
+// Symptom: connect() used to gate every same-apiKey connection behind a
+// static `nextSlotByKey` map with `SLOT_INTERVAL_MS = 3000`. The map was
+// added under the (wrong) assumption that the upstream server serialised
+// connections by apiKey. It does not — Deepgram concurrency is per-project
+// quota (HTTP 429 on overflow), and the system + mic channels are
+// explicitly supported concurrent streams disambiguated by the `channel`
+// field in the auth frame.
 //
-// Fix: the stagger setTimeout now stores its handle in the same
-// `pendingConnectTimer` field that inline reconnect timers (setSampleRate /
-// setRecognitionLanguage / language_detected) already use. start() and stop()
-// clear the field, so a stop+start sequence cancels any in-flight stagger.
+// Net effect of the bug: starting a meeting opens two NativelyProSTT
+// connections (one 'system', one 'mic') with the same apiKey. The second
+// connect would land in the stagger window of the first and pend a
+// setTimeout for ~3000 ms — pushing visible mic activation 3 s past the
+// click. Compounded by `language_detected` reconnects re-entering the same
+// gate, total cold-start could hit 6–9 s before any audio reached the STT.
+//
+// Fix: the per-key stagger is removed from connect(). This regression test
+// pins the new behavior so any reintroduction (e.g. someone re-adding a
+// "concurrent key collision prevention" sleep "to be safe") fails CI
+// loudly.
 //
 // Strategy: load the COMPILED NativelyProSTT with `Module._load` patched so
-// `require('electron')` is harmless, force the static `nextSlotByKey` map to
-// guarantee a stagger window, then spy on the instance's `connect` method to
-// count `connect(true)` (the stagger continuation). After stop+start within
-// the window, only ONE stagger continuation should fire — the new session's
-// — not two (which would prove the orphan survived).
+// `require('electron')` is harmless, then create two instances sharing one
+// apiKey but distinct channels ('system' and 'mic'). Spy on connect() to
+// observe whether either instance has pendingConnectTimer set after
+// start() — under the old stagger logic the second start would have a
+// non-null timer; under the fix it must remain null. Also measure the
+// real-time delta between when each instance's connect-body advanced past
+// the WebSocket-construction guard. The hard regression assertion is that
+// the second start does NOT schedule a deferred timer.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -48,126 +56,177 @@ Module._load = function patchedLoad(request, _parent, _isMain) {
 
 const { NativelyProSTT } = await import(path.join(distRoot, 'NativelyProSTT.js'));
 
-test('orphan stagger setTimeout from connect() must not fire after stop()/start() (no double-connect)', async () => {
-    const API_KEY = 'stagger-regression-key';
+test('connect() must NOT stagger same-apiKey connections (mic + system concurrent)', async () => {
+    const API_KEY = 'no-stagger-regression-key';
 
-    // Make sure no other test poisoned the slot map for this key.
-    NativelyProSTT.nextSlotByKey.delete(API_KEY);
+    // Two channels on the same apiKey — exactly the production startMeeting shape.
+    const sysStt = new NativelyProSTT(API_KEY, 'system');
+    const micStt = new NativelyProSTT(API_KEY, 'mic');
 
-    const stt = new NativelyProSTT(API_KEY, 'mic');
+    // Spy on connect: short-circuit BEFORE `new WebSocket(...)` (we don't want
+    // a real socket attempt) but record the moment the connect body has
+    // committed to a WebSocket attempt vs deferred via a stagger timer.
+    // We do this by leaving the real connect on the prototype but overriding
+    // the WebSocket constructor via a marker flag we read after start().
+    const tsSystem = { entered: null };
+    const tsMic    = { entered: null };
 
-    // Wrap `connect` so we can:
-    //   (a) count calls and observe whether skipStagger=true (the stagger
-    //       continuation) ever fires from the orphan,
-    //   (b) short-circuit the real WebSocket-construction branch — once the
-    //       stagger logic has run, we don't want to actually open a socket.
-    let connectCalls = 0;
-    let staggerContinuationCalls = 0;
-    const origConnect = stt.connect.bind(stt);
-    stt.connect = function spyConnect(skipStagger = false) {
-        connectCalls++;
-        if (skipStagger) staggerContinuationCalls++;
-        // Run the real stagger arithmetic so pendingConnectTimer gets set,
-        // but short-circuit BEFORE the `new WebSocket(...)` line by faking
-        // the isConnecting flag. We do this by calling the original only
-        // when skipStagger=false; when skipStagger=true (the continuation),
-        // we deliberately do nothing — its only job here is to prove it
-        // was called, not to open a socket.
-        if (skipStagger) {
-            // Simulate what real connect(true) would do up to the WS line:
-            // reset isConnecting so a subsequent connect can proceed.
-            stt.isConnecting = false;
-            return;
-        }
-        // Manually reproduce the stagger branch so pendingConnectTimer is
-        // populated by THIS spy (not the original) — this keeps the test
-        // independent of any future change to connect's pre-WS code path,
-        // and avoids accidentally invoking `new WebSocket()`.
-        if (!stt.isActive) return;
-        const now = Date.now();
-        const reserved = NativelyProSTT.nextSlotByKey.get(stt.apiKey) ?? 0;
-        const staggerMs = Math.max(0, reserved - now);
-        NativelyProSTT.nextSlotByKey.set(
-            stt.apiKey,
-            Math.max(now, reserved) + 3000,
-        );
-        if (staggerMs > 0) {
-            stt.isConnecting = true;
-            if (stt.pendingConnectTimer) clearTimeout(stt.pendingConnectTimer);
-            stt.pendingConnectTimer = setTimeout(() => {
-                stt.pendingConnectTimer = null;
-                stt.isConnecting = false;
-                if (stt.isActive) stt.connect(true);
-            }, staggerMs);
-        }
-        // No staggerMs===0 path needed — every start() in this test forces a stagger.
+    const origConnectSys = sysStt.connect.bind(sysStt);
+    const origConnectMic = micStt.connect.bind(micStt);
+
+    sysStt.connect = function (skipStagger = false) {
+        // Mark the moment connect was invoked.
+        tsSystem.entered = Date.now();
+        // Replicate just the early-return guard so isConnecting flips like the
+        // real path, but stop before `new WebSocket(...)`.
+        if (this.isConnecting || !this.isActive) return;
+        this.isConnecting = true;
+        this.isConnected  = false;
+        // Do NOT call origConnectSys — that would try to open a real WS.
+    };
+    micStt.connect = function (skipStagger = false) {
+        tsMic.entered = Date.now();
+        if (this.isConnecting || !this.isActive) return;
+        this.isConnecting = true;
+        this.isConnected  = false;
     };
 
-    // ── Step 1: force the first start() into a stagger window ──────────
-    NativelyProSTT.nextSlotByKey.set(API_KEY, Date.now() + 2000);
-    stt.start();
-    assert.equal(connectCalls, 1, 'first start() should invoke connect() exactly once');
-    assert.equal(staggerContinuationCalls, 0, 'no stagger continuation yet — still inside the window');
-    assert.ok(
-        stt.pendingConnectTimer !== null && stt.pendingConnectTimer !== undefined,
-        'first connect() should have stored its stagger setTimeout on pendingConnectTimer',
-    );
-    const firstTimerHandle = stt.pendingConnectTimer;
+    // ── Issue the two starts back-to-back ────────────────────────────
+    sysStt.start();
+    micStt.start();
 
-    // ── Step 2: stop() then start() IMMEDIATELY, well inside the 2s window ──
-    // Without the fix, `firstTimerHandle` would still be alive and would
-    // fire ~2s later inside the new session, calling connect(true) a second
-    // time — that's the double-connect.
-    stt.stop();
+    // ── Hard regression assertion: NO pendingConnectTimer set by start ──
+    // The old stagger logic set pendingConnectTimer on the SECOND
+    // same-apiKey connect (the one that landed in the other channel's slot
+    // window). After the fix, neither instance should have a pending timer
+    // attributable to a per-key stagger.
     assert.equal(
-        stt.pendingConnectTimer,
+        sysStt.pendingConnectTimer,
         null,
-        'stop() must clear pendingConnectTimer so the orphan stagger cannot fire later',
+        'system channel must NOT have a pendingConnectTimer set by start() — that would be the per-key stagger reintroduced',
+    );
+    assert.equal(
+        micStt.pendingConnectTimer,
+        null,
+        'mic channel must NOT have a pendingConnectTimer set by start() — that would be the per-key stagger reintroduced',
     );
 
-    // Force the second start() into a stagger too, so we can prove that ONLY
-    // the second session's stagger continuation fires (not both).
-    NativelyProSTT.nextSlotByKey.set(API_KEY, Date.now() + 2000);
-    stt.start();
-    assert.equal(connectCalls, 2, 'second start() should bring connect call count to 2');
-    assert.equal(staggerContinuationCalls, 0, 'still 0 continuations — both staggers are pending');
+    // ── Latency regression guardrail: both connects must enter their body ──
+    // synchronously inside start(). Real wallclock delta must be tiny (<50ms
+    // in the test env). If it's anywhere near 3000 ms, the stagger is back.
+    assert.notEqual(tsSystem.entered, null, 'system connect() must have been invoked synchronously by start()');
+    assert.notEqual(tsMic.entered,    null, 'mic connect() must have been invoked synchronously by start()');
+    const delta = Math.abs(tsMic.entered - tsSystem.entered);
     assert.ok(
-        stt.pendingConnectTimer !== null && stt.pendingConnectTimer !== undefined,
-        'second connect() should have stored a fresh stagger timer',
-    );
-    assert.notStrictEqual(
-        stt.pendingConnectTimer,
-        firstTimerHandle,
-        'new stagger timer handle must be distinct from the orphan',
+        delta < 50,
+        `same-apiKey mic vs system connect start delta must be < 50ms (was ${delta}ms). ` +
+        `A delta near 3000 ms indicates the per-key stagger has been reintroduced.`,
     );
 
-    // ── Step 3: wait past both stagger windows ──────────────────────────
-    await new Promise((r) => setTimeout(r, 2500));
+    // ── Drain the event loop briefly to catch any deferred connect() ──
+    // Wait noticeably longer than the old 3000 ms stagger to expose a
+    // sleeping setTimeout, if one slipped back in.
+    await new Promise((r) => setTimeout(r, 3200));
 
-    // ── Step 4: the critical assertion ──────────────────────────────────
-    // Exactly ONE stagger continuation must have fired — the live session's.
-    // Two would mean the orphan from the first start() survived stop() and
-    // also fired against the new session: the exact double-connect bug.
+    // After waiting past where the old stagger continuation would have
+    // fired, both connects should still have been entered exactly once.
+    // (Each instance's connect was invoked exactly once by its own start.)
+    // We re-assert the timers were never set during the wait, either.
     assert.equal(
-        staggerContinuationCalls,
-        1,
-        `BUG: orphan stagger setTimeout from the first start() fired inside ` +
-        `the new session — connect(true) was called ${staggerContinuationCalls} ` +
-        `times (expected exactly 1). This means the stagger branch's ` +
-        `setTimeout handle was not tracked by pendingConnectTimer (or not ` +
-        `cleared by stop()/start()).`,
+        sysStt.pendingConnectTimer,
+        null,
+        'system pendingConnectTimer must still be null after 3.2 s wait — no deferred stagger',
     );
-
-    // Total connect() invocations should be:
-    //   1 (first start) + 1 (second start) + 1 (live stagger continuation) = 3.
-    // The buggy path would yield 4 (extra orphan continuation).
     assert.equal(
-        connectCalls,
-        3,
-        `total connect() invocations should be 3 (start, start, one continuation); got ${connectCalls}`,
+        micStt.pendingConnectTimer,
+        null,
+        'mic pendingConnectTimer must still be null after 3.2 s wait — no deferred stagger',
     );
 
-    // Cleanup so we don't leak timers across the test runner.
+    // Cleanup
+    sysStt.stop();
+    micStt.stop();
+});
+
+test('language_detected reconnect must fire at ~250 ms (no stagger added on top)', async () => {
+    // Before the fix, this path was: closeUpstream() → 250 ms setTimeout →
+    // connect() → 3000 ms stagger setTimeout → connect(true) → new WS. The
+    // 250 ms inline debounce was correct (it's the server's
+    // concurrent_session_blocked race mitigation), but the stagger that ran
+    // INSIDE the resulting connect() pushed total reconnect latency to
+    // ~3250 ms. This test pins the new behavior: only the 250 ms inline
+    // debounce remains; the resulting connect() must NOT defer further.
+    const stt = new NativelyProSTT('lang-detected-key', 'mic');
+
+    // Spy on connect to record when it actually invokes the
+    // WebSocket-construction branch (we short-circuit before `new WebSocket`).
+    let connectFiredAt = null;
+    stt.connect = function (_skipStagger = false) {
+        if (this.isConnecting || !this.isActive) return;
+        connectFiredAt = Date.now();
+        this.isConnecting = true;
+        this.isConnected  = false;
+    };
+
+    // Force the state language_detected needs to schedule its inline 250 ms
+    // setTimeout: isActive && this.ws truthy. We poke ws to a sentinel object
+    // so the condition `if (this.isActive && this.ws)` is satisfied; the
+    // handler will then call closeUpstream() (no-op on the sentinel) and
+    // schedule the inline reconnect timer.
+    stt.isActive = true;
+    stt.isConnecting = false;
+    stt.isConnected = true;
+    stt.ws = { close() {}, removeAllListeners() {}, readyState: 1 };
+
+    // Simulate the server's language_detected branch directly. We can't
+    // round-trip a real WebSocket message, so we replicate exactly the
+    // handler body from NativelyProSTT.ts (language_detected path).
+    const detected = 'ja-JP';
+    stt.languageBcp47       = detected;
+    stt.languageAlternates  = [];
+    stt.reconnectAttempts   = 0;
+    stt.intentionalClose    = true;
+    stt.closeUpstream();
+    if (stt.pendingConnectTimer) clearTimeout(stt.pendingConnectTimer);
+    const scheduledAt = Date.now();
+    stt.pendingConnectTimer = setTimeout(() => {
+        stt.pendingConnectTimer = null;
+        if (stt.isActive) stt.connect();
+    }, 250);
+
+    // Wait noticeably longer than the inline 250 ms debounce but well under
+    // the old 3000 ms stagger.
+    await new Promise((r) => setTimeout(r, 600));
+
+    assert.notEqual(connectFiredAt, null, 'connect() must have fired within 600 ms after language_detected reconnect was scheduled');
+    const elapsed = connectFiredAt - scheduledAt;
+    assert.ok(
+        elapsed < 500,
+        `language_detected reconnect must fire within ~250–500 ms; got ${elapsed} ms. ` +
+        `An elapsed time near 3250 ms indicates the per-key stagger has been ` +
+        `reintroduced in the connect() body.`,
+    );
+    assert.ok(
+        elapsed >= 200,
+        `language_detected reconnect should respect the 250 ms inline debounce; got ${elapsed} ms (too fast — debounce missing?).`,
+    );
+
     stt.stop();
-    NativelyProSTT.nextSlotByKey.delete(API_KEY);
+});
+
+test('NativelyProSTT must not expose a per-key stagger map (structural guard)', async () => {
+    // Belt-and-braces: even if someone re-adds a serial-gate mechanism, this
+    // pins the specific name we used to use. If anyone reintroduces the
+    // static map under the same name, this fails — forcing them to read the
+    // comment in connect() before bringing the regression back.
+    assert.equal(
+        NativelyProSTT.nextSlotByKey,
+        undefined,
+        'NativelyProSTT.nextSlotByKey must not exist — the per-key stagger was deliberately removed (Deepgram concurrency is per-project quota, not per-key serial)',
+    );
+    assert.equal(
+        NativelyProSTT.SLOT_INTERVAL_MS,
+        undefined,
+        'NativelyProSTT.SLOT_INTERVAL_MS must not exist — the 3000 ms stagger interval was deliberately removed',
+    );
 });

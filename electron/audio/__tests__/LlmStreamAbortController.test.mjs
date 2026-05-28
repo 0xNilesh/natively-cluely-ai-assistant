@@ -156,88 +156,84 @@ test('streamChat gates each yield with `if (abortSignal?.aborted) return;` BEFOR
 });
 
 // ---------------------------------------------------------------------------
-// ipcHandlers — gemini-chat-stream creates a per-stream AbortController,
-// aborts the prior one on supersession, and passes the signal to streamChat.
-// Also: a new gemini-chat-stream-stop handler exists.
+// ipcHandlers — gemini-chat-stream creates a per-sender AbortController,
+// aborts only that sender's prior stream on supersession, and passes the signal to streamChat.
+// Also: gemini-chat-stream-stop is scoped to the sender that requested cancellation.
 // ---------------------------------------------------------------------------
 
-test('ipcHandlers declares a module-scoped _chatStreamController: AbortController | null', () => {
-    // The supersession-abort + renderer-cancel paths both reach for this
-    // shared handle. If it goes away (or is re-scoped per-call), supersession
-    // can't abort the prior stream and the renderer's cancelChatStream is a
-    // no-op.
+test('ipcHandlers tracks active gemini chat streams by sender id', () => {
     assert.ok(
-        /let\s+_chatStreamController\s*:\s*AbortController\s*\|\s*null\s*=\s*null/.test(ipcHandlersSrc),
-        'BUG: ipcHandlers must declare `let _chatStreamController: AbortController | null = null` at module scope. ' +
-        'Both the supersession-abort path and the gemini-chat-stream-stop handler reach for this shared handle.',
+        /const\s+_chatStreamsBySender\s*=\s*new\s+Map\s*</.test(ipcHandlersSrc),
+        'BUG: ipcHandlers must track chat streams by event.sender.id so launcher and overlay streams cannot cancel each other.',
+    );
+    assert.ok(
+        !/let\s+_chatStreamController\s*:\s*AbortController\s*\|\s*null\s*=\s*null/.test(ipcHandlersSrc),
+        'BUG: a single module-scoped _chatStreamController reintroduces cross-renderer cancellation.',
     );
 });
 
-test('gemini-chat-stream handler aborts prior controller, creates a fresh one, and passes signal to streamChat', () => {
-    // Find the safeHandle('gemini-chat-stream', ...) block and balance-extract
-    // its async callback body. This is brittle to handler refactors but keeps
-    // the assertions scoped — false positives from unrelated AbortController
-    // usage in the same file (RAG queries, etc.) are otherwise impossible to
-    // filter out.
+test('gemini-chat-stream handler supersedes only the current sender and passes signal to streamChat', () => {
     const handlerStart = ipcHandlersSrc.indexOf("'gemini-chat-stream'");
     assert.ok(handlerStart >= 0, "could not locate 'gemini-chat-stream' safeHandle registration");
-
-    // Extract a generous window after the handler registration — enough to
-    // cover the handler callback through its closing brace + the subsequent
-    // gemini-chat-stream-stop registration.
     const handlerRegion = ipcHandlersSrc.slice(handlerStart, handlerStart + 12_000);
 
-    // 1. Prior controller is aborted on supersession.
     assert.ok(
-        /if\s*\(\s*_chatStreamController\s*\)\s*\{[^}]*_chatStreamController\.abort\s*\(\s*\)/.test(handlerRegion),
-        'BUG: gemini-chat-stream handler must abort the prior _chatStreamController on entry. ' +
-        'Without this, supersession only flips the stream-ID counter — the prior provider call ' +
-        'keeps running and its tokens are silently discarded at the for-await guard.',
+        /const\s+senderId\s*=\s*event\.sender\.id/.test(handlerRegion),
+        'BUG: gemini-chat-stream handler must key stream ownership by event.sender.id.',
     );
-
-    // 2. A fresh AbortController is constructed per invocation.
     assert.ok(
-        /new\s+AbortController\s*\(\s*\)/.test(handlerRegion),
-        'BUG: gemini-chat-stream handler must construct a fresh AbortController per invocation',
+        /const\s+priorStream\s*=\s*_chatStreamsBySender\.get\s*\(\s*senderId\s*\)/.test(handlerRegion),
+        'BUG: gemini-chat-stream handler must look up only the current sender prior stream.',
     );
-
-    // 3. The fresh controller is assigned to the module-scoped handle so the
-    //    stop handler (and the next supersession) can find it.
     assert.ok(
-        /_chatStreamController\s*=\s*\w+/.test(handlerRegion),
-        'BUG: gemini-chat-stream handler must assign the fresh controller to _chatStreamController ' +
-        'so cancelChatStream / next-supersession can abort it',
+        /priorStream\.controller\.abort\s*\(\s*\)/.test(handlerRegion),
+        'BUG: same-sender supersession must abort that sender\'s prior controller.',
     );
-
-    // 4. The controller's signal is passed to llmHelper.streamChat. The
-    //    streamChat wrapper expects it as the trailing variadic arg.
     assert.ok(
-        /llmHelper\.streamChat\s*\([\s\S]*?\.signal\s*,?\s*\)/.test(handlerRegion),
-        'BUG: gemini-chat-stream handler must pass the AbortController.signal to llmHelper.streamChat. ' +
-        'Without this, streamChat has no signal to gate yields on and the producer keeps running.',
+        /_chatStreamsBySender\.set\s*\(\s*senderId\s*,\s*\{\s*streamId\s*:\s*myStreamId\s*,\s*controller\s*:\s*myController\s*\}\s*\)/.test(handlerRegion),
+        'BUG: gemini-chat-stream handler must store the fresh controller under senderId.',
+    );
+    assert.ok(
+        /_chatStreamsBySender\.get\s*\(\s*senderId\s*\)\?\.streamId\s*!==\s*myStreamId/.test(handlerRegion),
+        'BUG: supersession checks must compare against the current sender stream id, not a global active stream id.',
+    );
+    assert.ok(
+        /llmHelper\.streamChat\s*\([\s\S]*?myController\.signal\s*,?\s*\)/.test(handlerRegion),
+        'BUG: gemini-chat-stream handler must pass myController.signal to llmHelper.streamChat.',
     );
 });
 
-test('gemini-chat-stream-stop handler is registered and aborts the active controller', () => {
-    // ipcMain.on registration (renderer .send → main .on, not invoke/handle).
-    const stopRegPattern = /ipcMain\.on\s*\(\s*['"]gemini-chat-stream-stop['"]\s*,/;
+test('gemini-chat-stream-stop handler aborts only the requesting sender stream', () => {
+    const stopRegPattern = /safeOn\s*\(\s*['"]gemini-chat-stream-stop['"]\s*,/;
     assert.ok(
         stopRegPattern.test(ipcHandlersSrc),
-        "BUG: ipcMain.on('gemini-chat-stream-stop', ...) must be registered so the renderer's " +
-        'cancelChatStream can reach the main process. Without it, cancelChatStream is a silent no-op.',
+        "BUG: ipcMain.on('gemini-chat-stream-stop', ...) must be registered so the renderer's cancelChatStream can reach the main process.",
     );
 
-    // The handler body must abort the controller. Extract just the stop
-    // handler body to scope the assertion.
     const stopHandlerBody = extractBalancedBody(
         ipcHandlersSrc,
         stopRegPattern,
         "gemini-chat-stream-stop handler",
     );
     assert.ok(
-        /_chatStreamController\.abort\s*\(\s*\)/.test(stopHandlerBody),
-        'BUG: gemini-chat-stream-stop handler must call _chatStreamController.abort(). ' +
-        'Otherwise the renderer-initiated cancel does not actually stop the producer.',
+        /_chatStreamsBySender\.get\s*\(\s*senderId\s*\)/.test(stopHandlerBody),
+        'BUG: gemini-chat-stream-stop must look up the stream for the captured senderId only.',
+    );
+    assert.ok(
+        /stream\.controller\.abort\s*\(\s*\)/.test(stopHandlerBody),
+        'BUG: gemini-chat-stream-stop handler must abort the sender-owned controller.',
+    );
+    assert.ok(
+        /const\s+senderId\s*=\s*event\.sender\.id/.test(stopHandlerBody),
+        'BUG: gemini-chat-stream-stop must capture event.sender.id before cancelling.',
+    );
+    assert.ok(
+        /_chatStreamsBySender\.delete\s*\(\s*senderId\s*\)/.test(stopHandlerBody),
+        'BUG: gemini-chat-stream-stop handler must remove only the sender-owned stream entry.',
+    );
+    assert.ok(
+        !/_chatStreamsBySender\.clear\s*\(/.test(stopHandlerBody),
+        'BUG: gemini-chat-stream-stop must not clear streams owned by other renderers.',
     );
 });
 

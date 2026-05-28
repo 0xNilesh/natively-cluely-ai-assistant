@@ -121,23 +121,21 @@ test('mega-effect anchored on onNativeAudioConnected is the expected ~1434-1807 
     );
 });
 
-test('mega-effect dep array is empty ([]) — NOT [isExpanded]', () => {
-    // The closing line should be exactly `  }, []);` (possibly with a trailing comment).
+test('mega-effect dep array does not include expansion state', () => {
     const stripped = effect.closeStmt.trim();
+
     assert.ok(
-        /^\},\s*\[\s*\]\s*\)\s*;/.test(stripped),
-        `BUG REGRESSION: mega-effect dep array is not []. Found closing line:\n` +
+        /^\},\s*\[[\s\S]*\]\s*\)\s*;/.test(stripped),
+        `BUG REGRESSION: could not parse mega-effect dependency array. Found closing line:\n` +
         `  ${effect.closeStmt}\n` +
-        `(line ${effect.closeLine + 1}). The effect at line ${effect.openLine + 1} registers ~20 IPC ` +
-        `subscriptions and MUST be mount-only. A non-empty dep array (especially [isExpanded]) ` +
-        `causes all ~20 listeners to tear down + re-register on every dep change, leaking ` +
-        `listeners under React 18 strict mode and dropping events in the teardown gap.`,
+        `(line ${effect.closeLine + 1}).`,
     );
 
     assert.ok(
-        !/isExpanded/.test(stripped),
+        !/\bisExpanded\b/.test(stripped),
         `BUG REGRESSION: mega-effect dep array contains isExpanded. This is the exact bug ` +
-        `the fix removed. The effect must be mount-only ([]).`,
+        `the fix removed. Stable callback deps are allowed, but expansion state must not ` +
+        `tear down and re-register IPC listeners on every expand/collapse.`,
     );
 });
 

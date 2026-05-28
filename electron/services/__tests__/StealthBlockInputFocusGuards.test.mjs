@@ -250,21 +250,17 @@ describe('mount-effect onMouseDown: ref-driven tap-engage truth table', () => {
 describe('NativelyInterface.tsx: guard implementation must keep checking both refs', () => {
   const source = fs.readFileSync(NATIVELY_INTERFACE, 'utf8');
 
-  test('isCgEventTapAvailableRef uses synchronous platform-derived default (M1 evolved)', () => {
-    // Commit 2263c14 deliberately switched the default from literal `false` to
-    // a synchronous platform probe so macOS users get focus blocking on the
-    // very first render — without it, the brief window before the IPC resolved
-    // left the panel reachable for focus stealing on coding-interview
-    // platforms. On Windows the expression evaluates to false at module load,
-    // preserving the M1 "input clickable on non-darwin" invariant.
+  test('isCgEventTapAvailableRef defaults to false (M1 safe default)', () => {
+    // The ref declaration must initialise to false. A `useRef<boolean>(true)`
+    // would re-introduce the M1 hazard: input trapped until the IPC resolves.
     const refDecl = source.match(
       /const isCgEventTapAvailableRef\s*=\s*useRef<boolean>\(([^)]+)\)/,
     );
     assert.ok(refDecl, 'isCgEventTapAvailableRef declaration not found');
-    assert.match(
-      refDecl[1],
-      /window\.electronAPI\??\.platform\s*===\s*['"]darwin['"]/,
-      'isCgEventTapAvailableRef must derive from window.electronAPI.platform — see commit 2263c14',
+    assert.equal(
+      refDecl[1].trim(),
+      'false',
+      'isCgEventTapAvailableRef must default to false so the input is clickable until availability is confirmed (M1)',
     );
   });
 
@@ -291,27 +287,21 @@ describe('NativelyInterface.tsx: guard implementation must keep checking both re
     );
   });
 
-  test('mount-effect onMouseDown gates stealthTapStart on platform availability (M2 evolved)', () => {
-    // M2 contract: the chat-input click-to-engage listener must NOT call
-    // stealthTapStart on platforms where the tap can't run. Commit 2263c14
-    // restructured the guard system — the useEffect now bails at the top via
-    // `if (!window.electronAPI?.stealthTapStart) return;` (preload doesn't
-    // expose the function on non-darwin in the current architecture) and the
-    // onMouseDown additionally gates on stealthTapActiveRef + the IME-safety
-    // flag. The explicit `!isCgEventTapAvailableRef.current` check inside
-    // onMouseDown is no longer required because the top-level guard plus the
-    // platform-derived ref together cover the same surface.
+  test('mount-effect onMouseDown checks isCgEventTapAvailableRef before stealthTapStart (M2)', () => {
+    // The chat-input click-to-engage listener. Find the onMouseDown that
+    // sits inside the same useEffect as stealthTapStart and assert it
+    // short-circuits when the ref is false.
     const effectMatch = source.match(
-      /useEffect\(\(\) => \{\s*if \(!window\.electronAPI\?\.stealthTapStart\) return;[\s\S]*?const onMouseDown[\s\S]*?stealthTapStart\([\s\S]*?\}, \[\]\);/,
+      /useEffect\(\(\) => \{[\s\S]*?stealthTapShouldAutoEngage[\s\S]*?stealthTapAvailable[\s\S]*?const onMouseDown[\s\S]*?stealthTapStart\([\s\S]*?\}, \[\]\);/,
     );
     assert.ok(
       effectMatch,
-      'click-to-engage mount effect (top-level stealthTapStart guard + onMouseDown + stealthTapStart call) not found',
+      'click-to-engage mount effect (stealthTapAvailable + onMouseDown + stealthTapStart) not found',
     );
     assert.match(
       effectMatch[0],
-      /stealthAutoEngageOkRef\.current/,
-      'M2: onMouseDown must consult the IME-safety flag before engaging',
+      /if \(!isCgEventTapAvailableRef\.current\) return;/,
+      'M2: mount-effect onMouseDown must short-circuit when isCgEventTapAvailableRef is false (symmetric with blockInputFocus)',
     );
   });
 
@@ -325,37 +315,47 @@ describe('NativelyInterface.tsx: guard implementation must keep checking both re
     );
   });
 
-  test('onStealthTapState surfaces permission-missing state to the UI (M1 evolved)', () => {
-    // M1 contract: when the main process reports {active:false, reason:'permission'}
-    // the renderer must let the user know the tap is blocked. The implementation
-    // moved from a ref flip to React state (setStealthPermissionMissing) so the
-    // visible UI re-renders; the platform-derived isCgEventTapAvailableRef is now
-    // the source of truth for tap availability and is not toggled by this event.
+  test('onStealthTapState flips isCgEventTapAvailableRef to false on permission revoke and true on active', () => {
+    // M1 contract: the state listener must update isCgEventTapAvailableRef in
+    // both directions.
     const stateHandler = source.match(
       /const unsubState = window\.electronAPI\.onStealthTapState\(\(\{[\s\S]*?\}\) => \{[\s\S]*?\}\);/,
     );
     assert.ok(stateHandler, 'onStealthTapState handler not found');
+    // false branch on permission revoke
     assert.match(
       stateHandler[0],
-      /reason === ['"]permission['"][\s\S]*?setStealthPermissionMissing\(true\)/,
-      'M1: onStealthTapState({active:false, reason:"permission"}) must signal the UI via setStealthPermissionMissing(true)',
+      /reason === 'permission'[\s\S]*?isCgEventTapAvailableRef\.current = false;/,
+      'M1: onStealthTapState({active:false, reason:"permission"}) must flip isCgEventTapAvailableRef to false',
     );
+    // true branch on active=true
     assert.match(
       stateHandler[0],
-      /if \(active\)[\s\S]*?setStealthPermissionMissing\(false\)/,
-      'M1: a successful tap start must clear the permission-missing UI flag',
+      /if \(active\) \{[\s\S]*?isCgEventTapAvailableRef\.current = true;[\s\S]*?\}/,
+      'M1: onStealthTapState({active:true}) must promote isCgEventTapAvailableRef to true',
     );
   });
 
-  // M3 (window-focus IME refresh) was removed by commit 2bedf59 during the
-  // phone-mirror integration; the source no longer wires stealthTapRefreshIme
-  // at all. Leaving the assertion as a `skip` so the regression is visible in
-  // test output without blocking CI — re-enable when the feature is restored
-  // (see observation 3629 on 2026-05-27).
-  test.skip('window.focus listener calls stealthTapRefreshIme (M3) — removed in 2bedf59', () => {
-    assert.match(source, /window\.addEventListener\(['"]focus['"], onFocusRefresh\)/);
-    assert.match(source, /stealthTapRefreshIme\?\.\(\)/);
-    assert.match(source, /window\.removeEventListener\(['"]focus['"], onFocusRefresh\)/);
+  test('window.focus listener calls stealthTapRefreshIme (M3)', () => {
+    // M3 contract: refresh IME on window focus so mid-session input-source
+    // changes don't silently break CJK composition.
+    assert.match(
+      source,
+      /window\.addEventListener\(['"]focus['"], onFocusRefresh\)/,
+      'M3: must register a window focus listener that refreshes IME state',
+    );
+    assert.match(
+      source,
+      /stealthTapRefreshIme\?\.\(\)/,
+      'M3: focus listener must call stealthTapRefreshIme',
+    );
+    // And the cleanup must remove the listener — otherwise we leak a handler
+    // on every component remount (HMR, route changes, etc.).
+    assert.match(
+      source,
+      /window\.removeEventListener\(['"]focus['"], onFocusRefresh\)/,
+      'M3: focus listener cleanup must remove the listener to avoid leaks across remounts',
+    );
   });
 });
 

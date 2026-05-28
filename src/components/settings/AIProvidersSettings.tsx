@@ -116,6 +116,7 @@ export const AIProvidersSettings: React.FC = () => {
     const [groqApiKey, setGroqApiKey] = useState('');
     const [openaiApiKey, setOpenaiApiKey] = useState('');
     const [claudeApiKey, setClaudeApiKey] = useState('');
+    const [deepseekApiKey, setDeepseekApiKey] = useState('');
 
     // Status
     const [savedStatus, setSavedStatus] = useState<Record<string, boolean>>({});
@@ -176,6 +177,7 @@ export const AIProvidersSettings: React.FC = () => {
                         groq: creds.hasGroqKey,
                         openai: creds.hasOpenaiKey,
                         claude: creds.hasClaudeKey,
+                        deepseek: creds.hasDeepseekKey || false,
                         natively: creds.hasNativelyKey || false
                     });
                     // Load preferred models
@@ -184,6 +186,7 @@ export const AIProvidersSettings: React.FC = () => {
                     if (creds.groqPreferredModel) pm.groq = creds.groqPreferredModel;
                     if (creds.openaiPreferredModel) pm.openai = creds.openaiPreferredModel;
                     if (creds.claudePreferredModel) pm.claude = creds.claudePreferredModel;
+                    if (creds.deepseekPreferredModel) pm.deepseek = creds.deepseekPreferredModel;
                     setPreferredModels(pm);
                 }
 
@@ -403,6 +406,8 @@ export const AIProvidersSettings: React.FC = () => {
             if (provider === 'openai') result = await window.electronAPI.setOpenaiApiKey(key);
             // @ts-ignore
             if (provider === 'claude') result = await window.electronAPI.setClaudeApiKey(key);
+            // @ts-ignore
+            if (provider === 'deepseek') result = await window.electronAPI.setDeepseekApiKey(key);
 
             if (result && result.success) {
                 setSavedStatus(prev => ({ ...prev, [provider]: true }));
@@ -429,6 +434,8 @@ export const AIProvidersSettings: React.FC = () => {
             if (provider === 'openai') result = await window.electronAPI.setOpenaiApiKey('');
             // @ts-ignore
             if (provider === 'claude') result = await window.electronAPI.setClaudeApiKey('');
+            // @ts-ignore
+            if (provider === 'deepseek') result = await window.electronAPI.setDeepseekApiKey('');
 
             if (result && result.success) {
                 setHasStoredKey(prev => ({ ...prev, [provider]: false }));
@@ -724,6 +731,26 @@ export const AIProvidersSettings: React.FC = () => {
                         keyPlaceholder="sk-ant-..."
                         keyUrl="https://console.anthropic.com/settings/keys"
                         onPreferredModelChange={(model) => setPreferredModels(prev => ({ ...prev, claude: model }))}
+                    />
+
+                    {/* DeepSeek — text-only; intentionally not part of the screenshot/vision fallback chain. */}
+                    <ProviderCard
+                        providerId="deepseek"
+                        providerName="DeepSeek"
+                        apiKey={deepseekApiKey}
+                        preferredModel={preferredModels.deepseek}
+                        hasStoredKey={!!hasStoredKey.deepseek}
+                        onKeyChange={setDeepseekApiKey}
+                        onSaveKey={async () => { await handleSaveKey('deepseek', deepseekApiKey, setDeepseekApiKey); }}
+                        onRemoveKey={() => handleRemoveKey('deepseek', setDeepseekApiKey)}
+                        onTestConnection={() => handleTestConnection('deepseek', deepseekApiKey)}
+                        testStatus={testStatus.deepseek || 'idle'}
+                        testError={testError.deepseek}
+                        savingStatus={!!savingStatus.deepseek}
+                        savedStatus={!!savedStatus.deepseek}
+                        keyPlaceholder="sk-..."
+                        keyUrl="https://platform.deepseek.com/api_keys"
+                        onPreferredModelChange={(model) => setPreferredModels(prev => ({ ...prev, deepseek: model }))}
                     />
 
                 </div>

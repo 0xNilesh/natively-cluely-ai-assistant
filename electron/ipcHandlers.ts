@@ -26,6 +26,14 @@ export function initializeIpcHandlers(appState: AppState): void {
     ipcMain.handle(channel, listener);
   };
 
+  const safeOn = (
+    channel: string,
+    listener: (event: any, ...args: any[]) => void,
+  ) => {
+    ipcMain.removeAllListeners(channel);
+    ipcMain.on(channel, listener);
+  };
+
   /**
    * Returns true if the user has an active premium license OR an unexpired free trial.
    * Used to gate profile intelligence features (resume upload, JD upload, company research, etc.).
@@ -496,16 +504,9 @@ export function initializeIpcHandlers(appState: AppState): void {
   );
 
   // Streaming IPC Handler
-  // SECURITY FIX (P0-1): Monotonic stream ID prevents interleaved tokens from concurrent stream requests.
-  // Each new invocation increments the ID; any in-flight iteration bails as soon as it detects
-  // that a newer stream has taken over.
   let _chatStreamId = 0;
-  // The current stream's AbortController. Supersession aborts it so the
-  // generator inside LLMHelper.streamChat stops yielding to the renderer
-  // immediately instead of running to completion in the background while its
-  // tokens are silently discarded. Also exposed via gemini-chat-stream-stop
-  // so the renderer can cancel explicitly (e.g., user pressed Escape).
-  let _chatStreamController: AbortController | null = null;
+  // Keep IDs globally unique for phone/desktop message correlation; supersession is per sender.
+  const _chatStreamsBySender = new Map<number, { streamId: number; controller: AbortController }>();
 
   // Matches narrow identity/meta probes only. Kept tight so coding/normal asks don't trip it.
   // Prevents the small fast-mode model from over-firing the "I'm Natively" canned reply
@@ -524,21 +525,19 @@ export function initializeIpcHandlers(appState: AppState): void {
       context?: string,
       options?: { skipSystemPrompt?: boolean; ignoreKnowledgeMode?: boolean },
     ) => {
+      let myController: AbortController | null = null;
       try {
         console.log('[IPC] gemini-chat-stream started using LLMHelper.streamChat');
         const llmHelper = appState.processingHelper.getLLMHelper();
 
-        // Claim a new stream ID — any prior stream will detect this and stop emitting.
+        const senderId = event.sender.id;
         const myStreamId = ++_chatStreamId;
-        // Abort any prior in-flight controller so its generator stops yielding
-        // tokens that nobody is consuming. The for-await supersession check
-        // below is still kept as a defense-in-depth backstop for the case
-        // where streamChat's caller didn't honor the signal.
-        if (_chatStreamController) {
-          try { _chatStreamController.abort(); } catch { /* noop */ }
+        const priorStream = _chatStreamsBySender.get(senderId);
+        if (priorStream) {
+          try { priorStream.controller.abort(); } catch { /* noop */ }
         }
-        const myController = new AbortController();
-        _chatStreamController = myController;
+        myController = new AbortController();
+        _chatStreamsBySender.set(senderId, { streamId: myStreamId, controller: myController });
 
         const intelligenceManager = appState.getIntelligenceManager();
 
@@ -564,9 +563,9 @@ export function initializeIpcHandlers(appState: AppState): void {
             // Guard against a newer chat stream having taken over while we were computing
             // the canned reply — matches the protection the LLM path uses around its token
             // loop. Prevents cross-stream UI bleed.
-            if (_chatStreamId !== myStreamId) {
+            if (_chatStreamsBySender.get(senderId)?.streamId !== myStreamId) {
               console.log(
-                `[IPC] gemini-chat-stream ${myStreamId} (identity probe) superseded by ${_chatStreamId}, skipping emit.`,
+                `[IPC] gemini-chat-stream ${myStreamId} (identity probe) superseded for sender ${senderId}, skipping emit.`,
               );
               return null;
             }
@@ -655,9 +654,9 @@ export function initializeIpcHandlers(appState: AppState): void {
 
           for await (const token of stream) {
             // Bail if a newer stream has taken over (user triggered a new request)
-            if (_chatStreamId !== myStreamId) {
+            if (_chatStreamsBySender.get(senderId)?.streamId !== myStreamId) {
               console.log(
-                `[IPC] gemini-chat-stream ${myStreamId} superseded by ${_chatStreamId}, stopping.`,
+                `[IPC] gemini-chat-stream ${myStreamId} superseded for sender ${senderId}, stopping.`,
               );
               return null;
             }
@@ -671,7 +670,7 @@ export function initializeIpcHandlers(appState: AppState): void {
           }
 
           // Final check: only send done if we are still the active stream
-          if (_chatStreamId === myStreamId) {
+          if (_chatStreamsBySender.get(senderId)?.streamId === myStreamId) {
             event.sender.send('gemini-stream-done');
             try {
               PhoneMirrorService.getInstance().publishDone(String(myStreamId), fullResponse);
@@ -688,7 +687,7 @@ export function initializeIpcHandlers(appState: AppState): void {
           }
         } catch (streamError: any) {
           console.error('[IPC] Streaming error:', streamError);
-          if (_chatStreamId === myStreamId) {
+          if (_chatStreamsBySender.get(senderId)?.streamId === myStreamId) {
             event.sender.send(
               'gemini-stream-error',
               streamError.message || 'Unknown streaming error',
@@ -709,28 +708,23 @@ export function initializeIpcHandlers(appState: AppState): void {
         console.error('[IPC] Error in gemini-chat-stream setup:', error);
         throw error;
       } finally {
-        // Null the module-scope controller reference if it still points at
-        // ours. Without this, a normally-completed controller lingers as the
-        // "current" one; a subsequent cancelChatStream() would abort a
-        // finished controller (harmless but misleading), and the
-        // already-resolved controller object itself is retained in memory.
-        // Identity-check so we don't clobber a successor controller that a
-        // newer stream installed during our cleanup.
-        if (_chatStreamController === myController) {
-          _chatStreamController = null;
+        if (myController) {
+          const current = _chatStreamsBySender.get(event.sender.id);
+          if (current?.controller === myController) {
+            _chatStreamsBySender.delete(event.sender.id);
+          }
         }
       }
     },
   );
 
-  // Renderer-driven cancellation for the active chat stream. The renderer
-  // wires this to Escape, navigation, and component unmount so a half-typed
-  // answer doesn't keep streaming to a UI that's gone away. Idempotent —
-  // safe to call when no stream is active.
-  ipcMain.on('gemini-chat-stream-stop', () => {
-    if (_chatStreamController) {
-      try { _chatStreamController.abort(); } catch { /* noop */ }
-      _chatStreamController = null;
+  // Renderer-driven cancellation for the sender's active chat stream.
+  safeOn('gemini-chat-stream-stop', (event) => {
+    const senderId = event.sender.id;
+    const stream = _chatStreamsBySender.get(senderId);
+    if (stream) {
+      try { stream.controller.abort(); } catch { /* noop */ }
+      _chatStreamsBySender.delete(senderId);
     }
   });
 
@@ -1019,12 +1013,49 @@ export function initializeIpcHandlers(appState: AppState): void {
   });
 
   // Fire-and-forget: renderer forwards its console output to the main-process log file.
-  // Only written when verbose logging is enabled.
-  ipcMain.on('forward-log-to-file', (_event, level: string, msg: string) => {
+  // Only written when verbose logging is enabled. Hardened against log injection
+  // (CWE-117) and rotation thrash by validating types, capping length, stripping
+  // control characters, and rate-limiting per sender.
+  const FORWARD_LOG_MAX_LEN = 4 * 1024;
+  const FORWARD_LOG_RATE_REFILL_MS = 1_000;
+  const FORWARD_LOG_RATE_BUCKET = 200;
+  const _forwardLogBuckets = new Map<number, { tokens: number; lastRefill: number }>();
+  safeOn('forward-log-to-file', (event, level: unknown, msg: unknown) => {
     if (!appState.getVerboseLogging()) return;
+    if (typeof level !== 'string' || typeof msg !== 'string') return;
+
+    const senderId = event.sender?.id ?? -1;
+    const now = Date.now();
+    let bucket = _forwardLogBuckets.get(senderId);
+    if (!bucket) {
+      bucket = { tokens: FORWARD_LOG_RATE_BUCKET, lastRefill: now };
+      _forwardLogBuckets.set(senderId, bucket);
+      // Reap the bucket when the renderer goes away so the Map cannot grow
+      // unbounded across renderer reloads / hidden-window churn.
+      try {
+        event.sender?.once?.('destroyed', () => {
+          _forwardLogBuckets.delete(senderId);
+        });
+      } catch { /* noop */ }
+    } else {
+      const elapsed = now - bucket.lastRefill;
+      if (elapsed > 0) {
+        const refill = Math.floor((elapsed * FORWARD_LOG_RATE_BUCKET) / FORWARD_LOG_RATE_REFILL_MS);
+        if (refill > 0) {
+          bucket.tokens = Math.min(FORWARD_LOG_RATE_BUCKET, bucket.tokens + refill);
+          bucket.lastRefill += Math.floor((refill * FORWARD_LOG_RATE_REFILL_MS) / FORWARD_LOG_RATE_BUCKET);
+        }
+      }
+    }
+    if (bucket.tokens <= 0) return;
+    bucket.tokens -= 1;
+
     const tag =
       level === 'error' ? '[RENDERER-ERROR]' : level === 'warn' ? '[RENDERER-WARN]' : '[RENDERER]';
-    console.log(`${tag} ${msg}`);
+    const sanitized = msg
+      .replace(/[\r\n\x00-\x08\x0b\x0c\x0e-\x1f]/g, ' ')
+      .slice(0, FORWARD_LOG_MAX_LEN);
+    console.log(`${tag}[${senderId}] ${sanitized}`);
   });
 
   // Meeting interface theme cross-window broadcast. The settings window writes
@@ -1034,8 +1065,26 @@ export function initializeIpcHandlers(appState: AppState): void {
   // Without this, switching the meeting interface theme while the overlay is
   // hidden leaves it with stale CSS on the next meeting start — manifest as a
   // half-painted UI that requires force-quit.
-  ipcMain.on('interface-theme:set', (_event, theme: string) => {
-    if (typeof theme !== 'string') return;
+  // Allowlist must mirror MeetingInterfaceTheme in src/lib/meetingInterfaceTheme.ts.
+  // Any string that reaches a renderer via interface-theme:changed ends up in
+  // a `data-interface-theme={value}` DOM attribute on the overlay's wrapper
+  // div (NativelyInterface.tsx). Without an allowlist, a compromised or buggy
+  // renderer could broadcast an arbitrary string — at best CSS selector
+  // mismatch (overlay falls back to default), at worst an attribute-injection
+  // vector if any consumer ever switched from `setAttribute` to template
+  // literals. Hardening the trust boundary at the broadcast point is cheap.
+  const VALID_INTERFACE_THEMES = new Set(['default', 'liquid-glass', 'modern']);
+  safeOn('interface-theme:set', (_event, theme: string) => {
+    if (typeof theme !== 'string' || !VALID_INTERFACE_THEMES.has(theme)) {
+      // Truncate + strip control chars before logging — a 64-char payload can
+      // still embed \n/\r to forge log lines if a future log shipper parses
+      // newline-delimited records.
+      const safe = typeof theme === 'string'
+        ? theme.slice(0, 64).replace(/[\r\n\x00-\x1f]/g, '?')
+        : typeof theme;
+      console.warn(`[interface-theme:set] Rejected unknown theme: ${safe}`);
+      return;
+    }
     BrowserWindow.getAllWindows().forEach((win) => {
       if (win.isDestroyed()) return;
       try {
@@ -1246,9 +1295,32 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
+  safeHandle('set-deepseek-api-key', async (_, apiKey: string) => {
+    try {
+      const { CredentialsManager } = require('./services/CredentialsManager');
+      CredentialsManager.getInstance().setDeepseekApiKey(apiKey);
+
+      // Also update the LLMHelper immediately
+      const llmHelper = appState.processingHelper.getLLMHelper();
+      llmHelper.setDeepseekApiKey(apiKey);
+
+      // Cancel in-flight stream before re-init (engine only, not session)
+      appState.getIntelligenceManager().resetEngine();
+      // Re-init IntelligenceManager
+      appState.getIntelligenceManager().initializeLLMs();
+
+      return { success: true };
+    } catch (error: any) {
+      console.error('Error saving DeepSeek API key:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
   // ── Usage cache (60-second TTL, keyed by API key) ──────────────────────────
   const _usageCache = new Map<string, { data: any; ts: number }>();
   const USAGE_CACHE_TTL_MS = 60_000;
+  const _pricingCache = new Map<string, { data: any; ts: number }>();
+  const PRICING_CACHE_TTL_MS = 5 * 60_000;
 
   safeHandle('set-natively-api-key', async (_, apiKey: string) => {
     try {
@@ -1265,9 +1337,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       const defaultModel = cm.getDefaultModel();
       const providers = [...(cm.getCurlProviders() || []), ...(cm.getCustomProviders() || [])];
       llmHelper.setModel(defaultModel, providers);
-      BrowserWindow.getAllWindows().forEach((win) => {
-        if (!win.isDestroyed()) win.webContents.send('model-changed', defaultModel);
-      });
+      appState.sendModelChanged(defaultModel);
 
       // If setNativelyApiKey auto-promoted the STT provider to 'natively', reconfigure
       // the audio pipeline immediately — without this, the in-memory pipeline still uses
@@ -1341,6 +1411,29 @@ export function initializeIpcHandlers(appState: AppState): void {
     } finally {
       // Always bust the cache when the key changes so the next usage fetch is fresh
       _usageCache?.clear();
+    }
+  });
+
+  safeHandle('get-natively-pricing', async () => {
+    try {
+      const cached = _pricingCache.get('pricing');
+      if (cached && Date.now() - cached.ts < PRICING_CACHE_TTL_MS) {
+        return cached.data;
+      }
+
+      const res = await fetch('https://api.natively.software/v1/pricing', {
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as any;
+        return { ok: false, error: body.error || 'request_failed', status: res.status };
+      }
+      const data = (await res.json()) as any;
+      const result = { ok: true, ...data };
+      _pricingCache.set('pricing', { data: result, ts: Date.now() });
+      return result;
+    } catch (error: any) {
+      return { ok: false, error: error.message || 'network_error' };
     }
   });
 
@@ -1636,35 +1729,41 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
+  const validateCurlProviderPayload = (provider: unknown): { ok: true } | { ok: false; error: string } => {
+    if (
+      typeof provider !== 'object' ||
+      provider === null ||
+      typeof (provider as any).id !== 'string' ||
+      typeof (provider as any).name !== 'string' ||
+      typeof (provider as any).curlCommand !== 'string'
+    ) {
+      return { ok: false, error: 'Invalid provider payload' };
+    }
+
+    if (!(provider as any).curlCommand.includes('{{TEXT}}')) {
+      return { ok: false, error: 'curlCommand must contain {{TEXT}} placeholder for the prompt' };
+    }
+
+    if (
+      'responsePath' in provider &&
+      typeof (provider as any).responsePath !== 'string'
+    ) {
+      return { ok: false, error: 'Invalid provider responsePath' };
+    }
+
+    return { ok: true };
+  };
+
   safeHandle('save-custom-provider', async (_, provider: unknown) => {
     try {
-      // SECURITY FIX (P1-2): Validate provider payload shape before persisting.
-      // Prevents malformed/malicious renderer data from polluting CredentialsManager.
-      if (
-        typeof provider !== 'object' ||
-        provider === null ||
-        typeof (provider as any).id !== 'string' ||
-        typeof (provider as any).name !== 'string' ||
-        typeof (provider as any).curlCommand !== 'string'
-      ) {
-        console.error('[IPC] save-custom-provider: invalid payload shape', typeof provider);
-        return { success: false, error: 'Invalid provider payload' };
-      }
-
-      const curlCmd: string = (provider as any).curlCommand;
-      // Require {{TEXT}} so the app always has a defined injection point for the user prompt.
-      // We do NOT require the string to start with 'curl' — curlCommand is a template field,
-      // not necessarily a raw CLI string, and over-constraining it would break valid providers.
-      if (!curlCmd.includes('{{TEXT}}')) {
-        return {
-          success: false,
-          error: 'curlCommand must contain {{TEXT}} placeholder for the prompt',
-        };
+      const validation = validateCurlProviderPayload(provider);
+      if (!validation.ok) {
+        console.error('[IPC] save-custom-provider: invalid payload');
+        return { success: false, error: validation.error };
       }
 
       const { CredentialsManager } = require('./services/CredentialsManager');
-      // Save as CurlProvider (supports responsePath)
-      CredentialsManager.getInstance().saveCurlProvider(provider);
+      CredentialsManager.getInstance().saveCurlProvider(provider as any);
       return { success: true };
     } catch (error: any) {
       console.error('Error saving custom provider:', error);
@@ -1723,10 +1822,16 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
-  safeHandle('save-curl-provider', async (_, provider: any) => {
+  safeHandle('save-curl-provider', async (_, provider: unknown) => {
     try {
+      const validation = validateCurlProviderPayload(provider);
+      if (!validation.ok) {
+        console.error('[IPC] save-curl-provider: invalid payload');
+        return { success: false, error: validation.error };
+      }
+
       const { CredentialsManager } = require('./services/CredentialsManager');
-      CredentialsManager.getInstance().saveCurlProvider(provider);
+      CredentialsManager.getInstance().saveCurlProvider(provider as any);
       return { success: true };
     } catch (error: any) {
       console.error('Error saving curl provider:', error);
@@ -1783,6 +1888,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         hasGroqKey: hasKey(creds.groqApiKey),
         hasOpenaiKey: hasKey(creds.openaiApiKey),
         hasClaudeKey: hasKey(creds.claudeApiKey),
+        hasDeepseekKey: hasKey(creds.deepseekApiKey),
         hasNativelyKey: hasKey(creds.nativelyApiKey),
         googleServiceAccountPath: creds.googleServiceAccountPath || null,
         sttProvider: creds.sttProvider || 'none',
@@ -1813,6 +1919,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         groqPreferredModel: creds.groqPreferredModel || undefined,
         openaiPreferredModel: creds.openaiPreferredModel || undefined,
         claudePreferredModel: creds.claudePreferredModel || undefined,
+        deepseekPreferredModel: creds.deepseekPreferredModel || undefined,
       };
     } catch (error: any) {
       // SECURITY FIX (P0): Error fallback returns masked keys, not raw strings
@@ -1821,6 +1928,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         hasGroqKey: false,
         hasOpenaiKey: false,
         hasClaudeKey: false,
+        hasDeepseekKey: false,
         hasNativelyKey: false,
         googleServiceAccountPath: null,
         sttProvider: 'none',
@@ -1852,7 +1960,7 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle(
     'fetch-provider-models',
-    async (_, provider: 'gemini' | 'groq' | 'openai' | 'claude', apiKey: string) => {
+    async (_, provider: 'gemini' | 'groq' | 'openai' | 'claude' | 'deepseek', apiKey: string) => {
       try {
         // Fall back to stored key if no key was explicitly provided
         let key = apiKey?.trim();
@@ -1863,6 +1971,7 @@ export function initializeIpcHandlers(appState: AppState): void {
           else if (provider === 'groq') key = cm.getGroqApiKey();
           else if (provider === 'openai') key = cm.getOpenaiApiKey();
           else if (provider === 'claude') key = cm.getClaudeApiKey();
+          else if (provider === 'deepseek') key = cm.getDeepseekApiKey();
         }
 
         if (!key) {
@@ -1883,7 +1992,7 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle(
     'set-provider-preferred-model',
-    async (_, provider: 'gemini' | 'groq' | 'openai' | 'claude', modelId: string) => {
+    async (_, provider: 'gemini' | 'groq' | 'openai' | 'claude' | 'deepseek', modelId: string) => {
       try {
         const { CredentialsManager } = require('./services/CredentialsManager');
         CredentialsManager.getInstance().setPreferredModel(provider, modelId);
@@ -2484,7 +2593,7 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle(
     'test-llm-connection',
-    async (_, provider: 'gemini' | 'groq' | 'openai' | 'claude', apiKey?: string) => {
+    async (_, provider: 'gemini' | 'groq' | 'openai' | 'claude' | 'deepseek', apiKey?: string) => {
       console.log(`[IPC] Received test-llm-connection request for provider: ${provider}`);
       try {
         if (!apiKey || !apiKey.trim()) {
@@ -2494,6 +2603,7 @@ export function initializeIpcHandlers(appState: AppState): void {
           else if (provider === 'groq') apiKey = creds.getGroqApiKey();
           else if (provider === 'openai') apiKey = creds.getOpenaiApiKey();
           else if (provider === 'claude') apiKey = creds.getClaudeApiKey();
+          else if (provider === 'deepseek') apiKey = creds.getDeepseekApiKey();
         }
 
         if (!apiKey || !apiKey.trim()) {
@@ -2551,6 +2661,22 @@ export function initializeIpcHandlers(appState: AppState): void {
               headers: {
                 'x-api-key': apiKey,
                 'anthropic-version': '2023-06-01',
+                'content-type': 'application/json',
+              },
+              timeout: 15000,
+            },
+          );
+        } else if (provider === 'deepseek') {
+          response = await axios.post(
+            'https://api.deepseek.com/chat/completions',
+            {
+              model: 'deepseek-v4-flash',
+              max_tokens: 10,
+              messages: [{ role: 'user', content: 'Hello' }],
+            },
+            {
+              headers: {
+                Authorization: `Bearer ${apiKey}`,
                 'content-type': 'application/json',
               },
               timeout: 15000,
@@ -2680,15 +2806,10 @@ export function initializeIpcHandlers(appState: AppState): void {
 
       llmHelper.setModel(modelId, allProviders);
 
+      appState.sendModelChanged(modelId);
+
       // Close the selector window if open
       appState.modelSelectorWindowHelper.hideWindow();
-
-      // Broadcast to all windows so NativelyInterface can update its selector (session-only update)
-      BrowserWindow.getAllWindows().forEach((win) => {
-        if (!win.isDestroyed()) {
-          win.webContents.send('model-changed', modelId);
-        }
-      });
 
       return { success: true };
     } catch (error: any) {
@@ -2697,7 +2818,7 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
-  // Persist default model (from Settings) + update runtime + broadcast to all windows
+  // Persist default model (from Settings), update runtime, and notify model UI surfaces
   safeHandle('set-default-model', async (_, modelId: string) => {
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
@@ -2711,15 +2832,10 @@ export function initializeIpcHandlers(appState: AppState): void {
       const allProviders = [...curlProviders, ...legacyProviders];
       llmHelper.setModel(modelId, allProviders);
 
+      appState.sendModelChanged(modelId);
+
       // Close the selector window if open
       appState.modelSelectorWindowHelper.hideWindow();
-
-      // Broadcast to all windows so NativelyInterface can update its selector
-      BrowserWindow.getAllWindows().forEach((win) => {
-        if (!win.isDestroyed()) {
-          win.webContents.send('model-changed', modelId);
-        }
-      });
 
       return { success: true };
     } catch (error: any) {
@@ -2788,7 +2904,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   });
 
   safeHandle('stop-audio-test', async () => {
-    appState.stopAudioTest();
+    await appState.stopAudioTest();
     return { success: true };
   });
 
@@ -3680,7 +3796,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       }
 
       const abortController = new AbortController();
-      const queryKey = `meeting-${meetingId}`;
+      const queryKey = `meeting-${meetingId}-${crypto.randomUUID()}`;
       activeRAGQueries.set(queryKey, abortController);
 
       try {
@@ -3804,11 +3920,16 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle(
     'rag:cancel-query',
     async (_, { meetingId, global }: { meetingId?: string; global?: boolean }) => {
+      if (!global && !meetingId) {
+        return { success: false, error: 'meetingId is required' };
+      }
+
       const queryKey = global ? 'global' : `meeting-${meetingId}`;
 
       // Cancel any matching key
       for (const [key, controller] of activeRAGQueries) {
-        if (key.startsWith(queryKey) || (global && key.startsWith('global'))) {
+        const matchesQuery = global ? key.startsWith('global-') : key.startsWith(`${queryKey}-`);
+        if (matchesQuery) {
           controller.abort();
           activeRAGQueries.delete(key);
         }
@@ -3861,6 +3982,36 @@ export function initializeIpcHandlers(appState: AppState): void {
   // Profile Engine IPC Handlers
   // ==========================================
 
+  // Allowlist of file paths the user explicitly selected via profile:select-file.
+  // Without this, a compromised renderer could pass arbitrary filesystem paths
+  // (e.g. /etc/passwd, ~/.ssh/id_rsa) to the upload handlers and exfiltrate
+  // their contents through the knowledge index. Entries expire after 60s.
+  const PROFILE_SELECTED_PATH_TTL_MS = 60_000;
+  const profileSelectedPaths = new Map<string, number>();
+  const normalizeProfilePath = (p: string): string => path.resolve(p);
+  const sweepExpiredProfilePaths = (now: number): void => {
+    for (const [key, expiresAt] of profileSelectedPaths) {
+      if (now > expiresAt) profileSelectedPaths.delete(key);
+    }
+  };
+  const registerSelectedProfilePath = (filePath: string): void => {
+    const now = Date.now();
+    sweepExpiredProfilePaths(now);
+    profileSelectedPaths.set(normalizeProfilePath(filePath), now + PROFILE_SELECTED_PATH_TTL_MS);
+  };
+  const consumeSelectedProfilePath = (filePath: unknown): string | null => {
+    if (typeof filePath !== 'string' || filePath.length === 0) return null;
+    const key = normalizeProfilePath(filePath);
+    const expiresAt = profileSelectedPaths.get(key);
+    if (!expiresAt) return null;
+    if (Date.now() > expiresAt) {
+      profileSelectedPaths.delete(key);
+      return null;
+    }
+    profileSelectedPaths.delete(key);
+    return key;
+  };
+
   safeHandle('profile:upload-resume', async (_, filePath: string) => {
     try {
       // Premium gate: require active license or free trial for profile features
@@ -3871,7 +4022,12 @@ export function initializeIpcHandlers(appState: AppState): void {
             'Pro license required. Please activate a license key to use Profile Intelligence features.',
         };
       }
-      console.log(`[IPC] profile:upload-resume called with: ${filePath}`);
+      const resolvedPath = consumeSelectedProfilePath(filePath);
+      if (!resolvedPath) {
+        console.warn('[IPC] profile:upload-resume rejected: path was not produced by profile:select-file or has expired.');
+        return { success: false, error: 'Please re-select the resume file.' };
+      }
+      console.log(`[IPC] profile:upload-resume called with: ${resolvedPath}`);
       const orchestrator = appState.getKnowledgeOrchestrator();
       if (!orchestrator) {
         return {
@@ -3880,7 +4036,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         };
       }
       const { DocType } = require('../premium/electron/knowledge/types');
-      const result = await orchestrator.ingestDocument(filePath, DocType.RESUME);
+      const result = await orchestrator.ingestDocument(resolvedPath, DocType.RESUME);
       return result;
     } catch (error: any) {
       console.error('[IPC] profile:upload-resume error:', error);
@@ -3968,7 +4124,9 @@ export function initializeIpcHandlers(appState: AppState): void {
         return { cancelled: true };
       }
 
-      return { success: true, filePath: result.filePaths[0] };
+      const selected = result.filePaths[0];
+      registerSelectedProfilePath(selected);
+      return { success: true, filePath: selected };
     } catch (error: any) {
       return { success: false, error: error.message };
     }
@@ -3988,7 +4146,12 @@ export function initializeIpcHandlers(appState: AppState): void {
             'Pro license required. Please activate a license key to use Profile Intelligence features.',
         };
       }
-      console.log(`[IPC] profile:upload-jd called with: ${filePath}`);
+      const resolvedPath = consumeSelectedProfilePath(filePath);
+      if (!resolvedPath) {
+        console.warn('[IPC] profile:upload-jd rejected: path was not produced by profile:select-file or has expired.');
+        return { success: false, error: 'Please re-select the JD file.' };
+      }
+      console.log(`[IPC] profile:upload-jd called with: ${resolvedPath}`);
       const orchestrator = appState.getKnowledgeOrchestrator();
       if (!orchestrator) {
         return {
@@ -3997,7 +4160,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         };
       }
       const { DocType } = require('../premium/electron/knowledge/types');
-      const result = await orchestrator.ingestDocument(filePath, DocType.JD);
+      const result = await orchestrator.ingestDocument(resolvedPath, DocType.JD);
       return result;
     } catch (error: any) {
       console.error('[IPC] profile:upload-jd error:', error);
@@ -4788,10 +4951,17 @@ export function initializeIpcHandlers(appState: AppState): void {
     if (cmd.type === 'action') {
       // Re-use the same global-shortcut dispatch path the keyboard uses.
       // This keeps phone actions identical to key-triggered stealth actions.
-      const allWindows = BrowserWindow.getAllWindows();
-      allWindows.forEach((w) => {
-        if (!w.isDestroyed()) w.webContents.send('global-shortcut', { action: cmd.action });
-      });
+      const helper = appState.getWindowHelper();
+      const sent = new Set<number>();
+      for (const w of [helper.getLauncherWindow(), helper.getOverlayWindow()]) {
+        if (!w || w.isDestroyed() || sent.has(w.id)) continue;
+        sent.add(w.id);
+        try {
+          w.webContents.send('global-shortcut', { action: cmd.action });
+        } catch {
+          // Window is tearing down; keep delivering to any other valid surface.
+        }
+      }
     } else if (cmd.type === 'chat') {
       // Stream a phone-initiated chat through the LLM exactly like gemini-chat-stream
       // but without requiring a renderer event sender. Tokens are pushed directly to

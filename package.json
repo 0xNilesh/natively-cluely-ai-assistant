@@ -30,7 +30,8 @@
     "test:e2e:headed": "npx playwright test --headed",
     "test:e2e:parity": "ELECTRON_E2E=1 ELECTRON_APP_PORT=${ELECTRON_APP_PORT:-5173} npx playwright test tests/e2e/parity-gaps-evidence.spec.ts",
     "test:e2e:screen-understanding": "npm run build:electron && node natively-api/tests/screen-understanding-live.e2e.mjs",
-    "bench:screen-understanding": "npm run build:electron && node scripts/bench-screen-understanding.mjs"
+    "bench:screen-understanding": "npm run build:electron && node scripts/bench-screen-understanding.mjs",
+    "doctor": "npx react-doctor@latest"
   },
   "build": {
     "generateUpdatesFilesForAllChannels": true,
@@ -180,6 +181,7 @@
     "electron-is-dev": "^3.0.1",
     "electron-rebuild": "^3.2.9",
     "postcss": "^8.4.49",
+    "react-doctor": "^0.2.10",
     "rimraf": "^6.0.1",
     "tailwindcss": "^3.4.15",
     "typescript": "^5.6.3",

@@ -145,7 +145,7 @@ test('SystemAudioCapture restart after stop must not reuse a torn-down native mo
     const first = created.system[0];
     assert.equal(first.startCalls, 1, 'first native instance should have been started exactly once');
 
-    cap.stop();
+    await cap.stop();
     await flushSetImmediate();
     assert.equal(first.stopCalls, 1, 'deferred native stop() should have run after setImmediate flush');
     assert.equal(first.torndown, true, 'first native instance must be marked torn down');
@@ -180,7 +180,7 @@ test('SystemAudioCapture restart after stop must not reuse a torn-down native mo
     assert.equal(second.startCalls, 1, 'fresh native instance should be started exactly once');
 
     // Cleanup so we don't leak intervals/timers across tests.
-    cap.destroy();
+    await cap.destroy();
     await flushSetImmediate();
 });
 
@@ -197,7 +197,7 @@ test('MicrophoneCapture restart after stop must not reuse a torn-down native mon
     cap.start();
     assert.equal(first.startCalls, 1, 'first native instance should have been started exactly once');
 
-    cap.stop();
+    await cap.stop();
     await flushSetImmediate();
     assert.equal(first.stopCalls, 1, 'deferred native stop() should have run after setImmediate flush');
     assert.equal(first.torndown, true, 'first native mic instance must be marked torn down');
@@ -224,6 +224,6 @@ test('MicrophoneCapture restart after stop must not reuse a torn-down native mon
     assert.equal(second.torndown, false, 'fresh native mic instance must not be torn down');
     assert.equal(second.startCalls, 1, 'fresh native mic instance should be started exactly once');
 
-    cap.destroy();
+    await cap.destroy();
     await flushSetImmediate();
 });

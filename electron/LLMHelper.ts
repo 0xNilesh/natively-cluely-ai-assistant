@@ -46,6 +46,9 @@ const GEMINI_PRO_MODEL = "gemini-3.1-pro-preview"
 const GROQ_MODEL = "llama-3.3-70b-versatile"
 const OPENAI_MODEL = "gpt-5.4"
 const CLAUDE_MODEL = "claude-sonnet-4-6"
+const DEEPSEEK_MODEL = "deepseek-v4-flash"
+const DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+const DEEPSEEK_MAX_OUTPUT_TOKENS = 8192
 const MAX_OUTPUT_TOKENS = 65536
 const CLAUDE_MAX_OUTPUT_TOKENS = 64000
 
@@ -57,10 +60,14 @@ export class LLMHelper {
   private groqClient: Groq | null = null
   private openaiClient: OpenAI | null = null
   private claudeClient: Anthropic | null = null
+  // DeepSeek is OpenAI-compatible; reuse the OpenAI SDK with a custom baseURL.
+  // Kept as a separate client so credentials/scope/telemetry stay provider-specific.
+  private deepseekClient: OpenAI | null = null
   private apiKey: string | null = null
   private groqApiKey: string | null = null
   private openaiApiKey: string | null = null
   private claudeApiKey: string | null = null
+  private deepseekApiKey: string | null = null
   private useOllama: boolean = false
   private ollamaModel: string = ""
   private ollamaUrl: string = "http://127.0.0.1:11434"
@@ -142,7 +149,7 @@ export class LLMHelper {
     console.warn(`[ScopeFallback] ${scope} denied; Ollama unavailable, omitting from context`);
   }
 
-  constructor(apiKey?: string, useOllama: boolean = false, ollamaModel?: string, ollamaUrl?: string, groqApiKey?: string, openaiApiKey?: string, claudeApiKey?: string) {
+  constructor(apiKey?: string, useOllama: boolean = false, ollamaModel?: string, ollamaUrl?: string, groqApiKey?: string, openaiApiKey?: string, claudeApiKey?: string, deepseekApiKey?: string) {
     this.useOllama = useOllama
 
     // Initialize rate limiters
@@ -173,6 +180,13 @@ export class LLMHelper {
       this.claudeApiKey = claudeApiKey
       this.claudeClient = new Anthropic({ apiKey: claudeApiKey })
       console.log(`[LLMHelper] Claude client initialized with model: ${CLAUDE_MODEL}`)
+    }
+
+    // Initialize DeepSeek client if API key provided (OpenAI-compatible)
+    if (deepseekApiKey) {
+      this.deepseekApiKey = deepseekApiKey
+      this.deepseekClient = new OpenAI({ apiKey: deepseekApiKey, baseURL: DEEPSEEK_BASE_URL })
+      console.log(`[LLMHelper] DeepSeek client initialized with model: ${DEEPSEEK_MODEL}`)
     }
 
     if (useOllama) {
@@ -229,6 +243,19 @@ export class LLMHelper {
     this.claudeApiKey = apiKey;
     this.claudeClient = new Anthropic({ apiKey });
     console.log("[LLMHelper] Claude API Key updated.");
+  }
+
+  public setDeepseekApiKey(apiKey: string) {
+    const trimmed = (apiKey || '').trim();
+    if (!trimmed) {
+      this.deepseekApiKey = null;
+      this.deepseekClient = null;
+      console.log("[LLMHelper] DeepSeek API Key cleared.");
+      return;
+    }
+    this.deepseekApiKey = trimmed;
+    this.deepseekClient = new OpenAI({ apiKey: trimmed, baseURL: DEEPSEEK_BASE_URL });
+    console.log("[LLMHelper] DeepSeek API Key updated.");
   }
 
   public setNativelyKey(key: string | null): void {
@@ -348,11 +375,13 @@ export class LLMHelper {
     this.groqApiKey = null;
     this.openaiApiKey = null;
     this.claudeApiKey = null;
+    this.deepseekApiKey = null;
     this.nativelyKey = null;
     this.client = null;
     this.groqClient = null;
     this.openaiClient = null;
     this.claudeClient = null;
+    this.deepseekClient = null;
     // Destroy rate limiters
     if (this.rateLimiters) {
       Object.values(this.rateLimiters).forEach(rl => rl.destroy());
@@ -391,6 +420,15 @@ export class LLMHelper {
 
   private isClaudeModel(modelId: string): boolean {
     return modelId.startsWith("claude-");
+  }
+
+  private isDeepseekModel(modelId: string): boolean {
+    if (!modelId) return false;
+    return /^deepseek-v\d/.test(modelId.toLowerCase());
+  }
+
+  private getDeepseekMaxOutput(_modelId: string): number {
+    return DEEPSEEK_MAX_OUTPUT_TOKENS;
   }
 
   /**
@@ -457,6 +495,7 @@ export class LLMHelper {
     if (modelId === 'gemini-pro') targetModelId = GEMINI_PRO_MODEL;
     if (modelId === 'claude') targetModelId = CLAUDE_MODEL;
     if (modelId === 'llama') targetModelId = GROQ_MODEL;
+    if (modelId === 'deepseek') targetModelId = DEEPSEEK_MODEL;
 
     if (targetModelId.startsWith('ollama-')) {
       this.useOllama = true;
@@ -1179,11 +1218,17 @@ ANSWER DIRECTLY:`;
   // ModesManager is unavailable so we never regress modes that legitimately
   // use the intercept (looking-for-work, sales, recruiting, general).
   private isPremiumKnowledgeInterceptAllowed(): boolean {
+    let ModesManager: any;
     try {
-      const { ModesManager } = require('./services/ModesManager');
-      return ModesManager.getInstance().isPremiumKnowledgeInterceptAllowed();
+      ({ ModesManager } = require('./services/ModesManager'));
     } catch (_err) {
       return true;
+    }
+
+    try {
+      return ModesManager.getInstance().isPremiumKnowledgeInterceptAllowed();
+    } catch (_err) {
+      return false;
     }
   }
 
@@ -1522,6 +1567,13 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       if (this.isClaudeModel(this.currentModelId) && this.claudeClient) {
         return await this.generateWithClaude(cloudUserContent, claudeSystemPrompt, cloudImagePaths);
       }
+      if (this.isDeepseekModel(this.currentModelId) && this.deepseekClient) {
+        // DeepSeek is text-only; ignore image attachments here and let the
+        // fallback below pick a vision-capable provider if imagePaths are needed.
+        if (!cloudIsMultimodal) {
+          return await this.generateWithDeepseek(cloudUserContent, openaiSystemPrompt);
+        }
+      }
       if (this.isGroqModel(this.currentModelId) && this.groqClient) {
         if (cloudIsMultimodal && cloudImagePaths) {
           return await this.generateWithGroqMultimodal(cloudUserContent, cloudImagePaths, openaiSystemPrompt);
@@ -1559,6 +1611,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           hasGemini: Boolean(this.client),
           hasOpenAI: Boolean(this.openaiClient),
           hasClaude: Boolean(this.claudeClient),
+          hasDeepseek: Boolean(this.deepseekClient),
           hasOllama: ollamaAvailable,
         },
         models: {
@@ -1568,6 +1621,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           geminiPro: textGeminiPro,
           openai: textOpenAI,
           claude: textClaude,
+          deepseek: this.isDeepseekModel(this.currentModelId) ? this.currentModelId : DEEPSEEK_MODEL,
           ollama: this.ollamaModel,
         },
         dataScopes: outboundScopes,
@@ -1603,6 +1657,13 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           case 'claude':
             providers.push({ name: routedProvider.name, execute: () => this.generateWithClaude(cloudUserContent, claudeSystemPrompt, cloudIsMultimodal ? cloudImagePaths : undefined, routedProvider.model || textClaude) });
             break;
+          case 'deepseek':
+            // DeepSeek is text-only; the router already excludes it from multimodal,
+            // but this guard makes the omission explicit and safe to refactor.
+            if (!cloudIsMultimodal) {
+              providers.push({ name: routedProvider.name, execute: () => this.generateWithDeepseek(cloudUserContent, openaiSystemPrompt, routedProvider.model || DEEPSEEK_MODEL) });
+            }
+            break;
           case 'ollama':
             providers.push({ name: routedProvider.name, execute: () => this.callOllama(combinedMessages.gemini, imagePaths, undefined) });
             break;
@@ -1610,6 +1671,9 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       }
 
       if (providers.length === 0) {
+        if (cloudIsMultimodal && this.deepseekClient) {
+          return "DeepSeek is configured for text-only requests. Add a vision-capable provider like Gemini, OpenAI, Claude, Groq, or Natively to analyze images.";
+        }
         return "No AI providers configured. Please add at least one API key in Settings.";
       }
 
@@ -1994,6 +2058,38 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       })),
       60000,
       `OpenAI (${model})`
+    );
+
+    return response.choices[0]?.message?.content || "";
+  }
+
+  /**
+   * Non-streaming DeepSeek generation via the OpenAI-compatible API.
+   * Text-only — image payloads are intentionally not sent. Image-bearing
+   * requests are routed away from DeepSeek by the fallback chain.
+   */
+  private async generateWithDeepseek(userMessage: string, systemPrompt?: string, modelId?: string): Promise<string> {
+    if (this.isLocalOnlyMode) throw new Error("Cloud providers disabled in local-only mode");
+    if (!this.deepseekClient) throw new Error("DeepSeek client not initialized");
+    // No imagePaths argument — DeepSeek is text-only here; let the scope guard see text payload only.
+    this.assertOutboundScopes('deepseek', userMessage);
+
+    await this.rateLimiters.deepseek.acquire();
+
+    const model = modelId || (this.isDeepseekModel(this.currentModelId) ? this.currentModelId : DEEPSEEK_MODEL);
+
+    const messages: any[] = [];
+    if (systemPrompt) messages.push({ role: "system", content: systemPrompt });
+    messages.push({ role: "user", content: userMessage });
+
+    const response = await this.withTimeout(
+      this.withRetry(() => this.deepseekClient!.chat.completions.create({
+        model,
+        messages,
+        max_tokens: this.getDeepseekMaxOutput(model),
+      })),
+      60000,
+      `DeepSeek (${model})`
     );
 
     return response.choices[0]?.message?.content || "";
@@ -2620,7 +2716,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
    *
    * MULTIMODAL: Gemini-only (existing logic)
    */
-  public async * streamChatWithGemini(message: string, imagePaths?: string[], context?: string, skipSystemPrompt: boolean = false): AsyncGenerator<string, void, unknown> {
+  public async * streamChatWithGemini(message: string, imagePaths?: string[], context?: string, skipSystemPrompt: boolean = false, abortSignal?: AbortSignal): AsyncGenerator<string, void, unknown> {
     console.log(`[LLMHelper] streamChatWithGemini called`, { messageLength: message.length, imageCount: imagePaths?.length ?? 0, hasContext: Boolean(context) });
 
     let isMultimodal = !!(imagePaths?.length);
@@ -2699,54 +2795,63 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     if (isMultimodal) {
       // MULTIMODAL PROVIDER ORDER: [Natively] -> Codex CLI -> OpenAI -> Gemini Flash -> Claude -> Gemini Pro -> Groq Scout 4
       if (this.hasNatively()) {
-        providers.push({ name: 'Natively API', execute: () => this.streamWithNatively(userContent, openaiSystemPrompt, imagePaths) });
+        providers.push({ name: 'Natively API', execute: () => this.streamWithNatively(userContent, openaiSystemPrompt, imagePaths, abortSignal) });
       }
       if (this.codexCliConfig.enabled) {
-        providers.push({ name: `Codex CLI (${this.codexCliConfig.model})`, execute: () => this.streamWithCodexCli(userContent, openaiSystemPrompt, false, imagePaths) });
+        providers.push({ name: `Codex CLI (${this.codexCliConfig.model})`, execute: () => this.streamWithCodexCli(userContent, openaiSystemPrompt, false, imagePaths, abortSignal) });
       }
       if (this.openaiClient) {
-        providers.push({ name: `OpenAI (${textOpenAI})`, execute: () => this.streamWithOpenaiMultimodal(userContent, imagePaths!, openaiSystemPrompt, textOpenAI) });
+        providers.push({ name: `OpenAI (${textOpenAI})`, execute: () => this.streamWithOpenaiMultimodal(userContent, imagePaths!, openaiSystemPrompt, textOpenAI, abortSignal) });
       }
       if (this.client) {
         // CACHE: pass system via systemInstruction so it is separated from per-request contents.
-        providers.push({ name: `Gemini Flash (${textGeminiFlash})`, execute: () => this.streamWithGeminiModel(userContent, textGeminiFlash, imagePaths, geminiSystemForCache) });
+        providers.push({ name: `Gemini Flash (${textGeminiFlash})`, execute: () => this.streamWithGeminiModel(userContent, textGeminiFlash, imagePaths, geminiSystemForCache, abortSignal) });
       }
       if (this.claudeClient) {
-        providers.push({ name: `Claude (${textClaude})`, execute: () => this.streamWithClaudeMultimodal(userContent, imagePaths!, claudeSystemPrompt, textClaude) });
+        providers.push({ name: `Claude (${textClaude})`, execute: () => this.streamWithClaudeMultimodal(userContent, imagePaths!, claudeSystemPrompt, textClaude, abortSignal) });
       }
       if (this.client) {
         // CACHE: pass system via systemInstruction so it is separated from per-request contents.
-        providers.push({ name: `Gemini Pro (${textGeminiPro})`, execute: () => this.streamWithGeminiModel(userContent, textGeminiPro, imagePaths, geminiSystemForCache) });
+        providers.push({ name: `Gemini Pro (${textGeminiPro})`, execute: () => this.streamWithGeminiModel(userContent, textGeminiPro, imagePaths, geminiSystemForCache, abortSignal) });
       }
       if (this.groqClient) {
-        providers.push({ name: `Groq (meta-llama/llama-4-scout-17b-16e-instruct)`, execute: () => this.streamWithGroqMultimodal(userContent, imagePaths!, openaiSystemPrompt) });
+        providers.push({ name: `Groq (meta-llama/llama-4-scout-17b-16e-instruct)`, execute: () => this.streamWithGroqMultimodal(userContent, imagePaths!, openaiSystemPrompt, abortSignal) });
       }
     } else {
       // TEXT-ONLY PROVIDER ORDER: [Natively] -> Groq -> Codex CLI -> OpenAI -> Claude -> Gemini Flash -> Gemini Pro
       if (this.hasNatively()) {
-        providers.push({ name: 'Natively API', execute: () => this.streamWithNatively(userContent, openaiSystemPrompt) });
+        providers.push({ name: 'Natively API', execute: () => this.streamWithNatively(userContent, openaiSystemPrompt, undefined, abortSignal) });
       }
       if (this.groqClient) {
         // CACHE: pass system separately so Groq prefix-cache hits across turns.
-        providers.push({ name: `Groq (${textGroq})`, execute: () => this.streamWithGroq(userContent, textGroq, groqSystemForCache) });
+        providers.push({ name: `Groq (${textGroq})`, execute: () => this.streamWithGroq(userContent, textGroq, groqSystemForCache, abortSignal) });
       }
       if (this.codexCliConfig.enabled) {
-        providers.push({ name: `Codex CLI (${this.codexCliConfig.model})`, execute: () => this.streamWithCodexCli(userContent, openaiSystemPrompt) });
+        providers.push({ name: `Codex CLI (${this.codexCliConfig.model})`, execute: () => this.streamWithCodexCli(userContent, openaiSystemPrompt, false, undefined, abortSignal) });
       }
       if (this.openaiClient) {
-        providers.push({ name: `OpenAI (${textOpenAI})`, execute: () => this.streamWithOpenai(userContent, openaiSystemPrompt, textOpenAI) });
+        providers.push({ name: `OpenAI (${textOpenAI})`, execute: () => this.streamWithOpenai(userContent, openaiSystemPrompt, textOpenAI, abortSignal) });
       }
       if (this.claudeClient) {
-        providers.push({ name: `Claude (${textClaude})`, execute: () => this.streamWithClaude(userContent, claudeSystemPrompt, textClaude) });
+        providers.push({ name: `Claude (${textClaude})`, execute: () => this.streamWithClaude(userContent, claudeSystemPrompt, textClaude, abortSignal) });
+      }
+      // DeepSeek text-only fallback — mirrors the router order in routeLLMProviders.
+      if (this.deepseekClient) {
+        const dsModel = this.isDeepseekModel(this.currentModelId) ? this.currentModelId : DEEPSEEK_MODEL;
+        providers.push({ name: `DeepSeek (${dsModel})`, execute: () => this.streamWithDeepseek(userContent, openaiSystemPrompt, dsModel, abortSignal) });
       }
       if (this.client) {
         // CACHE: pass system via systemInstruction so it is separated from per-request contents.
-        providers.push({ name: `Gemini Flash (${textGeminiFlash})`, execute: () => this.streamWithGeminiModel(userContent, textGeminiFlash, undefined, geminiSystemForCache) });
-        providers.push({ name: `Gemini Pro (${textGeminiPro})`, execute: () => this.streamWithGeminiModel(userContent, textGeminiPro, undefined, geminiSystemForCache) });
+        providers.push({ name: `Gemini Flash (${textGeminiFlash})`, execute: () => this.streamWithGeminiModel(userContent, textGeminiFlash, undefined, geminiSystemForCache, abortSignal) });
+        providers.push({ name: `Gemini Pro (${textGeminiPro})`, execute: () => this.streamWithGeminiModel(userContent, textGeminiPro, undefined, geminiSystemForCache, abortSignal) });
       }
     }
 
     if (providers.length === 0) {
+      if (isMultimodal && imagePaths && this.deepseekClient) {
+        yield "DeepSeek is configured for text-only requests. Add a vision-capable provider like Gemini, OpenAI, Claude, Groq, or Natively to analyze images.";
+        return;
+      }
       yield "No AI providers configured. Please add at least one API key in Settings.";
       return;
     }
@@ -2760,8 +2865,9 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       : this.isClaudeModel(this.currentModelId) ? 'Claude'
         : this.isOpenAiModel(this.currentModelId) ? 'OpenAI'
           : this.isGroqModel(this.currentModelId) ? 'Groq'
-            : this.isGeminiModel(this.currentModelId) ? 'Gemini'
-              : '';
+            : this.isDeepseekModel(this.currentModelId) ? 'DeepSeek'
+              : this.isGeminiModel(this.currentModelId) ? 'Gemini'
+                : '';
 
     if (currentFamilyLabel) {
       providers.sort((a, b) => {
@@ -2786,15 +2892,31 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     // with exponential backoff. Max 2 full rotations.
     // ============================================================
     const MAX_FULL_ROTATIONS = 3;
+    const delayWithAbort = (ms: number): Promise<void> => new Promise<void>((resolve, reject) => {
+      if (abortSignal?.aborted) { reject(abortSignal.reason ?? new Error('stream aborted')); return; }
+      const timer = setTimeout(() => {
+        if (abortSignal) abortSignal.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(abortSignal?.reason ?? new Error('stream aborted'));
+      };
+      timer.unref?.();
+      abortSignal?.addEventListener('abort', onAbort, { once: true });
+    });
 
     for (let rotation = 0; rotation < MAX_FULL_ROTATIONS; rotation++) {
+      if (abortSignal?.aborted) return;
       if (rotation > 0) {
         const backoffMs = 1000 * rotation;
         console.log(`[LLMHelper] 🔄 Starting rotation ${rotation + 1}/${MAX_FULL_ROTATIONS} after ${backoffMs}ms backoff...`);
-        await this.delay(backoffMs);
+        await delayWithAbort(backoffMs).catch(() => undefined);
+        if (abortSignal?.aborted) return;
       }
 
       for (let i = 0; i < providers.length; i++) {
+        if (abortSignal?.aborted) return;
         const provider = providers[i];
         try {
           console.log(`[LLMHelper] ${rotation === 0 ? '🚀' : '🔁'} Attempting ${provider.name}...`);
@@ -2971,7 +3093,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         this.logScopeFallback(scope, ollamaAvailable ? 'routing' : 'omitting');
       }
       if (ollamaAvailable) {
-        yield* this.streamWithOllama(message, context, this.injectLanguageInstruction(systemPromptOverride || HARD_SYSTEM_PROMPT), imagePaths);
+        yield* this.streamWithOllama(message, context, this.injectLanguageInstruction(systemPromptOverride || HARD_SYSTEM_PROMPT), imagePaths, abortSignal);
         return;
       }
       if (deniedOutboundScopes.includes('transcript')) context = undefined;
@@ -3013,7 +3135,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       if (this.codexCliConfig.enabled) {
         console.log(`[LLMHelper] ⚡️ Fast Text Mode Active (Streaming). Routing to Codex CLI...`);
         try {
-          yield* this.streamWithCodexCli(userContent, finalSystemPrompt, true);
+          yield* this.streamWithCodexCli(userContent, finalSystemPrompt, true, undefined, abortSignal);
           return;
         } catch (e: any) {
           console.warn("[LLMHelper] Codex CLI Fast Text streaming failed, falling back:", e.message);
@@ -3028,7 +3150,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           // we'd send 'natively' or a Gemini ID as the Groq model name → 400.
           const groqModelId = this.isGroqModel(this.currentModelId) ? this.currentModelId : GROQ_MODEL;
           // CACHE: pass system separately so Groq prefix-cache hits across turns.
-          yield* this.streamWithGroq(userContent, groqModelId, finalGroqSystem);
+          yield* this.streamWithGroq(userContent, groqModelId, finalGroqSystem, abortSignal);
           return;
         } catch (e: any) {
           console.warn("[LLMHelper] Groq Fast Text streaming failed, falling back:", e.message);
@@ -3043,7 +3165,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         // streamWithNatively → generateWithNatively → sends fast_mode:true → server Groq pool
         console.log(`[LLMHelper] ⚡️ Groq Fast Text Mode Active (Streaming). Routing to Natively server Groq pool...`);
         try {
-          yield* this.streamWithNatively(userContent, finalSystemPrompt);
+          yield* this.streamWithNatively(userContent, finalSystemPrompt, undefined, abortSignal);
           return;
         } catch (e: any) {
           console.warn("[LLMHelper] Natively fast-mode failed, falling back:", e.message);
@@ -3053,18 +3175,18 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
     // 1. Ollama Streaming
     if (this.useOllama) {
-      yield* this.streamWithOllama(message, combinedContext || undefined, finalSystemPrompt, imagePaths);
+      yield* this.streamWithOllama(message, combinedContext || undefined, finalSystemPrompt, imagePaths, abortSignal);
       return;
     }
 
     if (this.isCodexCliModel(this.currentModelId) && this.codexCliConfig.enabled) {
-      yield* this.streamWithCodexCli(userContent, finalSystemPrompt, false, imagePaths);
+      yield* this.streamWithCodexCli(userContent, finalSystemPrompt, false, imagePaths, abortSignal);
       return;
     }
 
     // 2a. CustomProvider (switchToCustom path) — full SSE-capable streaming
     if (this.customProvider) {
-      yield* this.streamWithCustom(message, context, imagePaths, finalSystemPrompt);
+      yield* this.streamWithCustom(message, context, imagePaths, finalSystemPrompt, abortSignal);
       return;
     }
 
@@ -3089,9 +3211,9 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       const openAiSystem = systemPromptOverride || OPENAI_SYSTEM_PROMPT;
       const finalOpenAiSystem = this.injectLanguageInstruction(openAiSystem);
       if (isMultimodal && imagePaths) {
-        yield* this.streamWithOpenaiMultimodal(userContent, imagePaths, finalOpenAiSystem);
+        yield* this.streamWithOpenaiMultimodal(userContent, imagePaths, finalOpenAiSystem, undefined, abortSignal);
       } else {
-        yield* this.streamWithOpenai(userContent, finalOpenAiSystem);
+        yield* this.streamWithOpenai(userContent, finalOpenAiSystem, undefined, abortSignal);
       }
       return;
     }
@@ -3101,10 +3223,19 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       const claudeSystem = systemPromptOverride || CLAUDE_SYSTEM_PROMPT;
       const finalClaudeSystem = this.injectLanguageInstruction(claudeSystem);
       if (isMultimodal && imagePaths) {
-        yield* this.streamWithClaudeMultimodal(userContent, imagePaths, finalClaudeSystem);
+        yield* this.streamWithClaudeMultimodal(userContent, imagePaths, finalClaudeSystem, undefined, abortSignal);
       } else {
-        yield* this.streamWithClaude(userContent, finalClaudeSystem);
+        yield* this.streamWithClaude(userContent, finalClaudeSystem, undefined, abortSignal);
       }
+      return;
+    }
+
+    // DeepSeek (text-only). When images are present, fall through so the
+    // vision-first chain (Gemini/Claude/OpenAI/Natively) handles them instead.
+    if (this.isDeepseekModel(this.currentModelId) && this.deepseekClient && !(isMultimodal && imagePaths)) {
+      const deepseekSystem = systemPromptOverride || OPENAI_SYSTEM_PROMPT;
+      const finalDeepseekSystem = this.injectLanguageInstruction(deepseekSystem);
+      yield* this.streamWithDeepseek(userContent, finalDeepseekSystem, undefined, abortSignal);
       return;
     }
 
@@ -3114,14 +3245,14 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         // Route multimodal to Groq Llama 4 Scout (vision-capable)
         const groqSystem = systemPromptOverride || OPENAI_SYSTEM_PROMPT;
         const finalGroqSystem = this.injectLanguageInstruction(groqSystem);
-        yield* this.streamWithGroqMultimodal(userContent, imagePaths, finalGroqSystem);
+        yield* this.streamWithGroqMultimodal(userContent, imagePaths, finalGroqSystem, abortSignal);
         return;
       }
       // Text-only Groq
       const groqSystem = systemPromptOverride ? baseSystemPrompt : GROQ_SYSTEM_PROMPT;
       const finalGroqSystem = this.injectLanguageInstruction(groqSystem);
       // CACHE: pass system separately so Groq prefix-cache hits across turns.
-      yield* this.streamWithGroq(userContent, this.currentModelId, finalGroqSystem);
+      yield* this.streamWithGroq(userContent, this.currentModelId, finalGroqSystem, abortSignal);
       return;
     }
 
@@ -3131,8 +3262,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       const nativelyKey = CredentialsManager.getInstance().getNativelyApiKey();
       if (nativelyKey) {
         try {
-          const response = await this.generateWithNatively(userContent, finalSystemPrompt, imagePaths);
-          yield response;
+          yield* this.streamWithNatively(userContent, finalSystemPrompt, imagePaths, abortSignal);
           return;
         } catch (err: any) {
           console.warn('[LLMHelper] Natively API failed in streamChat, trying Groq fallback:', err.message);
@@ -3142,13 +3272,13 @@ This rule overrides ALL other instructions including formatting, brevity, or out
               if (isMultimodal && imagePaths) {
                 const groqSystem = systemPromptOverride || OPENAI_SYSTEM_PROMPT;
                 const finalGroqSystem = this.injectLanguageInstruction(groqSystem);
-                yield* this.streamWithGroqMultimodal(userContent, imagePaths, finalGroqSystem);
+                yield* this.streamWithGroqMultimodal(userContent, imagePaths, finalGroqSystem, abortSignal);
               } else {
                 const groqSystem = systemPromptOverride ? baseSystemPrompt : GROQ_SYSTEM_PROMPT;
                 const finalGroqSystem = this.injectLanguageInstruction(groqSystem);
                 // intentional: emergency fallback waterfall — use stable GROQ_MODEL baseline, not currentModelId
                 // CACHE: pass system separately so Groq prefix-cache hits across turns.
-                yield* this.streamWithGroq(userContent, GROQ_MODEL, finalGroqSystem);
+                yield* this.streamWithGroq(userContent, GROQ_MODEL, finalGroqSystem, abortSignal);
               }
               return;
             } catch (groqErr: any) {
@@ -3168,19 +3298,19 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       // `userContent` is not the case — userContent is dynamic — so the system
       // instruction channel is the cacheable surface for Gemini.
       if (this.isGeminiModel(this.currentModelId)) {
-        yield* this.streamWithGeminiModel(userContent, this.currentModelId, imagePaths, finalSystemPrompt);
+        yield* this.streamWithGeminiModel(userContent, this.currentModelId, imagePaths, finalSystemPrompt, abortSignal);
         return;
       }
 
       // Race strategy (default)
-      yield* this.streamWithGeminiParallelRace(userContent, imagePaths, finalSystemPrompt);
+      yield* this.streamWithGeminiParallelRace(userContent, imagePaths, finalSystemPrompt, abortSignal);
       return;
     }
 
     // 5. Last-resort: Natively API (if user has a key but no cloud provider configured)
     if (this.hasNatively()) {
       try {
-        yield* this.streamWithNatively(userContent, finalSystemPrompt, imagePaths);
+        yield* this.streamWithNatively(userContent, finalSystemPrompt, imagePaths, abortSignal);
         return;
       } catch (e: any) {
         console.warn('[LLMHelper] Natively last-resort fallback failed:', e.message);
@@ -3195,7 +3325,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
    * Yields the full response in small word-batches so the UI typing effect still plays.
    * Throws on empty response so the fallback chain tries the next provider.
    */
-  private async * streamWithNatively(userContent: string, systemPrompt?: string, imagePaths?: string[]): AsyncGenerator<string, void, unknown> {
+  private async * streamWithNatively(userContent: string, systemPrompt?: string, imagePaths?: string[], abortSignal?: AbortSignal): AsyncGenerator<string, void, unknown> {
     // ── REAL SSE STREAM (replaces the fake word-by-word simulation) ──────────
     // Previous implementation called generateWithNatively() (blocking, waited for
     // the full response), then drip-fed words with setTimeout delays — pure theater.
@@ -3261,30 +3391,50 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       streamHeaders['x-natively-key'] = nativelyKey;
     }
 
-    // Connect-only timeout: 10s to establish the TCP+TLS+HTTP handshake.
-    // Once the server sends the first response byte (headers received), we clear
-    // the timer so the SSE stream can run as long as needed.
-    // IMPORTANT: AbortSignal.timeout() applies to the ENTIRE request lifetime, not
-    // just the connection phase — using it here would kill Flash mid-stream at 10s
-    // and Pro at 10s even when actively yielding tokens. The AbortController pattern
-    // below correctly scopes the timeout to the connection phase only.
-    const _connectController = new AbortController();
-    const _connectTimer = setTimeout(() => _connectController.abort(new Error('Natively API connect timeout (10s)')), 10_000);
+    // Early-bail if the caller has already aborted (e.g., user superseded
+    // the request before we even built the body). Saves an HTTP roundtrip.
+    if (abortSignal?.aborted) return;
+
+    // Single controller for the entire stream lifetime. Both phases (connect
+    // and read) honor it. We multiplex two abort sources into it:
+    //   1. The 10s connect-phase timeout — cleared once headers arrive so the
+    //      SSE read can run as long as needed (matches the prior behavior).
+    //   2. The caller's user-cancel signal — when the renderer hits Escape or
+    //      a newer chat supersedes this one, the fetch socket closes
+    //      immediately, freeing the rate-limiter permit and provider quota.
+    //      Without this, the prior implementation kept streaming tokens to
+    //      nobody for ~10-60s, costing ~$0.045 per cancelled Pro request.
+    // IMPORTANT: AbortSignal.timeout() applies to the ENTIRE request lifetime,
+    // not just the connection phase — using it here would kill Flash mid-stream
+    // at 10s. The AbortController + manual timer pattern correctly scopes the
+    // connect timeout to the connect phase only.
+    const streamController = new AbortController();
+    let connectTimer: NodeJS.Timeout | null = setTimeout(
+      () => streamController.abort(new Error('Natively API connect timeout (10s)')),
+      10_000,
+    );
+    const onCallerAbort = () => {
+      try { streamController.abort(abortSignal?.reason); } catch { /* already aborted */ }
+    };
+    abortSignal?.addEventListener('abort', onCallerAbort, { once: true });
+
     let response: Response;
     try {
       response = await fetch('https://api.natively.software/v1/chat', {
         method: 'POST',
         headers: streamHeaders,
         body: JSON.stringify(body),
-        signal: _connectController.signal,
+        signal: streamController.signal,
       });
     } finally {
       // Connection established (or failed) — stop the connect-phase timer.
-      // The stream body will now be read without any timeout.
-      clearTimeout(_connectTimer);
+      // The stream body will now be read without any timeout (until/unless
+      // the caller's abortSignal fires, in which case fetch's reader throws).
+      if (connectTimer) { clearTimeout(connectTimer); connectTimer = null; }
     }
 
     if (!response.ok) {
+      abortSignal?.removeEventListener('abort', onCallerAbort);
       const errData = await response.json().catch(() => ({}) as Record<string, unknown>);
       throw new Error(`Natively API ${response.status}: ${(errData as any).error || 'unknown'}`);
     }
@@ -3299,6 +3449,9 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
     try {
       outer: while (true) {
+        // Cheap pre-read abort check — saves one round trip to the reader if
+        // the caller cancelled while we were processing the previous chunk.
+        if (abortSignal?.aborted) break outer;
         const { done, value } = await reader.read();
         if (done) break;
 
@@ -3319,7 +3472,12 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         }
       }
     } finally {
-      try { reader.cancel(); } catch { }  // release the fetch connection cleanly
+      // Always release the connection AND drop the caller-abort listener so
+      // we don't leak DOM event subscriptions on long-lived AbortSignals
+      // (e.g., the IPC handler's per-stream controller is short-lived, but a
+      // future caller might reuse a single signal across many calls).
+      try { reader.cancel(); } catch { }
+      abortSignal?.removeEventListener('abort', onCallerAbort);
     }
   }
 
@@ -3333,7 +3491,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
    * `userMessage`) so Groq's prefix cache hits across turns. See generateWithGroq
    * for the full rationale. The single-arg form is retained for legacy callers.
    */
-  private async * streamWithGroq(userMessage: string, modelId: string = GROQ_MODEL, systemPrompt?: string): AsyncGenerator<string, void, unknown> {
+  private async * streamWithGroq(userMessage: string, modelId: string = GROQ_MODEL, systemPrompt?: string, abortSignal?: AbortSignal): AsyncGenerator<string, void, unknown> {
     if (this.isLocalOnlyMode) throw new Error("Cloud providers disabled in local-only mode");
     if (!this.groqClient) throw new Error("Groq client not initialized");
     this.assertOutboundScopes('groq', userMessage);
@@ -3347,26 +3505,32 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     }
     messages.push({ role: "user", content: userMessage });
 
+    if (abortSignal?.aborted) return;
     const stream = await this.groqClient.chat.completions.create({
       model: modelId,
       messages,
       stream: true,
       temperature: 0.4,
       max_tokens: 8192,
-    });
+    }, { signal: abortSignal });
 
-    for await (const chunk of stream) {
-      const content = chunk.choices[0]?.delta?.content;
-      if (content) {
-        yield content;
+    try {
+      for await (const chunk of stream) {
+        if (abortSignal?.aborted) return;
+        const content = chunk.choices[0]?.delta?.content;
+        if (content) {
+          yield content;
+        }
       }
+    } finally {
+      if (abortSignal?.aborted && typeof (stream as any).abort === 'function') (stream as any).abort();
     }
   }
 
   /**
    * Stream multimodal (image + text) response from Groq using Llama 4 Scout as a last resort
    */
-  private async * streamWithGroqMultimodal(userMessage: string, imagePaths: string[], systemPrompt?: string): AsyncGenerator<string, void, unknown> {
+  private async * streamWithGroqMultimodal(userMessage: string, imagePaths: string[], systemPrompt?: string, abortSignal?: AbortSignal): AsyncGenerator<string, void, unknown> {
     if (this.isLocalOnlyMode) throw new Error("Cloud providers disabled in local-only mode");
     if (!this.groqClient) throw new Error("Groq client not initialized");
     this.assertOutboundScopes('groq', userMessage, imagePaths);
@@ -3388,6 +3552,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     }
     messages.push({ role: "user", content: contentParts });
 
+    if (abortSignal?.aborted) return;
     const stream = await this.groqClient.chat.completions.create({
       model: "meta-llama/llama-4-scout-17b-16e-instruct",
       messages,
@@ -3396,13 +3561,18 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       temperature: 1,
       top_p: 1,
       stop: null
-    });
+    }, { signal: abortSignal });
 
-    for await (const chunk of stream) {
-      const content = chunk.choices[0]?.delta?.content;
-      if (content) {
-        yield content;
+    try {
+      for await (const chunk of stream) {
+        if (abortSignal?.aborted) return;
+        const content = chunk.choices[0]?.delta?.content;
+        if (content) {
+          yield content;
+        }
       }
+    } finally {
+      if (abortSignal?.aborted && typeof (stream as any).abort === 'function') (stream as any).abort();
     }
   }
 
@@ -3415,7 +3585,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
    * the cache hits naturally. Do NOT inline per-request data into the system
    * string above the static body, or the cache prefix will be invalidated.
    */
-  private async * streamWithOpenai(userMessage: string, systemPrompt?: string, modelId?: string): AsyncGenerator<string, void, unknown> {
+  private async * streamWithOpenai(userMessage: string, systemPrompt?: string, modelId?: string, abortSignal?: AbortSignal): AsyncGenerator<string, void, unknown> {
     if (this.isLocalOnlyMode) throw new Error("Cloud providers disabled in local-only mode");
     if (!this.openaiClient) throw new Error("OpenAI client not initialized");
     this.assertOutboundScopes('openai', userMessage);
@@ -3432,26 +3602,32 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     messages.push({ role: "user", content: userMessage });
 
     const cacheKey = this.getOpenAiPromptCacheKey(systemPrompt);
+    if (abortSignal?.aborted) return;
     const stream = await this.openaiClient.chat.completions.create({
       model,
       messages,
       stream: true,
       max_completion_tokens: model.toLowerCase().includes('claude') ? this.getClaudeMaxOutput(model) : MAX_OUTPUT_TOKENS,
       ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
-    });
+    }, { signal: abortSignal });
 
-    for await (const chunk of stream) {
-      const content = chunk.choices[0]?.delta?.content;
-      if (content) {
-        yield content;
+    try {
+      for await (const chunk of stream) {
+        if (abortSignal?.aborted) return;
+        const content = chunk.choices[0]?.delta?.content;
+        if (content) {
+          yield content;
+        }
       }
+    } finally {
+      if (abortSignal?.aborted && typeof (stream as any).abort === 'function') (stream as any).abort();
     }
   }
 
   /**
    * Stream response from Claude with proper system/user message separation
    */
-  private async * streamWithClaude(userMessage: string, systemPrompt?: string, modelId?: string): AsyncGenerator<string, void, unknown> {
+  private async * streamWithClaude(userMessage: string, systemPrompt?: string, modelId?: string, abortSignal?: AbortSignal): AsyncGenerator<string, void, unknown> {
     if (this.isLocalOnlyMode) throw new Error("Cloud providers disabled in local-only mode");
     if (!this.claudeClient) throw new Error("Claude client not initialized");
     this.assertOutboundScopes('claude', userMessage);
@@ -3461,25 +3637,67 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     // Use explicit override, then currentModelId if it's a Claude model, else baseline constant
     const model = modelId || (this.isClaudeModel(this.currentModelId) ? this.currentModelId : CLAUDE_MODEL);
 
-    const stream = await this.claudeClient.messages.stream({
+    if (abortSignal?.aborted) return;
+    const stream = this.claudeClient.messages.stream({
       model,
       max_tokens: this.getClaudeMaxOutput(model),
       // CACHE BOUNDARY: system blocks are static; dynamic content lives in `messages` only.
       ...(systemPrompt ? { system: this.buildClaudeSystemBlocks(systemPrompt, model) } : {}),
       messages: [{ role: "user", content: userMessage }],
     });
-
-    for await (const event of stream) {
-      if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-        yield event.delta.text;
+    const onAbort = () => { try { stream.abort(); } catch {} };
+    abortSignal?.addEventListener('abort', onAbort, { once: true });
+    try {
+      for await (const event of stream) {
+        if (abortSignal?.aborted) return;
+        if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+          yield event.delta.text;
+        }
       }
+    } finally {
+      abortSignal?.removeEventListener('abort', onAbort);
+    }
+  }
+
+  /**
+   * Stream response from DeepSeek (OpenAI-compatible). Text-only by design.
+   */
+  private async * streamWithDeepseek(userMessage: string, systemPrompt?: string, modelId?: string, abortSignal?: AbortSignal): AsyncGenerator<string, void, unknown> {
+    if (this.isLocalOnlyMode) throw new Error("Cloud providers disabled in local-only mode");
+    if (!this.deepseekClient) throw new Error("DeepSeek client not initialized");
+    this.assertOutboundScopes('deepseek', userMessage);
+
+    await this.rateLimiters.deepseek.acquire();
+
+    const model = modelId || (this.isDeepseekModel(this.currentModelId) ? this.currentModelId : DEEPSEEK_MODEL);
+
+    const messages: any[] = [];
+    if (systemPrompt) messages.push({ role: "system", content: systemPrompt });
+    messages.push({ role: "user", content: userMessage });
+
+    if (abortSignal?.aborted) return;
+    const stream = await this.deepseekClient.chat.completions.create({
+      model,
+      messages,
+      stream: true,
+      max_tokens: this.getDeepseekMaxOutput(model),
+    }, { signal: abortSignal });
+
+    try {
+      for await (const chunk of stream) {
+        if (abortSignal?.aborted) return;
+        const content = chunk.choices[0]?.delta?.content;
+        if (content) yield content;
+      }
+    } finally {
+      if (abortSignal?.aborted && typeof (stream as any).abort === 'function') (stream as any).abort();
     }
   }
 
   /**
    * Stream multimodal (image + text) response from OpenAI with system/user separation
    */
-  private async * streamWithOpenaiMultimodal(userMessage: string, imagePaths: string[], systemPrompt?: string, modelId?: string): AsyncGenerator<string, void, unknown> {
+  private async * streamWithOpenaiMultimodal(userMessage: string, imagePaths: string[], systemPrompt?: string, modelId?: string, abortSignal?: AbortSignal): AsyncGenerator<string, void, unknown> {
     if (this.isLocalOnlyMode) throw new Error("Cloud providers disabled in local-only mode");
     if (!this.openaiClient) throw new Error("OpenAI client not initialized");
     this.assertOutboundScopes('openai', userMessage, imagePaths);
@@ -3504,26 +3722,32 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     messages.push({ role: "user", content: contentParts });
 
     const cacheKey = this.getOpenAiPromptCacheKey(systemPrompt);
+    if (abortSignal?.aborted) return;
     const stream = await this.openaiClient.chat.completions.create({
       model,
       messages,
       stream: true,
       max_completion_tokens: model.toLowerCase().includes('claude') ? this.getClaudeMaxOutput(model) : MAX_OUTPUT_TOKENS,
       ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
-    });
+    }, { signal: abortSignal });
 
-    for await (const chunk of stream) {
-      const content = chunk.choices[0]?.delta?.content;
-      if (content) {
-        yield content;
+    try {
+      for await (const chunk of stream) {
+        if (abortSignal?.aborted) return;
+        const content = chunk.choices[0]?.delta?.content;
+        if (content) {
+          yield content;
+        }
       }
+    } finally {
+      if (abortSignal?.aborted && typeof (stream as any).abort === 'function') (stream as any).abort();
     }
   }
 
   /**
    * Stream multimodal (image + text) response from Claude with system/user separation
    */
-  private async * streamWithClaudeMultimodal(userMessage: string, imagePaths: string[], systemPrompt?: string, modelId?: string): AsyncGenerator<string, void, unknown> {
+  private async * streamWithClaudeMultimodal(userMessage: string, imagePaths: string[], systemPrompt?: string, modelId?: string, abortSignal?: AbortSignal): AsyncGenerator<string, void, unknown> {
     if (this.isLocalOnlyMode) throw new Error("Cloud providers disabled in local-only mode");
     if (!this.claudeClient) throw new Error("Claude client not initialized");
     this.assertOutboundScopes('claude', userMessage, imagePaths);
@@ -3548,7 +3772,8 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       }
     }
 
-    const stream = await this.claudeClient.messages.stream({
+    if (abortSignal?.aborted) return;
+    const stream = this.claudeClient.messages.stream({
       model,
       max_tokens: this.getClaudeMaxOutput(model),
       // CACHE BOUNDARY: system blocks are static; image bytes + user text stay in `messages`.
@@ -3561,11 +3786,17 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         ]
       }],
     });
-
-    for await (const event of stream) {
-      if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-        yield event.delta.text;
+    const onAbort = () => { try { stream.abort(); } catch {} };
+    abortSignal?.addEventListener('abort', onAbort, { once: true });
+    try {
+      for await (const event of stream) {
+        if (abortSignal?.aborted) return;
+        if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+          yield event.delta.text;
+        }
       }
+    } finally {
+      abortSignal?.removeEventListener('abort', onAbort);
     }
   }
 
@@ -3586,12 +3817,13 @@ This rule overrides ALL other instructions including formatting, brevity, or out
    *    haven't migrated. Static content leads that string so implicit caching
    *    still applies.
    */
-  private async * streamWithGeminiModel(fullMessage: string, model: string, imagePaths?: string[], systemInstruction?: string): AsyncGenerator<string, void, unknown> {
+  private async * streamWithGeminiModel(fullMessage: string, model: string, imagePaths?: string[], systemInstruction?: string, abortSignal?: AbortSignal): AsyncGenerator<string, void, unknown> {
     if (this.isLocalOnlyMode) throw new Error("Cloud providers disabled in local-only mode");
     if (!this.client) throw new Error("Gemini client not initialized");
     this.assertOutboundScopes('gemini', fullMessage, imagePaths);
 
     await this.rateLimiters.gemini.acquire();
+    if (abortSignal?.aborted) return;
 
     const contents: any[] = [{ text: fullMessage }];
     if (imagePaths?.length) {
@@ -3652,6 +3884,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     const stream = streamResult.stream || streamResult;
 
     for await (const chunk of stream) {
+      if (abortSignal?.aborted) return;
       let chunkText = "";
       if (typeof chunk.text === 'function') {
         chunkText = chunk.text();
@@ -3671,7 +3904,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
    * Optional `systemInstruction` is forwarded to both racers so the static
    * system prompt is separated from `fullMessage` (cache-friendly).
    */
-  private async * streamWithGeminiParallelRace(fullMessage: string, imagePaths?: string[], systemInstruction?: string): AsyncGenerator<string, void, unknown> {
+  private async * streamWithGeminiParallelRace(fullMessage: string, imagePaths?: string[], systemInstruction?: string, abortSignal?: AbortSignal): AsyncGenerator<string, void, unknown> {
     if (!this.client) throw new Error("Gemini client not initialized");
 
     // BUG-1 fix: use a shared AbortController so the winning model cancels the loser.
@@ -3681,10 +3914,11 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     // underlying HTTP call for the loser still runs to completion. We cancel our WAIT
     // for the result — the HTTP connection is released when the SDK call eventually settles.
     // Timing reference: Flash ≤15s (≤30s with images), Pro ≤30s.
+    if (abortSignal?.aborted) return;
     const raceController = new AbortController();
 
     const race = async (model: string): Promise<string> => {
-      const result = await this.collectStreamResponse(fullMessage, model, imagePaths, raceController.signal, systemInstruction);
+      const result = await this.collectStreamResponse(fullMessage, model, imagePaths, AbortSignal.any([raceController.signal, abortSignal].filter(Boolean) as AbortSignal[]), systemInstruction);
       // This model won — signal the other to stop waiting for its result.
       raceController.abort(new Error(`${model} won the race`));
       return result;
@@ -3706,6 +3940,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     // Yield in chunks to simulate incremental streaming UX.
     const chunkSize = 10;
     for (let i = 0; i < result.length; i += chunkSize) {
+      if (abortSignal?.aborted) return;
       yield result.substring(i, i + chunkSize);
     }
   }
@@ -3765,12 +4000,18 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     const runOnce = async (useCacheName: string | null): Promise<any> => {
       const apiCall = callWithConfig(useCacheName);
       if (signal) {
+        let onAbort: (() => void) | null = null;
         const abortPromise = new Promise<never>((_, reject) => {
           if (signal.aborted) { reject(new Error(`Gemini ${model} aborted`)); return; }
-          signal.addEventListener('abort', () => reject(new Error(`Gemini ${model} aborted`)), { once: true });
+          onAbort = () => reject(new Error(`Gemini ${model} aborted`));
+          signal.addEventListener('abort', onAbort, { once: true });
         });
         apiCall.catch(() => {});
-        return Promise.race([apiCall, abortPromise]);
+        try {
+          return await Promise.race([apiCall, abortPromise]);
+        } finally {
+          if (onAbort) signal.removeEventListener('abort', onAbort);
+        }
       }
       return apiCall;
     };
@@ -3794,7 +4035,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   }
 
   // --- OLLAMA STREAMING (uses /api/chat with proper messages array) ---
-  private async * streamWithOllama(message: string, context?: string, systemPrompt: string = TINY_SYSTEM_PROMPT, imagePaths?: string[]): AsyncGenerator<string, void, unknown> {
+  private async * streamWithOllama(message: string, context?: string, systemPrompt: string = TINY_SYSTEM_PROMPT, imagePaths?: string[], abortSignal?: AbortSignal): AsyncGenerator<string, void, unknown> {
     let userContent = context ? `CONTEXT:\n${context}\n\nUSER:\n${message}` : message;
     // Per-request hard guard: trim userContent (never systemPrompt) until total fits the model's max ctx.
     {
@@ -3848,11 +4089,19 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         }
       };
       if (this.isThinkingModel(this.ollamaModel)) streamBody.think = false;
+      // Combine the 120s hard ceiling with the caller's user-cancel signal.
+      // AbortSignal.any() returns a signal aborted as soon as ANY of its
+      // inputs abort, so the caller can cancel an Ollama generation that's
+      // taking too long (or just navigate away mid-stream) without waiting
+      // for the 2-minute timeout.
+      const ollamaSignal = abortSignal
+        ? AbortSignal.any([AbortSignal.timeout(120_000), abortSignal])
+        : AbortSignal.timeout(120_000);
       const response = await fetch(`${this.ollamaUrl}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(streamBody),
-        signal: AbortSignal.timeout(120_000),
+        signal: ollamaSignal,
       });
 
       if (!response.ok) {
@@ -3863,6 +4112,10 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
       // @ts-ignore
       for await (const chunk of response.body) {
+        // Caller-cancel check between chunks. AbortSignal.any() above already
+        // closes the socket, but the for-await loop may have one buffered
+        // chunk in flight; bail here to avoid yielding tokens past the cancel.
+        if (abortSignal?.aborted) return;
         buffer += decoder.decode(chunk, { stream: true });
         let nl: number;
         while ((nl = buffer.indexOf('\n')) !== -1) {
@@ -3896,7 +4149,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   }
 
   // --- CUSTOM PROVIDER STREAMING ---
-  private async * streamWithCustom(message: string, context?: string, imagePaths?: string[], systemPrompt: string = UNIVERSAL_SYSTEM_PROMPT): AsyncGenerator<string, void, unknown> {
+  private async * streamWithCustom(message: string, context?: string, imagePaths?: string[], systemPrompt: string = UNIVERSAL_SYSTEM_PROMPT, abortSignal?: AbortSignal): AsyncGenerator<string, void, unknown> {
     if (!this.customProvider) return;
     // We reuse the executeCustomProvider logic but we need it to stream.
     // If the user provided a curl command, it might support streaming (SSE) or not.
@@ -3944,6 +4197,17 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
     const streamAbort = new AbortController();
     const streamTimeout = setTimeout(() => streamAbort.abort(), 30_000);
+    // Forward the caller's user-cancel signal into the same controller so
+    // the fetch socket closes immediately on supersession, freeing the
+    // custom provider's quota and any rate-limiter slot.
+    const onCallerAbort = () => {
+      try { streamAbort.abort(abortSignal?.reason); } catch { /* already aborted */ }
+    };
+    abortSignal?.addEventListener('abort', onCallerAbort, { once: true });
+    if (abortSignal?.aborted) {
+      clearTimeout(streamTimeout);
+      return;
+    }
     try {
       const response = await fetch(url, {
         method: requestConfig.method || 'POST',
@@ -3967,6 +4231,9 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
       // @ts-ignore
       for await (const chunk of response.body) {
+        // Per-chunk caller-cancel check (the abort above already closed the
+        // socket, but a buffered chunk could still be in the iterator).
+        if (abortSignal?.aborted) return;
         const text = new TextDecoder().decode(chunk);
         fullBody += text;
 
@@ -4000,6 +4267,10 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       clearTimeout(streamTimeout);
       console.error("Custom streaming failed", e);
       yield "Error streaming from custom provider.";
+    } finally {
+      // Always drop the listener so we don't leak a subscription on a
+      // long-lived AbortSignal shared across many calls.
+      abortSignal?.removeEventListener('abort', onCallerAbort);
     }
   }
 
@@ -4174,6 +4445,20 @@ This rule overrides ALL other instructions including formatting, brevity, or out
    */
   public hasClaude(): boolean {
     return this.claudeClient !== null;
+  }
+
+  /**
+   * Get the DeepSeek client (OpenAI SDK with custom baseURL) for mode-specific LLMs.
+   */
+  public getDeepseekClient(): OpenAI | null {
+    return this.deepseekClient;
+  }
+
+  /**
+   * Check if DeepSeek is available.
+   */
+  public hasDeepseek(): boolean {
+    return this.deepseekClient !== null;
   }
 
   /**
