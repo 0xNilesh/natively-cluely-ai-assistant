@@ -95,10 +95,7 @@ function InteractiveCard({
     const dynamicStyle = prefersReducedMotion
         ? {}
         : {
-              rotateX,
-              rotateY,
               scale,
-              transformStyle: 'preserve-3d' as const,
           };
 
     const spotlightBg = useTransform(
@@ -119,6 +116,95 @@ function InteractiveCard({
             {...props}
         >
             {!prefersReducedMotion && (
+                <motion.div
+                    className="absolute inset-0 pointer-events-none z-10 transition-opacity duration-300 opacity-0 group-hover:opacity-100"
+                    style={{ background: spotlightBg }}
+                />
+            )}
+            {children}
+        </motion.div>
+    );
+}
+
+// ─── Interactive Feature Card (with custom spotlight and subtle 3D tilt) ─────
+interface InteractiveFeatureCardProps {
+    children: React.ReactNode;
+    className?: string;
+    glowColor?: string;
+    isSoon?: boolean;
+    colorTheme?: 'violet' | 'teal' | 'blue' | 'rose' | 'orange' | 'cyan' | 'gray' | 'pink';
+}
+
+function InteractiveFeatureCard({
+    children,
+    className = '',
+    glowColor = 'rgba(59, 130, 246, 0.12)',
+    isSoon = false,
+    colorTheme = 'blue',
+}: InteractiveFeatureCardProps) {
+    const cardRef = useRef<HTMLDivElement>(null);
+    const prefersReducedMotion = useReducedMotion();
+
+    const mouseX = useMotionValue(0.5);
+    const mouseY = useMotionValue(0.5);
+
+    const spotlightX = useSpring(useTransform(mouseX, [0, 1], [0, 100]), { stiffness: 220, damping: 22 });
+    const spotlightY = useSpring(useTransform(mouseY, [0, 1], [0, 100]), { stiffness: 220, damping: 22 });
+
+    const rotateX = useSpring(useTransform(mouseY, [0, 1], [4, -4]), { stiffness: 150, damping: 22 });
+    const rotateY = useSpring(useTransform(mouseX, [0, 1], [-4, 4]), { stiffness: 150, damping: 22 });
+
+    const scale = useSpring(1, { stiffness: 450, damping: 16 });
+
+    const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+        if (prefersReducedMotion || !cardRef.current) return;
+        const rect = cardRef.current.getBoundingClientRect();
+        mouseX.set((e.clientX - rect.left) / rect.width);
+        mouseY.set((e.clientY - rect.top) / rect.height);
+    };
+
+    const handleMouseLeave = () => {
+        mouseX.set(0.5);
+        mouseY.set(0.5);
+        scale.set(1);
+    };
+
+    const handleMouseDown = () => {
+        if (prefersReducedMotion) return;
+        scale.set(0.98);
+    };
+
+    const handleMouseUp = () => {
+        scale.set(1);
+    };
+
+    const dynamicStyle = prefersReducedMotion
+        ? {}
+        : {
+              rotateX,
+              rotateY,
+              scale,
+              transformStyle: 'preserve-3d' as const,
+          };
+
+    const spotlightBg = useTransform(
+        [spotlightX, spotlightY],
+        ([x, y]) => `radial-gradient(circle 120px at ${x}% ${y}%, ${glowColor}, transparent 80%)`
+    );
+
+    return (
+        <motion.div
+            ref={cardRef}
+            className={`pro-feature-card pro-feature-card-${colorTheme} group relative overflow-hidden transition-all duration-200 ${
+                isSoon ? 'opacity-60 saturate-[0.7]' : ''
+            } ${className}`}
+            onMouseMove={handleMouseMove}
+            onMouseLeave={handleMouseLeave}
+            onMouseDown={handleMouseDown}
+            onMouseUp={handleMouseUp}
+            style={dynamicStyle}
+        >
+            {!prefersReducedMotion && !isSoon && (
                 <motion.div
                     className="absolute inset-0 pointer-events-none z-10 transition-opacity duration-300 opacity-0 group-hover:opacity-100"
                     style={{ background: spotlightBg }}
@@ -183,10 +269,10 @@ function ModesPoster({ animateShimmer }: { animateShimmer: boolean }) {
                 <g style={{ transform: 'perspective(600px) rotateX(16deg) rotateY(-10deg) rotateZ(1deg)', transformOrigin: 'center center' }}>
                     
                     {/* Connection lines from center to outer modes */}
-                    <line x1="140" y1="60" x2="60" y2="35" stroke="rgba(255,255,255,0.12)" strokeWidth="1" strokeDasharray="3 2" />
-                    <line x1="140" y1="60" x2="80" y2="90" stroke="rgba(255,255,255,0.12)" strokeWidth="1" strokeDasharray="3 2" />
-                    <line x1="140" y1="60" x2="220" y2="35" stroke="rgba(255,255,255,0.12)" strokeWidth="1" strokeDasharray="3 2" />
-                    <line x1="140" y1="60" x2="200" y2="90" stroke="rgba(255,255,255,0.12)" strokeWidth="1" strokeDasharray="3 2" />
+                    <line x1="140" y1="60" x2="60" y2="35" className="pricing-poster-stroke-subtle-line" strokeWidth="1" strokeDasharray="3 2" />
+                    <line x1="140" y1="60" x2="80" y2="90" className="pricing-poster-stroke-subtle-line" strokeWidth="1" strokeDasharray="3 2" />
+                    <line x1="140" y1="60" x2="220" y2="35" className="pricing-poster-stroke-subtle-line" strokeWidth="1" strokeDasharray="3 2" />
+                    <line x1="140" y1="60" x2="200" y2="90" className="pricing-poster-stroke-subtle-line" strokeWidth="1" strokeDasharray="3 2" />
                     
                     {/* Glowing highlight connection for the ACTIVE mode */}
                     <path d="M140 60 Q100 40 60 35" fill="none" stroke="rgba(16, 185, 129, 0.6)" strokeWidth="1.2" />
@@ -194,7 +280,7 @@ function ModesPoster({ animateShimmer }: { animateShimmer: boolean }) {
                     {/* NODE 1: TECHNICAL (Active / Highlighted) */}
                     <g transform="translate(60 35)">
                         <circle cx="0" cy="0" r="18" fill="rgba(16, 185, 129, 0.15)" stroke="rgba(16, 185, 129, 0.5)" strokeWidth="1" />
-                        <circle cx="0" cy="0" r="15" fill="rgba(15, 23, 42, 0.85)" stroke="rgba(255, 255, 255, 0.1)" strokeWidth="0.5" />
+                        <circle cx="0" cy="0" r="15" className="pricing-poster-node-bg" stroke="rgba(255, 255, 255, 0.1)" strokeWidth="0.5" />
                         {/* Icon: Code </> representation */}
                         <path d="M-4 -3 L-7 0 L-4 3 M4 -3 L7 0 L4 3" fill="none" stroke="#10b981" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
                         <line x1="1" y1="-4" x2="-1" y2="4" stroke="#10b981" strokeWidth="1.2" />
@@ -212,51 +298,49 @@ function ModesPoster({ animateShimmer }: { animateShimmer: boolean }) {
 
                     {/* NODE 2: SALES (Briefcase representation) */}
                     <g transform="translate(220 35)">
-                        <circle cx="0" cy="0" r="16" fill="url(#nodeBg)" stroke="rgba(255, 255, 255, 0.15)" strokeWidth="1" />
+                        <circle cx="0" cy="0" r="16" fill="url(#nodeBg)" className="pricing-poster-glass-node-border" strokeWidth="1" />
                         <rect x="-16" y="-16" width="32" height="32" rx="16" fill="url(#yearlyShimmer)" style={{ mixBlendMode: 'overlay' }} opacity="0.75" />
                         {/* Icon: Briefcase */}
-                        <rect x="-4" y="-2" width="8" height="6" rx="1" fill="none" stroke="rgba(255,255,255,0.6)" strokeWidth="1" />
-                        <path d="M-2 -2 L-2 -4 L2 -4 L2 -2" fill="none" stroke="rgba(255,255,255,0.6)" strokeWidth="1" />
+                        <rect x="-4" y="-2" width="8" height="6" rx="1" fill="none" className="pricing-poster-stroke-bright" strokeWidth="1" />
+                        <path d="M-2 -2 L-2 -4 L2 -4 L2 -2" fill="none" className="pricing-poster-stroke-bright" strokeWidth="1" />
                     </g>
                     {/* Label for Sales */}
-                    <text x="220" y="58" textAnchor="middle" fill="rgba(255,255,255,0.4)" fontSize="4.2" fontWeight="bold" fontFamily="Geist, Satoshi, sans-serif">SALES</text>
+                    <text x="220" y="58" textAnchor="middle" className="pricing-poster-text-muted" fontSize="4.2" fontWeight="bold" fontFamily="Geist, Satoshi, sans-serif">SALES</text>
 
 
                     {/* NODE 3: PRODUCT MANAGER */}
                     <g transform="translate(80 90)">
-                        <circle cx="0" cy="0" r="16" fill="url(#nodeBg)" stroke="rgba(255, 255, 255, 0.15)" strokeWidth="1" />
+                        <circle cx="0" cy="0" r="16" fill="url(#nodeBg)" className="pricing-poster-glass-node-border" strokeWidth="1" />
                         {/* Icon: Layers */}
-                        <path d="M-4 -2 L0 -4 L4 -2 L0 0 Z" fill="none" stroke="rgba(255,255,255,0.6)" strokeWidth="0.8" />
-                        <path d="M-4 1 L0 3 L4 1" fill="none" stroke="rgba(255,255,255,0.6)" strokeWidth="0.8" />
+                        <path d="M-4 -2 L0 -4 L4 -2 L0 0 Z" fill="none" className="pricing-poster-stroke-bright" strokeWidth="0.8" />
+                        <path d="M-4 1 L0 3 L4 1" fill="none" className="pricing-poster-stroke-bright" strokeWidth="0.8" />
                     </g>
                     {/* Label for PM */}
-                    <text x="80" y="112" textAnchor="middle" fill="rgba(255,255,255,0.4)" fontSize="4.2" fontWeight="bold" fontFamily="Geist, Satoshi, sans-serif">PRODUCT</text>
+                    <text x="80" y="112" textAnchor="middle" className="pricing-poster-text-muted" fontSize="4.2" fontWeight="bold" fontFamily="Geist, Satoshi, sans-serif">PRODUCT</text>
 
 
                     {/* NODE 4: SYSTEM DESIGN */}
                     <g transform="translate(200 90)">
-                        <circle cx="0" cy="0" r="16" fill="url(#nodeBg)" stroke="rgba(255, 255, 255, 0.15)" strokeWidth="1" />
+                        <circle cx="0" cy="0" r="16" fill="url(#nodeBg)" className="pricing-poster-glass-node-border" strokeWidth="1" />
                         {/* Icon: Flow Chart */}
-                        <rect x="-4" y="-4" width="3" height="3" fill="none" stroke="rgba(255,255,255,0.6)" strokeWidth="0.8" />
-                        <rect x="1" y="-4" width="3" height="3" fill="none" stroke="rgba(255,255,255,0.6)" strokeWidth="0.8" />
-                        <rect x="-1.5" y="1" width="3" height="3" fill="none" stroke="rgba(255,255,255,0.6)" strokeWidth="0.8" />
-                        <path d="M-2.5 -1 L-2.5 0 L0 0 L0 1" fill="none" stroke="rgba(255,255,255,0.6)" strokeWidth="0.8" />
-                        <path d="M2.5 -1 L2.5 0 L0 0" fill="none" stroke="rgba(255,255,255,0.6)" strokeWidth="0.8" />
+                        <rect x="-4" y="-4" width="3" height="3" fill="none" className="pricing-poster-stroke-bright" strokeWidth="0.8" />
+                        <rect x="1" y="-4" width="3" height="3" fill="none" className="pricing-poster-stroke-bright" strokeWidth="0.8" />
+                        <rect x="-1.5" y="1" width="3" height="3" fill="none" className="pricing-poster-stroke-bright" strokeWidth="0.8" />
+                        <path d="M-2.5 -1 L-2.5 0 L0 0 L0 1" fill="none" className="pricing-poster-stroke-bright" strokeWidth="0.8" />
+                        <path d="M2.5 -1 L2.5 0 L0 0" fill="none" className="pricing-poster-stroke-bright" strokeWidth="0.8" />
                     </g>
                     {/* Label for System Design */}
-                    <text x="200" y="112" textAnchor="middle" fill="rgba(255,255,255,0.4)" fontSize="4.2" fontWeight="bold" fontFamily="Geist, Satoshi, sans-serif">ARCHITECT</text>
+                    <text x="200" y="112" textAnchor="middle" className="pricing-poster-text-muted" fontSize="4.2" fontWeight="bold" fontFamily="Geist, Satoshi, sans-serif">ARCHITECT</text>
 
 
                     {/* CENTRAL NODE: ACTIVE ENGINE */}
                     <g transform="translate(140 60)">
-                        {/* Shadow */}
-                        <circle cx="0" cy="0" r="22" fill="black" opacity="0.3" style={{ transform: 'translate3d(-2px, 4px, 0px)', filter: 'blur(3px)' }} />
                         {/* Glass Body */}
-                        <circle cx="0" cy="0" r="22" fill="rgba(30, 41, 59, 0.95)" stroke="rgba(59, 130, 246, 0.6)" strokeWidth="1.2" />
+                        <circle cx="0" cy="0" r="22" className="pricing-poster-node-bg" stroke="rgba(59, 130, 246, 0.6)" strokeWidth="1.2" />
                         
                         {/* AI Text Orb */}
                         <circle cx="0" cy="0" r="16" fill="rgba(59, 130, 246, 0.15)" />
-                        <text x="0" y="3.5" textAnchor="middle" fill="#e0e7ff" fontSize="9" fontWeight="900" fontFamily="Geist, Satoshi, sans-serif" letterSpacing="0.05em">AI</text>
+                        <text x="0" y="3.5" textAnchor="middle" className="pricing-poster-central-ai-text" fontSize="9" fontWeight="900" fontFamily="Geist, Satoshi, sans-serif" letterSpacing="0.05em">AI</text>
                         
                         {/* Outer rotating/pulsing dashes */}
                         <circle cx="0" cy="0" r="25" fill="none" stroke="rgba(59, 130, 246, 0.3)" strokeWidth="0.8" strokeDasharray="4 6">
@@ -329,67 +413,63 @@ function ResumeMatchPoster({ animateShimmer }: { animateShimmer: boolean }) {
                 <g style={{ transform: 'perspective(600px) rotateX(16deg) rotateY(-10deg) rotateZ(1deg)', transformOrigin: 'center center' }}>
                     
                     {/* LEFT PANEL: RESUME */}
-                    {/* Shadow */}
-                    <rect x="25" y="16" width="95" height="78" rx="8" fill="black" opacity="0.3" style={{ transform: 'translate3d(-4px, 6px, 0px)', filter: 'blur(4px)' }} />
                     {/* Glass Body */}
-                    <rect x="25" y="16" width="95" height="78" rx="8" fill="url(#panelBg)" stroke="rgba(255, 255, 255, 0.12)" strokeWidth="1" />
+                    <rect x="25" y="16" width="95" height="78" rx="8" fill="url(#panelBg)" className="pricing-poster-panel-border" strokeWidth="1" />
                     <rect x="25" y="16" width="95" height="78" rx="8" fill="url(#stealthShimmer)" style={{ mixBlendMode: 'overlay' }} opacity="0.75" />
                     
                     {/* Header line & avatar representation */}
-                    <circle cx="38" cy="28" r="4.5" fill="rgba(255, 255, 255, 0.18)" />
-                    <rect x="47" y="24" width="35" height="3" rx="1.5" fill="rgba(255, 255, 255, 0.25)" />
-                    <rect x="47" y="30" width="20" height="2" rx="1" fill="rgba(255, 255, 255, 0.15)" />
+                    <circle cx="38" cy="28" r="4.5" className="pricing-poster-avatar-bg" />
+                    <rect x="47" y="24" width="35" height="3" rx="1.5" className="pricing-poster-rect-light" />
+                    <rect x="47" y="30" width="20" height="2" rx="1" className="pricing-poster-rect-subtle" />
                     
                     {/* Skills Checklist inside Resume card */}
                     <g transform="translate(34 42)">
                         {/* Check 1 */}
                         <circle cx="4" cy="5" r="2.5" fill="rgba(16, 185, 129, 0.2)" stroke="rgba(16, 185, 129, 0.6)" strokeWidth="0.6" />
-                        <rect x="11" y="3.5" width="48" height="3" rx="1.5" fill="rgba(255, 255, 255, 0.2)" />
-                        <text x="12" y="6.5" fill="rgba(255,255,255,0.7)" fontSize="4.5" fontFamily="Geist, Satoshi, sans-serif" fontWeight="600" letterSpacing="0.02em">React Native</text>
+                        <rect x="11" y="3.5" width="48" height="3" rx="1.5" className="pricing-poster-rect-light" />
+                        <text x="12" y="6.5" className="pricing-poster-text-bright" fontSize="4.5" fontFamily="Geist, Satoshi, sans-serif" fontWeight="600" letterSpacing="0.02em">React Native</text>
 
                         {/* Check 2 */}
                         <circle cx="4" cy="17" r="2.5" fill="rgba(16, 185, 129, 0.2)" stroke="rgba(16, 185, 129, 0.6)" strokeWidth="0.6" />
-                        <rect x="11" y="15.5" width="55" height="3" rx="1.5" fill="rgba(255, 255, 255, 0.2)" />
-                        <text x="12" y="18.5" fill="rgba(255,255,255,0.7)" fontSize="4.5" fontFamily="Geist, Satoshi, sans-serif" fontWeight="600" letterSpacing="0.02em">System Design</text>
+                        <rect x="11" y="15.5" width="55" height="3" rx="1.5" className="pricing-poster-rect-light" />
+                        <text x="12" y="18.5" className="pricing-poster-text-bright" fontSize="4.5" fontFamily="Geist, Satoshi, sans-serif" fontWeight="600" letterSpacing="0.02em">System Design</text>
 
                         {/* Check 3 */}
-                        <circle cx="4" cy="29" r="2.5" fill="rgba(255, 255, 255, 0.08)" stroke="rgba(255, 255, 255, 0.2)" strokeWidth="0.6" />
-                        <rect x="11" y="27.5" width="40" height="3" rx="1.5" fill="rgba(255, 255, 255, 0.12)" />
-                        <text x="12" y="30.5" fill="rgba(255,255,255,0.4)" fontSize="4.5" fontFamily="Geist, Satoshi, sans-serif" fontWeight="600" letterSpacing="0.02em">Python</text>
+                        <circle cx="4" cy="29" r="2.5" className="pricing-poster-check3-bg pricing-poster-check3-border" strokeWidth="0.6" />
+                        <rect x="11" y="27.5" width="40" height="3" rx="1.5" className="pricing-poster-rect-subtle" />
+                        <text x="12" y="30.5" className="pricing-poster-text-muted" fontSize="4.5" fontFamily="Geist, Satoshi, sans-serif" fontWeight="600" letterSpacing="0.02em">Python</text>
                     </g>
                     {/* Small Resume Badge */}
                     <rect x="34" y="81" width="30" height="7" rx="2" fill="rgba(139, 92, 246, 0.2)" stroke="rgba(139, 92, 246, 0.3)" strokeWidth="0.5" />
-                    <text x="49" y="85" textAnchor="middle" fill="#c4b5fd" fontSize="4.5" fontWeight="bold" fontFamily="Geist, Satoshi, sans-serif">RESUME</text>
+                    <text x="49" y="85" textAnchor="middle" fill="#c4b5fd" className="pricing-poster-badge-text-purple" fontSize="4.5" fontWeight="bold" fontFamily="Geist, Satoshi, sans-serif">RESUME</text>
 
 
                     {/* RIGHT PANEL: JOB DESCRIPTION */}
-                    {/* Shadow */}
-                    <rect x="160" y="16" width="95" height="78" rx="8" fill="black" opacity="0.3" style={{ transform: 'translate3d(-4px, 6px, 0px)', filter: 'blur(4px)' }} />
                     {/* Glass Body */}
-                    <rect x="160" y="16" width="95" height="78" rx="8" fill="url(#panelBg)" stroke="rgba(255, 255, 255, 0.12)" strokeWidth="1" />
+                    <rect x="160" y="16" width="95" height="78" rx="8" fill="url(#panelBg)" className="pricing-poster-panel-border" strokeWidth="1" />
                     <rect x="160" y="16" width="95" height="78" rx="8" fill="url(#stealthShimmer)" style={{ mixBlendMode: 'overlay' }} opacity="0.75" />
                     
                     {/* Job requirements lines */}
-                    <rect x="169" y="24" width="45" height="3.5" rx="1.5" fill="rgba(255, 255, 255, 0.25)" />
-                    <rect x="169" y="31" width="60" height="2" rx="1" fill="rgba(255, 255, 255, 0.12)" />
+                    <rect x="169" y="24" width="45" height="3.5" rx="1.5" className="pricing-poster-rect-light" />
+                    <rect x="169" y="31" width="60" height="2" rx="1" className="pricing-poster-rect-subtle" />
 
                     {/* Requirements list */}
                     <g transform="translate(169 42)">
                         {/* Requirement 1 */}
-                        <rect x="0" y="3.5" width="60" height="3" rx="1.5" fill="rgba(255, 255, 255, 0.15)" />
-                        <text x="2" y="6.5" fill="rgba(255,255,255,0.7)" fontSize="4.5" fontFamily="Geist, Satoshi, sans-serif" fontWeight="600" letterSpacing="0.02em">React Native</text>
+                        <rect x="0" y="3.5" width="60" height="3" rx="1.5" className="pricing-poster-rect-light" />
+                        <text x="2" y="6.5" className="pricing-poster-text-bright" fontSize="4.5" fontFamily="Geist, Satoshi, sans-serif" fontWeight="600" letterSpacing="0.02em">React Native</text>
 
                         {/* Requirement 2 */}
-                        <rect x="0" y="15.5" width="65" height="3" rx="1.5" fill="rgba(255, 255, 255, 0.15)" />
-                        <text x="2" y="18.5" fill="rgba(255,255,255,0.7)" fontSize="4.5" fontFamily="Geist, Satoshi, sans-serif" fontWeight="600" letterSpacing="0.02em">System Design</text>
+                        <rect x="0" y="15.5" width="65" height="3" rx="1.5" className="pricing-poster-rect-light" />
+                        <text x="2" y="18.5" className="pricing-poster-text-bright" fontSize="4.5" fontFamily="Geist, Satoshi, sans-serif" fontWeight="600" letterSpacing="0.02em">System Design</text>
 
                         {/* Requirement 3 */}
-                        <rect x="0" y="27.5" width="50" height="3" rx="1.5" fill="rgba(255, 255, 255, 0.15)" />
-                        <text x="2" y="30.5" fill="rgba(255,255,255,0.6)" fontSize="4.5" fontFamily="Geist, Satoshi, sans-serif" fontWeight="600" letterSpacing="0.02em">TypeScript</text>
+                        <rect x="0" y="27.5" width="50" height="3" rx="1.5" className="pricing-poster-rect-light" />
+                        <text x="2" y="30.5" className="pricing-poster-text-muted" fontSize="4.5" fontFamily="Geist, Satoshi, sans-serif" fontWeight="600" letterSpacing="0.02em">TypeScript</text>
                     </g>
                     {/* Small JD Badge */}
                     <rect x="169" y="81" width="30" height="7" rx="2" fill="rgba(59, 130, 246, 0.2)" stroke="rgba(59, 130, 246, 0.3)" strokeWidth="0.5" />
-                    <text x="184" y="85" textAnchor="middle" fill="#93c5fd" fontSize="4.5" fontWeight="bold" fontFamily="Geist, Satoshi, sans-serif">ROLE JD</text>
+                    <text x="184" y="85" textAnchor="middle" fill="#93c5fd" className="pricing-poster-badge-text-blue" fontSize="4.5" fontWeight="bold" fontFamily="Geist, Satoshi, sans-serif">ROLE JD</text>
 
 
                     {/* CONNECTING AI LASER LINES */}
@@ -420,17 +500,6 @@ function ResumeMatchPoster({ animateShimmer }: { animateShimmer: boolean }) {
     );
 }
 
-// ─── Feature catalog (restored verbatim from original) ───────
-const PRO_FEATURES = [
-    { title: 'Modes Manager',          desc: '7 expert personas (Technical, Sales, etc.)', icon: Layers,     status: 'ready' as const },
-    { title: 'Resume Intelligence',    desc: 'AI grounded in your lived experience',       icon: UserCheck,  status: 'ready' as const },
-    { title: 'Context Intelligence',   desc: 'Ground AI in your custom files & docs',      icon: Database,   status: 'ready' as const },
-    { title: 'Negotiation Assistance', desc: 'Live coaching with market-band strategy',    icon: TrendingUp, status: 'ready' as const },
-    { title: 'JD Intelligence',        desc: 'Gap-analysis against any job description',   icon: FileText,   status: 'ready' as const },
-    { title: 'Company Research',       desc: 'Real-time intel on culture & positioning',   icon: Building2,  status: 'ready' as const },
-    { title: 'System Design',          desc: 'Architecture questions & OCR extraction',    icon: Maximize2,  status: 'soon'  as const },
-    { title: 'Mock Interviews',        desc: 'Hiring-manager persona with coaching',       icon: Target,     status: 'soon'  as const },
-];
 
 export const NativelyProSettings: React.FC = () => {
     const prefersReducedMotion = useReducedMotion();
@@ -666,13 +735,7 @@ export const NativelyProSettings: React.FC = () => {
 
     return (
         <div className="space-y-4" data-interface-theme={interfaceTheme}>
-            {/* Page title */}
-            <div>
-                <h3 className="text-[15px] font-semibold text-text-primary tracking-[-0.01em]">Natively Pro</h3>
-                <p className="text-[12px] text-text-tertiary mt-0.5 leading-snug">
-                    Profile Engine &amp; Job Description Intelligence
-                </p>
-            </div>
+
 
             {isPremium ? (
                 <Card>
@@ -739,11 +802,9 @@ export const NativelyProSettings: React.FC = () => {
                                 <div className="relative mt-4 flex items-baseline gap-2 flex-wrap" style={{ transformStyle: 'preserve-3d', transform: 'translateZ(20px)' }}>
                                     {yearlyOriginalText && (
                                         <span
-                                            className="text-[17px] font-normal"
+                                            className="pricing-card-original-price text-[17px] font-normal"
                                             style={{
-                                                color: 'rgba(255, 255, 255, 0.52)',
                                                 textDecoration: 'line-through',
-                                                textDecorationColor: 'rgba(255, 255, 255, 0.36)',
                                                 textDecorationThickness: '1px',
                                                 fontVariantNumeric: 'tabular-nums',
                                                 fontFeatureSettings: '"tnum"',
@@ -754,7 +815,7 @@ export const NativelyProSettings: React.FC = () => {
                                         </span>
                                     )}
                                     <span
-                                        className="text-[44px] font-bold leading-none text-text-primary"
+                                        className="pricing-card-price text-[44px] font-bold leading-none text-text-primary"
                                         style={{
                                             display: 'inline-block',
                                             fontVariantNumeric: 'tabular-nums',
@@ -770,7 +831,7 @@ export const NativelyProSettings: React.FC = () => {
                                 </p>
 
                                 {/* Crisp gradient hairline divider */}
-                                <div className="relative h-px my-4 bg-gradient-to-r from-transparent via-white/25 to-transparent" style={{ transform: 'translateZ(8px)' }} />
+                                <div className="relative h-px my-4 pricing-card-divider" style={{ transform: 'translateZ(8px)' }} />
 
                                 {/* Hero feature: Expert Persona Modes */}
                                 <div className="relative" style={{ transformStyle: 'preserve-3d', transform: 'translateZ(14px)' }}>
@@ -802,7 +863,7 @@ export const NativelyProSettings: React.FC = () => {
                                 >
                                     Get Pro
                                     {yearlyDiscountAbs !== null && (
-                                        <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9.5px] font-bold tracking-wider" style={{ background: 'rgba(99, 102, 241, 0.16)', color: 'rgba(60, 55, 130, 0.92)' }}>
+                                        <span className="pricing-card-discount-badge inline-flex items-center px-1.5 py-0.5 rounded-full text-[9.5px] font-bold tracking-wider">
                                             -{yearlyDiscountAbs}%
                                         </span>
                                     )}
@@ -840,11 +901,9 @@ export const NativelyProSettings: React.FC = () => {
                                 <div className="relative mt-4 flex items-baseline gap-2 flex-wrap" style={{ transformStyle: 'preserve-3d', transform: 'translateZ(20px)' }}>
                                     {yearlyPrice !== null && lifetimePrice !== null && (
                                         <span
-                                            className="text-[17px] font-normal"
+                                            className="pricing-card-original-price text-[17px] font-normal"
                                             style={{
-                                                color: 'rgba(255, 255, 255, 0.46)',
                                                 textDecoration: 'line-through',
-                                                textDecorationColor: 'rgba(255, 255, 255, 0.32)',
                                                 textDecorationThickness: '1px',
                                                 fontVariantNumeric: 'tabular-nums',
                                                 fontFeatureSettings: '"tnum"',
@@ -855,7 +914,7 @@ export const NativelyProSettings: React.FC = () => {
                                         </span>
                                     )}
                                     <span
-                                        className="text-[44px] font-bold leading-none text-text-primary"
+                                        className="pricing-card-price text-[44px] font-bold leading-none text-text-primary"
                                         style={{
                                             display: 'inline-block',
                                             fontVariantNumeric: 'tabular-nums',
@@ -866,7 +925,7 @@ export const NativelyProSettings: React.FC = () => {
                                         {lifetimePriceText}
                                     </span>
                                     {lifetimeSavingsPct !== null && (
-                                        <span className="text-[10px] font-medium tracking-[0.01em] text-text-secondary bg-white/5 border border-white/10 px-2 py-0.5 rounded-full select-none ml-1.5 self-center">
+                                        <span className="pricing-card-savings-badge text-[10px] font-medium tracking-[0.01em] px-2 py-0.5 rounded-full select-none ml-1.5 self-center">
                                             Save {lifetimeSavingsPct}%
                                         </span>
                                     )}
@@ -876,7 +935,7 @@ export const NativelyProSettings: React.FC = () => {
                                 </p>
 
                                 {/* Crisp divider */}
-                                <div className="relative h-px my-4 bg-gradient-to-r from-transparent via-white/20 to-transparent" style={{ transform: 'translateZ(8px)' }} />
+                                <div className="relative h-px my-4 pricing-card-divider" style={{ transform: 'translateZ(8px)' }} />
 
                                 {/* Hero feature: Resume & Context Grounding */}
                                 <div className="relative" style={{ transformStyle: 'preserve-3d', transform: 'translateZ(14px)' }}>
@@ -920,61 +979,289 @@ export const NativelyProSettings: React.FC = () => {
                             </InteractiveCard>
                         </div>
 
-                        {/* ── Shared 8-feature grid ─────────────────────────── */}
-                        <motion.div
-                            variants={itemVariants}
-                            className="overlay-subtle-surface relative rounded-2xl overflow-hidden mt-1"
-                        >
+                        {/* ── Feature Comparison Section (Bento Grid) ────────── */}
+                        <motion.div variants={itemVariants} className="mt-2 space-y-3">
                             {/* Header */}
-                            <div className="flex items-center justify-between px-4 pt-4 pb-2">
-                                <p className="text-[12px] font-semibold tracking-tight text-text-primary">
-                                    Everything you get
-                                </p>
-                                <span className="text-[10px] uppercase tracking-widest font-semibold text-text-tertiary">
+                            <div className="flex items-center justify-between px-0.5">
+                                <h3 className="text-[13px] font-bold tracking-[-0.015em] text-text-primary">
+                                    Everything you get in Pro
+                                </h3>
+                                <span className="text-[9px] uppercase tracking-[0.1em] font-semibold text-text-tertiary px-2 py-0.5 rounded-full border border-white/5 bg-white/2">
                                     Both tiers
                                 </span>
                             </div>
 
-                            {/* 2-column grid */}
+                            {/* Bento Grid */}
                             <motion.div
                                 variants={gridVariants}
                                 initial="hidden"
                                 animate="visible"
-                                className="grid grid-cols-2 gap-2 px-4 pb-4 pt-1"
+                                className="grid grid-cols-2 gap-3"
                             >
-                                {PRO_FEATURES.map((f) => {
-                                    const Icon = f.icon;
-                                    const isReady = f.status === 'ready';
-                                    return (
-                                        <motion.div
-                                            key={f.title}
-                                            variants={gridItemVariants}
-                                            className="overlay-subtle-surface relative flex items-start gap-2.5 rounded-xl p-2.5"
-                                        >
-                                            <span className="feature-icon-chip w-7 h-7 flex items-center justify-center shrink-0">
-                                                <Icon size={14} className="text-text-primary" strokeWidth={2} />
+                                {/* 1. Modes Manager (Spans 2 columns) */}
+                                <InteractiveFeatureCard
+                                    colorTheme="violet"
+                                    glowColor="rgba(139, 92, 246, 0.15)"
+                                    className="col-span-2 p-4 flex flex-col md:flex-row md:items-center justify-between gap-4"
+                                >
+                                    <div className="flex items-start gap-3 flex-1">
+                                        <span className="w-8 h-8 rounded-xl flex items-center justify-center shrink-0 bg-gradient-to-br from-violet-500/15 to-blue-500/15 border border-violet-400/25 text-violet-300">
+                                            <Layers size={16} strokeWidth={2} />
+                                        </span>
+                                        <div className="min-w-0">
+                                            <p className="text-[12.5px] font-bold tracking-tight text-text-primary leading-tight">
+                                                Modes Manager
+                                            </p>
+                                            <p className="text-[11px] text-text-secondary leading-snug mt-1 max-w-[340px]">
+                                                7 expert personas customized for tech interview prep, PM strategy, executive presence, and sales negotiation.
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-3 bg-white/[0.04] border border-white/[0.09] rounded-full px-3 py-1.5 shadow-sm">
+                                        <span className="text-[9px] font-extrabold text-text-primary tracking-wider uppercase">
+                                            7 expert personas
+                                        </span>
+                                        <div className="flex -space-x-1.5">
+                                            {['bg-emerald-400', 'bg-blue-400', 'bg-violet-400', 'bg-pink-400', 'bg-orange-400', 'bg-cyan-400', 'bg-yellow-400'].map((color, idx) => (
+                                                <span
+                                                    key={idx}
+                                                    className={`w-3 h-3 rounded-full ${color} border border-black/30 shadow relative shrink-0`}
+                                                    style={{
+                                                        boxShadow: 'inset 0 1px 1px rgba(255,255,255,0.45), 0 1px 3px rgba(0,0,0,0.35)'
+                                                    }}
+                                                />
+                                            ))}
+                                        </div>
+                                    </div>
+                                </InteractiveFeatureCard>
+
+                                {/* 2. Resume Intelligence (1 column) */}
+                                <InteractiveFeatureCard
+                                    colorTheme="teal"
+                                    glowColor="rgba(20, 184, 166, 0.12)"
+                                    className="p-4 flex flex-col justify-between min-h-[110px]"
+                                >
+                                    <div className="flex items-start gap-3">
+                                        <span className="w-8 h-8 rounded-xl flex items-center justify-center shrink-0 bg-gradient-to-br from-teal-500/15 to-emerald-500/15 border border-teal-400/25 text-teal-300">
+                                            <UserCheck size={16} strokeWidth={2} />
+                                        </span>
+                                        <div className="min-w-0">
+                                            <p className="text-[12px] font-bold tracking-tight text-text-primary leading-tight">
+                                                Resume Intelligence
+                                            </p>
+                                            <p className="text-[10.5px] text-text-secondary leading-snug mt-1">
+                                                AI grounded in your lived experience, background, and career accomplishments.
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <div className="mt-3 flex items-center gap-1.5">
+                                        <div className="h-1.5 w-full bg-white/[0.06] rounded-full overflow-hidden border border-white/[0.04]">
+                                            <motion.div
+                                                className="h-full bg-gradient-to-r from-teal-400 to-emerald-400 rounded-full"
+                                                initial={{ width: 0 }}
+                                                animate={{ width: '92%' }}
+                                                transition={{ duration: 1.5, delay: 0.5, ease: EASE_OUT }}
+                                            />
+                                        </div>
+                                        <span className="text-[8.5px] font-mono text-emerald-350 font-bold shrink-0">92% MATCH</span>
+                                    </div>
+                                </InteractiveFeatureCard>
+
+                                {/* 3. Context Intelligence (1 column) */}
+                                <InteractiveFeatureCard
+                                    colorTheme="blue"
+                                    glowColor="rgba(59, 130, 246, 0.12)"
+                                    className="p-4 flex flex-col justify-between min-h-[110px]"
+                                >
+                                    <div className="flex items-start gap-3">
+                                        <span className="w-8 h-8 rounded-xl flex items-center justify-center shrink-0 bg-gradient-to-br from-blue-500/15 to-indigo-500/15 border border-blue-400/25 text-blue-350">
+                                            <Database size={16} strokeWidth={2} />
+                                        </span>
+                                        <div className="min-w-0">
+                                            <p className="text-[12px] font-bold tracking-tight text-text-primary leading-tight">
+                                                Context Intelligence
+                                            </p>
+                                            <p className="text-[10.5px] text-text-secondary leading-snug mt-1">
+                                                Ground the AI response in custom reference files, PDFs, docs, and codebases.
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <div className="mt-3 flex items-center gap-1 flex-wrap">
+                                        {['.pdf', '.docx', '.txt', '.json'].map((ext) => (
+                                            <span key={ext} className="text-[8.5px] font-mono font-bold text-blue-300 uppercase px-1.5 py-0.5 rounded border border-blue-500/20 bg-blue-500/8">
+                                                {ext}
                                             </span>
-                                            <div className="min-w-0 flex-1">
-                                                <div className="flex items-center gap-1.5">
-                                                    <p
-                                                        className="text-[11.5px] font-semibold tracking-tight text-text-primary leading-tight"
-                                                        style={{ letterSpacing: '-0.01em' }}
-                                                    >
-                                                        {f.title}
-                                                    </p>
-                                                    {!isReady && (
-                                                        <span className="text-[8.5px] font-bold uppercase tracking-[0.08em] px-1 py-px rounded text-text-secondary border border-white/15">
-                                                            Soon
-                                                        </span>
-                                                    )}
-                                                </div>
-                                                <p className="text-[10.5px] text-text-tertiary leading-snug mt-0.5">
-                                                    {f.desc}
+                                        ))}
+                                    </div>
+                                </InteractiveFeatureCard>
+
+                                {/* 4. Negotiation Assistance (1 column) */}
+                                <InteractiveFeatureCard
+                                    colorTheme="rose"
+                                    glowColor="rgba(244, 63, 94, 0.12)"
+                                    className="p-4 flex flex-col justify-between min-h-[110px]"
+                                >
+                                    <div className="flex items-start gap-3">
+                                        <span className="w-8 h-8 rounded-xl flex items-center justify-center shrink-0 bg-gradient-to-br from-rose-500/15 to-amber-500/15 border border-rose-400/25 text-rose-300">
+                                            <TrendingUp size={16} strokeWidth={2} />
+                                        </span>
+                                        <div className="min-w-0">
+                                            <p className="text-[12px] font-bold tracking-tight text-text-primary leading-tight">
+                                                Negotiation Coaching
+                                            </p>
+                                            <p className="text-[10.5px] text-text-secondary leading-snug mt-1">
+                                                Live coaching, counter-offer scripting, and real-time market-band analysis.
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <div className="mt-3 flex items-center justify-between text-[8.5px] font-mono text-text-secondary bg-white/[0.03] border border-white/[0.07] rounded-lg px-2 py-1">
+                                        <span>$140k</span>
+                                        <div className="h-1 w-16 bg-white/[0.08] rounded-full relative">
+                                            <div className="absolute left-[30%] right-[20%] top-0 bottom-0 bg-rose-400 rounded-full" />
+                                            <div className="absolute left-[55%] top-1/2 -translate-y-1/2 w-1.5 h-1.5 bg-text-primary rounded-full border border-rose-400" />
+                                        </div>
+                                        <span className="text-text-primary font-bold">$185k</span>
+                                    </div>
+                                </InteractiveFeatureCard>
+
+                                {/* 5. JD Intelligence (1 column) */}
+                                <InteractiveFeatureCard
+                                    colorTheme="orange"
+                                    glowColor="rgba(249, 115, 22, 0.12)"
+                                    className="p-4 flex flex-col justify-between min-h-[110px]"
+                                >
+                                    <div className="flex items-start gap-3">
+                                        <span className="w-8 h-8 rounded-xl flex items-center justify-center shrink-0 bg-gradient-to-br from-orange-500/15 to-amber-500/15 border border-orange-400/25 text-orange-300">
+                                            <FileText size={16} strokeWidth={2} />
+                                        </span>
+                                        <div className="min-w-0">
+                                            <p className="text-[12px] font-bold tracking-tight text-text-primary leading-tight">
+                                                JD Intelligence
+                                            </p>
+                                            <p className="text-[10.5px] text-text-secondary leading-snug mt-1">
+                                                Gap-analysis comparing your profile directly against target job descriptions.
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <div className="mt-3 space-y-1 text-[8.5px] font-semibold">
+                                        <div className="flex items-center justify-between text-emerald-300">
+                                            <span className="flex items-center gap-1">
+                                                <Check size={8} strokeWidth={3} />
+                                                System Design
+                                            </span>
+                                            <span className="font-mono text-[7.5px] font-bold tracking-wider text-emerald-400">MATCH</span>
+                                        </div>
+                                        <div className="flex items-center justify-between text-amber-300">
+                                            <span className="flex items-center gap-1">
+                                                <AlertCircle size={8} strokeWidth={3} />
+                                                Distributed Caching
+                                            </span>
+                                            <span className="font-mono text-[7.5px] font-bold tracking-wider text-amber-400">GAP</span>
+                                        </div>
+                                    </div>
+                                </InteractiveFeatureCard>
+
+                                {/* 6. Company Research (1 column) */}
+                                <InteractiveFeatureCard
+                                    colorTheme="cyan"
+                                    glowColor="rgba(6, 182, 212, 0.12)"
+                                    className="p-4 flex flex-col justify-between min-h-[110px]"
+                                >
+                                    <div className="flex items-start gap-3">
+                                        <span className="w-8 h-8 rounded-xl flex items-center justify-center shrink-0 bg-gradient-to-br from-cyan-500/15 to-teal-500/15 border border-cyan-400/25 text-cyan-300">
+                                            <Building2 size={16} strokeWidth={2} />
+                                        </span>
+                                        <div className="min-w-0">
+                                            <p className="text-[12px] font-bold tracking-tight text-text-primary leading-tight">
+                                                Company Research
+                                            </p>
+                                            <p className="text-[10.5px] text-text-secondary leading-snug mt-1">
+                                                Real-time deep-dive into culture, tech stack, and strategic industry positioning.
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <div className="mt-3 flex items-center justify-between text-[8.5px] text-text-primary bg-white/[0.03] border border-white/[0.07] rounded-lg px-2 py-1">
+                                        <span className="flex items-center gap-1 font-semibold text-text-secondary">
+                                            <span className="w-1.5 h-1.5 rounded-full bg-cyan-350 animate-pulse" />
+                                            Culture Intel
+                                        </span>
+                                        <span className="font-mono text-cyan-350 font-bold uppercase tracking-wider text-[7.5px]">FETCHED LIVE</span>
+                                    </div>
+                                </InteractiveFeatureCard>
+
+                                {/* 7. System Design (1 column - Soon) */}
+                                <InteractiveFeatureCard
+                                    colorTheme="gray"
+                                    glowColor="rgba(148, 163, 184, 0.05)"
+                                    isSoon
+                                    className="p-4 flex flex-col justify-between min-h-[110px]"
+                                >
+                                    <div className="flex items-start gap-3">
+                                        <span className="w-8 h-8 rounded-xl flex items-center justify-center shrink-0 bg-gradient-to-br from-slate-400/20 to-slate-500/10 border border-slate-400/25 text-slate-300">
+                                            <Maximize2 size={16} strokeWidth={2} />
+                                        </span>
+                                        <div className="min-w-0">
+                                            <div className="flex items-center gap-1.5">
+                                                <p className="text-[12px] font-bold tracking-tight text-text-secondary leading-tight">
+                                                    System Design
                                                 </p>
+                                                <span className="text-[8px] font-extrabold uppercase tracking-wider px-1 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/25 shrink-0">
+                                                    Soon
+                                                </span>
                                             </div>
-                                        </motion.div>
-                                    );
-                                })}
+                                            <p className="text-[10.5px] text-text-tertiary leading-snug mt-1">
+                                                Architecture whiteboard blueprints & diagram image OCR extraction.
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <div className="mt-3 relative h-6 rounded border border-dashed border-white/10 bg-white/[0.01] overflow-hidden flex items-center justify-center">
+                                        <div className="absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.02)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.02)_1px,transparent_1px)] bg-[size:6px_6px]" />
+                                        <span className="text-[8px] font-mono font-bold text-slate-400 select-none tracking-wider">ARCHITECTURE GRID</span>
+                                    </div>
+                                </InteractiveFeatureCard>
+
+                                {/* 8. Mock Interviews (Spans 2 columns - Soon) */}
+                                <InteractiveFeatureCard
+                                    colorTheme="pink"
+                                    glowColor="rgba(139, 92, 246, 0.05)"
+                                    isSoon
+                                    className="col-span-2 p-4 flex flex-col md:flex-row md:items-center justify-between gap-4"
+                                >
+                                    <div className="flex items-start gap-3 flex-1">
+                                        <span className="w-8 h-8 rounded-xl flex items-center justify-center shrink-0 bg-gradient-to-br from-pink-400/20 to-violet-400/10 border border-pink-400/25 text-pink-300">
+                                            <Target size={16} strokeWidth={2} />
+                                        </span>
+                                        <div className="min-w-0">
+                                            <div className="flex items-center gap-1.5">
+                                                <p className="text-[12px] font-bold tracking-tight text-text-secondary leading-tight">
+                                                    Mock Interviews
+                                                </p>
+                                                <span className="text-[8px] font-extrabold uppercase tracking-wider px-1 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/25 shrink-0">
+                                                    Soon
+                                                </span>
+                                            </div>
+                                            <p className="text-[11px] text-text-tertiary leading-snug mt-1 max-w-[340px]">
+                                                Practice dialogues with specialized hiring manager personas, offering dynamic difficulty and grading reports.
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <div className="flex flex-col gap-1 border border-white/[0.07] bg-white/[0.02] rounded-xl p-2 min-w-[160px] select-none shadow-sm shrink-0">
+                                        <div className="flex items-center justify-between border-b border-white/[0.05] pb-1">
+                                            <span className="text-[8px] font-mono text-text-secondary uppercase tracking-wider">Report</span>
+                                            <span className="text-[9px] font-mono font-bold text-pink-450">SCORE: 88%</span>
+                                        </div>
+                                        <div className="space-y-0.5 text-[8px] text-text-secondary leading-tight">
+                                            <div className="flex items-center gap-1">
+                                                <span className="w-1 h-1 rounded-full bg-emerald-400" />
+                                                <span>Strong behavioral stats</span>
+                                            </div>
+                                            <div className="flex items-center gap-1">
+                                                <span className="w-1 h-1 rounded-full bg-amber-400" />
+                                                <span>Add details in architecture</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </InteractiveFeatureCard>
                             </motion.div>
                         </motion.div>
 
@@ -1115,6 +1402,21 @@ export const NativelyProSettings: React.FC = () => {
                             <div className="w-1.5 h-1.5 rounded-full bg-indigo-400/70 shrink-0 mt-[6px]" />
                             <p className="text-[11.5px] text-text-secondary leading-relaxed">
                                 Purchases made with a coupon, voucher, referral credit, or limited-time offer are <strong className="text-text-primary font-semibold">final sale</strong> and not eligible for refund.
+                            </p>
+                        </div>
+
+                        <div className="flex items-start gap-3">
+                            <div className="w-1.5 h-1.5 rounded-full bg-indigo-400/70 shrink-0 mt-[6px]" />
+                            <p className="text-[11.5px] text-text-secondary leading-relaxed">
+                                To cancel your subscription, log in to the{' '}
+                                <span
+                                    onClick={() => openExternal('https://customer.dodopayments.com/')}
+                                    className="text-text-primary hover:text-text-secondary underline decoration-border-subtle underline-offset-[3px] cursor-pointer"
+                                    style={{ transition: `color 180ms ${EASE_OUT_CSS}` }}
+                                >
+                                    https://customer.dodopayments.com/
+                                </span>{' '}
+                                portal.
                             </p>
                         </div>
 

@@ -13,6 +13,15 @@ export interface CustomProvider {
     id: string;
     name: string;
     curlCommand: string;
+    /**
+     * Whether this provider can accept screenshots. When undefined, vision
+     * support is auto-detected from the cURL template (an `{{IMAGE_BASE64}}`
+     * placeholder, or an OpenAI-compatible `messages` body). Set explicitly to
+     * override the guess. See customProviderSupportsVision().
+     */
+    multimodal?: boolean;
+    /** True if this provider's endpoint is loopback/local (skips cloud-scope gating). */
+    localOnly?: boolean;
 }
 
 export interface CurlProvider {

@@ -769,6 +769,18 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
+  // Whether this build can perform a real in-place auto-install + relaunch
+  // (signed macOS build, or any packaged Windows/Linux build). The renderer
+  // uses this to choose the in-app update flow vs. the manual download fallback.
+  safeHandle('get-can-auto-update', async () => {
+    try {
+      return { canAutoUpdate: appState.canAutoUpdate() };
+    } catch (err: any) {
+      console.error('[IPC] get-can-auto-update failed:', err);
+      return { canAutoUpdate: false };
+    }
+  });
+
   // Window movement handlers
   safeHandle('move-window-left', async () => {
     appState.moveWindowLeft();
@@ -832,7 +844,9 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle('set-undetectable', async (_, state: boolean) => {
     appState.setUndetectable(state);
-    return { success: true };
+    // Return the AUTHORITATIVE final state so the renderer can reconcile / roll
+    // back its optimistic toggle instead of assuming success (RC-2).
+    return { success: true, state: appState.getUndetectable() };
   });
 
   safeHandle('set-disguise', async (_, mode: 'terminal' | 'settings' | 'activity' | 'none') => {
@@ -847,7 +861,8 @@ export function initializeIpcHandlers(appState: AppState): void {
   // Adapted from public PR #113 — verify premium interaction
   safeHandle('set-overlay-mouse-passthrough', async (_, enabled: boolean) => {
     appState.setOverlayMousePassthrough(enabled);
-    return { success: true };
+    // Authoritative final state for renderer reconciliation (RC-2).
+    return { success: true, enabled: appState.getOverlayMousePassthrough() };
   });
 
   safeHandle('toggle-overlay-mouse-passthrough', async () => {
@@ -2763,6 +2778,8 @@ export function initializeIpcHandlers(appState: AppState): void {
       sm.set('codexCliFastModel', normalized.fastModel);
       sm.set('codexCliTimeoutMs', normalized.timeoutMs);
       sm.set('codexCliSandboxMode', normalized.sandboxMode);
+      sm.set('codexCliServiceTier', normalized.serviceTier);
+      sm.set('codexCliModelReasoningEffort', normalized.modelReasoningEffort);
       appState.processingHelper.getLLMHelper().setCodexCliConfig(normalized);
       return { success: true, config: normalized };
     } catch (error: any) {
@@ -2972,6 +2989,82 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle('flush-database', async () => {
     const result = DatabaseManager.getInstance().clearAllData();
     return { success: result };
+  });
+
+  // UX2: in-app TCC repair button.
+  //
+  // Runs `tccutil reset Microphone <bundleId>` AND
+  // `tccutil reset ScreenCapture <bundleId>` to clear stale macOS TCC entries
+  // for Natively. This is the user-facing self-service recovery for the
+  // dominant "permissions appear granted in System Settings but capture is
+  // silently zero-filled" failure mode — which is caused by TCC binding the
+  // grant to a binary's cdhash, and the cdhash changing on every rebuild
+  // (ad-hoc-signed builds — see AUDIO_RELIABILITY_REPORT.md §3 A1).
+  //
+  // After tccutil reset, the user MUST force-quit and relaunch the app for
+  // the next TCC prompt to appear cleanly. We return the prompt copy so the
+  // renderer can show a "Quit & relaunch" CTA.
+  //
+  // Service-name capitalization MATTERS: Apple requires capital `Microphone`
+  // and `ScreenCapture` — lowercase fails with "Invalid Service Name." This
+  // is the most common implementation bug.
+  safeHandle('repair-tcc-permissions', async () => {
+    if (process.platform !== 'darwin') {
+      return { ok: false, error: 'TCC repair is macOS-only.' };
+    }
+
+    // Bundle ID resolution: prefer the live Electron app identifier (handles
+    // signed packaged builds and dev-mode Electron alike). Falls back to the
+    // package.json appId if app.getAppPath() inspection somehow fails.
+    let bundleId: string;
+    try {
+      // app.isPackaged → packaged Info.plist CFBundleIdentifier
+      //                  (== package.json build.appId for electron-builder)
+      // !app.isPackaged → 'com.github.Electron' (the dev Electron binary's
+      //                   bundle id; TCC entries land here in dev mode)
+      bundleId = app.isPackaged ? 'com.electron.meeting-notes' : 'com.github.Electron';
+    } catch {
+      bundleId = 'com.electron.meeting-notes';
+    }
+
+    const { execFile } = require('node:child_process');
+    const { promisify } = require('node:util');
+    const execFileAsync = promisify(execFile);
+
+    const services = ['Microphone', 'ScreenCapture']; // Capital letters REQUIRED.
+    const results: Array<{ service: string; ok: boolean; output: string }> = [];
+
+    for (const service of services) {
+      try {
+        // Absolute path — defense-in-depth against PATH shadowing. tccutil is
+        // a SIP-protected stock macOS binary at /usr/bin/tccutil; using the
+        // bare name would resolve via inherited PATH, which a user-modified
+        // shell could in theory redirect.
+        const { stdout, stderr } = await execFileAsync('/usr/bin/tccutil', ['reset', service, bundleId], {
+          timeout: 5000,
+        });
+        results.push({ service, ok: true, output: (stdout || stderr || '').toString().trim() });
+        console.log(`[IPC] tccutil reset ${service} ${bundleId}: OK`);
+      } catch (err: any) {
+        const msg = err?.stderr?.toString?.() || err?.message || String(err);
+        results.push({ service, ok: false, output: msg.trim() });
+        console.warn(`[IPC] tccutil reset ${service} ${bundleId} failed: ${msg}`);
+      }
+    }
+
+    const anyOk = results.some((r) => r.ok);
+    return {
+      ok: anyOk,
+      bundleId,
+      results,
+      promptRelaunch: anyOk,
+      message: anyOk
+        ? 'Permissions reset. Quit Natively completely (Cmd+Q) and reopen — macOS will ask you to grant Microphone and Screen Recording again. Approve both to restore audio capture.'
+        : `Permission reset failed for ${bundleId}. ${results
+            .filter((r) => !r.ok)
+            .map((r) => `${r.service}: ${r.output}`)
+            .join('; ')}`,
+    };
   });
 
   safeHandle('open-external', async (event, url: string) => {

@@ -1,10 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  applyInterviewerSttTranscript,
-  shouldShowRollingTranscriptBar,
-  shouldSuppressRollingTranscript,
-} from '../overlaySttPersistence.mjs';
+import { applyInterviewerSttTranscript } from '../overlaySttPersistence.mjs';
 
 const mergeFns = {
   mergeRollingTranscriptPartial: (prev, text) => (prev ? `${prev} ${text}` : text),
@@ -54,44 +50,4 @@ test('STT final does not clear messages', () => {
   assert.equal(next.messages, priorMessages);
   assert.equal(next.rollingTranscript, 'in progress|final line');
   assert.equal(next.isInterviewerSpeaking, false);
-});
-
-test('shouldSuppressRollingTranscript stays false when chat is pinned with answers', () => {
-  assert.equal(
-    shouldSuppressRollingTranscript({
-      isProcessing: false,
-    }),
-    false,
-  );
-});
-
-test('shouldSuppressRollingTranscript is true only during active LLM processing', () => {
-  assert.equal(shouldSuppressRollingTranscript({ isProcessing: true }), true);
-  assert.equal(shouldSuppressRollingTranscript({ isProcessing: false }), false);
-});
-
-test('shouldShowRollingTranscriptBar visible with chat history and rolling text', () => {
-  assert.equal(
-    shouldShowRollingTranscriptBar({
-      suppressRollingTranscript: false,
-      showTranscript: true,
-      rollingTranscript: 'interviewer speaking',
-      interviewerSttStatus: 'connected',
-      userSttStatus: 'connected',
-    }),
-    true,
-  );
-});
-
-test('shouldShowRollingTranscriptBar hidden only while processing suppresses', () => {
-  assert.equal(
-    shouldShowRollingTranscriptBar({
-      suppressRollingTranscript: true,
-      showTranscript: true,
-      rollingTranscript: 'interviewer speaking',
-      interviewerSttStatus: 'connected',
-      userSttStatus: 'connected',
-    }),
-    false,
-  );
 });

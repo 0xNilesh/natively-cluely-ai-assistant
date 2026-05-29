@@ -1,9 +1,8 @@
-export function shouldSuppressRollingTranscript(params: { isProcessing: boolean }): boolean;
-
-export function shouldShowRollingTranscriptBar(params: {
-  suppressRollingTranscript: boolean;
-  showTranscript: boolean;
-  rollingTranscript: string;
-  interviewerSttStatus: string;
-  userSttStatus: string;
-}): boolean;
+export function applyInterviewerSttTranscript(
+  state: Record<string, unknown>,
+  transcript: { speaker: string; final: boolean; text: string },
+  mergeFns: {
+    mergeRollingTranscriptPartial: (current: string, next: string) => string;
+    mergeRollingTranscriptFinal: (current: string, next: string) => string;
+  },
+): Record<string, unknown>;

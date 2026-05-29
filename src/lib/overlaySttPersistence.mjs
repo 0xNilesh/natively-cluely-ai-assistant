@@ -6,32 +6,6 @@
  */
 
 /**
- * Whether to hide the rolling transcript bar.
- * Only suppress during active LLM work so partial STT can still update state.
- */
-export function shouldSuppressRollingTranscript({ isProcessing }) {
-  return Boolean(isProcessing);
-}
-
-/**
- * Whether the rolling transcript bar should render (status indicators or text).
- */
-export function shouldShowRollingTranscriptBar({
-  suppressRollingTranscript,
-  showTranscript,
-  rollingTranscript,
-  interviewerSttStatus,
-  userSttStatus,
-}) {
-  if (suppressRollingTranscript) return false;
-  return (
-    (showTranscript && Boolean(rollingTranscript)) ||
-    interviewerSttStatus !== 'connected' ||
-    userSttStatus !== 'connected'
-  );
-}
-
-/**
  * Apply an interviewer-channel STT transcript event.
  * Returns updated overlay slice; `messages` is always returned unchanged.
  */

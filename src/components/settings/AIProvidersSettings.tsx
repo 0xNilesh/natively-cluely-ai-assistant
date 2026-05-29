@@ -4,11 +4,16 @@ import { CODEX_CLI_MODEL, CODEX_CLI_MODEL_PRESETS, codexCliSelectorId, STANDARD_
 import { validateCurl } from '../../lib/curl-validator';
 import { ProviderCard } from './ProviderCard';
 
+const CODEX_SERVICE_TIERS = ['default', 'fast', 'flex'] as const;
+const CODEX_MODEL_REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh'] as const;
+
 interface CustomProvider {
     id: string;
     name: string;
     curlCommand: string;
     responsePath: string;
+    /** Whether this provider accepts screenshots. undefined = auto-detect from the cURL template. */
+    multimodal?: boolean;
 }
 
 interface ModelOption {
@@ -21,9 +26,10 @@ interface ModelSelectProps {
     options: ModelOption[];
     onChange: (value: string) => void;
     placeholder?: string;
+    className?: string;
 }
 
-const ModelSelect: React.FC<ModelSelectProps> = ({ value, options, onChange, placeholder = "Select model" }) => {
+const ModelSelect: React.FC<ModelSelectProps> = ({ value, options, onChange, placeholder = "Select model", className = "" }) => {
     const [isOpen, setIsOpen] = useState(false);
     const containerRef = React.useRef<HTMLDivElement>(null);
 
@@ -39,11 +45,13 @@ const ModelSelect: React.FC<ModelSelectProps> = ({ value, options, onChange, pla
 
     const selectedOption = options.find(o => o.id === value);
 
+    const paddingClass = className.includes('py-') ? '' : 'py-1.5';
+
     return (
         <div className="relative" ref={containerRef}>
             <button
                 onClick={() => setIsOpen(!isOpen)}
-                className="w-40 bg-bg-input border border-border-subtle rounded-lg px-3 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent-primary flex items-center justify-between hover:bg-bg-elevated transition-colors"
+                className={`w-40 bg-bg-input border border-border-subtle rounded-lg px-3 ${paddingClass} ${className} text-xs text-text-primary focus:outline-none focus:border-accent-primary flex items-center justify-between hover:bg-bg-elevated transition-colors`}
                 type="button"
             >
                 <span className="truncate pr-2">{selectedOption ? selectedOption.name : placeholder}</span>
@@ -105,6 +113,7 @@ const CodexCliModelField: React.FC<{
                     onSelect(modelId);
                 }}
                 placeholder="Preset"
+                className="py-2"
             />
         </div>
     </label>
@@ -132,6 +141,8 @@ export const AIProvidersSettings: React.FC = () => {
     const [customName, setCustomName] = useState('');
     const [customCurl, setCustomCurl] = useState('');
     const [customResponsePath, setCustomResponsePath] = useState('');
+    // 'auto' = detect vision support from the template; 'on'/'off' = explicit override.
+    const [customVision, setCustomVision] = useState<'auto' | 'on' | 'off'>('auto');
     const [curlError, setCurlError] = useState<string | null>(null);
 
     // --- Local (Ollama) ---
@@ -141,7 +152,7 @@ export const AIProvidersSettings: React.FC = () => {
     const [isRefreshingOllama, setIsRefreshingOllama] = useState(false);
 
     // --- Local (Codex CLI) ---
-    const [codexCliConfig, setCodexCliConfig] = useState({ enabled: false, path: 'codex', model: 'gpt-5.4', fastModel: 'gpt-5.3-codex-spark', timeoutMs: 60000 });
+    const [codexCliConfig, setCodexCliConfig] = useState({ enabled: false, path: 'codex', model: 'gpt-5.4', fastModel: 'gpt-5.3-codex-spark', timeoutMs: 60000, sandboxMode: 'read-only' as string, serviceTier: 'default' as string | undefined, modelReasoningEffort: undefined as string | undefined });
     const [codexCliStatus, setCodexCliStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
     const [codexCliError, setCodexCliError] = useState('');
 
@@ -194,7 +205,7 @@ export const AIProvidersSettings: React.FC = () => {
                 // canUseFastMode will be correct when the enforcement effect runs.
                 // @ts-ignore
                 const cliConfig = await window.electronAPI?.getCodexCliConfig?.();
-                if (cliConfig) setCodexCliConfig(cliConfig);
+                if (cliConfig) setCodexCliConfig(cliConfig as typeof codexCliConfig);
 
                 const fastMode = await window.electronAPI?.getGroqFastTextMode();
                 if (fastMode) setFastResponseMode(fastMode.enabled);
@@ -366,7 +377,7 @@ export const AIProvidersSettings: React.FC = () => {
         const normalized = { ...next, timeoutMs: Number(next.timeoutMs) || 60000 };
         setCodexCliConfig(normalized);
         const result = await window.electronAPI?.setCodexCliConfig?.(normalized);
-        if (result?.config) setCodexCliConfig(result.config);
+        if (result?.config) setCodexCliConfig(result.config as typeof codexCliConfig);
         return result;
     };
 
@@ -380,7 +391,7 @@ export const AIProvidersSettings: React.FC = () => {
             if (result?.success) {
                 // If the main process auto-detected an install, reflect the
                 // resolved path in the form so the user sees what got picked.
-                if (result.config) setCodexCliConfig(result.config);
+                if (result.config) setCodexCliConfig(result.config as typeof codexCliConfig);
                 setCodexCliStatus('success');
                 setTimeout(() => setCodexCliStatus('idle'), 3000);
             } else {
@@ -489,6 +500,7 @@ export const AIProvidersSettings: React.FC = () => {
         setCustomName(provider.name);
         setCustomCurl(provider.curlCommand);
         setCustomResponsePath(provider.responsePath || '');
+        setCustomVision(provider.multimodal === true ? 'on' : provider.multimodal === false ? 'off' : 'auto');
         setIsEditingCustom(true);
         setCurlError(null);
     };
@@ -498,6 +510,7 @@ export const AIProvidersSettings: React.FC = () => {
         setCustomName('');
         setCustomCurl('');
         setCustomResponsePath('');
+        setCustomVision('auto');
         setIsEditingCustom(true);
         setCurlError(null);
     };
@@ -519,7 +532,9 @@ export const AIProvidersSettings: React.FC = () => {
             id: editingProvider ? editingProvider.id : crypto.randomUUID(),
             name: customName,
             curlCommand: customCurl,
-            responsePath: customResponsePath
+            responsePath: customResponsePath,
+            // 'auto' → omit the flag so the backend auto-detects from the template.
+            ...(customVision === 'on' ? { multimodal: true } : customVision === 'off' ? { multimodal: false } : {}),
         };
 
         try {
@@ -821,6 +836,32 @@ export const AIProvidersSettings: React.FC = () => {
                         />
                     </div>
 
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <label className="space-y-1">
+                            <span className="text-[10px] font-medium text-text-secondary uppercase tracking-wide">Service Tier</span>
+                            <ModelSelect
+                                value={codexCliConfig.serviceTier ?? 'default'}
+                                options={CODEX_SERVICE_TIERS.map(t => ({ id: t, name: t.charAt(0).toUpperCase() + t.slice(1) }))}
+                                onChange={(serviceTier) => saveCodexCliConfig({ ...codexCliConfig, serviceTier: serviceTier as typeof CODEX_SERVICE_TIERS[number] })}
+                                placeholder="default"
+                            />
+                            <p className="text-[9px] text-text-tertiary">Use faster service tier if available. Codex Cloud only.</p>
+                        </label>
+                        <label className="space-y-1">
+                            <span className="text-[10px] font-medium text-text-secondary uppercase tracking-wide">Reasoning Effort</span>
+                            <ModelSelect
+                                value={codexCliConfig.modelReasoningEffort ?? ''}
+                                options={[
+                                    { id: '', name: 'None' },
+                                    ...CODEX_MODEL_REASONING_EFFORTS.map(e => ({ id: e, name: e.charAt(0).toUpperCase() + e.slice(1) })),
+                                ]}
+                                onChange={(effort) => saveCodexCliConfig({ ...codexCliConfig, modelReasoningEffort: effort || undefined })}
+                                placeholder="None"
+                            />
+                            <p className="text-[9px] text-text-tertiary">How much reasoning effort the model uses. Model-dependent.</p>
+                        </label>
+                    </div>
+
                     <div className="flex items-center justify-between gap-3">
                         <div className="min-h-5">
                             {codexCliStatus === 'success' && (
@@ -990,6 +1031,24 @@ export const AIProvidersSettings: React.FC = () => {
                                 />
                                 <p className="text-[10px] text-text-secondary mt-1">
                                     Dot notation path to the answer text in the JSON response. If empty, the full JSON is returned.
+                                </p>
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-medium text-text-primary uppercase tracking-wide mb-1">
+                                    Screenshot / Vision Support
+                                </label>
+                                <select
+                                    value={customVision}
+                                    onChange={(e) => setCustomVision(e.target.value as 'auto' | 'on' | 'off')}
+                                    className="w-full bg-bg-input border border-border-subtle rounded-lg px-4 py-2.5 text-xs text-text-primary focus:outline-none focus:border-accent-primary transition-colors"
+                                >
+                                    <option value="auto">Auto-detect (recommended)</option>
+                                    <option value="on">Always send screenshots</option>
+                                    <option value="off">Never send screenshots (text only)</option>
+                                </select>
+                                <p className="text-[10px] text-text-secondary mt-1">
+                                    Auto-detect enables vision when your cURL uses <code className="font-mono">{"{{IMAGE_BASE64}}"}</code> or an OpenAI-style <code className="font-mono">messages</code> body. Choose “Always” only if your endpoint accepts images another way; “Never” keeps this provider out of screenshot analysis.
                                 </p>
                             </div>
 

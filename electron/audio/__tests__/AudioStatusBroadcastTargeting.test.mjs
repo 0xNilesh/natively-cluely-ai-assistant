@@ -5,14 +5,26 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const mainPath = path.resolve(__dirname, '../../../electron/main.ts');
+const mainPath = path.resolve(__dirname, '../../main.ts');
 const mainSource = readFileSync(mainPath, 'utf8');
 
 function extractMethod(methodName) {
-  const methodRe = new RegExp(`(?:private|public)\\s+${methodName}\\s*\\([^)]*\\)[^{]*\\{`);
+  const methodRe = new RegExp(`(?:private|public)\\s+${methodName}\\b`);
   const match = methodRe.exec(mainSource);
   assert.ok(match, `could not locate ${methodName}`);
-  let i = match.index + match[0].length;
+  let openBrace = -1;
+  let parenDepth = 0;
+  for (let i = match.index; i < mainSource.length; i++) {
+    const ch = mainSource[i];
+    if (ch === '(') parenDepth++;
+    else if (ch === ')') parenDepth--;
+    else if (ch === '{' && parenDepth === 0) {
+      openBrace = i;
+      break;
+    }
+  }
+  assert.ok(openBrace >= 0, `could not locate opening brace for ${methodName}`);
+  let i = openBrace + 1;
   let depth = 1;
   const start = i;
   while (i < mainSource.length && depth > 0) {

@@ -453,11 +453,15 @@ export class NativelyProSTT extends EventEmitter {
             this.isConnecting = false;
             this.isConnected  = false;
             this.emit('error', err);
+            if (this.isDnsFailure && this.isActive) {
+                this.scheduleReconnect();
+            }
         }));
 
         ws.on('close', (code: number) => guard(() => {
             this.isConnecting = false;
             this.isConnected  = false;
+            if (this.ws === ws) this.ws = null;
             console.log(`[NativelyProSTT] Connection closed (code ${code})`);
 
             // Skip auto-reconnect if this close was intentional (e.g. language change)
@@ -473,7 +477,7 @@ export class NativelyProSTT extends EventEmitter {
     }
 
     private scheduleReconnect(): void {
-        if (!this.isActive) return;
+        if (!this.isActive || this.reconnectTimer) return;
         this._chunksSent = 0;  // Reset per-session counter so chunk #N logs reflect the new session
         // Connection dropped before stability window — cancel the backoff reset
         if (this.stabilityTimer) { clearTimeout(this.stabilityTimer); this.stabilityTimer = null; }

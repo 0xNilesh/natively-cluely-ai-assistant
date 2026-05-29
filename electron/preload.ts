@@ -449,6 +449,10 @@ interface ElectronAPI {
   startAudioTest: (deviceId?: string) => Promise<{ success: boolean }>;
   stopAudioTest: () => Promise<{ success: boolean }>;
   onAudioTestLevel: (callback: (level: number) => void) => () => void;
+  // UX4: parallel system-audio probe — system audio level + error events
+  // emitted during the same startAudioTest lifecycle.
+  onAudioTestSystemLevel: (callback: (level: number) => void) => () => void;
+  onAudioTestSystemError: (callback: (errorMessage: string) => void) => () => void;
 
   // Database
   flushDatabase: () => Promise<{ success: boolean }>;
@@ -523,6 +527,7 @@ interface ElectronAPI {
   restartAndInstall: () => Promise<void>;
   checkForUpdates: () => Promise<void>;
   downloadUpdate: () => Promise<void>;
+  getCanAutoUpdate: () => Promise<{ canAutoUpdate: boolean }>;
   testReleaseFetch: () => Promise<{ success: boolean; error?: string }>;
 
   // RAG (Retrieval-Augmented Generation) API
@@ -981,6 +986,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     };
   },
   openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
+  // UX2: in-app TCC repair. Returns { ok, bundleId, results, promptRelaunch, message }.
+  // Renderer should show the `message` and prompt the user to fully quit and reopen.
+  repairTccPermissions: () => ipcRenderer.invoke('repair-tcc-permissions'),
   setUndetectable: (state: boolean) => ipcRenderer.invoke('set-undetectable', state),
   getUndetectable: () => ipcRenderer.invoke('get-undetectable'),
   setOverlayMousePassthrough: (enabled: boolean) =>
@@ -1599,6 +1607,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.removeListener('audio-test-level', subscription);
     };
   },
+  // UX4: parallel system-audio probe level meter. Wired during the existing
+  // startAudioTest so users see both mic AND system audio levels in Settings
+  // before starting a meeting.
+  onAudioTestSystemLevel: (callback: (level: number) => void) => {
+    const subscription = (_: any, level: number) => callback(level);
+    ipcRenderer.on('audio-test-system-level', subscription);
+    return () => {
+      ipcRenderer.removeListener('audio-test-system-level', subscription);
+    };
+  },
+  onAudioTestSystemError: (callback: (errorMessage: string) => void) => {
+    const subscription = (_: any, errorMessage: string) => callback(errorMessage);
+    ipcRenderer.on('audio-test-system-error', subscription);
+    return () => {
+      ipcRenderer.removeListener('audio-test-system-error', subscription);
+    };
+  },
 
   // Database
   flushDatabase: () => ipcRenderer.invoke('flush-database'),
@@ -1717,6 +1742,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   restartAndInstall: () => ipcRenderer.invoke('quit-and-install-update'),
   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
   downloadUpdate: () => ipcRenderer.invoke('download-update'),
+  getCanAutoUpdate: () => ipcRenderer.invoke('get-can-auto-update'),
   testReleaseFetch: () => ipcRenderer.invoke('test-release-fetch'),
 
   // RAG API

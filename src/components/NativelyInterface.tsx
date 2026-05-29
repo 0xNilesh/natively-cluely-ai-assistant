@@ -54,10 +54,6 @@ import {
   prepareIntelligenceStreamPlaceholderMessages,
 } from '../lib/overlayMessagePersistence.mjs';
 import {
-  shouldShowRollingTranscriptBar,
-  shouldSuppressRollingTranscript,
-} from '../lib/overlaySttPersistence.mjs';
-import {
   resolveCgEventTapAvailable,
   shouldBlockFocus as shouldBlockStealthFocus,
   shouldFireStealthTapStart,
@@ -925,14 +921,26 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // the audio-capture-failed path fired, the user saw a macOS-only title
   // and the Open Settings button handed Windows shell a URI scheme it
   // couldn't resolve (Microsoft Store popup).
+  // UX3: `channel` lets the banner button deep-link to the right macOS
+  // System Settings pane (Microphone vs Screen Recording) instead of just
+  // opening Natively's internal Settings, which is one extra click and
+  // doesn't actually take the user to the system pane they need.
   type SystemAudioWarning = {
     kind: 'screen-recording-permission' | 'audio-capture-failure';
     message: string;
+    channel?: 'system' | 'mic';
   };
   const [systemAudioWarning, setSystemAudioWarning] = useState<SystemAudioWarning | null>(null);
+  // UX2: in-flight guard for the "Repair Permissions" button so a double-click
+  // can't fire two concurrent tccutil sequences (whose second-arriving response
+  // would clobber the first's banner mid-render).
+  const [tccRepairing, setTccRepairing] = useState(false);
   useEffect(() => {
     const unsub = window.electronAPI?.onSystemAudioPermissionDenied?.((message: string) => {
-      setSystemAudioWarning({ kind: 'screen-recording-permission', message });
+      // screen-recording-permission is implicitly system-channel (it's the
+      // Screen Recording TCC pane). Set channel for consistency so the
+      // button-resolution logic has a single source of truth.
+      setSystemAudioWarning({ kind: 'screen-recording-permission', message, channel: 'system' });
       setIsExpanded(true); // Force overlay open so user sees the warning
     });
     return () => unsub?.();
@@ -953,7 +961,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       // recovery attempts shouldn't spam the banner since recovery
       // typically succeeds within ~1.5s.
       if (payload.terminal || payload.stuck) {
-        setSystemAudioWarning({ kind: 'audio-capture-failure', message: payload.message });
+        setSystemAudioWarning({
+          kind: 'audio-capture-failure',
+          message: payload.message,
+          channel: payload.channel,
+        });
         setIsExpanded(true);
       }
     });
@@ -4005,17 +4017,32 @@ Provide only the answer, nothing else.`;
   );
   const showAnswerPanel =
     messages.length > 0 || isManualRecording || isProcessing || answerPanelPinned;
-  // Hide rolling transcript only during active LLM processing — chat history and
-  // pinned answers must not suppress STT; partials keep updating rollingTranscript state.
-  const suppressRollingTranscript = shouldSuppressRollingTranscript({ isProcessing });
-  const showRollingTranscriptBar = shouldShowRollingTranscriptBar({
-    suppressRollingTranscript,
-    showTranscript,
-    rollingTranscript,
-    interviewerSttStatus: interviewerSttIndicatorStatus,
-    userSttStatus: sttUserStatus,
-  });
-  const shouldShowSttSummaryPill = sttSummary.tone !== 'ok';
+  // Only surface the STT pill for genuine problems (config error, failed, or a
+  // dropped-then-reconnecting channel). The neutral 'awaiting-audio' state
+  // ("Listening for audio…") is intentionally suppressed — it added a pill on
+  // every launch and made the top section look padded vs. the prior build.
+  // When an audio-capture-failure banner is showing, it already conveys the
+  // hard failure with actionable UI (repair button + system-settings deep
+  // link). Surfacing the STT "needs attention" error pill at the same time is
+  // the same status on two surfaces — let the richer banner own the error and
+  // suppress the redundant error-tone pill. Reconnecting indication still shows
+  // (the banner only fires on terminal/stuck, not transient reconnects).
+  const audioFailureBannerActive = systemAudioWarning?.kind === 'audio-capture-failure';
+  const shouldShowSttSummaryPill =
+    (sttSummary.tone === 'error' && !audioFailureBannerActive) ||
+    sttUserStatus === 'reconnecting' ||
+    sttInterviewerStatus === 'reconnecting';
+  // Whether the vision chip will render (mirrors the IIFE's early-return guard).
+  const visionPillFailed = screenContextStatus === 'failed' || !!latestVisionFailureReason;
+  const visionPillSucceeded =
+    (latestUsedImageInput || screenContextStatus === 'available') && !visionPillFailed;
+  const showVisionPill =
+    attachedContext.length > 0 || visionPillFailed || visionPillSucceeded;
+  // Gate the whole status-pill row on having at least one pill. Otherwise the
+  // empty row still reserved pt-3+pb-1, leaving a visible gap above the rolling
+  // transcript on launch (no mode yet, STT pill suppressed, no vision/llm).
+  const hasStatusPill =
+    !!activeModeLabel || shouldShowSttSummaryPill || showVisionPill || !!llmPrivacyLabel;
   const statusPillBaseClass = `flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-medium shadow-sm backdrop-blur-xl ${isLightTheme ? 'bg-white/55 border-black/10' : 'bg-black/20 border-white/10'}`;
 
   const copyDiagnostics = async () => {
@@ -4095,6 +4122,7 @@ Provide only the answer, nothing else.`;
             >
               {isGlassTheme && <GlassEffectLayer parentRef={shellRef} cornerRadius={24} />}
 
+              {hasStatusPill && (
               <div className="relative no-drag flex flex-wrap items-center justify-center gap-1.5 px-4 pt-3 pb-1">
                 {activeModeLabel && (
                   <div
@@ -4192,6 +4220,7 @@ Provide only the answer, nothing else.`;
                   </div>
                 )}
               </div>
+              )}
 
               {/* System Audio / Screen Recording Warning Banner */}
               {systemAudioWarning && (
@@ -4224,34 +4253,99 @@ Provide only the answer, nothing else.`;
                     </p>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
-                    {systemAudioWarning.kind === 'screen-recording-permission' ? (
-                      <button
-                        // Defense-in-depth: kind === 'screen-recording-permission'
-                        // is only ever set from a darwin-gated broadcast site
-                        // in main.ts (and the IPC allowlist rejects x-apple
-                        // URLs on non-darwin), but we still guard at call time
-                        // so a future regression in the broadcast layer can't
-                        // produce a no-op or worse on Windows.
-                        onClick={() => {
-                          if (isMac)
-                            window.electronAPI.openExternal(
-                              'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
-                            );
-                        }}
-                        className="px-3 py-1.5 rounded-lg bg-yellow-500/15 hover:bg-yellow-500/25 text-yellow-700 dark:text-yellow-500 text-[11px] font-semibold transition-all active:scale-95 border border-yellow-500/20 shadow-sm"
-                      >
-                        Open Settings
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => {
-                          window.electronAPI?.toggleSettingsWindow?.();
-                        }}
-                        className="px-3 py-1.5 rounded-lg bg-yellow-500/15 hover:bg-yellow-500/25 text-yellow-700 dark:text-yellow-500 text-[11px] font-semibold transition-all active:scale-95 border border-yellow-500/20 shadow-sm"
-                      >
-                        Open Settings
-                      </button>
-                    )}
+                    {/*
+                      UX3: deep-link to the correct macOS System Settings pane
+                      based on the failure channel. Pre-fix the mic-zero-fill /
+                      mic-denied path opened Natively's internal Settings,
+                      which then required the user to read the message, alt-tab
+                      to System Settings, navigate to Privacy & Security, find
+                      Microphone, and toggle Natively. Now one click takes them
+                      directly to the right pane. Falls back to internal
+                      Settings on Windows or when channel is unknown.
+                    */}
+                    {(() => {
+                      const wantsScreenCapturePane =
+                        systemAudioWarning.kind === 'screen-recording-permission' ||
+                        systemAudioWarning.channel === 'system';
+                      const wantsMicrophonePane =
+                        systemAudioWarning.kind === 'audio-capture-failure' &&
+                        systemAudioWarning.channel === 'mic';
+                      const deepLinkUrl = !isMac
+                        ? null
+                        : wantsScreenCapturePane
+                        ? 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'
+                        : wantsMicrophonePane
+                        ? 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone'
+                        : null;
+                      return (
+                        <>
+                          <button
+                            onClick={() => {
+                              if (deepLinkUrl) {
+                                window.electronAPI.openExternal(deepLinkUrl);
+                              } else {
+                                // Windows / unknown channel: fall back to internal Settings.
+                                window.electronAPI?.toggleSettingsWindow?.();
+                              }
+                            }}
+                            className="px-3 py-1.5 rounded-lg bg-yellow-500/15 hover:bg-yellow-500/25 text-yellow-700 dark:text-yellow-500 text-[11px] font-semibold transition-all active:scale-95 border border-yellow-500/20 shadow-sm"
+                            title={
+                              deepLinkUrl
+                                ? wantsMicrophonePane
+                                  ? 'Open macOS Microphone privacy settings'
+                                  : 'Open macOS Screen Recording privacy settings'
+                                : 'Open Natively Settings'
+                            }
+                          >
+                            {deepLinkUrl
+                              ? wantsMicrophonePane
+                                ? 'Open Mic Settings'
+                                : 'Open Screen Settings'
+                              : 'Open Settings'}
+                          </button>
+                          {/*
+                            UX2: in-app TCC repair button. macOS only.
+                            Shows when the banner is from a TCC-related failure
+                            (any audio-capture-failure path or screen-recording
+                            permission denial). The dominant root cause of
+                            "permissions granted but no transcription" is TCC
+                            cdhash drift across rebuilds; this button gives the
+                            user a one-click recovery without having to know
+                            about tccutil or terminal commands. After reset
+                            the user must fully quit (Cmd+Q) and reopen.
+                          */}
+                          {isMac && (
+                            <button
+                              onClick={async () => {
+                                if (tccRepairing) return; // in-flight guard
+                                setTccRepairing(true);
+                                try {
+                                  const result = await window.electronAPI?.repairTccPermissions?.();
+                                  if (result) {
+                                    // Show the returned message via the existing
+                                    // banner; user can dismiss when ready.
+                                    setSystemAudioWarning({
+                                      kind: 'audio-capture-failure',
+                                      message: result.message,
+                                      channel: systemAudioWarning.channel,
+                                    });
+                                  }
+                                } catch (err) {
+                                  console.warn('[UI] repair-tcc-permissions failed:', err);
+                                } finally {
+                                  setTccRepairing(false);
+                                }
+                              }}
+                              disabled={tccRepairing}
+                              className="px-3 py-1.5 rounded-lg bg-yellow-500/10 hover:bg-yellow-500/20 text-yellow-700 dark:text-yellow-500 text-[11px] font-medium transition-all active:scale-95 border border-yellow-500/15 disabled:opacity-60 disabled:cursor-not-allowed"
+                              title="Reset macOS permission entries for Natively (you will need to grant them again after relaunch)"
+                            >
+                              {tccRepairing ? 'Resetting…' : 'Repair Permissions'}
+                            </button>
+                          )}
+                        </>
+                      );
+                    })()}
                     <button
                       onClick={() => setSystemAudioWarning(null)}
                       className="p-1.5 rounded-full hover:bg-black/5 dark:hover:bg-white/10 text-yellow-600/50 hover:text-yellow-700 dark:text-yellow-500/50 dark:hover:text-yellow-400 transition-colors absolute top-1 right-1 opacity-0 group-hover/warning:opacity-100"
@@ -4319,10 +4413,13 @@ Provide only the answer, nothing else.`;
                 }}
               />
 
-              {/* Rolling Transcript Bar — includes STT status indicator inline */}
+              {/* Rolling Transcript Bar — live transcript + on-demand diagnostics
+                  for hard failures. Reconnecting/awaiting-audio status is owned by
+                  the top status pill, so the bar no longer mounts for those (which
+                  also avoids an empty bar / duplicated status text). */}
               {(showTranscript && rollingTranscript) ||
-              interviewerSttIndicatorStatus !== 'connected' ||
-              sttUserStatus !== 'connected' ? (
+              interviewerSttIndicatorStatus === 'failed' ||
+              sttUserStatus === 'failed' ? (
                 <RollingTranscript
                   text={showTranscript ? rollingTranscript : ''}
                   isActive={isInterviewerSpeaking}

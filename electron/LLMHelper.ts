@@ -22,6 +22,19 @@ import {
 } from "./llm/tinyPrompts"
 import { getModelCapabilities, selectPromptTier, estimateTokens, truncateTranscriptToFit, type PromptTier, type ModelCapabilities } from "./llm/modelCapabilities"
 import { GeminiPromptCache } from "./llm/GeminiPromptCache"
+import {
+  runStreamingVisionFallback,
+  orderVisionByHealth,
+  DEFAULT_VISION_FALLBACK_CONFIG,
+  type VisionStreamProvider,
+  type VisionHealthEntry,
+} from "./llm/visionStreamFallback"
+import {
+  ollamaVisionFromShow,
+  resolveOllamaVision,
+  customProviderSupportsVision,
+  customProviderIsLocal,
+} from "./llm/visionCapability"
 import { assertProviderDataScopes, getDeniedDataScopes, routeWithScopeFallback, ProviderRouter, type ProviderDataScope, type ProviderDataScopePolicy } from "./llm/ProviderRouter"
 import type { TranscriptTurn } from "./llm/transcriptCleaner"
 import { deepVariableReplacer, getByPath, injectImageIntoMessages } from './utils/curlUtils';
@@ -71,6 +84,15 @@ export class LLMHelper {
   private useOllama: boolean = false
   private ollamaModel: string = ""
   private ollamaUrl: string = "http://127.0.0.1:11434"
+  // Best vision-capable Ollama model found among installed models (authoritative
+  // via /api/show capabilities, name-heuristic fallback). null = none found yet
+  // or not probed. Used so a screenshot uses a vision model even when the
+  // user's primary/auto-selected Ollama model is text-only.
+  private ollamaVisionModel: string | null = null;
+  // Cache: model id → vision support (avoids re-probing /api/show every request).
+  private ollamaVisionCache: Map<string, boolean> = new Map();
+  // Dedupe concurrent refreshOllamaVisionModel() calls (init + switch + lazy).
+  private ollamaVisionRefreshInFlight: Promise<string | null> | null = null;
   private ollamaStartedByApp: boolean = false;
   private geminiModel: string = GEMINI_FLASH_MODEL
   private customProvider: CustomProvider | null = null;
@@ -96,6 +118,16 @@ export class LLMHelper {
 
   // Self-improving model version manager for vision analysis
   private modelVersionManager: ModelVersionManager;
+
+  // ─── Streaming vision fallback: per-provider health + latency tracking ───
+  // Powers the unified multimodal fallback chain (streamVisionWithFallback).
+  // Circuit-breaker semantics (values sourced from LiteLLM/Opossum/OpenRouter
+  // production defaults — see streamVisionWithFallback for citations):
+  //   - transient failures (429/5xx/timeout/network): OPEN for VISION_TRANSIENT_COOLDOWN_MS
+  //   - hard failures (401/403/quota/invalid key): OPEN for VISION_AUTH_COOLDOWN_MS
+  //   - ttftEma: exponentially-weighted moving avg of time-to-first-token (alpha 0.2),
+  //     used to reorder healthy providers fastest-first.
+  private visionHealth: Map<string, VisionHealthEntry> = new Map();
 
   // Process-local cache of Gemini explicit context caches (caches.create).
   // Lifecycle and contract documented in GeminiPromptCache.ts.
@@ -215,6 +247,13 @@ export class LLMHelper {
       apiKey: apiKey,
       httpOptions: { apiVersion: "v1alpha" }
     })
+    // Cache resource names are scoped to the old key's project — drop them so
+    // we don't reuse a stale/expired-key cache (the root cause behind the
+    // "API key expired" cache.create failures). Also clear the vision circuit
+    // breaker for Gemini so a freshly-entered key is retried immediately.
+    this.geminiPromptCache.clear();
+    this.visionHealth.delete('gemini_flash');
+    this.visionHealth.delete('gemini_pro');
     console.log("[LLMHelper] Gemini API Key updated.");
   }
 
@@ -230,18 +269,21 @@ export class LLMHelper {
   public setGroqApiKey(apiKey: string) {
     this.groqClient = new Groq({ apiKey });
     this._groqLocalDisabled = false;
+    this.visionHealth.delete('groq'); // fresh key → retry immediately, skip auth cooldown
     console.log("[LLMHelper] Groq API Key updated.");
   }
 
   public setOpenaiApiKey(apiKey: string) {
     this.openaiApiKey = apiKey;
     this.openaiClient = new OpenAI({ apiKey });
+    this.visionHealth.delete('openai'); // fresh key → retry immediately, skip auth cooldown
     console.log("[LLMHelper] OpenAI API Key updated.");
   }
 
   public setClaudeApiKey(apiKey: string) {
     this.claudeApiKey = apiKey;
     this.claudeClient = new Anthropic({ apiKey });
+    this.visionHealth.delete('claude'); // fresh key → retry immediately, skip auth cooldown
     console.log("[LLMHelper] Claude API Key updated.");
   }
 
@@ -549,6 +591,8 @@ export class LLMHelper {
       timeoutMs: this.codexCliConfig.timeoutMs,
       imagePaths,
       sandboxMode: this.codexCliConfig.sandboxMode,
+      serviceTier: this.codexCliConfig.serviceTier,
+      modelReasoningEffort: this.codexCliConfig.modelReasoningEffort,
       signal,
     });
   }
@@ -562,6 +606,8 @@ export class LLMHelper {
       timeoutMs: this.codexCliConfig.timeoutMs,
       imagePaths,
       sandboxMode: this.codexCliConfig.sandboxMode,
+      serviceTier: this.codexCliConfig.serviceTier,
+      modelReasoningEffort: this.codexCliConfig.modelReasoningEffort,
       signal,
     });
   }
@@ -730,6 +776,10 @@ export class LLMHelper {
         throw new Error(`/api/show failed: ${showResp.status}`);
       }
       console.log(`[LLMHelper] Ollama model ready: ${this.ollamaModel}`);
+      // Resolve the best vision-capable installed model (may differ from the
+      // primary text model) so screenshots can be answered locally. Fire-and-
+      // forget — never block init on it.
+      this.refreshOllamaVisionModel().catch(() => { });
     } catch (error: any) {
       console.error(`[LLMHelper] Failed to initialize Ollama model: ${error?.message}`);
       try {
@@ -2554,13 +2604,37 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     };
 
     // ──────────────────────────────────────────────────────────────────
-    // Build 3-tier retry rotation from ModelVersionManager
+    // Build 3-tier retry rotation from ModelVersionManager.
+    // PRIORITY ORDER: OpenAI (fastest) → Claude → Gemini Flash → Gemini Pro →
+    //                 Groq Scout → remaining providers.
+    // Each provider gets MAX_RETRIES_PER_PROVIDER attempts before moving on.
+    // Providers are re-ordered dynamically when a provider is unavailable.
     // ──────────────────────────────────────────────────────────────────
+    const MAX_RETRIES_PER_PROVIDER = 3;
+
     const allTiers = this.modelVersionManager.getAllVisionTiers();
+
+    // Sort tiers to enforce priority: OpenAI → Claude → Gemini Flash → Gemini Pro → Groq → others
+    const VISION_PRIORITY: ModelFamily[] = [
+      ModelFamily.OPENAI,
+      ModelFamily.CLAUDE,
+      ModelFamily.GEMINI_FLASH,
+      ModelFamily.GEMINI_PRO,
+      ModelFamily.GROQ_LLAMA,
+    ];
+
+    const sortedAllTiers = [...allTiers].sort((a, b) => {
+      const aIdx = VISION_PRIORITY.indexOf(a.family);
+      const bIdx = VISION_PRIORITY.indexOf(b.family);
+      if (aIdx === -1 && bIdx === -1) return 0;
+      if (aIdx === -1) return 1;
+      if (bIdx === -1) return -1;
+      return aIdx - bIdx;
+    });
 
     const buildTierProviders = (tierKey: 'tier1' | 'tier2' | 'tier3'): ProviderAttempt[] => {
       const result: ProviderAttempt[] = [];
-      for (const entry of allTiers) {
+      for (const entry of sortedAllTiers) {
         const modelId = entry[tierKey];
         const attempt = buildProviderForFamily(entry.family, modelId);
         if (attempt) result.push(attempt);
@@ -2641,44 +2715,90 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // Execute 3-tier rotation with exponential backoff between tiers
+    // Execute with per-provider retry logic and dynamic reordering.
+    // Priority order: OpenAI → Claude → Gemini Flash → Gemini Pro → Groq.
+    // Each provider gets MAX_RETRIES_PER_PROVIDER attempts before moving on.
+    // If a provider fails (network/rate-limit/auth), dynamically bump next
+    // provider to front of remaining queue (speed-based reordering).
     // ──────────────────────────────────────────────────────────────────
-    const tiers = [
-      { label: 'Tier 1 (Stable)', providers: tier1Providers },
-      { label: 'Tier 2 (Latest)', providers: tier2Providers },
-      { label: 'Tier 3 (Retry)', providers: tier3Providers },
+    const allProviders: ProviderAttempt[] = [
+      ...tier1Providers,
+      ...tier2Providers,
+      ...tier3Providers, // Same as tier2 — pure retry
     ];
 
-    for (let tierIndex = 0; tierIndex < tiers.length; tierIndex++) {
-      const tier = tiers[tierIndex];
+    if (allProviders.length === 0 && localProviders.length === 0) {
+      throw new Error("All AI providers failed: no vision-capable providers configured.");
+    }
 
-      if (tier.providers.length === 0) continue;
+    // Filtered view of remaining providers (mutated as we cycle)
+    let remaining = [...allProviders];
 
-      // Exponential backoff between tiers (skip for first tier)
-      if (tierIndex > 0) {
-        const backoffMs = 1000 * Math.pow(2, tierIndex - 1);
-        console.log(`[LLMHelper] 🔄 Escalating to ${tier.label} after ${backoffMs}ms backoff...`);
-        await new Promise(resolve => setTimeout(resolve, backoffMs));
-      }
+    // Track which providers we've exhausted (per rotation)
+    const exhausted = new Set<string>();
+    let rotation = 0;
+    const MAX_ROTATIONS = 3;
 
-      for (const provider of tier.providers) {
+    while (remaining.length > 0 && rotation < MAX_ROTATIONS) {
+      const provider = remaining[0];
+      const providerName = provider.name;
+
+      for (let attempt = 1; attempt <= MAX_RETRIES_PER_PROVIDER; attempt++) {
         try {
-          const emoji = tierIndex === 0 ? '🚀' : tierIndex === 1 ? '🔁' : '🆘';
-          console.log(`[LLMHelper] ${emoji} [${tier.label}] Attempting ${provider.name}...`);
+          console.log(`[LLMHelper] ${attempt === 1 ? '🚀' : attempt === 2 ? '🔁' : '🆘'} [${providerName}] attempt ${attempt}/${MAX_RETRIES_PER_PROVIDER}...`);
           const result = await provider.execute();
           if (result && result.trim().length > 0) {
-            console.log(`[LLMHelper] ✅ [${tier.label}] ${provider.name} succeeded.`);
+            console.log(`[LLMHelper] ✅ [${providerName}] succeeded on attempt ${attempt}.`);
             return result;
           }
-          console.warn(`[LLMHelper] ⚠️ [${tier.label}] ${provider.name} returned empty response`);
+          console.warn(`[LLMHelper] ⚠️ [${providerName}] returned empty response (attempt ${attempt})`);
         } catch (err: any) {
-          console.warn(`[LLMHelper] ⚠️ [${tier.label}] ${provider.name} failed: ${err.message}`);
+          console.warn(`[LLMHelper] ⚠️ [${providerName}] attempt ${attempt} failed: ${err.message}`);
 
           // Event-driven discovery: trigger on 404 / model-not-found errors
           const errMsg = (err.message || '').toLowerCase();
           if (errMsg.includes('404') || errMsg.includes('not found') || errMsg.includes('deprecated')) {
-            this.modelVersionManager.onModelError(provider.name).catch(() => { });
+            this.modelVersionManager.onModelError(providerName).catch(() => { });
           }
+
+          // Classify error — auth errors should not retry the same provider
+          if (errMsg.includes('401') || errMsg.includes('403') || errMsg.includes('unauthorized') ||
+              errMsg.includes('api key') || errMsg.includes('invalid_api') || errMsg.includes('quota')) {
+            console.warn(`[LLMHelper] Non-retryable error for ${providerName} — removing from chain`);
+            exhausted.add(providerName);
+            break; // stop retrying this provider
+          }
+        }
+
+        // Brief pause between retries for the same provider
+        if (attempt < MAX_RETRIES_PER_PROVIDER) {
+          const backoffMs = 500 * attempt;
+          await new Promise(resolve => setTimeout(resolve, backoffMs));
+        }
+      }
+
+      // Provider exhausted all retries (or was skipped) — remove and try next
+      remaining.shift();
+
+      // Dynamic reordering: if this provider failed due to availability (not empty output),
+      // boost the NEXT faster provider in the priority list to front
+      if (exhausted.has(providerName) && remaining.length > 1) {
+        const nextIdx = remaining.findIndex(p => !exhausted.has(p.name));
+        if (nextIdx > 0) {
+          const [bumped] = remaining.splice(nextIdx, 1);
+          remaining.unshift(bumped);
+          console.log(`[LLMHelper] 🔀 Dynamic reorder: moved "${bumped.name}" to front of queue`);
+        }
+      }
+
+      // When all cloud providers exhausted in this rotation, reset and try again
+      if (remaining.length === 0 && rotation < MAX_ROTATIONS - 1) {
+        rotation++;
+        remaining = [...allProviders].filter(p => !exhausted.has(p.name));
+        if (remaining.length > 0) {
+          const backoffMs = 1000 * Math.pow(2, rotation);
+          console.log(`[LLMHelper] 🔄 Rotation ${rotation + 1}/${MAX_ROTATIONS} — retrying remaining after ${backoffMs}ms...`);
+          await new Promise(resolve => setTimeout(resolve, backoffMs));
         }
       }
     }
@@ -2935,6 +3055,140 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     yield "All AI services are currently unavailable. Please check your API keys and try again.";
   }
 
+  // ════════════════════════════════════════════════════════════════════════
+  // UNIFIED STREAMING VISION FALLBACK
+  // ════════════════════════════════════════════════════════════════════════
+  //
+  // The single multimodal (screenshot + text) entry point for streaming. Every
+  // image-bearing streamChat request routes here so we get ONE robust, telemetry-
+  // rich fallback chain instead of the old ad-hoc per-model routing that died
+  // when the selected model (e.g. `natively`) timed out and only Gemini remained.
+  //
+  // Design — the "commit point" / first-token-buffering pattern used by LiteLLM,
+  // OpenRouter, and the Vercel AI SDK for streaming fallback:
+  //   1. Open a provider's stream but DO NOT forward any chunk yet.
+  //   2. Race the first token against a time-to-first-token (TTFT) timeout.
+  //      • If the provider errors / times out BEFORE chunk #1 → the caller has
+  //        seen nothing, so we silently abort and try the next provider/attempt.
+  //   3. On the first real content chunk we COMMIT: flush it and stream the rest
+  //      straight through. A failure AFTER commit cannot switch providers (that
+  //      would duplicate output) — we end the stream gracefully.
+  //
+  // Priority order (user-specified): OpenAI → Claude → Gemini Flash → Gemini Pro
+  //   → Groq Scout → Natively → (local) Custom → Ollama. Healthy providers are
+  //   then re-ordered fastest-first by measured TTFT EWMA ("rearrange the queue
+  //   in the speed"). Explicitly-selected local providers (Ollama / Custom) are
+  //   honored first; local-only mode uses local providers exclusively.
+  //
+  // Per provider: up to VISION_MAX_ATTEMPTS attempts (model tier1→tier2→tier3 on
+  //   cloud families, so a deprecated/404 model self-heals). Exponential backoff
+  //   with full jitter between retries. Auth/quota → open the breaker long; the
+  //   provider is skipped for the rest of the cooldown window.
+  //
+  // Config sourced from production gateways (LiteLLM reliability docs, Opossum,
+  // OpenRouter latency guide, Vercel AI SDK settings). The orchestration state
+  // machine lives in ./llm/visionStreamFallback so it can be unit-tested with
+  // deterministic fake providers; this method only builds the concrete chain.
+  private async *streamVisionWithFallback(
+    req: { userContent: string; message: string; context?: string; imagePaths: string[]; systemPrompt: string },
+    abortSignal?: AbortSignal,
+  ): AsyncGenerator<string, void, unknown> {
+    const { userContent, message, context, imagePaths, systemPrompt } = req;
+
+    // ── Resolve per-family model tiers (tier1→tier2→tier3 across attempts) ──
+    const tiers = this.modelVersionManager.getAllVisionTiers();
+    const tierModel = (family: ModelFamily, attempt: number): string | undefined => {
+      const entry = tiers.find(t => t.family === family);
+      if (!entry) return undefined;
+      return attempt <= 1 ? entry.tier1 : attempt === 2 ? entry.tier2 : entry.tier3;
+    };
+
+    // ── Build the candidate provider list ──────────────────────────────────
+    const cloud: VisionStreamProvider[] = [];
+    const localOnly = this.isLocalOnlyMode;
+    let prio = 0;
+
+    if (!localOnly) {
+      if (this.openaiClient) {
+        cloud.push({ id: 'openai', name: 'OpenAI', isLocal: false, priority: prio++,
+          open: (sig, att) => this.streamWithOpenaiMultimodal(userContent, imagePaths, systemPrompt, tierModel(ModelFamily.OPENAI, att), sig) });
+      }
+      if (this.claudeClient) {
+        cloud.push({ id: 'claude', name: 'Claude', isLocal: false, priority: prio++,
+          open: (sig, att) => this.streamWithClaudeMultimodal(userContent, imagePaths, systemPrompt, tierModel(ModelFamily.CLAUDE, att), sig) });
+      }
+      if (this.client) {
+        cloud.push({ id: 'gemini_flash', name: 'Gemini Flash', isLocal: false, priority: prio++,
+          open: (sig, att) => this.streamWithGeminiModel(userContent, tierModel(ModelFamily.GEMINI_FLASH, att) || GEMINI_FLASH_MODEL, imagePaths, systemPrompt, sig) });
+        cloud.push({ id: 'gemini_pro', name: 'Gemini Pro', isLocal: false, priority: prio++,
+          open: (sig, att) => this.streamWithGeminiModel(userContent, tierModel(ModelFamily.GEMINI_PRO, att) || GEMINI_PRO_MODEL, imagePaths, systemPrompt, sig) });
+      }
+      if (this.groqClient) {
+        cloud.push({ id: 'groq', name: 'Groq Llama-4 Scout', isLocal: false, priority: prio++,
+          open: (sig) => this.streamWithGroqMultimodal(userContent, imagePaths, systemPrompt, sig) });
+      }
+      if (this.hasNatively()) {
+        cloud.push({ id: 'natively', name: 'Natively API', isLocal: false, priority: prio++,
+          open: (sig) => this.streamWithNatively(userContent, systemPrompt, imagePaths, sig) });
+      }
+    }
+
+    // Local providers (always available, including in local-only mode).
+    const local: VisionStreamProvider[] = [];
+    // Custom provider: only include for vision when it can actually carry an
+    // image (explicit multimodal flag, an {{IMAGE_BASE64}} placeholder, or an
+    // OpenAI-compatible messages body). Otherwise it would "succeed" while
+    // silently dropping the screenshot — worse than skipping it.
+    if (this.customProvider && customProviderSupportsVision(this.customProvider)) {
+      // Derive local-ness from an explicit flag or a loopback/private cURL host,
+      // so a local custom vision endpoint still works in local-only mode.
+      const customIsLocal = customProviderIsLocal(this.customProvider);
+      if (!localOnly || customIsLocal) {
+        local.push({ id: 'custom', name: `Custom (${this.customProvider.name})`, isLocal: customIsLocal, priority: 100,
+          open: (sig) => this.streamWithCustom(message, context, imagePaths, systemPrompt, sig) });
+      }
+    }
+    // Ollama: use the resolved vision-capable model (which may differ from the
+    // primary text model). Synchronously trust the cached resolution; kick off
+    // a refresh for next time if we haven't probed yet.
+    const ollamaVisionModel = this.useOllama ? this.ollamaVisionModel : null;
+    if (this.useOllama && !ollamaVisionModel) {
+      this.refreshOllamaVisionModel().catch(() => { }); // populate for the next request
+    }
+    if (ollamaVisionModel) {
+      local.push({ id: 'ollama', name: `Ollama (${ollamaVisionModel})`, isLocal: true, priority: 101,
+        open: (sig) => this.streamWithOllama(message, context, systemPrompt, imagePaths, sig, ollamaVisionModel) });
+    }
+
+    // ── Assemble the ordered chain ─────────────────────────────────────────
+    // Honor an explicit local selection first, then health/speed-sorted cloud,
+    // then any remaining local providers as a final fallback.
+    const nowMs = Date.now();
+    let ordered: VisionStreamProvider[];
+    if (localOnly) {
+      ordered = orderVisionByHealth(local, this.visionHealth, nowMs);
+    } else {
+      const front: VisionStreamProvider[] = [];
+      if (this.useOllama) { const o = local.find(p => p.id === 'ollama'); if (o) front.push(o); }
+      if (this.customProvider) { const c = local.find(p => p.id === 'custom'); if (c) front.push(c); }
+      const backLocal = local.filter(p => !front.includes(p));
+      ordered = [...front, ...orderVisionByHealth(cloud, this.visionHealth, nowMs), ...backLocal];
+    }
+
+    if (ordered.length === 0) {
+      throw new Error('No vision-capable provider configured. Add an API key (OpenAI, Claude, Gemini, or Groq) or enable a vision-capable Ollama model in Settings.');
+    }
+
+    // Delegate the first-token-commit + retry + circuit-breaker state machine.
+    yield* runStreamingVisionFallback(
+      ordered,
+      DEFAULT_VISION_FALLBACK_CONFIG,
+      this.visionHealth,
+      { log: (m) => console.log(m), warn: (m) => console.warn(m) },
+      abortSignal,
+    );
+  }
+
   /**
    * Universal Stream Chat - Routes to correct provider based on currentModelId
    */
@@ -3118,6 +3372,34 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     const userContent = cloudCombinedContext
       ? `CONTEXT:\n${cloudCombinedContext}\n\nUSER QUESTION:\n${message}`
       : message;
+
+    // ── UNIFIED MULTIMODAL PATH ────────────────────────────────────────────
+    // Every image-bearing request goes through the single streaming vision
+    // fallback chain (OpenAI → Claude → Gemini → Groq → Natively → local) with
+    // first-token commit, per-provider retries, circuit breaking, and speed
+    // reordering. This replaces the old per-model multimodal branches below,
+    // which would dead-end when the selected model (e.g. `natively`) failed and
+    // only Gemini remained. The text-only routing below is unchanged.
+    if (isMultimodal && imagePaths && imagePaths.length > 0) {
+      let visionYielded = false;
+      try {
+        for await (const chunk of this.streamVisionWithFallback(
+          { userContent, message, context, imagePaths, systemPrompt: finalSystemPrompt },
+          abortSignal,
+        )) {
+          visionYielded = true;
+          yield chunk;
+        }
+      } catch (visionErr: any) {
+        // Only surface a graceful message if NOTHING was streamed — once the
+        // chain commits to a provider it yields tokens and won't throw here.
+        console.error('[LLMHelper] Vision fallback chain exhausted:', visionErr?.message || visionErr);
+        if (!visionYielded && !abortSignal?.aborted) {
+          yield "I couldn't read the screen just now — all vision models are unavailable. Check your API keys (OpenAI, Claude, Gemini, or Groq) in Settings, or try again in a moment.";
+        }
+      }
+      return;
+    }
 
     // GROQ FAST TEXT OVERRIDE (Text-Only)
     // Two paths: local Groq key → call Groq directly; Natively API only → send fast_mode:true
@@ -4035,14 +4317,18 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   }
 
   // --- OLLAMA STREAMING (uses /api/chat with proper messages array) ---
-  private async * streamWithOllama(message: string, context?: string, systemPrompt: string = TINY_SYSTEM_PROMPT, imagePaths?: string[], abortSignal?: AbortSignal): AsyncGenerator<string, void, unknown> {
+  private async * streamWithOllama(message: string, context?: string, systemPrompt: string = TINY_SYSTEM_PROMPT, imagePaths?: string[], abortSignal?: AbortSignal, modelOverride?: string): AsyncGenerator<string, void, unknown> {
+    // When a screenshot is attached and the primary model is text-only, the
+    // caller passes the resolved vision-capable model here so the image is
+    // actually understood instead of silently dropped.
+    const ollamaModel = modelOverride || this.ollamaModel;
     let userContent = context ? `CONTEXT:\n${context}\n\nUSER:\n${message}` : message;
     // Per-request hard guard: trim userContent (never systemPrompt) until total fits the model's max ctx.
     {
-      const maxCtx = getModelCapabilities(this.ollamaModel, true).maxContextTokens;
+      const maxCtx = getModelCapabilities(ollamaModel, true).maxContextTokens;
       const total = estimateTokens(systemPrompt) + estimateTokens(userContent) + 2000;
       if (total > maxCtx) {
-        console.warn('[Ollama] context overflow', { model: this.ollamaModel, total, max: maxCtx });
+        console.warn('[Ollama] context overflow', { model: ollamaModel, total, max: maxCtx });
         const lines = userContent.split('\n');
         while (lines.length > 1 && (estimateTokens(systemPrompt) + estimateTokens(lines.join('\n')) + 2000) > maxCtx) {
           lines.shift();
@@ -4073,22 +4359,22 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       userMessage,
     ];
 
-    console.log(`[LLMHelper] Ollama stream → model=${this.ollamaModel} sysLen=${systemPrompt.length} userLen=${userContent.length} images=${images?.length ?? 0}`);
+    console.log(`[LLMHelper] Ollama stream → model=${ollamaModel} sysLen=${systemPrompt.length} userLen=${userContent.length} images=${images?.length ?? 0}`);
 
     const decoder = new TextDecoder();
     let buffer = '';
     try {
       const streamBody: any = {
-        model: this.ollamaModel,
+        model: ollamaModel,
         messages,
         stream: true,
         options: {
-          temperature: getModelCapabilities(this.ollamaModel, true).tier === 'local-small' ? 0.2 : 0.7,
-          top_p: getModelCapabilities(this.ollamaModel, true).tier === 'local-small' ? 0.8 : undefined,
-          num_predict: getModelCapabilities(this.ollamaModel, true).tier === 'local-small' ? 180 : undefined,
+          temperature: getModelCapabilities(ollamaModel, true).tier === 'local-small' ? 0.2 : 0.7,
+          top_p: getModelCapabilities(ollamaModel, true).tier === 'local-small' ? 0.8 : undefined,
+          num_predict: getModelCapabilities(ollamaModel, true).tier === 'local-small' ? 180 : undefined,
         }
       };
-      if (this.isThinkingModel(this.ollamaModel)) streamBody.think = false;
+      if (this.isThinkingModel(ollamaModel)) streamBody.think = false;
       // Combine the 120s hard ceiling with the caller's user-cancel signal.
       // AbortSignal.any() returns a signal aborted as soon as ANY of its
       // inputs abort, so the caller can cancel an Ollama generation that's
@@ -4335,6 +4621,94 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     } catch (error: any) {
       // Connection refused/timeout — OllamaManager logs startup status.
       return [];
+    }
+  }
+
+  /**
+   * Authoritatively probe whether a single Ollama model supports vision via
+   * /api/show `capabilities` (Ollama lists "vision" for multimodal models).
+   * Falls back to the name heuristic when capabilities are absent (older
+   * servers).
+   *
+   * Caching policy: only AUTHORITATIVE results (a real /api/show capabilities
+   * answer) are cached. A transient probe failure (server down / timeout /
+   * non-200) returns the name-heuristic guess but is NOT cached — otherwise a
+   * momentary Ollama hiccup during the first probe would make a vision-capable
+   * model with a non-standard name invisible to screenshots for the whole
+   * session.
+   */
+  private async probeOllamaVision(modelId: string): Promise<boolean> {
+    if (!modelId) return false;
+    const cached = this.ollamaVisionCache.get(modelId);
+    if (cached !== undefined) return cached;
+
+    const baseUrl = (this.ollamaUrl || "http://127.0.0.1:11434").replace('localhost', '127.0.0.1');
+    try {
+      const resp = await fetch(`${baseUrl}/api/show`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: modelId }),
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (!resp.ok) return resolveOllamaVision(modelId, null); // transient — don't cache
+      const json: any = await resp.json().catch((): any => null);
+      const probed = ollamaVisionFromShow(json); // true/false (authoritative) or null
+      const result = resolveOllamaVision(modelId, probed);
+      // Cache only when the server gave us an authoritative capabilities answer.
+      if (probed !== null) this.ollamaVisionCache.set(modelId, result);
+      return result;
+    } catch {
+      // Probe failed (server down / timeout) — heuristic guess, not cached.
+      return resolveOllamaVision(modelId, null);
+    }
+  }
+
+  /**
+   * Resolve a vision-capable installed Ollama model and cache it in
+   * `this.ollamaVisionModel`. Prefers the currently-active model when it is
+   * itself vision-capable (no behavior change for users already on a vision
+   * model); otherwise picks the FIRST installed vision-capable model (in
+   * /api/tags order) so a screenshot can still be answered locally even when
+   * the primary model is text-only. Returns the chosen model id, or null when
+   * no installed model supports vision.
+   *
+   * Concurrent calls (init + switch + lazy-from-chain) share one in-flight
+   * probe to avoid redundant /api/show round-trips.
+   */
+  public async refreshOllamaVisionModel(): Promise<string | null> {
+    if (this.ollamaVisionRefreshInFlight) return this.ollamaVisionRefreshInFlight;
+    const run = (async (): Promise<string | null> => {
+      if (!this.useOllama) { this.ollamaVisionModel = null; return null; }
+      try {
+        const models = await this.getOllamaModels();
+        if (models.length === 0) { this.ollamaVisionModel = null; return null; }
+
+        // Prefer the active model if it's vision-capable.
+        if (this.ollamaModel && models.includes(this.ollamaModel) && await this.probeOllamaVision(this.ollamaModel)) {
+          this.ollamaVisionModel = this.ollamaModel;
+          return this.ollamaVisionModel;
+        }
+        // Otherwise pick the first installed vision-capable model.
+        for (const m of models) {
+          if (await this.probeOllamaVision(m)) {
+            this.ollamaVisionModel = m;
+            console.log(`[LLMHelper] Ollama vision model resolved: ${m} (primary model ${this.ollamaModel || 'n/a'} is text-only)`);
+            return m;
+          }
+        }
+        this.ollamaVisionModel = null;
+        return null;
+      } catch (e: any) {
+        console.warn('[LLMHelper] refreshOllamaVisionModel failed:', e?.message);
+        this.ollamaVisionModel = null;
+        return null;
+      }
+    })();
+    this.ollamaVisionRefreshInFlight = run;
+    try {
+      return await run;
+    } finally {
+      this.ollamaVisionRefreshInFlight = null;
     }
   }
 
@@ -4847,6 +5221,9 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   public async switchToOllama(model?: string, url?: string): Promise<void> {
     this.useOllama = true;
     if (url) this.ollamaUrl = url;
+    // URL/model change invalidates the per-model vision cache from a prior host.
+    this.ollamaVisionCache.clear();
+    this.ollamaVisionModel = null;
 
     if (model) {
       this.ollamaModel = model;
@@ -4854,6 +5231,11 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       // Auto-detect first available model
       await this.initializeOllamaModel();
     }
+
+    // Resolve the best vision-capable installed model for screenshots (may
+    // differ from the primary text model). Fire-and-forget; the vision chain
+    // also refreshes lazily on first image request.
+    this.refreshOllamaVisionModel().catch(() => { });
 
     console.log(`[LLMHelper] Switched to Ollama: ${this.ollamaModel} at ${this.ollamaUrl}`);
   }
