@@ -65,6 +65,12 @@ module.exports = {
     ...(base.extraMetadata || {}),
     nativelySigned: true,
   },
+  // afterSign: notarize the .app via scripts/notarize.js, which adds STAPLE-RETRY
+  // recovery for the Apple CDN ticket-propagation race (Error 65). We do NOT use
+  // electron-builder's built-in `mac.notarize` because its single-shot staple has
+  // no retry and fails the whole build on that race (observed repeatedly). See the
+  // notarize.js header and apple-signing-report.md §"Error 65 staple race".
+  afterSign: './scripts/notarize.js',
   // Rebuild styled DMGs from the pristine signed .app (create-dmg), then notarize +
   // staple them, then patch latest*.yml dmg hashes and assert the updater ZIP manifest.
   // (electron-builder's own DMG creation corrupts the embedded app signature — see header.)
@@ -76,7 +82,10 @@ module.exports = {
     gatekeeperAssess: false,                // don't run spctl assess mid-build (fails pre-staple)
     entitlements: 'build/entitlements.mac.plist',
     entitlementsInherit: 'build/entitlements.mac.inherit.plist',
-    notarize: true,                         // built-in notarytool + staple of the .app, via APPLE_KEYCHAIN_PROFILE
+    // notarize is handled by the afterSign hook (with staple retry), NOT by
+    // electron-builder's built-in single-shot notarize. `false` disables the
+    // built-in path so the .app is notarized exactly once (no double-submit).
+    notarize: false,
     // Build ONLY zip with electron-builder (preserves signatures + is the updater
     // artifact); the DMGs are produced cleanly by the afterAllArtifactBuild hook.
     target: [

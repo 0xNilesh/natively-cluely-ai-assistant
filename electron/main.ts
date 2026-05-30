@@ -445,7 +445,7 @@ import { PhoneMirrorService } from "./services/PhoneMirrorService"
 import { setVerboseLoggingFlag } from "./verboseLog"
 import { ReleaseNotesManager } from "./update/ReleaseNotesManager"
 import { OllamaManager } from './services/OllamaManager'
-import { decideToggle } from './services/toggleStateReducer'
+import { decideToggle, decideDockTransition } from './services/toggleStateReducer'
 
 export class AppState {
   private static instance: AppState | null = null
@@ -520,6 +520,7 @@ export class AppState {
   private _micSttRateApplied: boolean = false;
   private _disguiseTimers: NodeJS.Timeout[] = []; // Track forceUpdate timeouts
   private _dockDebounceTimer: NodeJS.Timeout | null = null; // Debounce dock state changes
+  private _dockStateApplied: boolean | null = null; // Last dock hide/show state pushed to the OS (null = never)
   private _dockReassertTimers: NodeJS.Timeout[] = []; // Re-assert dock-hidden state after show+focus
   private _ollamaBootstrapPromise: Promise<void> | null = null;
   private screenshotCaptureInProgress: boolean = false;
@@ -896,7 +897,7 @@ export class AppState {
     this.sendToMeetingSurfaces('system-audio-permission-denied', message);
   }
 
-  private broadcast(channel: string, ...args: any[]): void {
+  public broadcast(channel: string, ...args: any[]): void {
     BrowserWindow.getAllWindows().forEach(win => {
       this.sendToWindow(win, channel, ...args);
     });
@@ -3075,6 +3076,16 @@ export class AppState {
   // shutdown path. Snapshot this token before the await and bail if it has
   // changed by the time the await resolves.
   private _audioTestEpoch = 0;
+  // HANG FIX: pending timer for the debounced system-audio probe. The CoreAudio
+  // process-tap + aggregate-device teardown is a synchronous HAL operation that,
+  // on a Bluetooth output route (e.g. AirPods), can stall coreaudiod's global HAL
+  // lock for seconds — freezing the whole machine — when a tap is created and then
+  // destroyed within ~1-2s. Rapidly opening the Audio tab and switching away does
+  // exactly that. By deferring tap CREATION behind this timer (cleared on
+  // stopAudioTest), a quick tab switch never creates the tap at all, so there is
+  // nothing to tear down. The mic-level probe stays eager; only the system probe
+  // (which owns the CoreAudio tap) is debounced.
+  private _audioTestSystemProbeTimer: NodeJS.Timeout | null = null;
 
   private async _startAudioTestImpl(deviceId?: string): Promise<void> {
     console.log(`[Main] Starting Audio Test on device: ${deviceId || 'default'}`);
@@ -3186,16 +3197,53 @@ export class AppState {
           );
         }
       } else {
-        this.audioTestSystemCapture = new SystemAudioCapture();
-        attachSystemTestListeners(this.audioTestSystemCapture);
-        this.audioTestSystemCapture.start();
-        // Final defense: if epoch changed between the start() call setup
-        // and now (unlikely but possible if start() is sync-throwing-then-
-        // recovering), tear down immediately.
-        if (!isCurrentTest()) {
-          try { this.audioTestSystemCapture?.stop(); } catch { /* ignore */ }
-          this.audioTestSystemCapture = null;
+        // HANG FIX: defer the CoreAudio tap creation behind a debounce. If the
+        // user switches away from the Audio tab within this window, stopAudioTest
+        // clears the timer and the tap is NEVER created — so coreaudiod never has
+        // to tear down a freshly-created Bluetooth aggregate-device tap (the
+        // operation that stalls the system-wide HAL lock and hangs the machine).
+        // 600ms is long enough to absorb an accidental click-through, short enough
+        // that a deliberate visit to the Audio tab still shows the system meter
+        // promptly.
+        if (this._audioTestSystemProbeTimer) {
+          clearTimeout(this._audioTestSystemProbeTimer);
+          this._audioTestSystemProbeTimer = null;
         }
+        this._audioTestSystemProbeTimer = setTimeout(() => {
+          this._audioTestSystemProbeTimer = null;
+          // Re-check the epoch: a stopAudioTest (tab switch / close) bumps it and
+          // would have cleared this timer, but guard anyway against races.
+          if (!isCurrentTest()) {
+            console.log('[Main] Audio test stopped during system-probe debounce — skipping CoreAudio tap creation.');
+            return;
+          }
+          try {
+            this.audioTestSystemCapture = new SystemAudioCapture();
+            attachSystemTestListeners(this.audioTestSystemCapture);
+            // INVARIANT: SystemAudioCapture.start() MUST remain synchronous (its
+            // native CoreAudio init runs on a background thread and start()
+            // returns instantly). Because nothing awaits between start() and the
+            // isCurrentTest() re-check below, no stopAudioTest can interleave, so
+            // this guard cannot itself trigger a create-then-immediately-destroy
+            // teardown — the exact HAL stall this debounce exists to avoid. If
+            // start() is ever made async/awaiting, this inline stop() would run
+            // right after the tap is created and REINTRODUCE the hang; in that
+            // case, defer/cancel here instead of calling stop() inline.
+            this.audioTestSystemCapture.start();
+            if (!isCurrentTest()) {
+              try { this.audioTestSystemCapture?.stop(); } catch { /* ignore */ }
+              this.audioTestSystemCapture = null;
+            }
+          } catch (probeErr: any) {
+            console.warn('[Main] Deferred system-audio probe failed to start:', probeErr);
+            for (const target of broadcastTargets()) {
+              target.webContents.send(
+                'audio-test-system-error',
+                probeErr?.message || 'System audio probe failed to start.',
+              );
+            }
+          }
+        }, 600);
       }
     } catch (sysErr: any) {
       console.warn('[Main] Failed to start system-audio probe:', sysErr);
@@ -3213,6 +3261,15 @@ export class AppState {
     // awaiting resolveMacScreenCaptureCapability sees the change and skips
     // constructing the system capture (avoids orphaned-capture race).
     this._audioTestEpoch++;
+    // HANG FIX: cancel a pending debounced system-audio probe. If the user
+    // switched away from the Audio tab before the 600ms timer fired, the
+    // CoreAudio tap was never created — clearing the timer here ensures it
+    // never will be for this (now stale) test, so there is no Bluetooth
+    // aggregate-device teardown to stall coreaudiod.
+    if (this._audioTestSystemProbeTimer) {
+      clearTimeout(this._audioTestSystemProbeTimer);
+      this._audioTestSystemProbeTimer = null;
+    }
     if (this.audioTestCapture) {
       console.log('[Main] Stopping Audio Test');
       this.audioTestCapture.stop();
@@ -4430,15 +4487,25 @@ export class AppState {
       this._disguiseTimers = [];
     }
 
+    // Cancel any pending content-protection re-assert from a PREVIOUS toggle —
+    // a fresh toggle supersedes it, and we don't want a stale follow-up pushing
+    // an outdated sharingType after the user has changed their mind.
+    for (const timer of this._dockReassertTimers) {
+      clearTimeout(timer);
+    }
+    this._dockReassertTimers = [];
+
     // Broadcast state change to all relevant windows
     this._broadcastToAllWindows('undetectable-changed', state);
 
     // --- STEALTH MODE LOGIC ---
-    // The dock hide/show is debounced: rapid toggles update isUndetectable immediately
-    // (so content protection, IPC broadcasts and the guard above are always current),
-    // but the actual macOS dock/tray/focus operation only fires once the user stops
-    // toggling. This eliminates the race where dock.show() + NSApp.activate() lingers
-    // after a subsequent dock.hide() call.
+    // The dock hide/show is debounced: rapid toggles update isUndetectable
+    // immediately (so content protection, IPC broadcasts and the guard above are
+    // always current), but the actual macOS dock/tray/focus operation only fires
+    // once the user stops toggling. The debounce window MUST be longer than a
+    // human's fast toggle cadence (~250-400ms/click); at the old 150ms it
+    // expired between clicks and every click fired its own dock op, churning the
+    // activation policy. 400ms collapses a burst into a single dock transition.
     if (process.platform === 'darwin') {
       if (this._dockDebounceTimer) {
         clearTimeout(this._dockDebounceTimer);
@@ -4452,6 +4519,12 @@ export class AppState {
         // if the user toggled again before the timer fired.
         const settled = this.isUndetectable;
 
+        // Skip the dock op entirely if the OS is already in the desired state
+        // (e.g. ON→OFF→ON landing back where the dock already was). Re-running
+        // app.dock.hide()/show() in that case is pure activation-policy churn,
+        // which is exactly what resets window sharingType and breaks stealth.
+        const dockDecision = decideDockTransition(settled, this._dockStateApplied);
+
         const activeWindow = this.windowHelper.getMainWindow();
         const settingsWindow = this.settingsWindowHelper.getSettingsWindow();
         let targetFocusWindow = activeWindow;
@@ -4462,49 +4535,86 @@ export class AppState {
         const modelSelectorWindow = this.modelSelectorWindowHelper.getWindow();
         const isModelSelectorVisible = modelSelectorWindow && !modelSelectorWindow.isDestroyed() && modelSelectorWindow.isVisible();
 
-        if (targetFocusWindow && targetFocusWindow === settingsWindow) {
-          this.settingsWindowHelper.setIgnoreBlur(true);
-        }
-        if (isModelSelectorVisible) {
-          this.modelSelectorWindowHelper.setIgnoreBlur(true);
-        }
-
-        if (settled) {
-          // Capture whether Natively is currently the frontmost app BEFORE
-          // dock.hide() — that call triggers an implicit macOS app-deactivation
-          // which shifts keyboard focus to the next frontmost app (Chrome, etc.).
-          const nativelyWasFocused =
-            targetFocusWindow != null &&
-            !targetFocusWindow.isDestroyed() &&
-            targetFocusWindow.isFocused();
-
-          console.log('[Stealth] Calling app.dock.hide()');
-          app.dock.hide();
-          this.hideTray();
-
-          // If Natively was the focused window when the user toggled stealth,
-          // restore focus to our window after dock.hide() so macOS does not
-          // hand control to Chrome / whatever is behind us.
-          // We use win.focus() (not app.focus()) to avoid the heavy-handed
-          // [NSApp activateIgnoringOtherApps:YES] side-effect.
-          if (nativelyWasFocused && targetFocusWindow && !targetFocusWindow.isDestroyed()) {
-            targetFocusWindow.focus();
+        if (dockDecision.shouldApply) {
+          if (targetFocusWindow && targetFocusWindow === settingsWindow) {
+            this.settingsWindowHelper.setIgnoreBlur(true);
           }
-        } else {
-          console.log('[Stealth] Calling app.dock.show()');
-          app.dock.show();
-          this.showTray();
-          // Do NOT call focus() — let the user's current app retain focus
+          if (isModelSelectorVisible) {
+            this.modelSelectorWindowHelper.setIgnoreBlur(true);
+          }
+
+          if (settled) {
+            // Capture whether Natively is currently the frontmost app BEFORE
+            // dock.hide() — that call triggers an implicit macOS app-deactivation
+            // which shifts keyboard focus to the next frontmost app (Chrome, etc.).
+            const nativelyWasFocused =
+              targetFocusWindow != null &&
+              !targetFocusWindow.isDestroyed() &&
+              targetFocusWindow.isFocused();
+
+            console.log('[Stealth] Calling app.dock.hide()');
+            app.dock.hide();
+            this.hideTray();
+
+            // If Natively was the focused window when the user toggled stealth,
+            // restore focus to our window after dock.hide() so macOS does not
+            // hand control to Chrome / whatever is behind us.
+            // We use win.focus() (not app.focus()) to avoid the heavy-handed
+            // [NSApp activateIgnoringOtherApps:YES] side-effect.
+            if (nativelyWasFocused && targetFocusWindow && !targetFocusWindow.isDestroyed()) {
+              targetFocusWindow.focus();
+            }
+          } else {
+            console.log('[Stealth] Calling app.dock.show()');
+            app.dock.show();
+            this.showTray();
+            // Do NOT call focus() — let the user's current app retain focus
+          }
+
+          this._dockStateApplied = dockDecision.next;
+
+          if (targetFocusWindow && targetFocusWindow === settingsWindow) {
+            setTimeout(() => { this.settingsWindowHelper.setIgnoreBlur(false); }, 500);
+          }
+          if (isModelSelectorVisible) {
+            setTimeout(() => { this.modelSelectorWindowHelper.setIgnoreBlur(false); }, 500);
+          }
         }
 
-        if (targetFocusWindow && targetFocusWindow === settingsWindow) {
-          setTimeout(() => { this.settingsWindowHelper.setIgnoreBlur(false); }, 500);
+        // CRITICAL: app.dock.hide()/show() flips the macOS activation policy,
+        // which makes WindowServer re-evaluate every NSWindow and can reset its
+        // sharingType — silently undoing the setContentProtection(true) we
+        // applied synchronously above. Re-assert it now that the policy change
+        // has been issued. (Done whenever the settled state is undetectable,
+        // even if the dock op was skipped, since an earlier toggle's dock churn
+        // may have clobbered protection.)
+        if (settled) {
+          this.reassertAllContentProtection();
+
+          // WindowServer may apply the policy change slightly asynchronously, so
+          // a late flush could clobber sharingType AFTER our synchronous
+          // re-assert. One short follow-up re-assert closes that window. Tracked
+          // so a subsequent toggle cancels it (cleared at the top of this fn).
+          const followUp = setTimeout(() => {
+            this._dockReassertTimers = this._dockReassertTimers.filter(t => t !== followUp);
+            if (this.isUndetectable) {
+              this.reassertAllContentProtection();
+            }
+          }, 250);
+          this._dockReassertTimers.push(followUp);
         }
-        if (isModelSelectorVisible) {
-          setTimeout(() => { this.modelSelectorWindowHelper.setIgnoreBlur(false); }, 500);
-        }
-      }, 150);
+      }, 400);
     }
+  }
+
+  // Force-reapply the current content-protection state to every window helper,
+  // bypassing their dedupe guards. See setUndetectable() for why this is needed
+  // after macOS dock/activation-policy transitions.
+  private reassertAllContentProtection(): void {
+    this.windowHelper.reassertContentProtection();
+    this.settingsWindowHelper.reassertContentProtection();
+    this.modelSelectorWindowHelper.reassertContentProtection();
+    this.cropperWindowHelper.reassertContentProtection();
   }
 
   public getUndetectable(): boolean {

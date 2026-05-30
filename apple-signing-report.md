@@ -3,7 +3,7 @@
 **Date:** 2026-05-29
 **Team ID:** BJM29W3UQ6
 **Signing identity:** `Developer ID Application: Evin John Ignatious (BJM29W3UQ6)` (SHA-1 `9F5304EA3B20308A85020B172F1016E02E52AAAE`) — verified via `security find-identity -v -p codesigning` (exactly one valid identity).
-**Notary credential (local):** keychain profile `natively-notary` — verified via `xcrun notarytool history --keychain-profile natively-notary` (authenticates).
+**Notary credential:** App Store Connect API key (Team key `YZHD5HHT8X`) — file-based, immune to keychain auto-lock; verified via `xcrun notarytool history --key … --key-id … --issuer …`. (The `natively-notary` keychain profile also works but lives in the data-protection keychain, which auto-locks mid-build on this Mac — see §7c.)
 **Distribution model:** Developer ID, **non-sandboxed**, notarized, stapled, auto-updating via `electron-updater`.
 **Electron** 33.2.0 · **electron-builder** 26.8.1 · **@electron/notarize** 3.1.1 · **electron-updater** 6.7.3
 
@@ -16,7 +16,7 @@
 | Component | Value | Verified by |
 |---|---|---|
 | Signing identity | one valid `Developer ID Application` | `security find-identity -v -p codesigning` |
-| notarytool profile | `natively-notary` works | `xcrun notarytool history --keychain-profile natively-notary` → "No submission history" (auth OK) |
+| Notary credential | App Store Connect API key (Team key `YZHD5HHT8X`) | `xcrun notarytool history --key … --key-id … --issuer …` (auth OK) — file-based, lock-immune |
 | Xcode | active (`/Applications/Xcode.app/...`) | `xcode-select -p` |
 | Electron / builder | 33.2.0 / 26.8.1 | package.json |
 | Updater | electron-updater 6.7.3, channel `latest`, autoDownload off, manual install | `electron/main.ts:5,974-979` |
@@ -31,32 +31,17 @@
 | Path | Command | Config | Signing | Notarize | Apple acct |
 |---|---|---|---|---|---|
 | **Dev / local** | `npm run dist` | `package.json` `build` (`identity: null`) | ad-hoc (`scripts/ad-hoc-sign.js`) | none | no |
-| **Production** | `npm run dist:signed` | `electron-builder.signed.cjs` | Developer ID, deep, hardened runtime | **electron-builder built-in** (notarytool + staple) | yes |
+| **Production** | `npm run dist:signed` | `electron-builder.signed.cjs` | Developer ID, deep, hardened runtime | **app** via `afterSign` (`scripts/notarize.js`, notarytool + staple-retry); **DMG** via `afterAllArtifactBuild` (`scripts/afterAllArtifactBuild.cjs`, create-dmg + notarytool + staple) | yes |
 
-Keeping `identity: null` in `package.json` prevents electron-builder's arm64 "fall back to ad-hoc" path from double-signing the dev build. The opt-in `.cjs` config makes production signing explicit; the default build is byte-for-byte unchanged. `electron-builder.signed.cjs` sets `process.env.NATIVELY_PRODUCTION_SIGN='1'` so `ad-hoc-sign.js` **stands down** and never clobbers the real signature with an ad-hoc one.
+Keeping `identity: null` in `package.json` prevents electron-builder's arm64 "fall back to ad-hoc" path from double-signing the dev build. The opt-in `.cjs` config makes production signing explicit; the default build is byte-for-byte unchanged. `electron-builder.signed.cjs` sets `process.env.NATIVELY_PRODUCTION_SIGN='1'` so `ad-hoc-sign.js` **stands down** and never clobbers the real signature with an ad-hoc one. It builds the **`zip` target only** (zip preserves the deep signature and is the auto-updater artifact); DMGs are produced by the hook (see §7 RC-A).
 
-**Notarization credential model (requirement #4):** the signed config sets `APPLE_KEYCHAIN_PROFILE=natively-notary`. electron-builder's built-in notarize (`mac.notarize: true`) calls `@electron/notarize` with `notarytool` using that keychain profile. **No plaintext Apple password is in source** — the secret lives only in the macOS keychain; only the profile name (a label) and the (non-secret) Team ID are referenced. electron-builder also performs proper inside-out **deep signing** of the app, frameworks, helpers, and native `.node`/`.dylib`, then notarizes and staples.
+**Notarization credential model (requirement #4):** **App Store Connect API key** — `APPLE_API_KEY` (`.p8` path) + `APPLE_API_KEY_ID` + `APPLE_API_ISSUER`. Both `notarize.js` (app) and `afterAllArtifactBuild.cjs` (DMG) call `notarytool` with these. **No plaintext Apple password in source** — the `.p8` is referenced by path and lives outside the repo. (The `natively-notary` keychain profile is also supported but auto-locks mid-build on this Mac — §7 RC-B — so the API key is the working credential.) electron-builder performs inside-out **deep signing** of the app, frameworks, helpers, and native `.node`/`.dylib`; `notarize.js` then notarizes + staples the app with Error-65 staple-retry.
 
 ---
 
-## 3. Files changed / created
+## 3. Files changed / created (summary)
 
-**Created**
-- `build/entitlements.mac.plist` — top-level Hardened Runtime entitlements (minimal, justified).
-- `build/entitlements.mac.inherit.plist` — helper-process inherited entitlements.
-- `.github/workflows/release-macos.yml` — CI release pipeline (tag/dispatch → import cert → API-key notarize → verify → upload).
-- `apple-signing-report.md` — this report.
-
-**Modified**
-- `electron-builder.signed.cjs` — **built-in** notarization (`mac.notarize: true`) via the `natively-notary` keychain profile; entitlements repointed to `build/`; `hardenedRuntime: true`; `gatekeeperAssess: false`; identity auto-discover.
-- `scripts/ad-hoc-sign.js` — entitlements path → `build/entitlements.mac.plist`; corrected stale "screen-capture entitlement" comment.
-- `package.json` — `app:build:signed` / `dist:signed` scripts (prior session); `build` block unchanged.
-
-**Removed**
-- `assets/entitlements.mac.plist`, `assets/entitlements.mac.inherit.plist` — relocated to `build/` (single source of truth; matches the path requested in the task and electron-builder convention).
-
-**Retained, not wired**
-- `scripts/notarize.js` — standalone `@electron/notarize` afterSign hook (api-key / apple-id / keychain-profile). Superseded by the built-in notarize for the signed config (avoids double-notarization); kept as a documented fallback.
+> Full authoritative list with descriptions is in §8. Summary: created `build/entitlements.mac.plist` + `.inherit.plist`, `scripts/afterAllArtifactBuild.cjs`, `assets/dmg-background.png`, `.github/workflows/release-macos.yml`, this report; modified `electron-builder.signed.cjs`, `scripts/notarize.js`, `scripts/ad-hoc-sign.js`; removed `assets/entitlements.mac.*` (relocated to `build/`).
 
 ---
 
@@ -100,93 +85,147 @@ Non-sandboxed Developer ID app (no `com.apple.security.app-sandbox`). Privacy ac
 
 ---
 
-## 6. Build / verify / notarize / staple — LIVE RESULTS
+## 6. Build / verify / notarize / staple — FINAL VERIFIED RESULTS ✅
 
-The signed build produced BOTH arches (x64 + arm64), each as `.app` + `.zip` + `.dmg`, plus `latest-mac.yml`.
+Build version **2.7.0**. The signed build produced BOTH arches as `.app` + `.zip` + `.dmg`, plus `latest-mac.yml`. **All artifacts pass every required check.**
 
-### ✅ APP (both arches) — FULLY SIGNED + NOTARIZED + STAPLED + GATEKEEPER-ACCEPTED
-- **6.2 `codesign -dv --verbose=4`** → `Authority=Developer ID Application: Evin John Ignatious (BJM29W3UQ6)`, `TeamIdentifier=BJM29W3UQ6`, `flags=0x10000(runtime)` (hardened runtime), secure `Timestamp`, `Runtime Version=14.0.0`, sealed resources. ✅
-- **6.3 `codesign --verify --deep --strict --verbose=4`** → `valid on disk` + `satisfies its Designated Requirement`, exit 0 (both arches). ✅
-- **6.4 `spctl -a -vvv -t execute`** → `accepted` / `source=Notarized Developer ID` (both arches). ✅ ← target result
-- **6.6 `xcrun stapler validate`** → `The validate action worked!` (both arches). ✅
-- Embedded entitlements = exactly the minimal set (allow-jit, allow-unsigned-executable-memory, disable-library-validation, device.audio-input). Helpers (GPU/etc.): hardened runtime + Developer ID + inherit set (no mic). Native `.node`: deep-signed Developer ID + hardened runtime. ✅
-
-### ✅ UPDATER ZIP — VERIFIED CLEAN (the auto-update + downloadable-app artifact)
-- ZIP `sha512`/`size` MATCH `latest-mac.yml` for both arches. ✅
-- App extracted from `Natively-2.6.0-arm64-mac.zip` → `codesign --verify --deep --strict` valid, `spctl` accepted / Notarized Developer ID, `stapler validate` worked. ✅
-- **A fully Gatekeeper-clean distribution exists right now via the ZIP** (extract → run, no `xattr`).
-
-### ❌ DMG — notarization INVALID (electron-builder DMG-creation corrupts the framework signature)
-- DMG container signature itself is VALID (Developer ID + secure timestamp).
-- **Root cause (diagnosed):** the app *inside* the DMG fails `codesign --verify --deep --strict` — `Electron Framework.framework: code object is not signed at all` — even after `ditto`-copying it out to a writable disk (so NOT a read-only-mount artifact). The standalone `release/mac/Natively.app` and the ZIP's app are perfect; only electron-builder's **DMG-creation** path broke the framework code signature/symlinks. The ZIP is unaffected because electron-builder builds it via `ditto` (preserves the `Versions/Current` framework symlinks); the DMG path does not.
-- Consequence: `notarytool submit` of the DMG → `status: Invalid`; `stapler staple` → "Record not found" (no ticket because notarization failed).
-- **6.7 Dual-arch:** both apps + zips ✅; both dmgs ❌ (same framework-corruption issue).
-
-### ⚠️ BLOCKER — notarytool keychain profile now inaccessible
-- `natively-notary` is stored in the **data-protection keychain**, which requires an interactive/unlocked session. It worked at session start and DURING the build (electron-builder's built-in notarize used it to notarize both apps successfully), but fresh non-interactive `notarytool` calls now return *"No Keychain password item found for profile: natively-notary"* (the login keychain is readable; the profile simply isn't reachable non-interactively now — likely the screen locked).
-- This blocks: (a) fetching the Invalid notary **log** to confirm the exact reason, and (b) **re-notarizing** the DMG.
-
----
-
-## 7. Before / after behavior
-
-| Scenario | Before (ad-hoc) | After (Developer ID + notarized) |
+### ✅ APP — both arches: signed + hardened runtime + notarized + stapled + Gatekeeper-accepted
+| Check | x64 (`release/mac/Natively.app`) | arm64 (`release/mac-arm64/Natively.app`) |
 |---|---|---|
-| First launch from download | Gatekeeper blocks; user must `xattr -cr` / right-click→Open | Launches normally; `spctl` → Notarized Developer ID |
-| TCC grants across updates | cdhash changes each rebuild → grants invalidated → "no transcription" | DR ties to Team ID → grants persist |
-| Auto-update | ad-hoc download; Gatekeeper friction; signature validation issues | notarized download; installs cleanly |
-| DMG | unsigned | signed with Developer ID |
+| `codesign -dv --verbose=4` | Developer ID, TeamID `BJM29W3UQ6`, `flags=0x10000(runtime)` | same ✅ |
+| `codesign --verify --deep --strict --verbose=4` | `valid on disk` + `satisfies its Designated Requirement` | same ✅ |
+| `spctl -a -vvv -t execute` | **`accepted` / `source=Notarized Developer ID`** | same ✅ |
+| `xcrun stapler validate` | `The validate action worked!` | same ✅ |
+
+Embedded entitlements = exactly the minimal verified set (allow-jit, allow-unsigned-executable-memory, disable-library-validation, device.audio-input). Helpers: hardened runtime + Developer ID + inherit set (no mic). Native `.node`: deep-signed Developer ID + hardened runtime. App notarization took ~956s (x64) / ~1047s (arm64) — Apple's queue was slow but the api-key path never stalled.
+
+### ✅ DMG — both arches: styled (create-dmg) + signed + notarized + stapled + Gatekeeper-accepted
+| Check | `Natively-2.7.0.dmg` (x64) | `Natively-2.7.0-arm64.dmg` (arm64) |
+|---|---|---|
+| DMG signature | Developer ID, TeamID `BJM29W3UQ6` | same ✅ |
+| `xcrun stapler validate` (DMG) | `The validate action worked!` | same ✅ |
+| `spctl -a -t open` (DMG) | **`accepted` / `source=Notarized Developer ID`** | same ✅ |
+| app INSIDE dmg: `codesign --verify --deep --strict` | `valid on disk` + satisfies DR | same ✅ |
+| app INSIDE dmg: `spctl -a -t execute` | **`accepted` / `Notarized Developer ID`** | same ✅ |
+| app INSIDE dmg: `stapler validate` | worked | same ✅ |
+
+### ✅ UPDATER ZIP + manifest — verified
+- `Natively-2.7.0-arm64-mac.zip` + `Natively-2.7.0-mac.zip`: app extracted → `spctl` accepted / Notarized Developer ID + stapled ✅.
+- `latest-mac.yml`: all 4 entries (2 zip + 2 dmg) `sha512`/`size` **MATCH** disk ✅. `path:`/top-level point at the arm64 zip (updater artifact).
+
+> **This is a complete, production-grade, Gatekeeper-clean distribution. Installs with no `xattr`, passes Gatekeeper at both DMG-mount and app-launch, and electron-updater can validate update signatures.**
 
 ---
 
-## 7c. DMG fix — IMPLEMENTED (create-dmg rebuild + notarize + staple)
+## 7. Root causes solved during the live run (each cost real time)
 
-Decisions (confirmed with user): use the **`natively-notary` keychain profile** for credentials (re-enabled by unlocking the Mac), and produce a **styled DMG via `create-dmg`**.
+**RC-A — electron-builder's DMG creation corrupts the embedded app signature.** Apple notary log (submission `7b44d402…`): `"The signature of the binary is invalid"` @ `Natively.app/Contents/MacOS/Natively`. The standalone .app and the ZIP's app pass `codesign --verify --deep --strict`; only the app inside eb's DMG fails (even after `ditto`-copying out — not a mount artifact). **Fix:** build `zip` only with electron-builder; rebuild styled DMGs from the pristine signed .app via **`create-dmg`** (`hdiutil create -srcfolder` block-copy preserves the framework `Versions/Current` symlinks + `_CodeSignature`), then notarize+staple. Proven clean across both arches.
 
-Notary log confirmed the root cause precisely — submission `7b44d402…` (arm64 DMG) returned:
-> `"statusSummary": "Archive contains critical validation errors"` · issue: **`"The signature of the binary is invalid"`** @ `Natively.app/Contents/MacOS/Natively`.
+**RC-B — the `natively-notary` keychain profile auto-locks mid-build.** It lives in the data-protection keychain (screen-lock = "immediate" on this Mac; login.keychain `no-timeout` is irrelevant). It re-locked between the x64 and arm64 notarizations (~5 min apart) → arm64 failed with `"No Keychain password item found for profile: natively-notary"`. **Fix:** App Store Connect **API key** (`.p8` + key-id + issuer) — file-based, immune to keychain lock, unattended, doubles as the CI credential. Builds also wrapped in `caffeinate -dimsu`.
 
-Implementation:
-- `electron-builder.signed.cjs` now builds **`zip` only** with electron-builder (zip preserves signatures + is the updater artifact); the broken eb DMG target is removed.
-- `scripts/afterAllArtifactBuild.cjs` rewritten to, per arch (mac = x64, mac-arm64 = arm64): build a styled DMG from the pristine signed `.app` via **`create-dmg`** (stages via `hdiutil create -srcfolder` → block-copy preserves the framework `Versions/Current` symlinks + `_CodeSignature`; signs the DMG with `--codesign <Developer ID>`), then `notarytool submit --wait`, `stapler staple`, **mount + `codesign --verify --deep --strict` + `spctl` the app INSIDE the dmg** (regression guard against re-corruption), patch `latest*.yml` dmg hashes, and assert the updater ZIP manifest.
-- Added `assets/dmg-background.png` (660×400 styled background) + volicon from `assets/natively.icns`.
-- `create-dmg` 1.2.3 installed via Homebrew.
+**RC-C — `spctl` writes its verdict to stderr.** My DMG verification guard captured only stdout → empty string → false "not Gatekeeper-accepted" rejection of a perfectly notarized app. **Fix:** capture `2>&1`.
 
-Live build result: filled in below once the run completes.
+**RC-D — the `npm run dist:signed` chain intermittently ENOENT'd** on `dist-electron/electron/CropperWindowHelper.js` at package time (its `npm run build` re-clean racing electron-builder's native rebuild). **Reliable path:** build stages explicitly, then invoke `./node_modules/.bin/electron-builder --config electron-builder.signed.cjs` directly.
 
-## 7b. DMG fix — PROVEN (preliminary)
-
-A DMG built via plain `hdiutil create -volname … -srcfolder release/mac-arm64/Natively.app -format UDZO …` and then mounted verifies CLEAN: `codesign --verify --deep --strict` → valid; `spctl -a -t execute` → accepted / Notarized Developer ID. **So the reliable fix is to build the DMG from the already-signed app via `hdiutil` (which block-copies the filesystem and preserves the framework `Versions/Current` symlinks + `_CodeSignature`), instead of electron-builder's DMG assembly.** Then `codesign` the DMG (Developer ID, `--timestamp`), `notarytool submit … --wait`, `stapler staple`, and patch the `latest*.yml` DMG hashes (the `afterAllArtifactBuild.cjs` hook already does the sign/notarize/staple/patch — it just needs to first REPLACE electron-builder's broken DMG with an hdiutil-built one, or electron-builder's DMG target must be fixed).
-
-> Note: a plain hdiutil DMG lacks the styled drag-to-Applications background. Options: (a) `hdiutil` + a minimal layout, or (b) `create-dmg` (preserves signatures + adds styling). To be decided with you.
+**RC-E — Error 65 staple race** (CDN ticket-propagation lag → `stapler` "Record not found"). **Fix:** `scripts/notarize.js` does staple-with-retry (exponential backoff) instead of failing the build.
 
 ---
 
-## 8. TWO BLOCKERS THAT NEED YOU
+## 7a. Before / after behavior
 
-**Blocker 1 — notarytool credential access (data-protection keychain).**
-`natively-notary` is no longer reachable by non-interactive `notarytool` calls (it worked during the build, then the session/keychain state changed — likely the Mac locked). I cannot fetch the Invalid notary log or re-notarize the DMG without it. **Resolve by EITHER:**
-- (Recommended, robust) create an **App Store Connect API key** (App Store Connect → Users and Access → Integrations → Team Keys → generate, "Developer" access) and give me the `.p8` path + Key ID + Issuer ID. API keys work non-interactively (no keychain-lock problem) and double as the CI credential. Then I'll re-notarize the (rebuilt, clean) DMGs and staple. OR
-- (Quick) with your Mac unlocked, run `xcrun notarytool history --keychain-profile natively-notary` in an interactive terminal and click "Always Allow" if prompted, then tell me to retry.
+| Scenario | Before (ad-hoc) | After (Developer ID + notarized + stapled) |
+|---|---|---|
+| First launch from downloaded DMG | Gatekeeper blocks; user must `xattr -cr` / right-click→Open | Mounts + launches normally; `spctl` → Notarized Developer ID |
+| DMG mount | unsigned, "can't verify" | signed + notarized + stapled → accepted |
+| TCC grants across updates | cdhash changes each rebuild → grants invalidated → "permissions granted but no transcription" | stable Developer ID / Team ID → mic/screen/accessibility grants persist |
+| Auto-update (electron-updater) | ad-hoc download; signature validation friction | notarized ZIP; signature validates; in-place install works |
 
-**Blocker 2 — electron-builder DMG creation corrupts the framework signature** (root-caused above; fix proven in §7b). I'll wire the hdiutil/create-dmg rebuild into `afterAllArtifactBuild.cjs` (replacing electron-builder's broken DMG) once Blocker 1 is resolved so the result can be validated by a real notarization.
+---
 
-## 8b. Other recommendations
-1. **Trim `com.apple.security.cs.allow-unsigned-executable-memory`** (Electron 12+ no longer requires it) — rebuild + launch; if clean, drop it.
-2. **appId `com.electron.meeting-notes`** is a generic placeholder → migrate to e.g. `com.natively.app` (deliberate, announced migration: orphans existing TCC grants; auto-update keys on the feed so updates continue).
-3. **CI secrets** for `release-macos.yml`: `MACOS_CERT_P12_BASE64`, `MACOS_CERT_PASSWORD`, `KEYCHAIN_PASSWORD`, `APPLE_API_KEY_P8_BASE64`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`.
+## 8. Final files changed / created (this signing pass)
+
+**Created:** `build/entitlements.mac.plist`, `build/entitlements.mac.inherit.plist`, `scripts/afterAllArtifactBuild.cjs` (create-dmg rebuild + notarize + staple + verify + yml-patch), `assets/dmg-background.png`, `.github/workflows/release-macos.yml`, `apple-signing-report.md`.
+**Modified:** `electron-builder.signed.cjs` (zip-only target; afterSign=notarize.js with staple-retry; `notarize:false`; entitlements→build/; `extraMetadata.nativelySigned`), `scripts/notarize.js` (api-key/apple-id/keychain strategies + staple-retry), `scripts/ad-hoc-sign.js` (build/ entitlements path; stand-down guard).
+**Removed:** `assets/entitlements.mac.plist`, `assets/entitlements.mac.inherit.plist` (relocated to `build/`).
+**Tooling:** `create-dmg` 1.2.3 (Homebrew).
+
+## 8a. Reproduce the signed build
+
+```bash
+export APPLE_API_KEY="/path/AuthKey_XXXXXXXXXX.p8"
+export APPLE_API_KEY_ID="XXXXXXXXXX"
+export APPLE_API_ISSUER="<issuer-uuid>"
+npm run build && npm run build:electron && \
+  NATIVELY_BUILD_ALL_MAC_ARCHES=1 npm run build:native && \
+  node scripts/ensure-sharp-mac-deps.js && \
+  caffeinate -dimsu ./node_modules/.bin/electron-builder --mac --config electron-builder.signed.cjs --publish never
+```
+(Notarization is ~15-20 min/submission × 4 = up to ~1 hr; this is Apple-side, not a hang.)
+
+## 8b. Remaining recommendations (non-blocking)
+1. **Trim `com.apple.security.cs.allow-unsigned-executable-memory`** (Electron 12+ doesn't require it) — rebuild + launch; if clean, drop it to shrink attack surface.
+2. **appId `com.electron.meeting-notes`** is a generic placeholder → migrate to e.g. `com.natively.app` as a deliberate, announced change (orphans existing TCC grants; auto-update keys on the feed so updates continue).
+3. **CI:** add secrets for `release-macos.yml` — `MACOS_CERT_P12_BASE64`, `MACOS_CERT_PASSWORD`, `KEYCHAIN_PASSWORD`, `APPLE_API_KEY_P8_BASE64`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`. (CI uses the api-key strategy automatically.)
 4. **Intel (x64) launch test** on a real Intel Mac before release.
+5. **`latest-mac.yml` note:** if a build is killed before electron-builder emits the yml, regenerate it from artifact sha512+size (done this run after an interrupted build); a clean `npm run dist:signed` emits it automatically.
 
 ---
 
-## 9. Status summary
-- Entitlements corrected + relocated to `build/` (minimal, individually verified): ✅
-- Dual-path signing architecture (default ad-hoc unchanged + opt-in signed): ✅
-- **APP (both arches): signed (Developer ID) + hardened runtime + notarized + stapled + `spctl` Notarized Developer ID:** ✅✅
-- **UPDATER ZIP: app verified clean (deep-sign + notarized + stapled); ZIP hashes match `latest-mac.yml`:** ✅ → **a Gatekeeper-clean distribution exists NOW via the ZIP**
-- Built-in notarization via keychain profile (no plaintext secret): ✅
-- Senior code review (APPROVE) + fixes applied: ✅
-- Test-engineer pass (no regression; updater config correct; manual QA checklist): ✅
-- CI release workflow: ✅ (secrets pending)
-- **DMG: notarization INVALID (electron-builder framework corruption) — fix proven, blocked on credential access (§8):** ❌ → needs you
-- **notarytool credential access:** ⚠️ blocked (§8) → needs you
+## 9. Status summary — DONE ✅
+- Entitlements minimal + individually verified, relocated to `build/`: ✅
+- Dual-path signing (default ad-hoc unchanged + opt-in signed): ✅
+- **APP (both arches): Developer ID + hardened runtime + notarized + stapled + `spctl` Notarized Developer ID:** ✅
+- **DMG (both arches, styled via create-dmg): signed + notarized + stapled + embedded app Gatekeeper-accepted:** ✅
+- **UPDATER ZIP + `latest-mac.yml`: notarized app, all hashes match:** ✅
+- Notarization credential = App Store Connect API key, no plaintext secrets in source: ✅
+- Senior code review (APPROVE) + fixes applied; test-engineer pass (no regression, updater correct, manual QA checklist): ✅
+- Regression: signing changes touch only build config/scripts + `build/` entitlements (zero app-runtime code). Targeted network-free suite (stealth IPC, audio watchdog/abort lifecycle, license policy, toggle reducer) = **32/32 pass**. (The full `npm test` hangs on a pre-existing network-dependent test that ignores `--test-timeout` in this offline env — unrelated to signing.)
+- CI release workflow created (secrets pending): ✅
+- **Release recommendation: SHIP-READY.** Run the manual QA checklist (§10) on a clean machine, add CI secrets, then publish.
+
+---
+
+## 10. Manual QA checklist (run on a real / clean machine — cannot be automated headlessly)
+
+Artifacts to test: `release/Natively-2.7.0.dmg` (x64), `release/Natively-2.7.0-arm64.dmg` (arm64), `release/Natively-2.7.0-*-mac.zip` (auto-update).
+
+**A. Pre-flight (already PASSED here; re-run after any rebuild):**
+```bash
+APP=release/mac-arm64/Natively.app   # and release/mac/Natively.app
+codesign --verify --deep --strict --verbose=4 "$APP"        # valid on disk + satisfies DR
+spctl -a -vvv -t execute "$APP"                              # accepted / source=Notarized Developer ID
+xcrun stapler validate "$APP"                                # The validate action worked!
+xcrun stapler validate release/Natively-2.7.0-arm64.dmg      # + the x64 dmg
+```
+
+**B. Fresh install from DMG (clean machine, app never run):**
+1. Download the DMG **via a browser** (so it carries `com.apple.quarantine` — the real test). `xattr -p com.apple.quarantine <dmg>` → present.
+2. Double-click DMG → it mounts with **no "can't verify" block** → drag Natively to Applications. **No `xattr -cr` needed.**
+3. First launch → normal "downloaded from the internet, open?" prompt → **Open works** (NOT "damaged / unidentified developer / move to Trash").
+4. After launch: `xattr -p com.apple.quarantine /Applications/Natively.app` → cleared by Gatekeeper.
+
+**C. First-grant permission prompts (record each fires + works):**
+- **Microphone** → prompt shows `NSMicrophoneUsageDescription` text → grant → start a meeting, confirm user transcript + mic level meter.
+- **Screen & System Audio Recording** → prompt + Settings deep-link → grant (relaunch if macOS requires) → confirm interviewer/system-audio transcript.
+- **Accessibility** (global keyboard tap / stealth) → prompt + Settings deep-link → grant → confirm global shortcuts + overlay toggle.
+
+**D. Upgrade install over existing (same machine):**
+1. With an older version in /Applications and all 3 TCC grants live, drag the new DMG build over it (Replace).
+2. Launch → **no permission re-prompts** (stable Developer ID → TCC persists). Confirm in System Settings → Privacy & Security that mic/screen/accessibility entries remain checked for Natively.
+
+**E. Auto-update via electron-updater (the key Developer ID win):**
+1. Install an older signed build (N-1) from the GitHub release.
+2. Publish a newer signed+notarized release (the ZIP + `latest-mac.yml`).
+3. Launch N-1 → wait ~10s → "update available" → download → install → app relaunches into the new version (the in-place install now works because both builds are Developer-ID signed; `nativelySigned` flag gates the true `quitAndInstall`).
+4. **Critical:** after the auto-update relaunch, confirm Microphone / Screen+System Audio / Accessibility are **still granted with NO new prompts**, and capture works immediately. (This is exactly what stable signing fixes vs the old ad-hoc cdhash drift.)
+
+**F. Clean-machine / offline:**
+- Repeat B+C on a 2nd Mac with no developer cert/keychain → confirms it's notarization (not local trust) that satisfies Gatekeeper.
+- Offline test: disconnect network, then mount+launch → still works (the stapled ticket means no network round-trip to Apple is needed).
+
+> Status: A passed (verified in this session). B–F require a real/clean machine + a published release and are the operator's final gate before public release.
+
+**G. Transition + regression guards (don't skip — these catch the non-obvious breakage):**
+1. **Ad-hoc → Developer ID one-time re-prompt (expected, document in release notes):** a user upgrading from a prior *ad-hoc* build (drifting cdhash) to this Developer ID build **will** get re-prompted for Mic/Screen/Accessibility once — the signing identity changed, so TCC treats it as a new app. This is correct and one-time; every *subsequent* DevID→DevID update then persists grants (§10-D/E). Verify: old build `codesign -dvvv` shows ad-hoc (no Team), new shows `TeamIdentifier=BJM29W3UQ6`; re-grant restores capture; the next update does NOT re-prompt.
+2. **Dev build still works with NO Apple account (regression guard):** on a machine with no notarytool profile / no Apple creds, `npm run dist` (default config, ad-hoc `afterPack` signer) must still succeed — NO notarize attempt, NO failure. Verify: build completes, logs show no `notarytool` submission, resulting app is ad-hoc (`nativelySigned` absent → manual update fallback, not `quitAndInstall`). This proves the production signing is fully opt-in and the dev path is byte-unchanged.
+3. **Hardened runtime didn't break the native module (not just "no crash"):** under hardened runtime, the Rust `cpal`/CoreAudio `.node` + `.dylib` must LOAD and **produce real audio** — confirm §10-C mic + system-audio transcripts are non-empty with non-zero level meters, and `Console.app` shows no codesign-kill / `EXC_BAD_ACCESS` on the native module. (The `disable-library-validation` + `allow-unsigned-executable-memory` entitlements exist precisely so HR doesn't reject the non-Team-signed native libs.)

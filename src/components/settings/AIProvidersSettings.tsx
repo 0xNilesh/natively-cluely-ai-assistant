@@ -152,7 +152,7 @@ export const AIProvidersSettings: React.FC = () => {
     const [isRefreshingOllama, setIsRefreshingOllama] = useState(false);
 
     // --- Local (Codex CLI) ---
-    const [codexCliConfig, setCodexCliConfig] = useState({ enabled: false, path: 'codex', model: 'gpt-5.4', fastModel: 'gpt-5.3-codex-spark', timeoutMs: 60000, sandboxMode: 'read-only' as string, serviceTier: 'default' as string | undefined, modelReasoningEffort: undefined as string | undefined });
+    const [codexCliConfig, setCodexCliConfig] = useState({ enabled: false, path: 'codex', model: 'gpt-5.4', fastModel: 'gpt-5.3-codex-spark', timeoutMs: 60000, sandboxMode: 'read-only' as string, serviceTier: 'default', modelReasoningEffort: undefined as string | undefined });
     const [codexCliStatus, setCodexCliStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
     const [codexCliError, setCodexCliError] = useState('');
 

@@ -91,6 +91,17 @@ export class WindowHelper {
     });
   }
 
+  // Force-reapply the CURRENT content-protection state to every live window,
+  // bypassing the dedupe guard in setContentProtection(). Needed because
+  // app.dock.hide()/show() flips the macOS activation policy, which makes
+  // WindowServer re-evaluate each NSWindow and can silently reset its
+  // sharingType (the NSWindowSharingNone flag setContentProtection set). The
+  // in-memory `this.contentProtection` is still correct, so the normal setter
+  // would no-op — we must push the value to the OS again unconditionally.
+  public reassertContentProtection(): void {
+    this.applyContentProtection(this.contentProtection);
+  }
+
   public setWindowDimensions(width: number, height: number): void {
     const activeWindow = this.getMainWindow(); // Gets currently focused/relevant window
     if (!activeWindow || activeWindow.isDestroyed()) return;

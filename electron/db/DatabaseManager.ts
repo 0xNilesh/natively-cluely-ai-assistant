@@ -46,11 +46,25 @@ export class DatabaseManager {
     private db: Database.Database | null = null;
     private dbPath: string;
     private resolvedExtPath: string = '';
+    private initError: Error | null = null;
 
     private constructor() {
         const userDataPath = app.getPath('userData');
         this.dbPath = path.join(userDataPath, 'natively.db');
-        this.init();
+        // IMPORTANT: never throw out of the constructor. If init() throws and
+        // escapes, `DatabaseManager.instance` is never assigned — so every
+        // subsequent getInstance() call re-enters the constructor and re-emits
+        // the identical failure (this is why a single dlopen error used to print
+        // as a wall of ~dozens of identical stack traces across seed-demo,
+        // get-recent-meetings, modes:get-active, etc.). Instead we capture the
+        // error once and degrade to db: null; every public method already guards
+        // with `if (!this.db)`, so callers get empty/null results, not throws.
+        try {
+            this.init();
+        } catch (error) {
+            this.initError = error as Error;
+            this.reportInitFailure(error);
+        }
     }
 
     public static getInstance(): DatabaseManager {
@@ -58,6 +72,49 @@ export class DatabaseManager {
             DatabaseManager.instance = new DatabaseManager();
         }
         return DatabaseManager.instance;
+    }
+
+    /** True when the underlying SQLite database opened successfully. */
+    public isAvailable(): boolean {
+        return this.db !== null;
+    }
+
+    /**
+     * The error that caused initialization to fail, if any. Lets the app surface
+     * a single user-facing banner (e.g. "Local database unavailable — meeting
+     * history disabled") instead of relying on log scraping.
+     */
+    public getInitError(): Error | null {
+        return this.initError;
+    }
+
+    /**
+     * Translate an init failure into a single, actionable log line. The most
+     * common fatal cause is a native-module architecture mismatch (an x86_64
+     * better-sqlite3 binary loaded under the arm64 Electron runtime, typically
+     * produced by an `npm install` that ran under a Rosetta shell).
+     */
+    private reportInitFailure(error: unknown): void {
+        const err = error as NodeJS.ErrnoException;
+        const msg = err?.message || String(error);
+        const isArchMismatch =
+            err?.code === 'ERR_DLOPEN_FAILED' ||
+            /incompatible architecture|ERR_DLOPEN_FAILED|mach-o/i.test(msg);
+
+        if (isArchMismatch) {
+            console.error(
+                '[DatabaseManager] FATAL: native module (better-sqlite3) failed to load — the compiled ' +
+                'binary architecture does not match the Electron runtime. Local database is DISABLED ' +
+                '(meeting history, modes, and notes will not persist this session).\n' +
+                '  Fix: run `npm run rebuild:native` from a native (non-Rosetta) terminal, then restart the app.'
+            );
+        } else {
+            console.error(
+                '[DatabaseManager] FATAL: database initialization failed. Local database is DISABLED ' +
+                '(meeting history, modes, and notes will not persist this session).',
+                error
+            );
+        }
     }
 
     private init() {
