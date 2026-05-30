@@ -488,6 +488,17 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const voiceInputRef = useRef<string>(''); // Ref for capturing in async handlers
   const textInputRef = useRef<HTMLInputElement>(null); // Ref for input focus
   const isStealthRef = useRef<boolean>(false); // Tracks if the next expansion should be stealthy
+  // Startup-flicker guards (restored from 2de1b62, reverted by 18b139b):
+  //  - isExpandedEffectInitializedRef: skip the FIRST run of the visibility-sync
+  //    effect so the mount-time isExpanded=true does not fire showWindow() and
+  //    re-enter switchToOverlay() (double setBounds + focus flash) on top of the
+  //    swap main.startMeeting() already performed.
+  //  - hasRenderedExpandedRef: suppress the shell's scale/translate entry
+  //    animation on the first content render (it is the only moment the OS
+  //    window is simultaneously settling its bounds, so the transform tween
+  //    would otherwise read as a shake). Re-expansions after mount still animate.
+  const isExpandedEffectInitializedRef = useRef(false);
+  const hasRenderedExpandedRef = useRef(false);
   // CGEventTap stealth-typing state. Driven by IPC from main; ref shadows
   // the state so the captured-key handler can early-out without depending
   // on React's render cycle for stop signals.
@@ -1007,9 +1018,16 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // TopPill's horizontal center invariant across resizes.
   const reportShellSize = useCallback(() => {
     if (!contentRef.current) return;
-    const rect = contentRef.current.getBoundingClientRect();
+    // offsetHeight is the LAYOUT (untransformed) border-box height. We must NOT
+    // use getBoundingClientRect().height here: that returns the POST-transform
+    // box, so the shell's scale 0.95→1 / y 20→0 entry animation would feed a
+    // continuously-changing height into this OS-resize channel, and the native
+    // setBounds() would chase the CSS transform frame-by-frame on a separate
+    // clock — the startup shake. Layout height is immune to descendant
+    // transforms, so genuine content growth still flows through while the
+    // entry flourish stays purely compositor-side.
     const width = Math.round(shellWidth.get());
-    const height = Math.ceil(rect.height);
+    const height = contentRef.current.offsetHeight;
     const api = window.electronAPI as any;
     if (api?.updateContentDimensionsCentered) {
       api.updateContentDimensionsCentered({ width, height });
@@ -1033,7 +1051,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       if (Math.abs(width - lastSentWidth) < 1) return;
       lastSentWidth = width;
       if (!contentRef.current) return;
-      const height = Math.ceil(contentRef.current.getBoundingClientRect().height);
+      // offsetHeight (layout height) — not getBoundingClientRect, which would
+      // include descendant CSS transforms and reintroduce the entry-animation
+      // resize feedback loop. See reportShellSize above.
+      const height = contentRef.current.offsetHeight;
       const api = window.electronAPI as any;
       if (api?.updateContentDimensionsCentered) {
         api.updateContentDimensionsCentered({ width, height });
@@ -1304,6 +1325,18 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 
   // Sync Window Visibility with Expanded State
   useEffect(() => {
+    // First run is the mount-time isExpanded=true. main.startMeeting() has
+    // already shown the overlay via switchToOverlay(); calling showWindow()
+    // here would re-enter switchToOverlay() (a second setBounds + focus()),
+    // producing the startup focus flash. Skip it exactly once. The
+    // `ensure-expanded` IPC handler still sets isStealthRef before any later
+    // expansion, so stealth is preserved.
+    if (!isExpandedEffectInitializedRef.current) {
+      isExpandedEffectInitializedRef.current = true;
+      isStealthRef.current = false;
+      return;
+    }
+
     if (isExpanded) {
       window.electronAPI.showWindow(isStealthRef.current);
       isStealthRef.current = false; // Reset back to default
@@ -4045,6 +4078,19 @@ Provide only the answer, nothing else.`;
     !!activeModeLabel || shouldShowSttSummaryPill || showVisionPill || !!llmPrivacyLabel;
   const statusPillBaseClass = `flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-medium shadow-sm backdrop-blur-xl ${isLightTheme ? 'bg-white/55 border-black/10' : 'bg-black/20 border-white/10'}`;
 
+  // Suppress the shell's scale/translate entry animation until it has rendered
+  // expanded at least once (set via onAnimationComplete). On the first content
+  // render the OS window is still settling its bounds, so animating
+  // scale 0.95→1 / y 20→0 would feed the size-reporter a moving box and read as
+  // a shake. `false` tells Framer Motion to mount at the `animate` state with no
+  // enter transition. Re-expansions after mount get the full animation.
+  const expandedMotionInitial = hasRenderedExpandedRef.current
+    ? { opacity: 0, y: 20, scale: 0.95 }
+    : false;
+  const markExpandedRendered = useCallback(() => {
+    hasRenderedExpandedRef.current = true;
+  }, []);
+
   const copyDiagnostics = async () => {
     const version = import.meta.env.VITE_APP_VERSION || 'unknown';
     const [arch, osVersion] = await Promise.all([
@@ -4095,10 +4141,11 @@ Provide only the answer, nothing else.`;
       <AnimatePresence initial={false}>
         {isExpanded && (
           <motion.div
-            initial={{ opacity: 0, y: 20, scale: 0.95 }}
+            initial={expandedMotionInitial}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 20, scale: 0.95 }}
             transition={{ duration: 0.3, ease: 'easeInOut' }}
+            onAnimationComplete={markExpandedRendered}
             className="flex flex-col items-center gap-2 w-full"
           >
             <TopPill
