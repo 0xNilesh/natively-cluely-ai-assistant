@@ -1,17 +1,25 @@
 import { IEmbeddingProvider } from './IEmbeddingProvider';
+import { embeddingSpaceKey } from '../embeddingSpace';
 
 export class GeminiEmbeddingProvider implements IEmbeddingProvider {
   readonly name = 'gemini';
   readonly dimensions = 768; // Using output_dimensionality=768 to save storage
+  readonly model: string;
+  readonly space: string;
 
-  constructor(private apiKey: string, private model = 'models/gemini-embedding-001') {}
+  constructor(private apiKey: string, model = 'models/gemini-embedding-001') {
+    // Store the bare model id (no `models/` prefix) for the space key; the wire
+    // call below re-adds the prefix.
+    this.model = model.replace(/^models\//, '');
+    this.space = embeddingSpaceKey({ name: this.name, model: this.model, dimensions: this.dimensions });
+  }
 
   async isAvailable(): Promise<boolean> {
     try { await this.embed('test'); return true; } catch { return false; }
   }
 
   async embed(text: string): Promise<number[]> {
-    const url = `https://generativelanguage.googleapis.com/v1beta/${this.model}:embedContent?key=${this.apiKey}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:embedContent?key=${this.apiKey}`;
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

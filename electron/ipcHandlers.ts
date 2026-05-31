@@ -1774,7 +1774,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       const validation = validateCurlProviderPayload(provider);
       if (!validation.ok) {
         console.error('[IPC] save-custom-provider: invalid payload');
-        return { success: false, error: validation.error };
+        return { success: false, error: (validation as any).error };
       }
 
       const { CredentialsManager } = require('./services/CredentialsManager');
@@ -1842,7 +1842,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       const validation = validateCurlProviderPayload(provider);
       if (!validation.ok) {
         console.error('[IPC] save-curl-provider: invalid payload');
-        return { success: false, error: validation.error };
+        return { success: false, error: (validation as any).error };
       }
 
       const { CredentialsManager } = require('./services/CredentialsManager');
@@ -2629,7 +2629,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         let response;
 
         if (provider === 'gemini') {
-          const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent`;
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent`;
           response = await axios.post(
             url,
             {
@@ -2869,7 +2869,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       return { model: cm.getDefaultModel() };
     } catch (error: any) {
       console.error('Error getting default model:', error);
-      return { model: 'gemini-3.1-flash-lite-preview' };
+      return { model: 'gemini-3.5-flash' };
     }
   });
 

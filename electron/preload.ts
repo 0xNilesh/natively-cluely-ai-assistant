@@ -266,6 +266,9 @@ interface ElectronAPI {
       stuck?: boolean;
     }) => void,
   ) => () => void;
+  onAudioInputAutoSwitched: (
+    callback: (payload: { from: string; to: string; reason: string; message?: string }) => void,
+  ) => () => void;
 
   // STT Status Events
   onSttStatusChanged: (
@@ -827,6 +830,14 @@ export const PROCESSING_EVENTS = {
 
 // Expose the Electron API to the renderer process
 contextBridge.exposeInMainWorld('electronAPI', {
+  // ── TEST-ONLY eval bridges (gated in main by NODE_ENV==='test') ──────────────
+  // Exposed unconditionally but inert in production: the underlying IPC handlers
+  // ('test-inject-transcript') refuse unless NODE_ENV==='test'. Used by the real
+  // UI eval (intelligence-eval-real-ui) to feed the production transcript path
+  // and read profile debug metadata WITHOUT bypassing the UI or leaking content.
+  __evalInjectTranscript: (segment: { speaker: string; text: string; timestamp?: number; final?: boolean }) =>
+    ipcRenderer.invoke('test-inject-transcript', segment),
+  __evalProfileDebug: () => ipcRenderer.invoke('profile:get-status'),
   updateContentDimensions: (dimensions: { width: number; height: number }) =>
     ipcRenderer.invoke('update-content-dimensions', dimensions),
   updateContentDimensionsCentered: (dimensions: { width: number; height: number }) =>
@@ -1276,6 +1287,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('audio-capture-failed', subscription);
     return () => {
       ipcRenderer.removeListener('audio-capture-failed', subscription);
+    };
+  },
+  onAudioInputAutoSwitched: (
+    callback: (payload: { from: string; to: string; reason: string; message?: string }) => void,
+  ) => {
+    const subscription = (_: any, payload: any) => callback(payload);
+    ipcRenderer.on('audio-input-auto-switched', subscription);
+    return () => {
+      ipcRenderer.removeListener('audio-input-auto-switched', subscription);
     };
   },
 

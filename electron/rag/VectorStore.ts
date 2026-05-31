@@ -5,6 +5,7 @@
 import Database from 'better-sqlite3';
 import { Worker } from 'worker_threads';
 import path from 'path';
+import fs from 'fs';
 import { Chunk } from './SemanticChunker';
 import { DatabaseManager } from '../db/DatabaseManager';
 
@@ -23,7 +24,6 @@ export interface ScoredChunk extends StoredChunk {
  * 
  * Uses sqlite-vec extension for native vector similarity search (O(1) per query via ANN).
  * Falls back to pure JS cosine similarity if sqlite-vec is unavailable.
- * Native sqlite-vec queries are offloaded to a worker thread to avoid blocking the main thread.
  */
 export class VectorStore {
     private db: Database.Database;
@@ -44,13 +44,35 @@ export class VectorStore {
     }
 
     /**
+     * Resolves the on-disk path to vectorSearchWorker.js across all layouts (bundled/unbundled, packaged/unpackaged)
+     */
+    private getWorkerPath(): string {
+        const candidates = [
+            path.join(__dirname, 'vectorSearchWorker.js'),
+            path.join(__dirname, 'rag', 'vectorSearchWorker.js'),
+            path.join(__dirname, 'electron', 'rag', 'vectorSearchWorker.js'),
+        ];
+
+        // Find the first path that actually exists
+        let resolvedPath = candidates.find(p => fs.existsSync(p)) ?? candidates[0];
+
+        // Map to unpacked path if running inside packaged ASAR
+        if (resolvedPath.includes('app.asar') && !resolvedPath.includes('app.asar.unpacked')) {
+            resolvedPath = resolvedPath.replace('app.asar', 'app.asar.unpacked');
+        }
+
+        console.log('[VectorStore] Resolved vectorSearchWorker path to:', resolvedPath);
+        return resolvedPath;
+    }
+
+    /**
      * Lazily initialize the worker thread for JS fallback searches.
      * The worker is reused across all search calls.
      */
     private getWorker(): Worker {
         if (!this.worker) {
             // Resolve the compiled worker script path (dist-electron output)
-            const workerPath = path.join(__dirname, 'vectorSearchWorker.js');
+            const workerPath = this.getWorkerPath();
             this.worker = new Worker(workerPath);
 
             this.worker.on('message', (msg: { type: string; requestId: number; data?: any; error?: string }) => {

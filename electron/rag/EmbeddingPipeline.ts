@@ -471,6 +471,36 @@ export class EmbeddingPipeline {
     }
 
     /**
+     * Embed a query using the ON-DEVICE local provider specifically (bundled
+     * MiniLM, ~10ms, fully offline) rather than whatever the primary provider
+     * is. Used for the latency-critical knowledge query path: when the resume
+     * was also indexed locally (same 384d space), this skips a ~100-200ms cloud
+     * embedding round-trip on every question.
+     *
+     * Returns null when no local provider is available (bundled model missing)
+     * — the caller MUST fall back to the index-matching embedder so cosine
+     * similarity is never computed across mismatched dimensions (which silently
+     * returns 0 in HybridSearchEngine). Never throws; resolves null on any error.
+     *
+     * `localDimensions` exposes the local model's vector size so the caller can
+     * dimension-check against the index BEFORE paying for the embed.
+     */
+    get localDimensions(): number | null {
+        return this.fallbackProvider?.dimensions ?? null;
+    }
+
+    async getEmbeddingForQueryLocalOnly(text: string): Promise<number[] | null> {
+        const local = this.fallbackProvider;
+        if (!local) return null;
+        try {
+            return await this.embedWithTimeout(local, text, 'local-query');
+        } catch (e: any) {
+            console.warn('[EmbeddingPipeline] Local query embed failed:', e?.message || e);
+            return null;
+        }
+    }
+
+    /**
      * BUG-5 fix: Wraps a single embed() call with a hard timeout so a frozen API
      * (network partition, provider hang) cannot lock isProcessing=true indefinitely.
      * Throws if the provider does not respond within EMBED_TIMEOUT_MS (30s).

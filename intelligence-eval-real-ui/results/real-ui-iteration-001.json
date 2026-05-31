@@ -1,0 +1,37 @@
+{
+  "iteration": "real-ui-iteration-001",
+  "date": "2026-05-31",
+  "appVersion": "2.7.0",
+  "platform": "darwin-arm64",
+  "provider": "natively /v1/chat (gemini-3.5-flash)",
+  "realUiUsed": true,
+  "realApiUsed": false,
+  "mockResponsesDetected": 0,
+  "total": 0,
+  "passed": 0,
+  "failed": 0,
+  "accuracy": 0,
+  "criticalTotal": 0,
+  "criticalPassed": 0,
+  "criticalFailed": [],
+  "latency": {
+    "fut_avg": 0,
+    "fut_p50": 0,
+    "fut_p95": 0,
+    "fut_p99": 0,
+    "fut_max": 0,
+    "total_p50": 0,
+    "total_p95": 0,
+    "total_max": 0,
+    "manual_fut_p50": 0,
+    "manual_fut_p95": 0,
+    "wta_fut_p50": 0,
+    "wta_fut_p95": 0
+  },
+  "cost": {
+    "total": 0,
+    "avg": 0,
+    "wastedOnFailures": 0
+  },
+  "rows": []
+}

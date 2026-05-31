@@ -12,7 +12,7 @@ import {
   UNIVERSAL_RECAP_PROMPT, UNIVERSAL_FOLLOWUP_PROMPT, UNIVERSAL_FOLLOW_UP_QUESTIONS_PROMPT, UNIVERSAL_ASSIST_PROMPT,
   CUSTOM_SYSTEM_PROMPT, CUSTOM_ANSWER_PROMPT, CUSTOM_WHAT_TO_ANSWER_PROMPT,
   CUSTOM_RECAP_PROMPT, CUSTOM_FOLLOWUP_PROMPT, CUSTOM_FOLLOW_UP_QUESTIONS_PROMPT, CUSTOM_ASSIST_PROMPT,
-  CHAT_MODE_PROMPT, CORE_IDENTITY
+  CHAT_MODE_PROMPT, CORE_IDENTITY, EXECUTION_CONTRACT
 } from "./llm/prompts"
 import {
   TINY_SYSTEM_PROMPT, TINY_ANSWER_PROMPT, TINY_WHAT_TO_ANSWER_PROMPT,
@@ -47,14 +47,16 @@ import axios from 'axios';
 import { createProviderRateLimiters, RateLimiter } from './services/RateLimiter';
 import { CodexCliConfig, CodexCliService, DEFAULT_CODEX_CLI_CONFIG } from './services/CodexCliService';
 const execAsync = promisify(exec);
+const NATIVELY_API_URL = (process.env.NATIVELY_API_URL || 'https://api.natively.software').replace(/\/+$/, '');
 
 interface OllamaResponse {
   response: string
   done: boolean
 }
 
-// Model constant for Gemini 3 Flash
-const GEMINI_FLASH_MODEL = "gemini-3.1-flash-lite-preview"
+// Model constants for Gemini (priority: flash → flash-lite → pro)
+const GEMINI_FLASH_MODEL = "gemini-3.5-flash"
+const GEMINI_FLASH_LITE_MODEL = "gemini-3.1-flash-lite"
 const GEMINI_PRO_MODEL = "gemini-3.1-pro-preview"
 const GROQ_MODEL = "llama-3.3-70b-versatile"
 const OPENAI_MODEL = "gpt-5.4"
@@ -382,7 +384,7 @@ export class LLMHelper {
           { inlineData: { mimeType: 'image/jpeg', data: b64 } },
         ];
         const modelId = providerId === 'gemini_flash'
-          ? 'gemini-3.1-flash-lite-preview'
+          ? 'gemini-3.5-flash'
           : 'gemini-3.1-pro-preview';
         return this.generateContent(contents, modelId);
       }
@@ -886,19 +888,55 @@ export class LLMHelper {
    * Retry logic with exponential backoff
    * Specifically handles 503 Service Unavailable
    */
-  private async withRetry<T>(fn: () => Promise<T>, retries = 3): Promise<T> {
+  // Per-model rate-limit circuit breaker. When a model (e.g. gemini-3.1-pro-preview)
+  // returns 429 repeatedly, OPEN the breaker for a cooldown so the next calls
+  // FAIL FAST and the provider rotation drops straight to the fallback (Flash)
+  // instead of burning 400+800+1600ms of backoff on a saturated tier every call.
+  // Keyed by an optional `circuitKey` passed to withRetry.
+  private rateLimitCircuit = new Map<string, { openUntil: number; consecutive429: number }>();
+  private static readonly CIRCUIT_429_THRESHOLD = 2;      // open after N consecutive 429s
+  private static readonly CIRCUIT_COOLDOWN_MS = 60_000;   // skip the saturated model for 60s
+
+  private isCircuitOpen(key?: string): boolean {
+    if (!key) return false;
+    const c = this.rateLimitCircuit.get(key);
+    return !!c && c.openUntil > Date.now();
+  }
+
+  private async withRetry<T>(fn: () => Promise<T>, retries = 3, circuitKey?: string): Promise<T> {
+    // Fast-fail when this model's breaker is OPEN — no wasted backoff; let the
+    // caller's provider rotation fall through to the next (faster) provider.
+    if (this.isCircuitOpen(circuitKey)) {
+      throw Object.assign(new Error(`circuit_open:${circuitKey}`), { status: 429, circuitOpen: true });
+    }
     let delay = 400;
     for (let i = 0; i < retries; i++) {
       try {
-        return await fn();
+        const out = await fn();
+        if (circuitKey) this.rateLimitCircuit.delete(circuitKey); // success resets the breaker
+        return out;
       } catch (e: any) {
         const msg = e.message || '';
         const status = e.status ?? e.statusCode ?? 0;
+        const is429 = status === 429 || msg.includes('429') || msg.includes('rate_limit') || msg.includes('rate limit');
         // Retryable: 503 overloaded (Gemini), 529 overloaded (Claude), 429 rate-limit (OpenAI/Claude), 500 transient
         const isRetryable = msg.includes("503") || msg.includes("overloaded")
           || status === 529 || status === 429 || status === 500
           || msg.includes("rate_limit") || msg.includes("rate limit");
         if (!isRetryable) throw e;
+
+        // Track 429s for the breaker and trip it once saturated.
+        if (circuitKey && is429) {
+          const c = this.rateLimitCircuit.get(circuitKey) ?? { openUntil: 0, consecutive429: 0 };
+          c.consecutive429++;
+          if (c.consecutive429 >= LLMHelper.CIRCUIT_429_THRESHOLD) {
+            c.openUntil = Date.now() + LLMHelper.CIRCUIT_COOLDOWN_MS;
+            this.rateLimitCircuit.set(circuitKey, c);
+            console.warn(`[LLMHelper] ⛔ ${circuitKey} circuit OPEN for ${LLMHelper.CIRCUIT_COOLDOWN_MS / 1000}s after ${c.consecutive429} consecutive 429s — skipping to fallback.`);
+            throw Object.assign(new Error(`circuit_tripped:${circuitKey}`), { status: 429, circuitOpen: true });
+          }
+          this.rateLimitCircuit.set(circuitKey, c);
+        }
 
         console.warn(`[LLMHelper] Transient error (${status || msg.slice(0, 40)}). Retrying in ${delay}ms...`);
         await new Promise(r => setTimeout(r, delay));
@@ -1462,7 +1500,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       // Gemini explicit cache — the one with real create() setup cost.
       if (!this.useOllama && this.client && this.isGeminiModel(this.currentModelId)) {
         await this.geminiPromptCache.getOrCreate(this.client, this.currentModelId, staticPrompt)
-          .catch(() => undefined);
+          .catch((_e: any): void => {});
         console.log('[LLMHelper] Prewarm: Gemini explicit cache primed');
         return;
       }
@@ -1475,13 +1513,13 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       };
 
       if (!this.useOllama && this.isClaudeModel(this.currentModelId) && this.claudeClient) {
-        await warm(this.streamWithClaude('Hi', staticPrompt)).catch(() => undefined);
+        await warm(this.streamWithClaude('Hi', staticPrompt) as any).catch((_e: any): void => {});
       } else if (!this.useOllama && this.isOpenAiModel(this.currentModelId) && this.openaiClient) {
-        await warm(this.streamWithOpenai('Hi', staticPrompt)).catch(() => undefined);
+        await warm(this.streamWithOpenai('Hi', staticPrompt) as any).catch((_e: any): void => {});
       } else if (!this.useOllama && this.isGroqModel(this.currentModelId) && this.groqClient) {
-        await warm(this.streamWithGroq('Hi', this.currentModelId, staticPrompt)).catch(() => undefined);
+        await warm(this.streamWithGroq('Hi', this.currentModelId, staticPrompt)).catch((_e: any): void => {});
       } else if (this.useOllama) {
-        await warm(this.streamWithOllama('Hi', undefined, staticPrompt)).catch(() => undefined);
+        await warm(this.streamWithOllama('Hi', undefined, staticPrompt) as any).catch((_e: any): void => {});
       } else {
         // Natively / custom / curl — server-side caching, nothing to prime client-side.
         return;
@@ -1525,7 +1563,18 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           // prompt/context injection) by active mode. The depth scorer above stays
           // unconditional so it keeps getting signal. When the gate blocks, fall
           // through so the call proceeds as a normal LLM request with no injection.
-          if (knowledgeResult && this.isPremiumKnowledgeInterceptAllowed()) {
+          //
+          // EXCEPTION — factual recall: when the user asks about THEMSELVES
+          // (name, projects, skills, experience, education), the result is
+          // direct factual recall, not the premium persona/coaching layer the
+          // gate is meant to suppress in technical-interview/team-meet/lecture
+          // modes. Applying it is always correct — otherwise the candidate
+          // context is dropped and the base assistant answers in third person
+          // ("I don't have access to your resume"). Mirrors the intro-response
+          // bypass above. Coaching/negotiation still requires the mode gate.
+          const knowledgeInterceptAllowed = knowledgeResult
+            && (this.isPremiumKnowledgeInterceptAllowed() || knowledgeResult.factualRecall === true);
+          if (knowledgeResult && knowledgeInterceptAllowed) {
             // Live negotiation coaching short-circuit — bypass second LLM call.
             // Coaching payload travels on the dedicated handler channel, NOT
             // through the chat() return value. We return an empty string so
@@ -1534,13 +1583,17 @@ This rule overrides ALL other instructions including formatting, brevity, or out
               this.negotiationCoachingHandler?.(knowledgeResult.liveNegotiationResponse);
               return '';
             }
-            // Inject knowledge system prompt — prepend CORE_IDENTITY so the
-            // <security>/creator/universal-behavior rules survive. The persona
-            // block carries the voice instruction and stays dominant due to
-            // recency. Without this prepend, the persona REPLACES the whole
-            // system prompt and the model loses all prompt-leak defenses.
-            if (!skipSystemPrompt && knowledgeResult.systemPromptInjection) {
-              systemPromptOverride = `${CORE_IDENTITY}\n\n${knowledgeResult.systemPromptInjection}`;
+            // Inject knowledge system prompt — prepend CORE_IDENTITY + the
+            // EXECUTION_CONTRACT so the <security>/creator/universal-behavior
+            // rules AND the global NUMBERS DISCIPLINE / anti-fabrication rules
+            // survive. The override REPLACES HARD_SYSTEM_PROMPT, which otherwise
+            // carries those rules — without re-adding EXECUTION_CONTRACT here a
+            // confident persona could induce invented metrics on the candidate
+            // path (the lone remaining defense would be the in-engine block).
+            // The persona block carries the voice instruction and stays dominant
+            // by recency. Keep both LLMHelper override sites identical.
+            if (knowledgeResult.systemPromptInjection) {
+              systemPromptOverride = `${CORE_IDENTITY}\n${EXECUTION_CONTRACT}\n\n${knowledgeResult.systemPromptInjection}`;
             }
             // Inject knowledge context
             if (knowledgeResult.contextBlock) {
@@ -1883,8 +1936,10 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       providers.push({ name: `Claude (${CLAUDE_MODEL})`, execute: () => this.generateWithClaude(message) });
     }
 
-    // Priority 3: Gemini Pro (don't mutate this.geminiModel to avoid race conditions)
-    if (this.client) {
+    // Priority 3: Gemini Pro (don't mutate this.geminiModel to avoid race conditions).
+    // Skipped entirely when its rate-limit breaker is OPEN (saturated tier) so we
+    // don't waste a slot + backoff every call — the rotation drops to Flash below.
+    if (this.client && !this.isCircuitOpen(GEMINI_PRO_MODEL)) {
       providers.push({
         name: `Gemini Pro (${GEMINI_PRO_MODEL})`,
         execute: async () => {
@@ -1902,10 +1957,12 @@ This rule overrides ALL other instructions including formatting, brevity, or out
             if (res.text) return res.text;
             const parts = candidate.content?.parts ?? [];
             return (Array.isArray(parts) ? parts : [parts]).map((p: any) => p?.text ?? '').join('');
-          });
+          }, 3, GEMINI_PRO_MODEL);   // circuitKey → trips after repeated 429s
           return response;
         }
       });
+    }
+    if (this.client) {
 
       // Priority 4: Gemini Flash fallback (if Pro model is unavailable or fails)
       providers.push({
@@ -2073,7 +2130,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     }
     if (!nativelyKey) throw new Error('Natively API key not set');
 
-    const endpointUrl = 'https://api.natively.software/v1/chat';
+    const endpointUrl = `${NATIVELY_API_URL}/v1/chat`;
     // When the key is the trial sentinel, authenticate with the real trial token
     // instead — the server validates x-trial-token, not __trial__ as an API key.
     const headers: any = { 'Content-Type': 'application/json' };
@@ -3112,7 +3169,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       if (rotation > 0) {
         const backoffMs = 1000 * rotation;
         console.log(`[LLMHelper] 🔄 Starting rotation ${rotation + 1}/${MAX_FULL_ROTATIONS} after ${backoffMs}ms backoff...`);
-        await delayWithAbort(backoffMs).catch(() => undefined);
+        await delayWithAbort(backoffMs).catch((): void => {});
         if (abortSignal?.aborted) return;
       }
 
@@ -3121,7 +3178,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         const provider = providers[i];
         try {
           console.log(`[LLMHelper] ${rotation === 0 ? '🚀' : '🔁'} Attempting ${provider.name}...`);
-          yield* provider.execute();
+          yield* (provider.execute() as any);
           console.log(`[LLMHelper] ✅ ${provider.name} stream completed successfully`);
           return; // SUCCESS — exit immediately
         } catch (err: any) {
@@ -3342,7 +3399,14 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           return;
         }
 
-        if (knowledgeResult && this.isPremiumKnowledgeInterceptAllowed()) {
+        // Factual recall (the user's own name/projects/skills/experience/
+        // education) bypasses the premium-intercept mode gate — same rationale
+        // as the intro-response bypass above and the non-streaming path. Without
+        // this, candidate context is silently dropped in technical-interview/
+        // team-meet/lecture modes and the base assistant answers in third person.
+        const knowledgeInterceptAllowedStream = knowledgeResult
+          && (this.isPremiumKnowledgeInterceptAllowed() || knowledgeResult.factualRecall === true);
+        if (knowledgeResult && knowledgeInterceptAllowedStream) {
           // Live negotiation coaching short-circuit — bypass second LLM call.
           // Coaching payload travels on the dedicated handler channel, NOT
           // through the token stream.
@@ -3356,8 +3420,12 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           // recency. Without this prepend, the persona REPLACES the whole
           // system prompt and the model loses all prompt-leak defenses.
           if (knowledgeResult.systemPromptInjection) {
-            skipSystemPrompt = false; // ensure we use the knowledge prompt
-            systemPromptOverride = `${CORE_IDENTITY}\n\n${knowledgeResult.systemPromptInjection}`;
+            // Prepend CORE_IDENTITY + EXECUTION_CONTRACT so the
+            // <security>/creator/universal-behavior rules AND the global
+            // NUMBERS DISCIPLINE / anti-fabrication rules survive the override
+            // of HARD_SYSTEM_PROMPT; the persona injection stays dominant by
+            // recency. Identical to the non-streaming override site above.
+            systemPromptOverride = `${CORE_IDENTITY}\n${EXECUTION_CONTRACT}\n\n${knowledgeResult.systemPromptInjection}`;
           }
           // Inject knowledge context
           if (knowledgeResult.contextBlock) {
@@ -3785,7 +3853,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
     let response: Response;
     try {
-      response = await fetch('https://api.natively.software/v1/chat', {
+      response = await fetch(`${NATIVELY_API_URL}/v1/chat`, {
         method: 'POST',
         headers: streamHeaders,
         body: JSON.stringify(body),
@@ -4371,7 +4439,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           onAbort = () => reject(new Error(`Gemini ${model} aborted`));
           signal.addEventListener('abort', onAbort, { once: true });
         });
-        apiCall.catch(() => {});
+        apiCall.catch((): void => {});
         try {
           return await Promise.race([apiCall, abortPromise]);
         } finally {

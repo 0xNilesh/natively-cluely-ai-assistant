@@ -31,10 +31,10 @@ export function buildPreparedTranscriptContext(
     timestamp: item.timestamp,
   }));
 
-  const preparedTranscript = prepareTranscriptForWhatToAnswer(transcriptTurns, 12);
+  const preparedTranscript = prepareTranscriptForWhatToAnswer(transcriptTurns as any, 12);
   const temporalContext = buildTemporalContext(
-    contextItems,
-    session.getAssistantResponseHistory(),
+    contextItems as any,
+    session.getAssistantResponseHistory() as any,
     lastSeconds,
   );
 

@@ -28,7 +28,44 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
+import os from 'node:os';
+import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
+
+// GoogleSTT's ctor does `new SpeechClient({ keyFilename })`. With NO credentials,
+// google-auth-library probes the GCE metadata server to discover a project — a
+// background lookup that rejects asynchronously, AFTER these synchronous tests
+// finish, and (depending on timing) aborts the shared test process with exit 13,
+// flakily poisoning sibling test files. We only exercise the pure write()/
+// keepalive logic and never make a real RPC, so the deterministic fix is to give
+// google-auth a syntactically valid dummy service-account key file: with a key
+// file present it uses it directly and NEVER probes the metadata server. No
+// network, no async rejection, no flakiness. Belt-and-braces: also swallow any
+// stray auth rejection (real ones can't occur — we never call an RPC).
+const DUMMY_KEY = path.join(os.tmpdir(), `natively-stt-test-sa-${process.pid}.json`);
+fs.writeFileSync(
+  DUMMY_KEY,
+  JSON.stringify({
+    type: 'service_account',
+    project_id: 'natively-stt-test',
+    private_key_id: 'test',
+    // Not a real key — never used because no RPC is issued in these tests.
+    private_key: '-----BEGIN PRIVATE KEY-----\nMIIBVAIBADAN\n-----END PRIVATE KEY-----\n',
+    client_email: 'test@natively-stt-test.iam.gserviceaccount.com',
+    client_id: '0',
+    token_uri: 'https://oauth2.googleapis.com/token',
+  }),
+);
+process.env.GOOGLE_APPLICATION_CREDENTIALS = DUMMY_KEY;
+process.env.GOOGLE_SDK_NODE_LOGGING = 'off';
+process.on('unhandledRejection', (err) => {
+  const msg = String(err && (err.message || err));
+  if (/metadata|ENOTFOUND|ECONNREFUSED|EHOSTUNREACH|could not load the default credentials|GoogleAuth|fetch failed|network timeout|invalid_grant|DECODER|private key/i.test(msg)) {
+    return; // expected: stray SpeechClient auth artifact; no RPC is ever made
+  }
+  throw err;
+});
+process.on('exit', () => { try { fs.unlinkSync(DUMMY_KEY); } catch { /* ignore */ } });
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distRoot = path.resolve(__dirname, '../../../dist-electron/electron/audio');

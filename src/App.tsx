@@ -798,12 +798,13 @@ const App: React.FC = () => {
             }}
           />
 
-          {/* Remote Campaigns Render Logic */}
+          {/* Remote Campaigns Render Logic (Commented out)
           <RemoteCampaignToaster
             isOpen={typeof activeAd === 'object' && activeAd !== null}
             campaign={typeof activeAd === 'object' && activeAd !== null ? activeAd : undefined as any}
             onDismiss={dismissAd}
           />
+          */}
         </>
       )}
 
