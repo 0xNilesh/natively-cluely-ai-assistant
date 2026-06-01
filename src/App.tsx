@@ -15,6 +15,7 @@ import { FreeTrialBanner }      from "./components/trial/FreeTrialBanner"
 import { FreeTrialModal }       from "./components/trial/FreeTrialModal"
 import { TrialPromoToaster }    from "./components/trial/TrialPromoToaster"
 import { PermissionsToaster }   from "./components/onboarding/PermissionsToaster"
+import { PermissionsOnboardingFull } from "./components/onboarding/PermissionsOnboardingFull"
 import { AlertCircle, RefreshCw } from "lucide-react"
 import { clampOverlayOpacity, OVERLAY_OPACITY_DEFAULT, getDefaultOverlayOpacity } from "./lib/overlayAppearance"
 import { getMeetingInterfaceTheme, type MeetingInterfaceTheme } from './lib/meetingInterfaceTheme'
@@ -93,11 +94,7 @@ const App: React.FC = () => {
   // One-shot first-run startup sequence. Once the user dismisses it (or any
   // future code flips the flag), it never appears again on subsequent launches.
   const [showStartup, setShowStartup] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem('natively_seen_startup_v1') !== 'true';
-    } catch {
-      return true;
-    }
+    return false;
   });
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState<string>('general');
@@ -160,6 +157,7 @@ const App: React.FC = () => {
 
   // ── Onboarding / promo toasters ───────────────────────────
   const [showPermissionsToaster, setShowPermissionsToaster] = useState(false);
+  const [showPermissionsLostToaster, setShowPermissionsLostToaster] = useState(false);
   const [showTrialPromo,         setShowTrialPromo]         = useState(false);
 
   // ── Free Trial global state ────────────────────────────────
@@ -180,25 +178,79 @@ const App: React.FC = () => {
     hasNativelyApi
   );
 
-  // Preview shortcuts — Ctrl/Cmd+Shift+1-5 force-show any ad card.
-  // Uses e.code so Shift doesn't remap the digit to a symbol ('!' etc.).
+  // Preview shortcuts — Ctrl/Cmd+Shift+1-7 force-show any ad toaster.
+  // Shortcuts 1-5 use e.code so Shift doesn't remap the digit to a symbol ('!' etc.).
+  // Shortcuts 1-7 also registered as global keybinds in electron/services/KeybindManager.ts
+  // so they work even when the app window is not focused.
   useEffect(() => {
+    // Helper to activate a toast by its ID
+    const triggerToast = (toastId: string) => {
+      const adMap: Record<string, string> = {
+        'trial-promo': 'trial-promo',
+        'max-ultra-upgrade': 'max_ultra_upgrade',
+        'premium-promo': 'promo',
+        'natively-api-promo': 'natively_api',
+        'profile-feature': 'profile',
+        'jd-awareness': 'jd',
+        'remote-campaign': 'remote-campaign',
+      };
+      const ad = adMap[toastId];
+      if (ad === 'trial-promo') {
+        // Trial promo uses its own state, not the ad campaigns system
+        setShowTrialPromo(true);
+        return;
+      }
+      if (ad === 'remote-campaign') {
+        // Remote campaign is object-based; show a sample campaign for dev testing
+        previewAd({
+          id: 'dev-remote-campaign',
+          type: 'promo',
+          title: 'Spring Sale!',
+          message: 'Use SAVE30 for $5 off lifetime access.',
+          cta_text: 'Get the Deal',
+          url: 'https://natively.ai',
+          icon: 'sparkles',
+        } as any);
+        return;
+      }
+      if (ad) previewAd(ad as any);
+    };
+
+    const unsubIpc = window.electronAPI?.onDevTriggerToast?.(({ toastId }) => {
+      triggerToast(toastId);
+    }) ?? (() => {});
+
+    // Local keyboard shortcuts — PRIMARY path (guaranteed to work when launcher/overlay is focused)
     const CODE_MAP: Record<string, string> = {
-      'Digit1': 'max_ultra_upgrade',
-      'Digit2': 'promo',
-      'Digit3': 'natively_api',
-      'Digit4': 'profile',
-      'Digit5': 'jd',
+      'Digit1': 'trial-promo',          // Cmd+Shift+1 → Trial Promo
+      'Digit2': 'max-ultra-upgrade',   // Cmd+Shift+2 → Max/Ultra Upgrade
+      'Digit3': 'premium-promo',        // Cmd+Shift+3 → Premium Promo
+      'Digit4': 'natively-api-promo',   // Cmd+Shift+4 → Natively API Promo
+      'Digit5': 'profile-feature',      // Cmd+Shift+5 → Profile Feature
+      'Digit6': 'jd-awareness',         // Cmd+Shift+6 → JD Awareness
+      'Digit7': 'remote-campaign',      // Cmd+Shift+7 → Remote Campaign
     };
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || !e.shiftKey) return;
-      const ad = CODE_MAP[e.code];
-      if (!ad) return;
-      e.preventDefault();
-      previewAd(ad as any);
+      const toastId = CODE_MAP[e.code];
+      if (toastId) {
+        e.preventDefault();
+        triggerToast(toastId);
+        return;
+      }
     };
     document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
+
+    // DEV: Shift+K to show split-view Permissions Toaster (permission-lost scenario)
+    const unsubPermsToast = window.electronAPI?.onDevTriggerPermissionsToaster?.(() => {
+      setShowPermissionsLostToaster(true);
+    }) ?? (() => {});
+
+    return () => {
+      unsubIpc();
+      unsubPermsToast();
+      document.removeEventListener('keydown', onKey);
+    };
   }, [previewAd]);
 
   useEffect(() => {
@@ -288,6 +340,20 @@ const App: React.FC = () => {
       } else {
         // Subsequent launches — trial promo will self-gate via TrialPromoToaster
         setShowTrialPromo(true);
+
+        // Check if permissions were previously granted but are now lost.
+        // PermissionsToaster (split-view) will handle the UI for this case.
+        const wasOnboarded = localStorage.getItem('natively_perms_shown_v1') === '1';
+        if (wasOnboarded) {
+          window.electronAPI?.checkPermissions?.().then(p => {
+            if (!p) return;
+            const lostMic  = p.microphone === 'denied' || p.microphone === 'not-determined';
+            const lostScr = p.platform === 'darwin' && (p.screen === 'denied' || p.screen === 'not-determined');
+            if (lostMic || lostScr) {
+              setShowPermissionsLostToaster(true);
+            }
+          }).catch(() => {});
+        }
       }
     }
 
@@ -772,14 +838,20 @@ const App: React.FC = () => {
         />
       )}
 
-      {/* Permissions toaster — first ever launch */}
-      <PermissionsToaster
-        isOpen={showPermissionsToaster}
+      {/* Permissions onboarding — first ever launch (full-screen, two-column, matches StartupSequence style) */}
+      <PermissionsOnboardingFull
+        isOpen={showPermissionsToaster && !showStartup}
         onDismiss={() => {
           localStorage.setItem('natively_perms_shown_v1', '1');
           setShowPermissionsToaster(false);
           // After permissions, allow trial promo on next launch
         }}
+      />
+
+      {/* Permissions toaster — shown when permissions are lost after being granted (split-view) */}
+      <PermissionsToaster
+        isOpen={showPermissionsLostToaster}
+        onDismiss={() => setShowPermissionsLostToaster(false)}
       />
 
       {/* Trial promo toaster — 5s after restart (self-gates via localStorage + conditions) */}
