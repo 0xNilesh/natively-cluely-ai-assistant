@@ -92,11 +92,14 @@ const App: React.FC = () => {
   // State
   // One-shot first-run startup sequence. Once the user dismisses it (or any
   // future code flips the flag), it never appears again on subsequent launches.
-  const [showStartup, setShowStartup] = useState<boolean>(() => {
+  const [showStartup, setShowStartup] = useState<boolean | null>(() => {
     try {
-      return localStorage.getItem('natively_seen_startup_v1') !== 'true';
+      const val = localStorage.getItem('natively_seen_startup_v1');
+      if (val === 'true') return false;
+      if (val === 'false') return true;
+      return null;
     } catch {
-      return true;
+      return null;
     }
   });
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -205,61 +208,82 @@ const App: React.FC = () => {
     // Clean up old local storage
     localStorage.removeItem('useLegacyAudioBackend');
 
-    // Sync onboarding and gate flags between localStorage and persistent settings.json store
-    window.electronAPI?.onboardingGetFlags?.()
-      .then((flags) => {
-        if (flags) {
-          // 1. seenStartup
-          if (flags.seenStartup) {
-            setShowStartup(false);
-            try { localStorage.setItem('natively_seen_startup_v1', 'true'); } catch {}
-          } else {
-            try {
-              const localSeen = localStorage.getItem('natively_seen_startup_v1') === 'true';
-              if (localSeen) {
-                window.electronAPI?.onboardingSetFlag?.('seenStartup', true).catch(() => {});
-              }
-            } catch {}
-          }
+    const fallbackLocal = () => {
+      try {
+        const localSeen = localStorage.getItem('natively_seen_startup_v1') === 'true';
+        setShowStartup(!localSeen);
+      } catch {
+        setShowStartup(true);
+      }
+    };
 
-          // 2. seenModesOnboarding
-          if (flags.seenModesOnboarding) {
-            try { localStorage.setItem('natively_seen_modes_onboarding_v5', 'true'); } catch {}
-          } else {
-            try {
-              const localSeen = localStorage.getItem('natively_seen_modes_onboarding_v5') === 'true';
-              if (localSeen) {
-                window.electronAPI?.onboardingSetFlag?.('seenModesOnboarding', true).catch(() => {});
+    if (window.electronAPI?.onboardingGetFlags) {
+      window.electronAPI.onboardingGetFlags()
+        .then((flags) => {
+          if (flags) {
+            // 1. seenStartup
+            if (flags.seenStartup) {
+              setShowStartup(false);
+              try { localStorage.setItem('natively_seen_startup_v1', 'true'); } catch {}
+            } else {
+              try {
+                const localSeen = localStorage.getItem('natively_seen_startup_v1') === 'true';
+                if (localSeen) {
+                  setShowStartup(false);
+                  window.electronAPI?.onboardingSetFlag?.('seenStartup', true).catch(() => {});
+                } else {
+                  setShowStartup(true);
+                }
+              } catch {
+                setShowStartup(true);
               }
-            } catch {}
-          }
+            }
 
-          // 3. seenProfileOnboarding
-          if (flags.seenProfileOnboarding) {
-            try { localStorage.setItem('natively_seen_profile_onboarding_v1', 'true'); } catch {}
-          } else {
-            try {
-              const localSeen = localStorage.getItem('natively_seen_profile_onboarding_v1') === 'true';
-              if (localSeen) {
-                window.electronAPI?.onboardingSetFlag?.('seenProfileOnboarding', true).catch(() => {});
-              }
-            } catch {}
-          }
+            // 2. seenModesOnboarding
+            if (flags.seenModesOnboarding) {
+              try { localStorage.setItem('natively_seen_modes_onboarding_v5', 'true'); } catch {}
+            } else {
+              try {
+                const localSeen = localStorage.getItem('natively_seen_modes_onboarding_v5') === 'true';
+                if (localSeen) {
+                  window.electronAPI?.onboardingSetFlag?.('seenModesOnboarding', true).catch(() => {});
+                }
+              } catch {}
+            }
 
-          // 4. permsShown
-          if (flags.permsShown) {
-            try { localStorage.setItem('natively_perms_shown_v1', '1'); } catch {}
+            // 3. seenProfileOnboarding
+            if (flags.seenProfileOnboarding) {
+              try { localStorage.setItem('natively_seen_profile_onboarding_v1', 'true'); } catch {}
+            } else {
+              try {
+                const localSeen = localStorage.getItem('natively_seen_profile_onboarding_v1') === 'true';
+                if (localSeen) {
+                  window.electronAPI?.onboardingSetFlag?.('seenProfileOnboarding', true).catch(() => {});
+                }
+              } catch {}
+            }
+
+            // 4. permsShown
+            if (flags.permsShown) {
+              try { localStorage.setItem('natively_perms_shown_v1', '1'); } catch {}
+            } else {
+              try {
+                const localSeen = localStorage.getItem('natively_perms_shown_v1') === '1';
+                if (localSeen) {
+                  window.electronAPI?.onboardingSetFlag?.('permsShown', true).catch(() => {});
+                }
+              } catch {}
+            }
           } else {
-            try {
-              const localSeen = localStorage.getItem('natively_perms_shown_v1') === '1';
-              if (localSeen) {
-                window.electronAPI?.onboardingSetFlag?.('permsShown', true).catch(() => {});
-              }
-            } catch {}
+            fallbackLocal();
           }
-        }
-      })
-      .catch(() => {});
+        })
+        .catch(() => {
+          fallbackLocal();
+        });
+    } else {
+      fallbackLocal();
+    }
 
     // Basic status check for campaign targeting
     window.electronAPI?.profileGetStatus?.().then(s => setHasProfile(s?.hasProfile || false)).catch(() => {});
@@ -615,6 +639,12 @@ const App: React.FC = () => {
 
   // --- LAUNCHER WINDOW (Default) ---
   // Renders if window=launcher OR no param
+  if (showStartup === null) {
+    return (
+      <div className="h-full w-full bg-[#000000]" />
+    );
+  }
+
   return (
     <ErrorBoundary context="Launcher">
     <div className="h-full min-h-0 w-full relative bg-[#000000]">

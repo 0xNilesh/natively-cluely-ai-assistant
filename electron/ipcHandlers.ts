@@ -15,6 +15,7 @@ import { SkillsManager } from './services/SkillsManager';
 
 import { TRIAL_SENTINEL_KEY } from './config/constants';
 import { AI_RESPONSE_LANGUAGES, RECOGNITION_LANGUAGES } from './config/languages';
+import { planAnswer, formatAnswerPlanForPrompt, isCodingAnswerType, validateAnswerStructure } from './llm';
 import { CHAT_MODE_PROMPT } from './llm/prompts';
 
 export function initializeIpcHandlers(appState: AppState): void {
@@ -620,11 +621,23 @@ export function initializeIpcHandlers(appState: AppState): void {
 
         let fullResponse = '';
 
-        if (!context && autoContextSnapshot) {
+        const answerPlan = planAnswer({
+          question: message,
+          source: 'manual_input',
+          speakerPerspective: 'user',
+        });
+        const isCodingChat = isCodingAnswerType(answerPlan.answerType);
+
+        if (!context && autoContextSnapshot && !isCodingChat) {
           context = autoContextSnapshot;
           console.log(
             `[IPC] Auto-injected 100s context for gemini-chat-stream (${context.length} chars)`,
           );
+        } else if (isCodingChat) {
+          context = formatAnswerPlanForPrompt(answerPlan);
+          console.log('[IPC] Coding chat detected; excluding rolling resume/JD/transcript context and enforcing answer contract', {
+            answerType: answerPlan.answerType,
+          });
         }
 
         // Use CHAT_MODE_PROMPT for general chat — bypasses the interview-copilot
@@ -646,8 +659,8 @@ export function initializeIpcHandlers(appState: AppState): void {
             imagePaths,
             context,
             systemPromptOverride,
-            options?.ignoreKnowledgeMode,
-            false, // skipModeInjection
+            isCodingChat ? true : options?.ignoreKnowledgeMode,
+            isCodingChat, // skipModeInjection; coding chat must not pull active-mode resume/JD/reference context
             [],    // extraDataScopes
             myController.signal,
           );
@@ -660,17 +673,42 @@ export function initializeIpcHandlers(appState: AppState): void {
               );
               return null;
             }
-            event.sender.send('gemini-stream-token', token);
-            try {
-              PhoneMirrorService.getInstance().publishToken(String(myStreamId), token);
-            } catch (_) {
-              /* noop */
-            }
+
             fullResponse += token;
+
+            if (!isCodingChat) {
+              event.sender.send('gemini-stream-token', token);
+              try {
+                PhoneMirrorService.getInstance().publishToken(String(myStreamId), token);
+              } catch (_) {
+                /* noop */
+              }
+            }
+          }
+
+          if (isCodingChat) {
+            const structureValidation = validateAnswerStructure(answerPlan.answerType, fullResponse);
+            if (!structureValidation.ok && structureValidation.repaired) {
+              console.warn('[IPC] Repaired coding chat answer structure', {
+                answerType: answerPlan.answerType,
+                missingSections: structureValidation.missingSections,
+                hasCodeBlock: structureValidation.hasCodeBlock,
+                hasComplexity: structureValidation.hasComplexity,
+              });
+              fullResponse = structureValidation.repaired;
+            }
           }
 
           // Final check: only send done if we are still the active stream
           if (_chatStreamsBySender.get(senderId)?.streamId === myStreamId) {
+            if (isCodingChat && fullResponse.trim().length > 0) {
+              event.sender.send('gemini-stream-token', fullResponse);
+              try {
+                PhoneMirrorService.getInstance().publishToken(String(myStreamId), fullResponse);
+              } catch (_) {
+                /* noop */
+              }
+            }
             event.sender.send('gemini-stream-done');
             try {
               PhoneMirrorService.getInstance().publishDone(String(myStreamId), fullResponse);
@@ -1018,6 +1056,9 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle('onboarding:set-flag', async (_, key: string, value: boolean) => {
     if (['seenStartup', 'seenProfileOnboarding', 'seenModesOnboarding', 'permsShown'].includes(key)) {
+      if (typeof value !== 'boolean') {
+        return { success: false, error: 'invalid_value_type' };
+      }
       SettingsManager.getInstance().set(key as any, value);
       return { success: true };
     }

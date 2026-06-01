@@ -2038,8 +2038,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Onboarding & gate persistent backup flags
   onboardingGetFlags: () => ipcRenderer.invoke('onboarding:get-flags'),
-  onboardingSetFlag: (key: string, value: boolean) =>
-    ipcRenderer.invoke('onboarding:set-flag', key, value),
+  onboardingSetFlag: (
+    key: 'seenStartup' | 'seenProfileOnboarding' | 'seenModesOnboarding' | 'permsShown',
+    value: boolean
+  ) => ipcRenderer.invoke('onboarding:set-flag', key, value),
 
   // Arch
   getArch: () => ipcRenderer.invoke('get-arch'),
