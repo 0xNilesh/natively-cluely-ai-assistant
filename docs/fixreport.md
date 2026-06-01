@@ -4,6 +4,28 @@ Running changelog for the embedding-system upgrade (2026-06-01). Newest first.
 
 ---
 
+## FIX-007 — Mid-session STT quota watchdog (unbounded-session leak)
+- **Issue found:** Transcription quota was gated only at WS session OPEN (`server.js:~5484`)
+  and billed only at session CLOSE (`billSTTSeconds` in `socket.on('close')`). A session that
+  started with little quota left ran UNBOUNDED for hours; only the NEXT session got blocked.
+  (Reported: "meeting started with low STT credits keeps going until the next meeting.")
+- **Root cause:** no live usage check during the session; `sessionQuota` captured once at auth,
+  never re-evaluated against accumulating usage.
+- **Files changed:** `natively-api/server.js` — added `sessionBudgetSeconds`/`sessionResetsAt`/
+  `quotaCutoffFired` session vars, `liveBillableSeconds()` helper, and a watchdog inside the
+  existing 25s `pingInterval`.
+- **Before:** open with 1 min left → run for hours → bill all at close → next session blocked.
+- **After:** watchdog computes live billable seconds (mirrors close-time math conservatively)
+  and, when usage reaches the auth-time budget, sends `transcription_quota_exceeded` + closes
+  the socket (1008) → existing close path bills the final amount. Works for paid + trial.
+- **Residuals (documented, accepted):** per-connection budget → two truly-concurrent meetings
+  can collectively overrun by ~concurrency factor (single-session lock covers the common case);
+  up to ~25s overage per session (one ping cycle) — <5% on a 10-min trial, negligible on paid.
+- **Tests:** code-reviewer pass (APPROVE, 0 crit/high; 1 MEDIUM concurrency + 3 LOW, all
+  documented/addressed); booted server `/health` 200, clean startup; `node --check` OK.
+
+---
+
 ## FIX-006 — `bad_request` no longer stamps failReason on a healthy slot (cosmetic)
 - **Issue found:** A 400 (`bad_request`) wrote `h.failReason` even though it doesn't open
   the breaker, so `/health` could momentarily show `failReason:'bad_request'` with `healthy:true`.
