@@ -48,7 +48,9 @@ function makeOrch(db, { embedFn, activeSpaceFn } = {}) {
   orch.activeJD = null;
   orch._processedResumeCache = null;
   orch.embedFn = embedFn ?? null;
+  orch.embedQueryFn = null;
   orch.activeSpaceFn = activeSpaceFn ?? null;
+  orch._indexSpace = undefined;
   return orch;
 }
 
@@ -277,5 +279,32 @@ describe('resolveQueryEmbedder matrix completion (real compiled method)', () => 
     const embedder = orch.resolveQueryEmbedder();
     const out = await embedder('q');
     assert.deepEqual(out, [], 'null fast + no embedFn → empty array (caller treats as no-retrieval)');
+  });
+
+  test('cloud branch PREFERS the asymmetric embedQueryFn over the document embedFn', async () => {
+    // committed == cloud (SPACE_V2), fast local is a different space → cloud branch.
+    // When an embedQueryFn (asymmetric retrieval framing) is registered, it must be
+    // used for the query instead of embedFn (document framing). Same space, better recall.
+    const orch = makeOrch(db, { activeSpaceFn: () => SPACE_V2 });
+    let docUsed = false, queryUsed = false;
+    orch.embedFn = async () => { docUsed = true; return vec(0.1); };
+    orch.embedQueryFn = async () => { queryUsed = true; return vec(0.2); };
+    withFast(orch, { dimensions: 384, space: 'local:xenova/all-minilm-l6-v2:384' }); // diff space → cloud branch
+    const embedder = orch.resolveQueryEmbedder();
+    const out = await embedder('q');
+    assert.ok(queryUsed, 'asymmetric embedQueryFn must be used on the cloud query path');
+    assert.ok(!docUsed, 'document embedFn must NOT be used for queries when embedQueryFn is wired');
+    assert.equal(out[0], vec(0.2)[0]);
+  });
+
+  test('cloud branch falls back to embedFn when no embedQueryFn registered (back-compat)', async () => {
+    const orch = makeOrch(db, { activeSpaceFn: () => SPACE_V2 });
+    let docUsed = false;
+    orch.embedFn = async () => { docUsed = true; return vec(0.1); };
+    orch.embedQueryFn = null; // not wired
+    withFast(orch, { dimensions: 384, space: 'local:xenova/all-minilm-l6-v2:384' });
+    const embedder = orch.resolveQueryEmbedder();
+    await embedder('q');
+    assert.ok(docUsed, 'with no embedQueryFn, the cloud query path uses embedFn (prior behavior)');
   });
 });

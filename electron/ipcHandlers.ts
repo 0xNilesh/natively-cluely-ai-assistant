@@ -1453,9 +1453,11 @@ export function initializeIpcHandlers(appState: AppState): void {
   });
 
   safeHandle('get-natively-usage', async () => {
+    // Hoisted out of try so the catch block's stale-cache lookup can reach it.
+    let key: string | undefined;
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
-      const key = CredentialsManager.getInstance().getNativelyApiKey();
+      key = CredentialsManager.getInstance().getNativelyApiKey();
       if (!key) return { ok: false, error: 'no_key' };
 
       // Return cached value if it's still fresh
@@ -1479,6 +1481,11 @@ export function initializeIpcHandlers(appState: AppState): void {
       _usageCache.set(key, { data: result, ts: Date.now() });
       return result;
     } catch (error: any) {
+      // On transient DNS/network failure, serve stale cache rather than showing an error.
+      // Railway uses 1s TTL on DNS records, so a momentary resolver hiccup causes ENOTFOUND
+      // even when the server is up. Stale quota data is far better than a broken UI.
+      const stale = key ? _usageCache.get(key) : undefined;
+      if (stale) return { ...stale.data, stale: true };
       return { ok: false, error: error.message || 'network_error' };
     }
   });
