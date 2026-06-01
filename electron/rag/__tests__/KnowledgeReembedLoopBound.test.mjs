@@ -203,16 +203,31 @@ describe('resolveQueryEmbedder matrix completion (real compiled method)', () => 
     assert.ok(embedFnUsed, 'null fast.dimensions must divert to embedFn (line 173 guard)');
   });
 
-  test('active space UNKNOWN + fast dim MATCHES indexed dim → fast local USED', async () => {
+  test('active space UNKNOWN + EMPTY corpus + fast dim present → legacy dim check allows fast local', async () => {
+    // With no embedded nodes AND no active space, _committedIndexSpace() is undefined,
+    // so resolveQueryEmbedder falls to the legacy dimension guard. fast has dims and
+    // there's no indexed dim to mismatch → fast local is used.
     const orch = makeOrch(db, { activeSpaceFn: () => undefined });
-    // Indexed node at 768d; fast also 768d → legacy dim check passes → use fast.
-    seedNode(db, { title: 'n', space: 'whatever', fill: 0.1 });
-    orch.cachedNodes = orch.db.getAllNodes();
+    orch.cachedNodes = []; // empty corpus → no derivable committed space
     orch.embedFn = async () => vec(0.2);
     withFast(orch, { dimensions: 768, space: null });
     const embedder = orch.resolveQueryEmbedder();
     const out = await embedder('q');
-    assert.equal(out[0], vec(0.7)[0], 'fast local used: unknown active space + matching dim → legacy check allows fast');
+    assert.equal(out[0], vec(0.7)[0], 'empty corpus + unknown space + present dims → legacy check allows fast local');
+  });
+
+  test('active space UNKNOWN but corpus has a derivable committed space → query in THAT space (not fast-local with diff space)', async () => {
+    // A node in space S makes _committedIndexSpace() = S even with active unknown. The
+    // fast local embedder (space null/different) is then NOT comparable → embedFn used.
+    const orch = makeOrch(db, { activeSpaceFn: () => undefined });
+    seedNode(db, { title: 'n', space: SPACE_V2, fill: 0.1 });
+    orch.cachedNodes = orch.db.getAllNodes();
+    let embedFnUsed = false;
+    orch.embedFn = async () => { embedFnUsed = true; return vec(0.2); };
+    withFast(orch, { dimensions: 768, space: null }); // fast space != committed S
+    const embedder = orch.resolveQueryEmbedder();
+    await embedder('q');
+    assert.ok(embedFnUsed, 'committed space derivable → must query in it, not via a different-space fast local');
   });
 
   test('cloud-active with DIFFERENT dimensions (1536 vs fast 384) → embedFn', async () => {
@@ -227,16 +242,32 @@ describe('resolveQueryEmbedder matrix completion (real compiled method)', () => 
     assert.ok(embedFnUsed, 'cloud-active different dims/space → embedFn');
   });
 
-  test('fast embed returns null at call time → embedFn fallback used for THAT query', async () => {
-    // Compatible space (so fast is selected), but its embed() resolves null at runtime.
-    const orch = makeOrch(db, { activeSpaceFn: () => SPACE_V2 });
+  test('committed==local-space + fast embed returns null → returns [] (NO cross-space cloud fallback — the MEDIUM-2 fix)', async () => {
+    // When the corpus is committed to the LOCAL space (fast.space === committed) and
+    // the local embed fails at runtime, we must NOT fall back to the cloud embedFn —
+    // that would produce a cloud-space query vector compared against local-space nodes
+    // (silent garbage). Returning [] is correct (empty, not wrong).
+    const LOCAL = 'local:xenova/all-minilm-l6-v2:384';
+    const orch = makeOrch(db, { activeSpaceFn: () => undefined });
+    orch._indexSpace = LOCAL; // corpus committed to local (degraded mode)
     let embedFnUsed = false;
     orch.embedFn = async () => { embedFnUsed = true; return vec(0.4); };
-    withFast(orch, { dimensions: 768, space: SPACE_V2, embedImpl: async () => null });
+    withFast(orch, { dimensions: 384, space: LOCAL, embedImpl: async () => null });
     const embedder = orch.resolveQueryEmbedder();
     const out = await embedder('q');
-    assert.ok(embedFnUsed, 'fast embed null → fall through to embedFn');
-    assert.equal(out[0], vec(0.4)[0]);
+    assert.ok(!embedFnUsed, 'must NOT cloud-fall-back when committed to local space');
+    assert.deepEqual(out, [], 'empty result, never a cross-space query');
+  });
+
+  test('committed==local-space + fast embed succeeds → fast local used', async () => {
+    const LOCAL = 'local:xenova/all-minilm-l6-v2:384';
+    const orch = makeOrch(db, { activeSpaceFn: () => undefined });
+    orch._indexSpace = LOCAL;
+    orch.embedFn = async () => vec(0.4);
+    withFast(orch, { dimensions: 384, space: LOCAL });
+    const embedder = orch.resolveQueryEmbedder();
+    const out = await embedder('q');
+    assert.equal(out[0], vec(0.7)[0], 'local embedder used when committed to local space');
   });
 
   test('fast embed null AND no embedFn → returns [] (never throws, never cross-space)', async () => {

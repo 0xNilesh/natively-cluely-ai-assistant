@@ -221,13 +221,29 @@ describe('KnowledgeOrchestrator._spaceGatedNodes (real compiled method)', () => 
     assert.deepEqual(titles, ['v2'], 'only the active-space embedded node survives');
   });
 
-  test('active space UNDEFINED (pipeline not ready) → NO gate, ALL nodes survive', () => {
+  test('active space UNDEFINED (pipeline not ready) + mixed corpus → gate to the MAJORITY embedded space (safer than no-gate)', () => {
+    // When the active space is unknown, _committedIndexSpace derives the majority
+    // space among embedded nodes rather than disabling the gate. This is SAFER than
+    // the old "no gate" behavior: returning mixed-space embedded nodes to be scored
+    // against one query vector is the exact cross-space hazard. Here v2-space nodes
+    // are the majority → only they (+ keyword-only nodes) survive.
     const orch = makeOrch(db, { activeSpaceFn: () => undefined });
-    seedNode(db, { title: 'v2', space: SPACE_V2 });
+    seedNode(db, { title: 'v2a', space: SPACE_V2 });
+    seedNode(db, { title: 'v2b', space: SPACE_V2 }); // v2 is the majority (2 vs 1)
     seedNode(db, { title: 'v1', space: SPACE_V1 });
     seedNode(db, { title: 'kw', space: null, embedded: false });
     loadCache(orch);
-    assert.equal(orch._spaceGatedNodes().length, 3, 'no gate when active space unknown');
+    const titles = orch._spaceGatedNodes().map(n => n.title).sort();
+    assert.deepEqual(titles, ['kw', 'v2a', 'v2b'], 'majority (v2) + keyword-only survive; the v1 straggler is excluded');
+  });
+
+  test('active space UNDEFINED + single-space corpus → all embedded survive (no spurious exclusion)', () => {
+    const orch = makeOrch(db, { activeSpaceFn: () => undefined });
+    seedNode(db, { title: 'a', space: SPACE_V2 });
+    seedNode(db, { title: 'b', space: SPACE_V2 });
+    seedNode(db, { title: 'kw', space: null, embedded: false });
+    loadCache(orch);
+    assert.equal(orch._spaceGatedNodes().length, 3, 'a consistent single-space corpus is fully searchable even when active space is unknown');
   });
 
   test('activeSpaceFn unset entirely (null) → NO gate (optional()), all survive', () => {
