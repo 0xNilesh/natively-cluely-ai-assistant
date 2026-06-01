@@ -17,9 +17,45 @@ export function normalizeModel(model: string): string {
   return model.replace(/^models\//, '').trim().toLowerCase();
 }
 
-/** Canonical identity for an embedding space: `${name}:${model}:${dims}`. */
+/**
+ * Canonical identity for an embedding space: `${name}:${normalizeModel(model)}:${dims}`.
+ *
+ * INVARIANT: this is an OPAQUE EQUALITY KEY. Never parse it by splitting on ':' —
+ * a model id may itself contain a colon (e.g. Ollama's `nomic-embed-text:latest`),
+ * which would make a split ambiguous. All consumers (VectorStore predicates, the
+ * search worker, the DB backfill CASE) compare it by equality only.
+ */
 export function embeddingSpaceKey(p: { name: string; model: string; dimensions: number }): string {
   return `${p.name}:${normalizeModel(p.model)}:${p.dimensions}`;
+}
+
+/**
+ * The model id each provider shipped with at the time legacy (pre-embedding_space)
+ * rows were written. Single source of truth shared by legacySpaceForProvider() and
+ * the v16 DB migration's backfill CASE (DatabaseManager builds the CASE arms by
+ * iterating this map — see the v16 block in DatabaseManager.runMigrations).
+ * Values are already normalized (lowercase, no `models/` prefix).
+ */
+export const LEGACY_PROVIDER_MODEL: Readonly<Record<string, string>> = {
+  gemini: 'gemini-embedding-001',
+  ollama: 'nomic-embed-text',
+  openai: 'text-embedding-3-small',
+  local: 'xenova/all-minilm-l6-v2',
+};
+
+/**
+ * Build the SQL `CASE embedding_provider WHEN ... THEN ... END` arms for the v16
+ * migration backfill, derived from LEGACY_PROVIDER_MODEL so the migration and the
+ * runtime key share ONE source of truth (can't drift). Returns just the WHEN/THEN
+ * lines (no CASE/END wrapper) for interpolation into the backfill UPDATE.
+ *
+ * Values come from a hardcoded internal map (never user input) so direct string
+ * interpolation is safe here; there is no SQL-injection surface.
+ */
+export function buildLegacySpaceCaseSql(): string {
+  return Object.entries(LEGACY_PROVIDER_MODEL)
+    .map(([provider, model]) => `WHEN '${provider}' THEN '${model}'`)
+    .join('\n                          ');
 }
 
 /**
@@ -32,12 +68,6 @@ export function embeddingSpaceKey(p: { name: string; model: string; dimensions: 
  * time the legacy rows were written.
  */
 export function legacySpaceForProvider(name: string, dims: number | null): string {
-  const legacyModel: Record<string, string> = {
-    gemini: 'gemini-embedding-001',
-    ollama: 'nomic-embed-text',
-    openai: 'text-embedding-3-small',
-    local: 'xenova/all-minilm-l6-v2',
-  };
-  const model = legacyModel[name] ?? 'unknown';
+  const model = LEGACY_PROVIDER_MODEL[name] ?? 'unknown';
   return `${name}:${model}:${dims ?? 'unknown'}`;
 }

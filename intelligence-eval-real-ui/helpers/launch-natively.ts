@@ -54,6 +54,10 @@ export async function launchNatively(opts: { userDataDir?: string; recordVideoDi
   const userDataDir = opts.userDataDir
     || fs.mkdtempSync(path.join(os.tmpdir(), 'natively-ui-eval-'));
 
+  // NOTE: Playwright's _electron.launch() does NOT support `recordVideo` —
+  // passing it causes the launcher to hang silently. Video capture via
+  // Playwright requires browser contexts, not Electron. Artifacts are captured
+  // via screenshots instead; screen recordings can be added via OS-level tools.
   const app = await electron.launch({
     args: ['.', `--user-data-dir=${userDataDir}`],
     cwd: REPO_ROOT,
@@ -61,10 +65,9 @@ export async function launchNatively(opts: { userDataDir?: string; recordVideoDi
       ...process.env,
       NODE_ENV: 'test',
       NATIVELY_TEST_API_KEY: key,
-      NATIVELY_UI_EVAL: '1',                // app may expose dev debug metadata under this
+      NATIVELY_UI_EVAL: '1',
     },
     timeout: 30000,
-    ...(opts.recordVideoDir ? { recordVideo: { dir: opts.recordVideoDir } } : {}),
   });
 
   // Window accessors by route query (?window=settings / ?window=overlay).
@@ -79,27 +82,60 @@ export async function launchNatively(opts: { userDataDir?: string; recordVideoDi
     throw new Error(`window=${route} did not appear within ${timeoutMs}ms (open: ${app.windows().map(w => w.url()).join(', ')})`);
   };
 
+  // Prevent silent Node.js exit when Electron closes — without a listener,
+  // EventEmitter throws the 'close' event as an uncaught exception. Also
+  // catch any 'error' events on the underlying process to prevent crashes.
+  app.on('close', () => { process.stdout.write('[launch] Electron app closed\n'); });
+  try { app.process().on('error', (e: any) => { process.stdout.write(`[launch] Electron process error: ${e?.message || String(e)}\n`); }); } catch { /* */ }
+  try { app.process().on('exit', (code: number) => { process.stdout.write(`[launch] Electron process exited with code ${code}\n`); }); } catch { /* */ }
+
   return {
     app,
     settingsWindow: () => windowByRoute('settings'),
     overlayWindow: () => windowByRoute('overlay'),
     launcherWindow: () => windowByRoute('launcher'),
     seedCleanState: async (win: Page) => {
-      // The launcher shows a one-time StartupScreen until
-      // localStorage['natively_seen_startup_v1']==='true'; onboarding toasters
-      // gate similarly. On a fresh isolated userData these block the launcher
-      // main view (and its Profile Intelligence button). Set the "already seen"
-      // flags — equivalent to a returning user — then reload so the launcher
-      // mounts. This is test-state setup, not a UI bypass.
+      // Set all "already seen" localStorage flags so the launcher mounts without
+      // onboarding modals blocking the UI. Keys discovered by reading src/:
+      //   natively_seen_startup_v1         — StartupScreen gate
+      //   natively_seen_profile_onboarding_v1 — profile onboarding toaster
+      //   natively_seen_modes_onboarding_v5   — modes onboarding toaster (note: v5)
+      //   natively_perms_shown_v1             — PermissionsToaster (blocks all clicks)
       await win.evaluate(() => {
         try {
           localStorage.setItem('natively_seen_startup_v1', 'true');
           localStorage.setItem('natively_seen_profile_onboarding_v1', 'true');
-          localStorage.setItem('natively_seen_modes_onboarding_v1', 'true');
+          localStorage.setItem('natively_seen_modes_onboarding_v5', 'true');
+          localStorage.setItem('natively_perms_shown_v1', '1');
+        } catch { /* */ }
+      }).catch(() => {});
+      // Mark the SupportToaster (donation toast, z-[9999]) as shown so it does
+      // not appear ~10s after launch and intercept pointer events. This uses the
+      // real preload bridge — the same call the dismiss button makes.
+      await win.evaluate(async () => {
+        try {
+          const api: any = (window as any).electronAPI;
+          if (api?.markDonationToastShown) await api.markDonationToastShown();
+        } catch { /* */ }
+      }).catch(() => {});
+      // Pre-seed the premium cache so the Profile Intelligence component mounts
+      // with `isPremium: true` immediately (the async licenseGetDetails call may
+      // lose to the button click otherwise, opening the upgrade modal instead of
+      // uploading). PI_PREMIUM_CACHE_KEY = 'pi:isPremium'. The cache is
+      // intentionally persistent — we just wrote a real license, so this is
+      // correct, not a bypass.
+      await win.evaluate(async () => {
+        try {
+          const api: any = (window as any).electronAPI;
+          const details = await api?.licenseGetDetails?.();
+          if (details?.isPremium) {
+            localStorage.setItem('pi:isPremium', '1');
+            localStorage.setItem('pi:plan', details.plan || 'ultra');
+          }
         } catch { /* */ }
       }).catch(() => {});
       await win.reload().catch(() => {});
-      await win.waitForTimeout(800);
+      await win.waitForTimeout(1800); // extra time for React to mount fully
     },
     primeFileDialog: async (absPath: string) => {
       // Stub the next dialog.showOpenDialog in the MAIN process to return absPath.

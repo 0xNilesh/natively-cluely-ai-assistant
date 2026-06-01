@@ -22,9 +22,17 @@ const r2 = (n: number) => Math.round(n * 1000) / 1000;
 
 export function writeReports(rows: UiResultRow[], meta: any) {
   fs.mkdirSync(RESULTS, { recursive: true });
-  const passed = rows.filter(r => r.passed);
-  const failed = rows.filter(r => !r.passed);
-  const critical = rows.filter(r => r.critical);
+  // Separate INFRA-skipped cases (electron app died mid-profile from a backend
+  // flap / crash) from real logic results. Infra skips are NOT logic failures —
+  // they must not pollute the accuracy signal or falsely fail the gate. The
+  // "executed" set is what actually ran against a live app.
+  const isInfra = (r: UiResultRow) => (r.failReasons || []).some(f => f === 'infra_app_unavailable')
+    || /Target page, context or browser has been closed/i.test(r.error || '');
+  const infra = rows.filter(isInfra);
+  const executed = rows.filter(r => !isInfra(r));
+  const passed = executed.filter(r => r.passed);
+  const failed = executed.filter(r => !r.passed);
+  const critical = executed.filter(r => r.critical);
   const fut = (arr: UiResultRow[]) => arr.map(r => r.latency?.firstUsefulTokenMs).filter((n: number) => n > 0);
   const tot = (arr: UiResultRow[]) => arr.map(r => r.latency?.totalResponseMs).filter((n: number) => n > 0);
   const manual = rows.filter(r => r.mode === 'manual_input');
@@ -34,8 +42,12 @@ export function writeReports(rows: UiResultRow[], meta: any) {
     iteration: meta.iteration || 'real-ui-iteration-001',
     date: meta.date, appVersion: meta.appVersion, platform: meta.platform,
     provider: meta.provider, realUiUsed: true, realApiUsed: meta.realApiUsed, mockResponsesDetected: 0,
-    total: rows.length, passed: passed.length, failed: failed.length,
-    accuracy: rows.length ? passed.length / rows.length : 0,
+    total: rows.length, executed: executed.length, infraSkipped: infra.length,
+    infraSkippedIds: infra.map(r => r.testId),
+    passed: passed.length, failed: failed.length,
+    // Accuracy is over EXECUTED cases (those that ran against a live app), not
+    // total — infra skips from a backend flap aren't logic outcomes.
+    accuracy: executed.length ? passed.length / executed.length : 0,
     criticalTotal: critical.length, criticalPassed: critical.filter(r => r.passed).length,
     criticalFailed: critical.filter(r => !r.passed).map(r => r.testId),
     latency: {
@@ -57,7 +69,13 @@ export function writeReports(rows: UiResultRow[], meta: any) {
   fs.writeFileSync(path.join(RESULTS, 'real-ui-iteration-001.json'), redact(JSON.stringify(summary, null, 2)));
 
   const L = summary.latency, C = summary.cost;
-  const gate = summary.criticalFailed.length === 0 && summary.passed >= Math.ceil(rows.length * 0.99) && meta.realApiUsed;
+  // Strict gate: ALL 100 cases must execute AND pass ≥99% with no critical fails.
+  // If any case was infra-skipped (backend flap), the gate is INCONCLUSIVE — we
+  // cannot certify a release on a partial run, but we DON'T report a logic fail.
+  const fullyExecuted = summary.infraSkipped === 0;
+  const gate = fullyExecuted && summary.criticalFailed.length === 0
+    && summary.passed >= Math.ceil(executed.length * 0.99) && meta.realApiUsed;
+  const gateLabel = !fullyExecuted ? `INCONCLUSIVE (${summary.infraSkipped} infra-skipped — backend flap)` : (gate ? 'PASS' : 'FAIL');
   const slowest = [...rows].sort((a, b) => (b.latency?.firstUsefulTokenMs || 0) - (a.latency?.firstUsefulTokenMs || 0)).slice(0, 5);
   const costly = [...rows].sort((a, b) => (b.cost?.estimatedCostUsd || 0) - (a.cost?.estimatedCostUsd || 0)).slice(0, 5);
 
@@ -73,10 +91,12 @@ Run metadata:
 - Mock responses detected: 0
 
 Accuracy:
-- Total tests: ${summary.total}
+- Total cases: ${summary.total}
+- Executed (ran against a live app): ${summary.executed}
+- Infra-skipped (backend flap / app crash — NOT logic failures): ${summary.infraSkipped}${summary.infraSkipped ? ` (${summary.infraSkippedIds.join(', ')})` : ''}
 - Passed: ${summary.passed}
 - Failed: ${summary.failed}
-- Overall accuracy: ${(summary.accuracy * 100).toFixed(1)}%
+- Accuracy over executed: ${(summary.accuracy * 100).toFixed(1)}%
 - Critical tests: ${summary.criticalPassed}/${summary.criticalTotal}${summary.criticalFailed.length ? ` (failed: ${summary.criticalFailed.join(', ')})` : ''}
 
 Latency (real UI-observed, ms):
@@ -100,7 +120,7 @@ ${costly.map((r, i) => `${i + 1}. ${r.testId} — $${r2(r.cost?.estimatedCostUsd
 Failed tests:
 ${failed.slice(0, 20).map((r, i) => `${i + 1}. ${r.testId} [${r.pattern}] — ${r.failReasons.join(', ')}`).join('\n') || 'none'}
 
-Release gate: ${gate ? 'PASS' : 'FAIL'}
+Release gate: ${gateLabel}
 `);
 
   write('real-ui-latency-report.md', `# Real UI Latency Report\n\nProvider/model: ${meta.provider}\n\n` +

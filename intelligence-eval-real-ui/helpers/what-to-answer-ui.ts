@@ -29,8 +29,15 @@ async function armSuggestionTap(win: Page): Promise<void> {
   });
 }
 
-export async function clickWhatToAnswer(win: Page, rec: UiLatencyRecorder, timeoutMs = 100_000): Promise<WtaResponse> {
-  await armSuggestionTap(win);
+// Intelligence events (suggested_answer / suggested_answer_token) are sent to
+// mainWindow() in main.ts — which is the LAUNCHER window (currentWindowMode=
+// 'launcher' default). The WTA button lives in the overlay, but the event
+// arrives in the launcher. eventWin defaults to win (overlay) for backward
+// compat but callers should pass the launcher window as eventWin so the
+// stream listener is armed on the correct Playwright page.
+export async function clickWhatToAnswer(win: Page, rec: UiLatencyRecorder, timeoutMs = 100_000, eventWin?: Page): Promise<WtaResponse> {
+  const listenWin = eventWin ?? win;
+  await armSuggestionTap(listenWin);
   // Find the real BUTTON (not the decorative "What should I answer?" bubble span
   // in NativelyInterfaceCard). Scope to <button> with the exact label.
   const btn = win.locator('button', { hasText: /what to answer\?/i });
@@ -43,7 +50,7 @@ export async function clickWhatToAnswer(win: Page, rec: UiLatencyRecorder, timeo
   const deadline = Date.now() + timeoutMs;
   let firstSeen = false;
   while (Date.now() < deadline) {
-    const e: any = await win.evaluate(() => (window as any).__wtaEval).catch(() => null);
+    const e: any = await listenWin.evaluate(() => (window as any).__wtaEval).catch(() => null);
     if (e) {
       if (!firstSeen && e.firstTokenMs > 0) { rec.mark('firstUsefulToken'); rec.mark('firstVisibleText'); firstSeen = true; }
       if (e.done) {
@@ -53,7 +60,7 @@ export async function clickWhatToAnswer(win: Page, rec: UiLatencyRecorder, timeo
         return { text, domText, visibleConfirmed: !!domText, error: e.error };
       }
     }
-    await win.waitForTimeout(150);
+    await new Promise(r => setTimeout(r, 200)); // use setTimeout not waitForTimeout to survive Electron restart
   }
   const domText = await readVisible(win);
   return { text: domText, domText, visibleConfirmed: !!domText, error: 'wta_observer_timeout' };

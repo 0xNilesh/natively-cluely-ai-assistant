@@ -39,7 +39,7 @@
     "test:intelligence:ui:headed": "playwright test --config intelligence-eval-real-ui/playwright.config.ts --headed",
     "test:intelligence:ui:debug": "PWDEBUG=1 playwright test --config intelligence-eval-real-ui/playwright.config.ts",
     "test:intelligence:ui:report": "playwright show-report intelligence-eval-real-ui/results/playwright-report",
-    "eval:intelligence:ui": "node intelligence-eval-real-ui/run-real-ui-e2e.ts"
+    "eval:intelligence:ui": "node --experimental-strip-types intelligence-eval-real-ui/run-real-ui-e2e.ts"
   },
   "build": {
     "generateUpdatesFilesForAllChannels": true,

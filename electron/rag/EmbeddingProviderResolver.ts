@@ -10,6 +10,10 @@ export interface AppAPIConfig {
   geminiKey?: string;
   ollamaUrl?: string; // e.g. 'http://localhost:11434'
   providerDataScopes?: ProviderDataScopePolicy;
+  // Optional overrides for the Gemini embedding model/dims (internal escape hatch
+  // for a future bump). Default to gemini-embedding-2 @ 768d when omitted.
+  geminiEmbeddingModel?: string;
+  geminiEmbeddingDims?: number;
 }
 
 export class EmbeddingProviderResolver {
@@ -39,7 +43,16 @@ export class EmbeddingProviderResolver {
     if (config.geminiKey) {
       try {
         assertProviderDataScopes('gemini_embeddings', ['embeddings'], config.providerDataScopes);
-        candidates.push(new GeminiEmbeddingProvider(config.geminiKey));
+        // Rollback lever: NATIVELY_GEMINI_EMBED_MODEL / _DIMS env vars pin the model
+        // without a rebuild (e.g. back to 'gemini-embedding-001' @ 768 in an incident).
+        // Explicit config overrides take precedence over env, which overrides the v2 default.
+        const envModel = process.env.NATIVELY_GEMINI_EMBED_MODEL;
+        const envDims = process.env.NATIVELY_GEMINI_EMBED_DIMS ? Number(process.env.NATIVELY_GEMINI_EMBED_DIMS) : undefined;
+        candidates.push(new GeminiEmbeddingProvider(
+          config.geminiKey,
+          config.geminiEmbeddingModel ?? envModel,
+          config.geminiEmbeddingDims ?? (Number.isFinite(envDims) ? envDims : undefined),
+        ));
       } catch (error) {
         if (error instanceof ProviderScopeError) {
           embeddingsDenied = true;

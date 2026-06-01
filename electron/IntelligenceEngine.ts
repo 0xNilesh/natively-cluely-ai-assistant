@@ -676,6 +676,21 @@ export class IntelligenceEngine extends EventEmitter {
                             } else if (knowledge.isIntroQuestion && knowledge.introResponse) {
                                 candidateProfile = `<candidate_identity_fact>\n${knowledge.introResponse}\n</candidate_identity_fact>`;
                             }
+                            // For an explicit name/intro ask, the grounded name is a
+                            // hard requirement, not optional colour. The WTA prompt's
+                            // NAME RULE is permissive ("open WITHOUT a name if none is
+                            // grounded") and the model otherwise drifts into a thematic
+                            // intro that omits the name even when it IS grounded. When
+                            // the extractor saw an identity question AND we have the
+                            // candidate's name, attach an explicit MUST-lead-with-name
+                            // directive so the answer opens with it. Derived purely
+                            // from grounded facts — no fixture/name hardcoding.
+                            if (candidateProfile && extracted.questionType === 'identity') {
+                                candidateProfile +=
+                                    `\n<answer_directive>\nThe interviewer asked the candidate to state their name / introduce themselves. ` +
+                                    `You MUST open the answer with the candidate's real name from the grounded identity fact above ` +
+                                    `(e.g. "I'm <Name>, ...") before any narrative. Do NOT omit the name; do NOT use the assistant's or creator's name.\n</answer_directive>`;
+                            }
                             if (candidateProfile) {
                                 console.log('[IntelligenceEngine] Grounded what-to-answer in candidate profile', {
                                     questionType: extracted.questionType,

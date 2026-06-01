@@ -1,55 +1,49 @@
-> **STATUS (2026-06-01): harness built + EVERY real-UI selector verified working; full 100-case keyed run NOT executed here (no Pro key).**
-> Vertical-slice probes against the live app confirm the complete UI-driving chain:
-> launch → all 5 windows render → seed clean state (dismiss startup) → click the
-> real "Profile Intelligence" button (found:1) → resume upload btn (1), JD upload
-> btn (1), custom-context textarea (1), persona textarea (1) all present → overlay
-> chat input (1) + real "What to answer?" button (1) found → real transcript
-> injection returns {success:true} via the shipped test IPC → all preload bridges
-> functional → grader passes good answers / hard-fails "I'm Natively". The full
-> run needs (a) NATIVELY_TEST_API_KEY (Pro-entitled — Profile Intelligence is
-> genuinely Pro-gated, no bypass) + (b) a GUI session. iteration-001 = 0 executed
-> cases (no key); NOT a real 0/0 pass. Run with the key to populate.
-> A test-engineer review found + drove fixes to 4 selector/navigation defects
-> (profile-open mechanism, license bridge, chat-input selector, WTA button
-> disambiguation) + observer false-pass gating + grader follow-up strictness.
-
 # Natively Real UI Intelligence E2E Report
 
 Run metadata:
-- Date: 2026-05-31
+- Date: 2026-06-01
 - App version: 2.7.0
 - Platform: darwin-arm64
-- Provider/model: natively /v1/chat (gemini-3.5-flash)
+- Provider/model: natively /v1/chat
 - Real UI used: yes
-- Real API used: NO (precondition failed)
+- Real API used: yes
 - Mock responses detected: 0
 
 Accuracy:
-- Total tests: 0
-- Passed: 0
-- Failed: 0
-- Overall accuracy: 0.0%
-- Critical tests: 0/0
+- Total tests: 20
+- Passed: 18
+- Failed: 2
+- Overall accuracy: 90.0%
+- Critical tests: 5/5
 
 Latency (real UI-observed, ms):
-- Avg first useful token: 0
-- p50 / p95 / p99 / max first useful token: 0 / 0 / 0 / 0
-- Manual p50/p95 first useful token: 0 / 0
+- Avg first useful token: 6300.545
+- p50 / p95 / p99 / max first useful token: 7625.705 / 10674.034 / 10674.034 / 10674.034
+- Manual p50/p95 first useful token: 7625.705 / 10674.034
 - What-to-answer p50/p95 first useful token: 0 / 0
-- p50 / p95 / max total response: 0 / 0 / 0
+- p50 / p95 / max total response: 7622.063 / 27122.985 / 27122.985
 
 Cost:
-- Total eval cost: $0
+- Total eval cost: $0.002
 - Average cost/test: $0
 - Cost wasted on failed tests: $0
 
 Slowest tests:
-
+1. PM-008 — 10674.034ms
+2. PM-005 — 8376.587ms
+3. ML-008 — 8227.897ms
+4. PM-003 — 7937.699ms
+5. ML-003 — 7625.705ms
 
 Most expensive tests:
-
+1. PM-008 — $0
+2. PM-005 — $0
+3. PM-004 — $0
+4. PM-003 — $0
+5. PM-007 — $0
 
 Failed tests:
-none
+1. ML-005 [jd_alignment] — empty_answer
+2. ML-009 [unknown] — missing_not_admitted:exact model accuracy
 
 Release gate: FAIL

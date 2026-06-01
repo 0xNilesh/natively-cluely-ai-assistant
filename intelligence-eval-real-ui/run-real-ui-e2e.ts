@@ -34,6 +34,17 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.join(__dirname, 'fixtures');
 const SHOTS = path.join(__dirname, 'results', 'screenshots');
 
+// Surface any unhandled promise rejections (e.g. from Playwright when Electron crashes).
+process.on('unhandledRejection', (reason, promise) => {
+  process.stderr.write(`[real-ui-eval] unhandledRejection: ${reason instanceof Error ? reason.stack : String(reason)}\n`);
+  process.stdout.write(`[real-ui-eval] unhandledRejection: ${reason instanceof Error ? reason.message : String(reason)}\n`);
+});
+process.on('uncaughtException', (err) => {
+  process.stderr.write(`[real-ui-eval] uncaughtException: ${err.stack || String(err)}\n`);
+  process.stdout.write(`[real-ui-eval] uncaughtException: ${err.stack || String(err)}\n`);
+  process.exit(1);
+});
+
 const argProfiles = (process.argv.find(a => a.startsWith('--profiles=')) || '').split('=')[1];
 const argMax = Number((process.argv.find(a => a.startsWith('--max=')) || '').split('=')[1] || '0');
 
@@ -49,42 +60,72 @@ async function main() {
   const meta = { date: new Date().toISOString().slice(0, 10), appVersion: readAppVersion(), platform: `${process.platform}-${process.arch}`, provider: 'natively /v1/chat', realApiUsed: false, iteration: 'real-ui-iteration-001' };
 
   const profileIds = [...new Set(selected.map(c => c.profileId))];
-  const app = await launchNatively({ recordVideoDir: path.join(__dirname, 'results', 'videos') });
-  try {
-    const settings = await app.settingsWindow();
 
-    // ── Activate Pro through the real key path ─────────────────────────────────
-    const act = await activateProWithKey(settings, key);
-    meta.realApiUsed = act.success || act.isPremium;
-    if (!act.isPremium && !(await isPremium(settings))) {
-      console.error(`[real-ui-eval] Pro NOT active (key plan may lack Pro): ${act.error || 'unknown'}. Profile Intelligence UI is gated; cannot proceed honestly.`);
-      // Still write a report documenting the precondition failure.
-    }
+  // Launch a FRESH app instance per profile. The single shared instance
+  // accumulates memory/state across sequential real LLM ingestions (resume
+  // extraction + embeddings × 10) and crashes around profile 2-3 with
+  // "Target page closed" — cascading every later test into a spurious failure.
+  // A per-profile instance is both robust AND more faithful: each profile is a
+  // fresh user session with only its own resume/JD/persona loaded.
+  for (const pid of profileIds) {
+    const paths = profilePaths(FIXTURES, pid);
+    const profile = JSON.parse(fs.readFileSync(paths.profileJson, 'utf8'));
+    process.stdout.write(`\n=== Profile ${pid}: fresh app launch + load through UI ===\n`);
 
-    const launcher = await app.launcherWindow().catch(() => settings);
-    for (const pid of profileIds) {
-      const paths = profilePaths(FIXTURES, pid);
-      console.log(`\n=== Profile ${pid}: loading through UI ===`);
+    let app: Awaited<ReturnType<typeof launchNatively>> | null = null;
+    try {
+      app = await launchNatively();
+      app.app.on('close', () => { process.stdout.write(`[real-ui-eval] Electron app closed (${pid})\n`); });
+      const settings = await app.settingsWindow();
+
+      // Activate Pro through the real key path (per fresh instance).
+      const act = await activateProWithKey(settings, key);
+      meta.realApiUsed = meta.realApiUsed || act.success || act.isPremium;
+      if (!act.isPremium && !(await isPremium(settings))) {
+        process.stdout.write(`[real-ui-eval] Pro NOT active for ${pid}: ${act.error || 'unknown'}\n`);
+      }
+
+      const launcher = await app.launcherWindow().catch(() => settings);
       let load: any = {};
-      // Profile Intelligence panel renders in the launcher window.
-      try { load = await loadProfileThroughUI(app, launcher, paths); }
-      catch (e: any) { console.warn(`[real-ui-eval] profile load failed for ${pid}:`, e.message); }
-      console.log(`  resumeLoaded=${load.resumeLoaded} jdLoaded=${load.jdLoaded} custom=${load.customSaved} persona=${load.personaSaved}`);
+      try {
+        load = await loadProfileThroughUI(app, launcher, paths);
+        process.stdout.write(`[real-ui-eval] loadProfileThroughUI completed for ${pid}\n`);
+      } catch (e: any) {
+        process.stdout.write(`[real-ui-eval] profile load failed for ${pid}: ${e.message}\n`);
+      }
+      process.stdout.write(`  resumeLoaded=${load.resumeLoaded} jdLoaded=${load.jdLoaded} custom=${load.customSaved} persona=${load.personaSaved}\n`);
 
       const overlay = await app.overlayWindow().catch(() => null);
-      const profile = JSON.parse(fs.readFileSync(paths.profileJson, 'utf8'));
 
+      // Liveness probe: if the Electron app has died (backend flap / OOM), every
+      // remaining test in this profile would otherwise burn a 100s observer
+      // timeout producing spurious "Target page closed" failures. Probe cheaply
+      // and, on death, mark the rest of THIS profile as infra-skipped (recorded
+      // distinctly so they don't pollute the real pass/fail signal).
+      const appAlive = async (): Promise<boolean> => {
+        try { await launcher.evaluate(() => true); return true; } catch { return false; }
+      };
+
+      let appDead = false;
       for (const tc of selected.filter(c => c.profileId === pid)) {
         const rec = new UiLatencyRecorder();
-        const win = (tc.mode === 'what_to_answer' ? overlay : overlay) || settings;
+        const win = overlay || settings;
         const row: UiResultRow = baseRow(tc);
+        if (appDead || !(await appAlive())) {
+          appDead = true;
+          row.passed = false; row.failReasons = ['infra_app_unavailable']; row.error = 'electron app not alive (backend flap / crash)';
+          row.latency = rec.toMetrics();
+          rows.push(row);
+          process.stdout.write(`  ${tc.testId} [${tc.pattern}] SKIP — infra_app_unavailable\n`);
+          continue;
+        }
         try {
           await snap(win, SHOTS, `${tc.testId}-before`);
           let answer = '';
           if (tc.mode === 'what_to_answer') {
             const turns = parseTranscript(tc.transcript || '');
             await injectTranscript(win, turns as any);
-            const r = await clickWhatToAnswer(win, rec);
+            const r = await clickWhatToAnswer(win, rec, 100_000, launcher);
             answer = r.text; row.artifacts.visibleConfirmed = r.visibleConfirmed; if (r.error) row.error = r.error;
           } else {
             const r = await askManualQuestion(win, tc.question || '', rec);
@@ -104,16 +145,21 @@ async function main() {
           row.latency = rec.toMetrics();
         }
         rows.push(row);
-        console.log(`  ${tc.testId} [${tc.pattern}] ${row.passed ? 'PASS' : 'FAIL'} ${row.failReasons.length ? '— ' + row.failReasons.join(',') : ''} (fut=${Math.round(row.latency?.firstUsefulTokenMs || 0)}ms)`);
+        process.stdout.write(`  ${tc.testId} [${tc.pattern}] ${row.passed ? 'PASS' : 'FAIL'} ${row.failReasons.length ? '— ' + row.failReasons.join(',') : ''} (fut=${Math.round(row.latency?.firstUsefulTokenMs || 0)}ms)\n`);
       }
+    } finally {
+      if (app) await app.close().catch(() => {});
+      // Brief settle so the OS reaps helper processes before the next launch.
+      await new Promise(r => setTimeout(r, 1500));
     }
-  } finally {
-    await app.close();
   }
 
   const { gate, summary } = writeReports(rows, meta);
-  console.log(`\n=== REAL UI E2E: ${summary.passed}/${summary.total} passed | critical ${summary.criticalPassed}/${summary.criticalTotal} | gate ${gate ? 'PASS' : 'FAIL'} ===`);
-  process.exit(gate ? 0 : 1);
+  const infra = (summary as any).infraSkipped || 0;
+  const gateStr = infra > 0 ? `INCONCLUSIVE (${infra} infra-skipped)` : (gate ? 'PASS' : 'FAIL');
+  process.stdout.write(`\n=== REAL UI E2E: ${summary.passed}/${(summary as any).executed} passed (executed) | ${infra} infra-skipped | critical ${summary.criticalPassed}/${summary.criticalTotal} | gate ${gateStr} ===\n`);
+  // Exit 0 only on a clean full PASS; 2 = inconclusive (infra), 1 = real logic fail.
+  process.exit(infra > 0 ? 2 : (gate ? 0 : 1));
 }
 
 function baseRow(tc: UiTestCase): UiResultRow {

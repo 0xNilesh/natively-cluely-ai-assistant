@@ -151,8 +151,13 @@ function pickSalientToken(text: string): string {
 function classifyType(q: string): ExtractedQuestionType {
     const t = q.toLowerCase();
 
-    // Identity: name / who am i (about the person)
-    if (/\b(your name|who are you|what'?s your name|what is your name)\b/.test(t)) return 'identity';
+    // Identity: name / who-are-you / introduce-yourself variants.
+    // "your full name", "introduce yourself", "introduce yourself as a <role>" all
+    // require profile grounding — they're identity questions even without the
+    // exact phrase "what is your name".
+    if (/\b(your (full |first |last )?name|who are you|what'?s your name|what is your name)\b/.test(t)) return 'identity';
+    if (/\b(introduce yourself|tell me about yourself|describe yourself|about yourself)\b/.test(t)) return 'identity';
+    if (/\b(who (are|is) (the|this) (candidate|person|interviewee))\b/.test(t)) return 'identity';
 
     // Negotiation
     if (/\b(salary|compensation|comp|pay|package|ctc|equity|stock|bonus|offer|expectations? (for|on) (pay|salary|comp)|how much (do|are) you (expect|looking)|what are you (expecting|looking for)|notice period|joining date)\b/.test(t)) {
@@ -265,24 +270,36 @@ export function extractLatestQuestion(
         (FOLLOW_UP_MARKERS.test(latestQuestion) && latestQuestion.split(/\s+/).length <= 14));
 
     // Follow-up target: the most recent salient noun phrase from a prior turn.
-    // Heuristic — pick the nearest prior non-interviewer turn's most prominent
-    // capitalized token or quoted phrase; else the last content word. Fully
-    // dynamic; no hardcoded names.
+    // Strategy: scan backward through ALL prior turns (both candidate and
+    // interviewer). The topic is often introduced by the interviewer ("You
+    // mentioned a recommendation system project") and the candidate's response is
+    // a brief acknowledgement ("Yes."). If we only scan candidate turns, we miss
+    // the topic noun. Scan all turns; prefer user/candidate turns first (they
+    // often contain the actual product/project name), then interviewer turns as
+    // fallback so we capture "You mentioned X" patterns.
     let followUpTarget = '';
     if (isFollowUp) {
+        // Pass 1: candidate/user turns (highest signal — they named the thing themselves)
         for (let i = priorTurns.length - 1; i >= 0; i--) {
+            if (priorTurns[i].role === 'interviewer') continue;
             const cand = priorTurns[i].text;
-            // Prefer a salient capitalized/CamelCase product-like token from the
-            // original (uncleaned) text of the same timestamp if available. Skip
-            // sentence-initial capitalized fillers ("So, Right, Well, Okay") and
-            // common capitalized stopwords — a transcript capitalizes the first
-            // word of every sentence, so a naive "first capitalized token" grabs
-            // garbage and grounds the follow-up on the wrong thing.
             const original = turns.find(t => t.timestamp === priorTurns[i].timestamp)?.text || cand;
             const found = pickSalientToken(original);
             if (found) { followUpTarget = found; break; }
             const words = cand.split(/\s+/).filter(w => w.length > 4 && !CAPITALIZED_STOPWORDS.has(w.toLowerCase()));
             if (words.length > 0) { followUpTarget = words[words.length - 1]; break; }
+        }
+        // Pass 2: interviewer turns (fallback — "You mentioned X project")
+        if (!followUpTarget) {
+            for (let i = priorTurns.length - 1; i >= 0; i--) {
+                if (priorTurns[i].role !== 'interviewer') continue;
+                const cand = priorTurns[i].text;
+                const original = turns.find(t => t.timestamp === priorTurns[i].timestamp)?.text || cand;
+                const found = pickSalientToken(original);
+                if (found) { followUpTarget = found; break; }
+                const words = cand.split(/\s+/).filter(w => w.length > 4 && !CAPITALIZED_STOPWORDS.has(w.toLowerCase()));
+                if (words.length > 0) { followUpTarget = words[words.length - 1]; break; }
+            }
         }
     }
 

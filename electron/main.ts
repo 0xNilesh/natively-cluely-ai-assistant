@@ -432,9 +432,12 @@ interface ScreenshotCaptureSession {
 // Premium: Knowledge modules loaded conditionally
 let KnowledgeOrchestratorClass: any = null;
 let KnowledgeDatabaseManagerClass: any = null;
+// Phase 1: shared comp-evidence detector for transcript-aware intent routing.
+let textHasCompEvidence: ((text: string) => boolean) | null = null;
 try {
     KnowledgeOrchestratorClass = require('../premium/electron/knowledge/KnowledgeOrchestrator').KnowledgeOrchestrator;
     KnowledgeDatabaseManagerClass = require('../premium/electron/knowledge/KnowledgeDatabaseManager').KnowledgeDatabaseManager;
+    textHasCompEvidence = require('../premium/electron/knowledge/NegotiationConversationTracker').textHasCompEvidence;
 } catch {
     console.log('[Main] Knowledge modules not available — profile intelligence disabled.');
 }
@@ -1013,6 +1016,15 @@ export class AppState {
           await pipeline.waitForReady();
           return await pipeline.getEmbedding(text);
         });
+        // Report the active document-embedder's composite space so the orchestrator
+        // can detect knowledge nodes embedded in an OLD space (e.g. after a
+        // gemini-embedding-001 → -2 upgrade) and re-embed them, instead of silently
+        // comparing v1 node vectors against v2 query vectors (same dims = no dim guard).
+        if (typeof this.knowledgeOrchestrator.setActiveSpaceFn === 'function') {
+          this.knowledgeOrchestrator.setActiveSpaceFn(() => {
+            return self.ragManager?.getEmbeddingPipeline()?.getActiveSpaceKey();
+          });
+        }
         if (typeof this.knowledgeOrchestrator.setEmbedQueryFn === 'function') {
           this.knowledgeOrchestrator.setEmbedQueryFn(async (text: string) => {
             const pipeline = self.ragManager?.getEmbeddingPipeline();
@@ -1030,6 +1042,10 @@ export class AppState {
             const pipeline = self.ragManager?.getEmbeddingPipeline();
             return {
               dimensions: pipeline?.localDimensions ?? null,
+              // Composite space of the local embedder — the orchestrator gates the
+              // fast path on space identity (not just dimension), so a same-dim but
+              // different-space collision can't silently produce garbage similarity.
+              space: pipeline?.localSpaceKey ?? null,
               embed: async (text: string) => {
                 if (!pipeline) return null;
                 // Await readiness so the FIRST cold-session question still gets the
@@ -1042,6 +1058,47 @@ export class AppState {
                 return await pipeline.getEmbeddingForQueryLocalOnly(text);
               },
             };
+          });
+        }
+
+        // Kick a knowledge re-embed once the embedding pipeline is ready. CRITICAL:
+        // the orchestrator's constructor fires refreshCache()→ensureEmbeddingSpace()
+        // BEFORE setActiveSpaceFn is wired above, so that initial pass no-ops (no active
+        // space yet). Without this explicit kick, a v1→v2 model upgrade would leave the
+        // resume/JD nodes stranded in the old space — _spaceGatedNodes would exclude them
+        // and semantic retrieval would silently return nothing until the user re-uploaded.
+        // This is the knowledge-base analogue of RAGManager.scheduleAutoReindex's self-heal.
+        if (typeof this.knowledgeOrchestrator.ensureEmbeddingSpace === 'function') {
+          const ko = this.knowledgeOrchestrator;
+          (async () => {
+            try {
+              await self.ragManager?.getEmbeddingPipeline()?.waitForReady();
+              await ko.ensureEmbeddingSpace();
+            } catch (e: any) {
+              console.warn('[main] Knowledge ensureEmbeddingSpace kick failed (non-fatal):', e?.message || e);
+            }
+          })();
+        }
+
+        // Phase 1: transcript-aware intent hint. The orchestrator (premium) has
+        // no SessionTracker reference (package boundary), so the app layer reads
+        // the rolling ~180s transcript here and hands back a lightweight verdict.
+        // We inspect only the last 1-2 INTERVIEWER turns for comp evidence — NOT
+        // the whole window (that caused topic-bleed) and NOT the candidate's own
+        // typed question (classified separately). Cheap + synchronous.
+        if (typeof this.knowledgeOrchestrator.setConversationContextProvider === 'function') {
+          this.knowledgeOrchestrator.setConversationContextProvider(() => {
+            if (!textHasCompEvidence) return null;
+            try {
+              const items = self.intelligenceManager?.getContext(180) ?? [];
+              const interviewerTurns = items.filter((i: any) => i.role === 'interviewer');
+              const lastTwo = interviewerTurns.slice(-2);
+              const lastInterviewerTurn = lastTwo.length ? lastTwo[lastTwo.length - 1].text : undefined;
+              const recentInterviewerComp = lastTwo.some((i: any) => textHasCompEvidence!(i.text));
+              return { recentInterviewerComp, lastInterviewerTurn };
+            } catch {
+              return null;
+            }
           });
         }
 
@@ -5502,6 +5559,16 @@ async function initializeApp() {
     // This is critical to prevent resource leaks and ensure proper cleanup
     if (appState?.cropperWindowHelper) {
       appState.cropperWindowHelper.dispose();
+    }
+
+    // Cancel any pending RAG auto-reindex timer (could fire ~15s — or the long
+    // drain-poll — after quit) and terminate the VectorStore worker thread.
+    try {
+      const rag = appState.getRAGManager();
+      rag?.cancelPendingReindex();
+      void rag?.dispose();
+    } catch (e) {
+      console.error('[main] Failed to dispose RAGManager during shutdown:', e);
     }
 
     // Kill Ollama if we started it
