@@ -474,6 +474,18 @@ export interface ElectronAPI {
   getLogFilePath: () => Promise<string | null>;
   openLogFile: () => Promise<{ success: boolean; error?: string }>;
 
+  // Onboarding & gate persistent backup flags
+  onboardingGetFlags: () => Promise<{
+    seenStartup: boolean;
+    seenProfileOnboarding: boolean;
+    seenModesOnboarding: boolean;
+    permsShown: boolean;
+  }>;
+  onboardingSetFlag: (
+    key: 'seenStartup' | 'seenProfileOnboarding' | 'seenModesOnboarding' | 'permsShown',
+    value: boolean,
+  ) => Promise<{ success: boolean; error?: string }>;
+
   // Arch
   getArch: () => Promise<string>;
   getOsVersion: () => Promise<string>;

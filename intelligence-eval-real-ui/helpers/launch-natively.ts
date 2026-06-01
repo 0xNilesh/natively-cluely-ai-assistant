@@ -58,6 +58,15 @@ export async function launchNatively(opts: { userDataDir?: string; recordVideoDi
   // passing it causes the launcher to hang silently. Video capture via
   // Playwright requires browser contexts, not Electron. Artifacts are captured
   // via screenshots instead; screen recordings can be added via OS-level tools.
+  //
+  // CRITICAL: force the PRODUCTION Natively API base. The repo's .env sets
+  // NATIVELY_API_URL=http://localhost:3000 (the local dev server), and the app's
+  // main.ts does require('dotenv').config() at startup — so without this override
+  // the app points at localhost:3000, every /v1/pro/verify + /v1/chat call gets
+  // ECONNREFUSED, Pro never activates (Profile Intelligence is Pro-gated), and
+  // the WHOLE eval fails with missing-fact errors that look like model bugs.
+  // dotenv does NOT overwrite vars already present in the process env, so setting
+  // it here wins over .env. This was the true root cause of the "backend flap".
   const app = await electron.launch({
     args: ['.', `--user-data-dir=${userDataDir}`],
     cwd: REPO_ROOT,
@@ -66,6 +75,7 @@ export async function launchNatively(opts: { userDataDir?: string; recordVideoDi
       NODE_ENV: 'test',
       NATIVELY_TEST_API_KEY: key,
       NATIVELY_UI_EVAL: '1',
+      NATIVELY_API_URL: process.env.NATIVELY_API_URL_OVERRIDE || 'https://api.natively.software',
     },
     timeout: 30000,
   });
@@ -101,12 +111,20 @@ export async function launchNatively(opts: { userDataDir?: string; recordVideoDi
       //   natively_seen_profile_onboarding_v1 — profile onboarding toaster
       //   natively_seen_modes_onboarding_v5   — modes onboarding toaster (note: v5)
       //   natively_perms_shown_v1             — PermissionsToaster (blocks all clicks)
-      await win.evaluate(() => {
+      await win.evaluate(async () => {
         try {
           localStorage.setItem('natively_seen_startup_v1', 'true');
           localStorage.setItem('natively_seen_profile_onboarding_v1', 'true');
           localStorage.setItem('natively_seen_modes_onboarding_v5', 'true');
           localStorage.setItem('natively_perms_shown_v1', '1');
+          
+          const api: any = (window as any).electronAPI;
+          if (api?.onboardingSetFlag) {
+            await api.onboardingSetFlag('seenStartup', true);
+            await api.onboardingSetFlag('seenProfileOnboarding', true);
+            await api.onboardingSetFlag('seenModesOnboarding', true);
+            await api.onboardingSetFlag('permsShown', true);
+          }
         } catch { /* */ }
       }).catch(() => {});
       // Mark the SupportToaster (donation toast, z-[9999]) as shown so it does

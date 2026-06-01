@@ -1005,6 +1005,25 @@ export function initializeIpcHandlers(appState: AppState): void {
     return { success: true };
   });
 
+  // Onboarding & gate persistent backup flags
+  safeHandle('onboarding:get-flags', async () => {
+    const sm = SettingsManager.getInstance();
+    return {
+      seenStartup: sm.get('seenStartup') ?? false,
+      seenProfileOnboarding: sm.get('seenProfileOnboarding') ?? false,
+      seenModesOnboarding: sm.get('seenModesOnboarding') ?? false,
+      permsShown: sm.get('permsShown') ?? false,
+    };
+  });
+
+  safeHandle('onboarding:set-flag', async (_, key: string, value: boolean) => {
+    if (['seenStartup', 'seenProfileOnboarding', 'seenModesOnboarding', 'permsShown'].includes(key)) {
+      SettingsManager.getInstance().set(key as any, value);
+      return { success: true };
+    }
+    return { success: false, error: 'invalid_key' };
+  });
+
   safeHandle('get-log-file-path', async () => {
     try {
       return path.join(app.getPath('documents'), 'natively_debug.log');

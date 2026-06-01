@@ -719,6 +719,18 @@ interface ElectronAPI {
   getLogFilePath: () => Promise<string | null>;
   openLogFile: () => Promise<{ success: boolean; error?: string }>;
 
+  // Onboarding & gate persistent backup flags
+  onboardingGetFlags: () => Promise<{
+    seenStartup: boolean;
+    seenProfileOnboarding: boolean;
+    seenModesOnboarding: boolean;
+    permsShown: boolean;
+  }>;
+  onboardingSetFlag: (
+    key: 'seenStartup' | 'seenProfileOnboarding' | 'seenModesOnboarding' | 'permsShown',
+    value: boolean,
+  ) => Promise<{ success: boolean; error?: string }>;
+
   // Arch
   getArch: () => Promise<string>;
   getOsVersion: () => Promise<string>;
@@ -2023,6 +2035,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   getLogFilePath: () => ipcRenderer.invoke('get-log-file-path'),
   openLogFile: () => ipcRenderer.invoke('open-log-file'),
+
+  // Onboarding & gate persistent backup flags
+  onboardingGetFlags: () => ipcRenderer.invoke('onboarding:get-flags'),
+  onboardingSetFlag: (key: string, value: boolean) =>
+    ipcRenderer.invoke('onboarding:set-flag', key, value),
 
   // Arch
   getArch: () => ipcRenderer.invoke('get-arch'),

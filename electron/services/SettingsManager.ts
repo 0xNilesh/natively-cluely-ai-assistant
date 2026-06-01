@@ -54,6 +54,11 @@ export interface AppSettings {
     // When true (default) and the active mode is a technical / coding interview, prefer
     // direct vision LLM over structured-extract-then-answer for lowest latency.
     technicalInterviewVisionFirst?: boolean;
+    // Onboarding and gate flags for persistent settings backup
+    seenStartup?: boolean;
+    seenProfileOnboarding?: boolean;
+    seenModesOnboarding?: boolean;
+    permsShown?: boolean;
 }
 
 export const VALID_SCREEN_UNDERSTANDING_MODES = ['vision_first', 'vision_only', 'private_vision'] as const;

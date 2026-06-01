@@ -442,6 +442,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onO
                             onClick={() => {
                                 setShowProfileOnboarding(false);
                                 localStorage.setItem('natively_seen_profile_onboarding_v1', 'true');
+                                window.electronAPI?.onboardingSetFlag?.('seenProfileOnboarding', true).catch(() => {});
                                 onOpenProfile?.();
                             }}
                             title="Profile Intelligence"
@@ -500,6 +501,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onO
                                                         e.stopPropagation(); 
                                                         setShowProfileOnboarding(false); 
                                                         localStorage.setItem('natively_seen_profile_onboarding_v1', 'true'); 
+                                                        window.electronAPI?.onboardingSetFlag?.('seenProfileOnboarding', true).catch(() => {});
                                                     }}
                                                     className={`text-[12px] font-medium px-3.5 py-[6px] rounded-full transition-all active:scale-95 ${
                                                         isLight
@@ -515,6 +517,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onO
                                                         onOpenProfile?.(); 
                                                         setShowProfileOnboarding(false); 
                                                         localStorage.setItem('natively_seen_profile_onboarding_v1', 'true'); 
+                                                        window.electronAPI?.onboardingSetFlag?.('seenProfileOnboarding', true).catch(() => {});
                                                     }}
                                                     className={`text-[12px] font-medium px-4 py-[6px] rounded-full transition-all active:scale-95 shadow-sm ${
                                                         isLight
@@ -536,6 +539,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onO
                             onClick={() => {
                                 setShowModesOnboarding(false);
                                 localStorage.setItem('natively_seen_modes_onboarding_v5', 'true');
+                                window.electronAPI?.onboardingSetFlag?.('seenModesOnboarding', true).catch(() => {});
                                 onOpenModes?.();
                             }}
                             title="Modes"
@@ -604,6 +608,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onO
                                                         e.stopPropagation(); 
                                                         setShowModesOnboarding(false); 
                                                         localStorage.setItem('natively_seen_modes_onboarding_v5', 'true'); 
+                                                        window.electronAPI?.onboardingSetFlag?.('seenModesOnboarding', true).catch(() => {});
                                                     }}
                                                     className={`text-[12px] font-medium px-3.5 py-[6px] rounded-full transition-all active:scale-95 ${
                                                         isLight
@@ -619,6 +624,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onO
                                                         onOpenModes?.(); 
                                                         setShowModesOnboarding(false); 
                                                         localStorage.setItem('natively_seen_modes_onboarding_v5', 'true'); 
+                                                        window.electronAPI?.onboardingSetFlag?.('seenModesOnboarding', true).catch(() => {});
                                                     }}
                                                     className={`text-[12px] font-medium px-4 py-[6px] rounded-full transition-all active:scale-95 shadow-sm ${
                                                         isLight
