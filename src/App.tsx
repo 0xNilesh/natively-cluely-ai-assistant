@@ -19,6 +19,7 @@ import { AlertCircle, RefreshCw } from "lucide-react"
 import { clampOverlayOpacity, OVERLAY_OPACITY_DEFAULT, getDefaultOverlayOpacity } from "./lib/overlayAppearance"
 import { getMeetingInterfaceTheme, type MeetingInterfaceTheme } from './lib/meetingInterfaceTheme'
 import { isMac } from "./utils/platformUtils"
+import { trackAppOpen, markToasterAsShown } from "./lib/toasterGating"
 import {
   JDAwarenessToaster,
   ProfileFeatureToaster,
@@ -165,6 +166,7 @@ const App: React.FC = () => {
   const [showPermissionsToaster, setShowPermissionsToaster] = useState(false);
   const [showTrialPromo,         setShowTrialPromo]         = useState(false);
 
+
   // ── Free Trial global state ────────────────────────────────
   const [activeTrial, setActiveTrial] = useState<{
     expiresAt: string;
@@ -173,7 +175,7 @@ const App: React.FC = () => {
   const [showTrialExpiredModal, setShowTrialExpiredModal] = useState(false);
 
   const isAppReady = !isSettingsWindow && !isOverlayWindow && !isModelSelectorWindow && !showStartup && !isSettingsOpen && isLauncherMainView && !isProfileOpen;
-  const { activeAd, dismissAd, previewAd } = useAdCampaigns(
+  const { activeAd, dismissAd } = useAdCampaigns(
     planDetails,
     hasProfile,
     isAppReady,
@@ -183,28 +185,12 @@ const App: React.FC = () => {
     hasNativelyApi
   );
 
-  // Preview shortcuts — Ctrl/Cmd+Shift+1-5 force-show any ad card.
-  // Uses e.code so Shift doesn't remap the digit to a symbol ('!' etc.).
-  useEffect(() => {
-    const CODE_MAP: Record<string, string> = {
-      'Digit1': 'max_ultra_upgrade',
-      'Digit2': 'promo',
-      'Digit3': 'natively_api',
-      'Digit4': 'profile',
-      'Digit5': 'jd',
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || !e.shiftKey) return;
-      const ad = CODE_MAP[e.code];
-      if (!ad) return;
-      e.preventDefault();
-      previewAd(ad as any);
-    };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [previewAd]);
+
 
   useEffect(() => {
+    // Track app opens for global gating
+    trackAppOpen();
+
     // Clean up old local storage
     localStorage.removeItem('useLegacyAudioBackend');
 
@@ -367,7 +353,10 @@ const App: React.FC = () => {
         setShowPermissionsToaster(true);
       } else {
         // Subsequent launches — trial promo will self-gate via TrialPromoToaster
-        setShowTrialPromo(true);
+        const trialShown = localStorage.getItem('natively_trial_promo_ts');
+        if (!trialShown) {
+          setShowTrialPromo(true);
+        }
       }
     }
 
@@ -866,7 +855,10 @@ const App: React.FC = () => {
           localStorage.setItem('natively_perms_shown_v1', '1');
           window.electronAPI?.onboardingSetFlag?.('permsShown', true).catch(() => {});
           setShowPermissionsToaster(false);
-          // After permissions, allow trial promo on next launch
+          // Show the trial promo immediately after permissions setup (with a 1.5s transition delay)
+          setTimeout(() => {
+            setShowTrialPromo(true);
+          }, 1500);
         }}
       />
 
@@ -909,16 +901,15 @@ const App: React.FC = () => {
           }}
         />
       )}
-      {/* Ad toasters — render whenever activeAd is set (isLauncherMainView guard bypassed
-          when triggered via preview shortcut so the card always surfaces) */}
-      {(isLauncherMainView || !!activeAd) && !isSettingsOpen && (
+      {/* Ad toasters */}
+      {isLauncherMainView && !isSettingsOpen && (
         <NativelyApiPromoToaster
           isOpen={activeAd === 'natively_api'}
           onDismiss={() => dismissAd('natively_api')}
           onOpenSettings={(tab: string) => openSettingsExclusive(tab)}
         />
       )}
-      {(isLauncherMainView || !!activeAd) && (
+      {isLauncherMainView && (
         <>
           <ProfileFeatureToaster
             isOpen={activeAd === 'profile'}
