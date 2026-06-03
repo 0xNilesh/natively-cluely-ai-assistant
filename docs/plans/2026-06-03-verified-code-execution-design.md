@@ -176,6 +176,24 @@ Two gaps from the first pass were closed:
 - Tests: 569 total (559 pass, 10 gated-skip without Go/Java toolchains). SQL fully
   runs here (21 SQL tests incl. 6 real sqlite3 executions).
 
+### Unsupported-language safety (2026-06-03)
+A language NOT in the verified set (c, rust, kotlin, ruby, php, swift, c#, …) is a
+CLEAN SKIP — no execution, no badge, never a false verdict. Fixed a bug where an
+unknown declared language was coerced to `python` and run in the wrong
+interpreter; now an explicitly-declared unsupported language skips immediately
+(`unsupported_language`) without falling through to inference. See the unsupported
+regression tests in `Orchestrator.test.mjs`.
+
+### DEFERRED to 2.7+ — expand verified-execution language coverage
+Adding MORE languages is a post-2.7 follow-up (intentionally out of the initial
+release; clean-skip is safe in the meantime). Priority + toolchain reality
+(dev machine, 2026-06-03): **Ruby first** (dynamic → cheapest, reuses py/js
+pattern, `ruby` present), then **Rust / Swift** (static, `rustc`/`swiftc`
+present, cppDriver-style), then **C** (static; fiddly array+returnSize out-params;
+currently the lone cloud entry). **PHP / Kotlin / C#** last — toolchains absent on
+the dev box, so they'd ship unproven; add behind their toolchain gate. Code-level
+marker: `drivers.ts` `LOCAL_LANGUAGES` `TODO(2.7+)`.
+
 **Java — a LOCAL compiled language (when a JDK is installed).**
 - `javaDriver.ts` mirrors the C++ approach: parse the `class Solution` method
   signature, build typed Java literals, wrap in a `Main`, `javac` + `java`.

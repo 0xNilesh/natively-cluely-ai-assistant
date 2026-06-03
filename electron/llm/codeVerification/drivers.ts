@@ -32,6 +32,28 @@ export interface Driver {
 // via a compile+run path handled in localRunner — NOT buildDriver's interpreter
 // path. Java/C++ only actually run when their toolchain is installed (checked by
 // localLanguageAvailable); otherwise the orchestrator skips cleanly.
+//
+// VERIFIED-EXECUTION COVERAGE: python, javascript, cpp, java, go + sql (separate
+// path). Everything else (c, rust, kotlin, ruby, php, swift, c#, …) is a CLEAN
+// SKIP today — never a false verdict, just no badge.
+//
+// TODO(2.7+ / post-release): EXPAND coverage to more languages. Deferred from the
+// initial verified-code-execution release on purpose. Prioritization + toolchain
+// reality (verified on the dev machine 2026-06-03):
+//   - Ruby   — DYNAMIC: cheapest to add (reuse the Python/JS driver pattern, no
+//              signature parser). `ruby` present. High value, do first.
+//   - Rust   — static, `rustc` present. Signature-aware driver like cppDriver.
+//   - Swift  — static, `swiftc` present. Signature-aware driver.
+//   - C      — static, `gcc/clang` present. Fiddliest (array length + returnSize
+//              out-params); currently the lone CLOUD_LANGUAGES entry.
+//   - PHP / Kotlin / C# — toolchains NOT on the dev machine, so they'd ship
+//              UNPROVEN (driver-gen only); add behind their toolchain gate, lowest
+//              priority. PHP is dynamic (cheap); Kotlin/C# are static.
+// When adding a local language: append it here, add a runXCase in localRunner
+// (compiled) or a buildDriver branch (interpreted), wire localLanguageAvailable,
+// drop it from CLOUD_LANGUAGES, and update the stale CLOUD_LANGUAGES /
+// isLocallyRunnable / orchestrator-skip-reason tests. See cppDriver.ts (static)
+// or the python/js drivers (dynamic) as templates.
 export const LOCAL_LANGUAGES: VerifyLanguage[] = ['python', 'javascript', 'cpp', 'java', 'go'];
 
 export const isLocallyRunnable = (lang: VerifyLanguage): boolean => LOCAL_LANGUAGES.includes(lang);
