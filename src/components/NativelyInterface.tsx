@@ -2249,21 +2249,32 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     );
 
     // Verified code execution: the shown code FAILED and a (re-verified) fix was
-    // produced. Post it as a NEW system message clearly marked as a correction.
+    // produced. REPLACE the wrong answer IN PLACE (same markdown coding card, same
+    // format) so the compact overlay doesn't grow — the user always ends on the
+    // CORRECT code, marked with a small "corrected" header + ✓ verified badge.
+    // Only replace when the wrong card is still the LAST message (same
+    // supersession guard as the badge); if a newer turn arrived, append instead
+    // so a genuine correction is never silently dropped.
     cleanups.push(
       window.electronAPI.onIntelligenceCodeCorrection?.((data) => {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `correction-${Date.now()}`,
-            role: 'system',
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          const corrected = {
             text: data.answer,
             isCode: true,
             isCorrection: true,
             correctionNote: data.note,
             codeVerified: data.reVerified ? { passed: 1, total: 1, language: 'verified' } : undefined,
-          },
-        ]);
+          };
+          if (last && last.role === 'system' && !last.isStreaming) {
+            // In-place swap: keep the same message id so React reuses the row.
+            const next = [...prev];
+            next[next.length - 1] = { ...last, ...corrected };
+            return next;
+          }
+          // Superseded / not a finalized system row → append (never lose the fix).
+          return [...prev, { id: `correction-${Date.now()}`, role: 'system', ...corrected }];
+        });
       }) ?? (() => {}),
     );
 
