@@ -45,6 +45,10 @@ export interface AppSettings {
         profile_history?: boolean;
         embeddings?: boolean;
         post_call_summary?: boolean;
+        // Verified code execution: when false, the model's code is NOT sent to
+        // the cloud (Piston) runner for languages we can't run locally. Default
+        // allowed; only the cloud path consults this (local py/js never sends).
+        code_execution?: boolean;
     };
     // Screen-understanding routing — VISION-ONLY architecture (legacy OCR removed from runtime).
     //   vision_first   — Default. Send screenshot to the first available vision-capable provider; cascade through fallback chain on failure.

@@ -30,7 +30,39 @@ export type TelemetryEventName =
   | 'screen_context_error'
   | 'post_call_summary_started'
   | 'post_call_summary_completed'
-  | 'post_call_summary_failed';
+  | 'post_call_summary_failed'
+  // ── Profile Intelligence live-path latency events (REPORT_TO_CHATGPT §27) ──
+  // The full click→render trace. Every event carries timings/sizes/hashes only,
+  // never raw resume/JD/custom/persona/negotiation/transcript content (the
+  // sanitizer below strips those keys; callers must pass metadata, not content).
+  | 'question_submitted'
+  | 'what_to_answer_clicked'
+  | 'transcript_window_loaded'
+  | 'latest_question_extracted'
+  | 'intent_classified'
+  | 'answer_type_selected'
+  | 'context_selected'
+  | 'context_build_started'
+  | 'context_build_completed'
+  | 'context_layers_used'
+  | 'prompt_built'
+  | 'provider_request_started'
+  | 'first_response_byte'
+  | 'first_stream_chunk'
+  | 'first_visible_text'
+  | 'first_useful_token'
+  | 'response_completed'
+  | 'validation_started'
+  | 'validation_completed'
+  | 'validation_failed'
+  | 'repair_used'
+  | 'retry_used'
+  | 'provider_race_started'
+  | 'provider_race_won'
+  | 'ui_render_completed'
+  | 'cost_estimated'
+  | 'tokens_used'
+  | 'degraded_context';
 
 export type TelemetrySinkName = 'local-jsonl' | 'posthog' | 'axiom' | 'sentry';
 
@@ -47,6 +79,14 @@ export interface TelemetryConfig {
   userDataPath?: string;
   logFilePath?: string;
   sinks?: TelemetrySinkConfig[];
+  /**
+   * Dev/test-only structured debug metadata merged into EVERY event's
+   * `properties` (under `debug`). Used by evals/real-UI to attach the
+   * answerType/intent/selectedContextLayers/provider/model/timings snapshot
+   * without polluting production logs. Still passes through the sanitizer,
+   * so it must carry metadata (names/sizes/hashes), never raw content.
+   */
+  debugMetadata?: Record<string, unknown> | null;
 }
 
 export interface TelemetryEventInput {
@@ -79,12 +119,12 @@ const REMOVED = '[REMOVED]';
 // carried verbatim user content (queries, chunks, transcripts, prompts,
 // error bodies, free-form error messages). Add to this list when introducing
 // any new free-text property — telemetry should never carry raw user input.
-const SENSITIVE_KEY_RE = /(api[_-]?key|authorization|bearer|token|secret|password|credential|raw[_-]?(transcript|prompt|reference|content|query)|transcript(text)?|prompt|reference(content)?|evidence(text)?|screenshot(path)?|image(path)?|error(body|response|message)?|responsebody|body|query(text|string)?|user(input|message)|chunk(text|content)?|snippet(text)?)$/i;
+const SENSITIVE_KEY_RE = /(api[_-]?key|authorization|bearer|token|secret|password|credential|raw[_-]?(transcript|prompt|reference|content|query|resume|jd|persona|negotiation)|transcript(text)?|prompt|reference(content)?|evidence(text)?|screenshot(path)?|image(path)?|error(body|response|message)?|responsebody|body|query(text|string)?|user(input|message)|chunk(text|content)?|snippet(text)?|resume(text)?|persona(text)?|negotiation(text|script|context)?|jd(text|content)?|customcontext|customnotes|notes|note|answer(text)?|question(text)?|latestquestion|salary|compensation|content|text)$/i;
 // REMOVE_VALUE_KEY_RE matches a strict subset of the above for which we drop
 // the value entirely (not just redact). Used for keys that are guaranteed-
 // bulky raw text — we don't want a 16KB transcript field in a log line even
 // with [REDACTED] in place.
-const REMOVE_VALUE_KEY_RE = /(raw[_-]?(transcript|prompt|reference|content|query)|transcript(text)?|prompt|reference(content)?|evidence(text)?|screenshot(path)?|image(path)?|error(body|response)?|responsebody|body|query(text|string)?|user(input|message)|chunk(text|content)?|snippet(text)?)$/i;
+const REMOVE_VALUE_KEY_RE = /(raw[_-]?(transcript|prompt|reference|content|query|resume|jd|persona|negotiation)|transcript(text)?|prompt|reference(content)?|evidence(text)?|screenshot(path)?|image(path)?|error(body|response)?|responsebody|body|query(text|string)?|user(input|message)|chunk(text|content)?|snippet(text)?|resume(text)?|persona(text)?|negotiation(text|script|context)?|jd(text|content)?|customcontext|customnotes|notes|note|answer(text)?|question(text)?|latestquestion|content|text)$/i;
 const API_KEY_VALUE_PATTERNS = [
   /Bearer\s+[A-Za-z0-9._~+\/=:-]{12,}/gi,
   /natively_sk_[A-Za-z0-9._-]+/gi,
@@ -94,16 +134,78 @@ const API_KEY_VALUE_PATTERNS = [
   /[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{20,}/g,
 ];
 
+/**
+ * A monotonic timing span. Created by `telemetryService.startSpan(name)`,
+ * closed by `.end()` / `.endWith(status, extraProps)`. On close it emits ONE
+ * telemetry event with `durationMs` measured from a monotonic clock
+ * (`performance.now()` when available — immune to wall-clock adjustments).
+ * Closing twice is a no-op. Spans are cheap and non-blocking; they never throw.
+ */
+export class TelemetrySpan {
+  private startedAt: number;
+  private ended = false;
+  constructor(
+    private readonly service: TelemetryService,
+    private readonly name: TelemetryEventName | string,
+    private readonly base: Omit<TelemetryEventInput, 'name' | 'durationMs'> = {},
+  ) {
+    this.startedAt = monotonicNow();
+  }
+  /** Elapsed ms since the span started, without closing it. */
+  elapsedMs(): number {
+    return Math.max(0, Math.round(monotonicNow() - this.startedAt));
+  }
+  /** Close the span and emit the event. Safe to call once; later calls no-op. */
+  end(extraProps?: Record<string, unknown>): number {
+    if (this.ended) return 0;
+    this.ended = true;
+    const durationMs = this.elapsedMs();
+    this.service.track({
+      ...this.base,
+      name: this.name,
+      durationMs,
+      properties: { ...(this.base.properties ?? {}), ...(extraProps ?? {}) },
+    });
+    return durationMs;
+  }
+  /** Close with an explicit status (e.g. 'ok' | 'timeout' | 'error'). */
+  endWith(status: string, extraProps?: Record<string, unknown>): number {
+    if (this.ended) return 0;
+    this.ended = true;
+    const durationMs = this.elapsedMs();
+    this.service.track({
+      ...this.base,
+      name: this.name,
+      durationMs,
+      status,
+      properties: { ...(this.base.properties ?? {}), ...(extraProps ?? {}) },
+    });
+    return durationMs;
+  }
+}
+
+function monotonicNow(): number {
+  // performance.now() exists in Electron main + renderer; fall back to Date.now.
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const p: any = (globalThis as any).performance;
+    if (p && typeof p.now === 'function') return p.now();
+  } catch { /* ignore */ }
+  return Date.now();
+}
+
 export class TelemetryService {
   private enabled: boolean;
   private localEnabled: boolean;
   private logFilePath: string;
   private sinks: TelemetrySinkConfig[];
+  private debugMetadata: Record<string, unknown> | null;
 
   constructor(config: TelemetryConfig = {}) {
     this.enabled = config.enabled !== false;
     this.localEnabled = config.localEnabled !== false;
     this.sinks = config.sinks ?? [];
+    this.debugMetadata = config.debugMetadata ?? null;
     this.logFilePath = config.logFilePath ?? path.join(config.userDataPath ?? process.cwd(), 'logs', DEFAULT_FILE_NAME);
   }
 
@@ -123,6 +225,8 @@ export class TelemetryService {
     } else if (config.userDataPath) {
       this.logFilePath = path.join(config.userDataPath, 'logs', DEFAULT_FILE_NAME);
     }
+    // `null` explicitly clears; `undefined` leaves the current value untouched.
+    if (config.debugMetadata !== undefined) this.debugMetadata = config.debugMetadata;
   }
 
   isEnabled(): boolean {
@@ -133,29 +237,74 @@ export class TelemetryService {
     return this.logFilePath;
   }
 
+  /**
+   * Set/clear the dev/test-only debug-metadata snapshot merged into every
+   * event under `properties.debug`. Pass `null` to clear. No-op in production
+   * unless a caller opts in (the eval harnesses do; the app does not).
+   */
+  setDebugMetadata(metadata: Record<string, unknown> | null): void {
+    this.debugMetadata = metadata;
+  }
+
+  /** Convenience alias for `track({ name, properties })`. */
+  record(name: TelemetryEventName | string, properties?: Record<string, unknown>): void {
+    this.track({ name, properties });
+  }
+
+  /**
+   * Start a timing span. The returned span emits one event with `durationMs`
+   * (monotonic) when `.end()`/`.endWith()` is called. Use for the live-path
+   * stage timings (context build, provider connect, etc.).
+   */
+  startSpan(
+    name: TelemetryEventName | string,
+    base: Omit<TelemetryEventInput, 'name' | 'durationMs'> = {},
+  ): TelemetrySpan {
+    return new TelemetrySpan(this, name, base);
+  }
+
   track(input: TelemetryEventInput): void {
     if (!this.enabled) return;
 
-    const record: TelemetryRecord = {
-      name: String(input.name),
-      timestamp: new Date().toISOString(),
-      properties: sanitizeTelemetryProperties(input.properties ?? {}),
-    };
+    // HARD CONTRACT: telemetry must NEVER throw or block on the live answer
+    // path. Every span/trace mark routes through here, all inside the engine's
+    // outer try — an exception would be swallowed into the answer's catch and
+    // abort the response. So the whole body is guarded; a sanitizer/caller-prop
+    // edge can at worst drop the event, never break the app.
+    try {
+      // Merge dev/test debug metadata (if set) under a `debug` namespace so it
+      // never collides with caller props. Still sanitized below. Guard the
+      // event-level `debug` so a non-object value can't degrade the spread.
+      const evDebug = (input.properties?.debug && typeof input.properties.debug === 'object' && !Array.isArray(input.properties.debug))
+        ? (input.properties.debug as Record<string, unknown>)
+        : {};
+      const mergedProps: Record<string, unknown> = this.debugMetadata
+        ? { ...(input.properties ?? {}), debug: { ...this.debugMetadata, ...evDebug } }
+        : (input.properties ?? {});
 
-    if (input.sessionId) record.sessionId = String(input.sessionId);
-    if (input.modeId) record.modeId = String(input.modeId);
-    if (input.provider) record.provider = String(input.provider);
-    if (typeof input.durationMs === 'number' && Number.isFinite(input.durationMs)) record.durationMs = input.durationMs;
-    if (input.status) record.status = String(input.status);
+      const record: TelemetryRecord = {
+        name: String(input.name),
+        timestamp: new Date().toISOString(),
+        properties: sanitizeTelemetryProperties(mergedProps),
+      };
 
-    if (this.localEnabled) {
-      this.appendLocal(record);
-    }
+      if (input.sessionId) record.sessionId = String(input.sessionId);
+      if (input.modeId) record.modeId = String(input.modeId);
+      if (input.provider) record.provider = String(input.provider);
+      if (typeof input.durationMs === 'number' && Number.isFinite(input.durationMs)) record.durationMs = input.durationMs;
+      if (input.status) record.status = String(input.status);
 
-    for (const sink of this.sinks) {
-      if (!sink.enabled || sink.name === 'local-jsonl') continue;
-      // Placeholder for future SDK-backed sinks. Intentionally no-op to avoid dependencies
-      // and to preserve local-only default telemetry behavior.
+      if (this.localEnabled) {
+        this.appendLocal(record);
+      }
+
+      for (const sink of this.sinks) {
+        if (!sink.enabled || sink.name === 'local-jsonl') continue;
+        // Placeholder for future SDK-backed sinks. Intentionally no-op to avoid dependencies
+        // and to preserve local-only default telemetry behavior.
+      }
+    } catch {
+      // Telemetry must never break app behavior.
     }
   }
 

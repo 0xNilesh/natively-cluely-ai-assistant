@@ -4,6 +4,7 @@ import {
   applyWhatToAnswerNullFeedbackMessages,
   finalizeStreamingByIntentMessages,
   prepareIntelligenceStreamPlaceholderMessages,
+  discardStreamingByIntentMessages,
 } from '../overlayMessagePersistence.mjs';
 
 const priorMessages = [
@@ -229,4 +230,57 @@ test('finalize-before-mount race resolves to a single row (E2E)', async () => {
   const systemRows = rows.filter((m) => m.role === 'system');
   assert.equal(systemRows.length, 1, 'race must not produce duplicate rows');
   assert.equal(systemRows[0].id, reservedId);
+});
+
+// ── discardStreamingByIntentMessages (orphaned-scaffold fix) ────────────────
+
+test('discard removes the open what_to_answer scaffold row', () => {
+  const rows = [
+    { id: 'u1', role: 'user', text: 'hi' },
+    { id: 's1', role: 'system', text: '## Approach\n_Working…_', intent: 'what_to_answer', isStreaming: true },
+  ];
+  const next = discardStreamingByIntentMessages(rows, 'what_to_answer');
+  assert.equal(next.length, 1, 'scaffold row removed');
+  assert.equal(next.find((m) => m.id === 's1'), undefined);
+});
+
+test('discard never deletes a finalized (non-streaming) answer', () => {
+  const rows = [
+    { id: 's1', role: 'system', text: 'Final answer', intent: 'what_to_answer', isStreaming: false },
+  ];
+  const next = discardStreamingByIntentMessages(rows, 'what_to_answer');
+  assert.deepEqual(next, rows, 'finalized answer preserved');
+});
+
+test('discard is a no-op when there is no open row (idempotent)', () => {
+  const rows = [
+    { id: 'u1', role: 'user', text: 'hi' },
+    { id: 's1', role: 'system', text: 'done', intent: 'what_to_answer', isStreaming: false },
+  ];
+  const next = discardStreamingByIntentMessages(rows, 'what_to_answer');
+  assert.equal(next, rows, 'same reference returned when nothing to discard');
+});
+
+test('discard only removes the matching intent, leaving other streams', () => {
+  const rows = [
+    { id: 'c1', role: 'system', text: '', intent: 'clarify', isStreaming: true },
+    { id: 's1', role: 'system', text: '## Approach', intent: 'what_to_answer', isStreaming: true },
+  ];
+  const next = discardStreamingByIntentMessages(rows, 'what_to_answer');
+  assert.equal(next.length, 1);
+  assert.equal(next[0].id, 'c1', 'unrelated streaming intent untouched');
+});
+
+test('discard removes only the LAST open row of the intent', () => {
+  const rows = [
+    { id: 's1', role: 'system', text: 'old', intent: 'what_to_answer', isStreaming: false },
+    { id: 's2', role: 'system', text: '## Approach', intent: 'what_to_answer', isStreaming: true },
+  ];
+  const next = discardStreamingByIntentMessages(rows, 'what_to_answer');
+  assert.equal(next.length, 1);
+  assert.equal(next[0].id, 's1', 'prior finalized answer kept');
+});
+
+test('discard handles a non-array input gracefully', () => {
+  assert.deepEqual(discardStreamingByIntentMessages(null, 'what_to_answer'), []);
 });

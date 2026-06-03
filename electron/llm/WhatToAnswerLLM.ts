@@ -7,18 +7,54 @@ import { IntentResult } from "./IntentClassifier";
 import { ScreenContext } from "../services/screen/ScreenContextService";
 import { PromptAssembler } from "../services/context/PromptAssembler";
 import { checkAnswerForCodeBugs } from "./CodeSanityCheck";
+import { formatAnswerPlanForPrompt, isCodingAnswerType } from "./AnswerPlanner";
+import type { AnswerPlan, AnswerType } from "./AnswerPlanner";
+import { isLayerAllowed } from "./contextRoute";
 import type { ProviderDataScope } from "./ProviderRouter";
+
+// Wall-clock budget for the pre-stream mode-context HYBRID retrieval await.
+// The hybrid retriever embeds the live query, and the embedder's own hard
+// timeout is 30s (EmbeddingPipeline.EMBED_TIMEOUT_MS). On the live answer path
+// that 30s would sit BEFORE the first token whenever the embedding provider is
+// cold/slow/rate-limited. We cap the await here and fall through to the cheap
+// synchronous lexical retrieval on timeout, so a slow embedder can never stall
+// first-useful-token. Mirrors the bounded grounding race in IntelligenceEngine.
+const HYBRID_RETRIEVAL_BUDGET_MS = 1500;
+
+/**
+ * Resolve `promise` or, after `ms`, resolve `fallback` instead — whichever is
+ * first. Never rejects (a thrown promise resolves to `fallback`). `timedOut`
+ * lets the caller distinguish a budget hit from a genuine empty result so it can
+ * run the lexical fallback. Local to this module (no shared import) to keep the
+ * hot path dependency-light.
+ */
+async function raceWithBudget<T>(promise: Promise<T>, ms: number, fallback: T): Promise<{ value: T; timedOut: boolean }> {
+    return new Promise((resolve) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            resolve({ value: fallback, timedOut: true });
+        }, ms);
+        timer.unref?.();
+        promise.then(
+            (value) => { if (!settled) { settled = true; clearTimeout(timer); resolve({ value, timedOut: false }); } },
+            () => { if (!settled) { settled = true; clearTimeout(timer); resolve({ value: fallback, timedOut: false }); } },
+        );
+    });
+}
 
 // Dynamically imported to avoid circular dependency at module load time
 type ModesManagerType = {
     getInstance: () => {
         getActiveModeSystemPromptSuffix: () => string;
         buildActiveModeContextBlock: () => string;
-        buildRetrievedActiveModeContextBlock: (query: string, transcript?: string, tokenBudget?: number) => string;
+        buildRetrievedActiveModeContextBlock: (query: string, transcript?: string, tokenBudget?: number, answerType?: AnswerType) => string;
         // Phase 4: optional async hybrid retrieval (FTS + vector). Backwards
         // compatible — older builds without this method still work via the
-        // sync lexical fallback.
-        buildRetrievedActiveModeContextBlockHybrid?: (query: string, transcript?: string, tokenBudget?: number) => Promise<string>;
+        // sync lexical fallback. `answerType` (Phase 3) scopes the mode's
+        // customContext so sensitive chunks can't leak into the wrong answer.
+        buildRetrievedActiveModeContextBlockHybrid?: (query: string, transcript?: string, tokenBudget?: number, answerType?: AnswerType) => Promise<string>;
     };
 };
 
@@ -33,6 +69,14 @@ export class WhatToAnswerLLM {
     constructor(llmHelper: LLMHelper, modesManager?: ReturnType<ModesManagerType['getInstance']>) {
         this.llmHelper = llmHelper;
         this.modesManager = modesManager;
+    }
+
+    private getModesManager(): ReturnType<ModesManagerType['getInstance']> {
+        if (!this.modesManager) {
+            const { ModesManager } = require('../services/ModesManager') as { ModesManager: ModesManagerType };
+            this.modesManager = ModesManager.getInstance();
+        }
+        return this.modesManager;
     }
 
     // Deprecated non-streaming method (redirect to streaming or implement if needed)
@@ -60,7 +104,8 @@ export class WhatToAnswerLLM {
         // candidate VOICE is owned by UNIVERSAL_WHAT_TO_ANSWER_PROMPT. Empty/
         // undefined when knowledge mode is off or the question isn't about the
         // candidate, so non-profile turns are unaffected.
-        candidateProfile?: string
+        candidateProfile?: string,
+        answerPlan?: AnswerPlan
     ): AsyncGenerator<string> {
         const MEASURE = process.env.MEASURE_LATENCY === 'true';
         let tStart = 0, tIntent = 0, tTemporal = 0, tMode = 0, tTrunc = 0, tPrompt = 0, tStream = 0;
@@ -95,6 +140,9 @@ DETECTED INTENT: ${intentResult.intent}
 ANSWER SHAPE: ${intentResult.answerShape}
 </intent_and_shape>`);
             }
+            if (answerPlan) {
+                intentContextParts.push(formatAnswerPlanForPrompt(answerPlan));
+            }
             if (instructionContext) {
                 intentContextParts.push(instructionContext);
             }
@@ -118,37 +166,66 @@ ANSWER SHAPE: ${intentResult.answerShape}
             // hybrid retrieval) mode-context block fetch entirely.
             if (!activeSkill) {
                 try {
-                    if (!this.modesManager) {
-                        const { ModesManager } = require('../services/ModesManager') as { ModesManager: ModesManagerType };
-                        this.modesManager = ModesManager.getInstance();
-                    }
+                    const modesManager = this.getModesManager();
                     // Phase 4 — prefer async hybrid retrieval (FTS + vector with
                     // lexical fallback inside the retriever). The hybrid method
                     // already falls back to lexical internally when embeddings
                     // are unavailable, so we just need a single await here.
                     // Sync lexical method remains as the second-line fallback in
                     // case the hybrid method is missing (older module shape).
+                    // Default to ALLOW unless the user EXPLICITLY denied the
+                    // reference_files scope. When SettingsManager is merely
+                    // unavailable (transient init race / test harness), we must
+                    // NOT conflate "policy unreadable" with "user opted out" —
+                    // that would silently drop reference context for everyone.
+                    //
+                    // THIS block is the authoritative gate for an EXPLICIT denial
+                    // on the WTA path: on denial the retrieved block is built only
+                    // when a local (Ollama) provider is available, else it is
+                    // OMITTED entirely (see the else branches below) and never
+                    // enters packet.userMessage. We do NOT rely on the downstream
+                    // provider-boundary scrub here — that nulls `context`, but the
+                    // retrieved block rides in `message`, so omitting-at-source is
+                    // what actually prevents the cloud send. (The boundary remains
+                    // a second line of defence for other call paths.)
                     let referenceFilesAllowed = true;
                     try {
                         const { SettingsManager } = require('../services/SettingsManager');
                         const policy = SettingsManager.getInstance().get('providerDataScopes');
                         referenceFilesAllowed = policy?.reference_files !== false;
                     } catch (_scopeErr: any) {
+                        // Settings unreadable ≠ user opted out → product default (allow).
+                        referenceFilesAllowed = true;
+                        console.warn('[ScopeFallback] reference_files policy unreadable; using default-allow (explicit denial still omits-at-source below)');
+                    }
+                    // Unified context-route enforcement: forbidden always wins.
+                    if (answerPlan && !isLayerAllowed(answerPlan, 'reference_files')) {
                         referenceFilesAllowed = false;
-                        console.warn('[ScopeFallback] reference_files policy unavailable; Ollama unavailable, omitting from context');
                     }
                     if (referenceFilesAllowed) {
-                        if (typeof this.modesManager.buildRetrievedActiveModeContextBlockHybrid === 'function') {
-                            modeContextBlock = await this.modesManager.buildRetrievedActiveModeContextBlockHybrid(
-                                cleanedTranscript, cleanedTranscript, 1800,
+                        if (typeof modesManager.buildRetrievedActiveModeContextBlockHybrid === 'function') {
+                            // Cap the hybrid (embedding) retrieval so a cold/slow
+                            // embedder can't stall first-token for up to 30s. On
+                            // timeout we fall through to the synchronous lexical
+                            // retriever below, which needs no embedding round-trip.
+                            const { value, timedOut } = await raceWithBudget(
+                                modesManager.buildRetrievedActiveModeContextBlockHybrid(
+                                    cleanedTranscript, cleanedTranscript, 1800, answerPlan?.answerType,
+                                ),
+                                HYBRID_RETRIEVAL_BUDGET_MS,
+                                '',
                             );
+                            modeContextBlock = value;
+                            if (timedOut) {
+                                console.warn(`[WhatToAnswerLLM] hybrid retrieval exceeded ${HYBRID_RETRIEVAL_BUDGET_MS}ms — using lexical fallback`);
+                            }
                         }
                         if (!modeContextBlock) {
-                            modeContextBlock = this.modesManager.buildRetrievedActiveModeContextBlock(cleanedTranscript, cleanedTranscript, 1800);
+                            modeContextBlock = modesManager.buildRetrievedActiveModeContextBlock(cleanedTranscript, cleanedTranscript, 1800, answerPlan?.answerType);
                         }
                     } else if (await this.llmHelper.canUseLocalFallback(false)) {
                         console.warn('[ScopeFallback] reference_files denied for cloud; routing to Ollama');
-                        modeContextBlock = this.modesManager.buildRetrievedActiveModeContextBlock(cleanedTranscript, cleanedTranscript, 1800);
+                        modeContextBlock = modesManager.buildRetrievedActiveModeContextBlock(cleanedTranscript, cleanedTranscript, 1800, answerPlan?.answerType);
                     } else {
                         console.warn('[ScopeFallback] reference_files denied; Ollama unavailable, omitting from context');
                     }
@@ -157,10 +234,16 @@ ANSWER SHAPE: ${intentResult.answerShape}
                 }
             }
 
+            // Resume facts (candidateProfile) are dropped when the route forbids
+            // the resume layer — e.g. coding/DSA must not see resume context.
+            const effectiveCandidateProfile = (answerPlan && !isLayerAllowed(answerPlan, 'resume'))
+                ? undefined
+                : candidateProfile;
+
             const assemblerBudget = 2000
                 + estimateTokens(intentContext || '')
                 + estimateTokens(modeContextBlock)
-                + estimateTokens(candidateProfile || '')
+                + estimateTokens(effectiveCandidateProfile || '')
                 + estimateTokens(screenContext?.ocrText || '')
                 + estimateTokens((temporalContext?.previousResponses || []).join('\n'));
             const reservedForFit =
@@ -175,11 +258,7 @@ ANSWER SHAPE: ${intentResult.answerShape}
             let modePromptSuffix = '';
             if (!activeSkill) {
                 try {
-                    if (!this.modesManager) {
-                        const { ModesManager } = require('../services/ModesManager') as { ModesManager: ModesManagerType };
-                        this.modesManager = ModesManager.getInstance();
-                    }
-                    modePromptSuffix = this.modesManager.getActiveModeSystemPromptSuffix();
+                    modePromptSuffix = this.getModesManager().getActiveModeSystemPromptSuffix();
                 } catch (_err: any) {
                     // already warned above
                 }
@@ -205,7 +284,7 @@ ANSWER SHAPE: ${intentResult.answerShape}
                 priorResponses: temporalContext?.hasRecentResponses ? temporalContext.previousResponses : undefined,
                 intentContext,
                 retrievedModeContext: modeContextBlock || undefined,
-                candidateProfile: candidateProfile || undefined,
+                candidateProfile: effectiveCandidateProfile || undefined,
                 tokenBudget: Math.max(1000, assemblerBudget),
                 systemPrompt: finalPromptOverride,
             });
@@ -227,7 +306,14 @@ ANSWER SHAPE: ${intentResult.answerShape}
             const hasProfileHistory = Boolean(candidateProfile)
                 || Boolean(temporalContext?.hasRecentResponses && temporalContext.previousResponses.length > 0);
             if (hasProfileHistory) packetScopes.push('profile_history');
-            for await (const token of this.llmHelper.streamChat(packet.userMessage, imagePaths, undefined, finalPromptOverride, true, true, packetScopes)) {
+            // Coding/DSA answers get a small reasoning budget for correctness;
+            // everything else streams with thinking off (fastest TTFT). abortSignal
+            // is undefined here (WTA uses generation-id supersession, not a signal).
+            // Optional-safe: older/stub helpers may not expose the resolver.
+            const wtaThinkingBudget = this.llmHelper.thinkingBudgetForAnswerType?.(
+                Boolean(answerPlan && isCodingAnswerType(answerPlan.answerType)),
+            );
+            for await (const token of this.llmHelper.streamChat(packet.userMessage, imagePaths, undefined, finalPromptOverride, true, true, packetScopes, undefined, wtaThinkingBudget)) {
                 if (MEASURE) {
                     const now = performance.now();
                     if (tPrevToken > 0) interTokenLatencies.push(now - tPrevToken);

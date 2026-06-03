@@ -138,3 +138,22 @@ export function applyWhatToAnswerNullFeedbackMessages(prev, feedback, idFactory 
     },
   ];
 }
+
+/**
+ * Discard an in-flight what-to-answer scaffold row that will never receive a
+ * final answer (stream superseded / declined / errored). Removes the open
+ * streaming `what_to_answer` row so the user is never left with a permanent
+ * "Working on…" scaffold card. No-op if no such open row exists (idempotent —
+ * safe to call alongside the manual-path null cleanup). Only removes a row that
+ * is STILL streaming, so a previously-finalized answer is never deleted.
+ */
+export function discardStreamingByIntentMessages(prev, intent = 'what_to_answer') {
+  if (!Array.isArray(prev)) return [];
+  const openIdx = prev.findLastIndex(
+    (m) => m.role === 'system' && m.intent === intent && m.isStreaming,
+  );
+  if (openIdx === -1) return prev;
+  const updated = [...prev];
+  updated.splice(openIdx, 1);
+  return updated;
+}

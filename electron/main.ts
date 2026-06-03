@@ -4155,6 +4155,31 @@ export class AppState {
       queueBatch('suggested_answer', { token, question, confidence });
     })
 
+    // Orphaned-scaffold fix: a what-to-answer stream that already showed a
+    // coding scaffold ended with no final answer (superseded/declined/errored).
+    // Tell the renderer to drop the open scaffold row. Flush pending token
+    // batches first so a late scaffold batch can't re-mount the row afterwards.
+    this.intelligenceManager.on('suggested_answer_discard', (reason: string) => {
+      flushBatchesBeforeFinal();
+      const win = mainWindow()
+      if (win) {
+        win.webContents.send('intelligence-suggested-answer-discard', { reason })
+      }
+    })
+
+    // Verified code execution (background): a ✓ badge when the shown code passed
+    // its executed test cases, and a NEW corrected message when it failed and a
+    // re-verified fix was produced. Both arrive AFTER the answer was shown.
+    this.intelligenceManager.on('code_verified', (info: { question: string; passed: number; total: number; language: string }) => {
+      const win = mainWindow()
+      if (win) win.webContents.send('intelligence-code-verified', info)
+    })
+    this.intelligenceManager.on('code_correction', (info: { question: string; answer: string; note: string; reVerified: boolean }) => {
+      flushBatchesBeforeFinal();
+      const win = mainWindow()
+      if (win) win.webContents.send('intelligence-code-correction', info)
+    })
+
     // Sprint 7: dedicated negotiation-coaching channel. Engine emits this
     // INSTEAD of suggested_answer / suggested_answer_token when it detects
     // the coaching sentinel, so the renderer no longer needs JSON.parse-
@@ -5296,6 +5321,33 @@ async function initializeApp() {
   }
 
   console.log("App is ready")
+
+  // DEV-ONLY: thinking-budget sweep. Runs after credentials are loaded (so the
+  // LIVE Gemini key is available — the .env key is billing-dead), prints the
+  // table + writes userData/thinking-budget-bench-results.json, then quits.
+  //   THINKING_BENCH=1 npm run electron:build
+  //   THINKING_BENCH=1 THINKING_BENCH_BUDGETS=0,256,512,1024 THINKING_BENCH_REPEATS=2 npm run electron:build
+  if (process.env.THINKING_BENCH === '1') {
+    (async () => {
+      try {
+        const llmHelper = appState.processingHelper?.getLLMHelper?.();
+        if (!llmHelper) { console.error('[ThinkingBudgetBench] LLMHelper unavailable'); app.quit(); return; }
+        const { runThinkingBudgetBench } = require('./services/dev/ThinkingBudgetBench');
+        const budgets = (process.env.THINKING_BENCH_BUDGETS || '0,128,512,1024,-1').split(',').map((s: string) => Number(s.trim()));
+        const repeats = Number(process.env.THINKING_BENCH_REPEATS || '1');
+        const model = process.env.THINKING_BENCH_MODEL || 'gemini-3.1-flash-lite';
+        // Give the embedding/provider init a moment to settle.
+        await new Promise(r => setTimeout(r, 2000));
+        await runThinkingBudgetBench(llmHelper, { budgets, repeats, model, log: (s: string) => console.log(s) });
+      } catch (e: any) {
+        console.error('[ThinkingBudgetBench] failed:', e?.message || e);
+      } finally {
+        console.log('[ThinkingBudgetBench] done — quitting.');
+        app.quit();
+      }
+    })();
+    return; // skip the rest of startup (no meeting/STT prewarm needed for the bench)
+  }
 
   // PERF: pre-construct STT provider objects so the meeting-start critical
   // path doesn't pay for class init + listener wiring. Runs after all

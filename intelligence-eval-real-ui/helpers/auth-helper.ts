@@ -12,22 +12,35 @@ export interface ActivationResult { success: boolean; isPremium: boolean; error?
 export async function activateProWithKey(win: Page, key: string): Promise<ActivationResult> {
   // Drive the real preload IPC the settings UI uses. (We call the bridge the UI
   // calls; this is the production activation path, not a backend shortcut.)
-  const res = await win.evaluate(async (k: string) => {
+  // Pro activation inside set-natively-api-key does a NETWORK round-trip
+  // (GET /v1/pro/verify → storeLicense), so premium is NOT true the instant
+  // setNativelyApiKey resolves — the earlier code checked immediately and saw
+  // false, leaving the whole suite ungated. We now POLL licenseCheckPremium for
+  // up to ~20s after setting the key.
+  const setRes = await win.evaluate(async (k: string) => {
     const api: any = (window as any).electronAPI;
     if (!api?.setNativelyApiKey) return { success: false, error: 'setNativelyApiKey bridge unavailable' };
     const set = await api.setNativelyApiKey(k).catch((e: any) => ({ success: false, error: String(e?.message || e) }));
-    // Re-check premium via the REAL license bridge (getPremiumStatus does not
-    // exist; license:check-premium / license:get-details do).
-    let isPremium = false;
-    try {
-      if (api.licenseCheckPremiumAsync) isPremium = !!(await api.licenseCheckPremiumAsync());
-      else if (api.licenseCheckPremium) isPremium = !!(await api.licenseCheckPremium());
-      else if (api.licenseGetDetails) isPremium = !!(await api.licenseGetDetails())?.isPremium;
-      else { const s = await api.profileGetStatus?.(); isPremium = !!s?.profileMode; }
-    } catch { /* */ }
-    return { success: !!set?.success, isPremium, error: set?.error };
+    return { success: !!set?.success, error: set?.error };
   }, key);
-  return { success: !!res.success, isPremium: !!res.isPremium, error: res.error };
+
+  const checkPremium = async (): Promise<boolean> => win.evaluate(async () => {
+    const api: any = (window as any).electronAPI;
+    try {
+      if (api.licenseCheckPremiumAsync) return !!(await api.licenseCheckPremiumAsync());
+      if (api.licenseCheckPremium) return !!(await api.licenseCheckPremium());
+      if (api.licenseGetDetails) return !!(await api.licenseGetDetails())?.isPremium;
+      const s = await api.profileGetStatus?.(); return !!s?.profileMode;
+    } catch { return false; }
+  }).catch(() => false);
+
+  let isPremium = false;
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    if (await checkPremium()) { isPremium = true; break; }
+    await new Promise(r => setTimeout(r, 1500));
+  }
+  return { success: !!setRes.success, isPremium, error: setRes.error };
 }
 
 /** Verify the app reports premium (so Profile Intelligence UI is enabled). */

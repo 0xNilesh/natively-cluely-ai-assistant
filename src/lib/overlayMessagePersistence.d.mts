@@ -17,3 +17,8 @@ export function applyWhatToAnswerNullFeedbackMessages<T extends { id: string; ro
   feedback: string,
   idFactory?: () => string,
 ): T[];
+
+export function discardStreamingByIntentMessages<T extends { id: string; role: string; text: string; intent?: string; isStreaming?: boolean }>(
+  prev: T[],
+  intent?: string,
+): T[];

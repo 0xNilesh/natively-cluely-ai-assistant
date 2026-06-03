@@ -97,3 +97,71 @@ test('ModeContextRetriever includes reference grounding guard with retrieved sni
   assert.match(result.formattedContext, /do not reconstruct it from general knowledge/);
   assert.match(result.formattedContext, /formula-sheet\.md/);
 });
+
+// ── Phase 3: customContext sensitive-scoping by answerType (review P0 gap) ───
+// The mode's customContext blob can hold sensitive comp/pricing notes. The
+// retriever now scopes it by answerType so a salary line is DROPPED for a
+// non-negotiation answer but KEPT for a negotiation answer. Undefined answerType
+// must return the full blob (backward compatible). This is the integration seam
+// that actually protects against a salary leak — the classifier unit test alone
+// does not prove the retriever invokes it.
+const sensitiveCustomMode = {
+  id: 'mode_recruit',
+  name: 'Recruiting Mode',
+  templateType: 'recruiting',
+  // Two chunks: one benign+relevant, one sensitive salary line. Both lexically
+  // match a query mentioning "compensation" + "process" so retrieval can't drop
+  // the salary line for mere irrelevance — only the answerType gate should.
+  customContext: 'Our interview process emphasizes system design and ownership.\n\nMy current compensation is 30 LPA and my target is 45 LPA.',
+  isActive: true,
+  createdAt: 'now',
+};
+
+test('customContext: salary chunk is DROPPED for a behavioral answer', async () => {
+  const { ModeContextRetriever } = await loadRetriever();
+  const retriever = new ModeContextRetriever();
+  const result = retriever.retrieve(sensitiveCustomMode, [], {
+    query: 'Tell me about your interview process and compensation expectations',
+    tokenBudget: 800,
+    answerType: 'behavioral_interview_answer',
+  });
+  assert.doesNotMatch(result.formattedContext, /30 LPA|45 LPA|compensation is/i,
+    'sensitive salary must not reach a behavioral answer');
+});
+
+test('customContext: salary chunk is KEPT for a negotiation answer', async () => {
+  const { ModeContextRetriever } = await loadRetriever();
+  const retriever = new ModeContextRetriever();
+  // Query shares concrete terms with the salary chunk so it clears the lexical
+  // relevance gate — the point of THIS test is the answerType GATE (negotiation
+  // is allowed to see sensitive), isolated from the relevance scorer.
+  const result = retriever.retrieve(sensitiveCustomMode, [], {
+    query: 'my current compensation target LPA for this negotiation',
+    tokenBudget: 800,
+    answerType: 'negotiation_answer',
+  });
+  assert.match(result.formattedContext, /30 LPA|45 LPA/, 'negotiation answer may use salary context');
+});
+
+test('customContext: undefined answerType returns the full blob (backward compatible)', async () => {
+  const { ModeContextRetriever } = await loadRetriever();
+  const retriever = new ModeContextRetriever();
+  const result = retriever.retrieve(sensitiveCustomMode, [], {
+    query: 'my current compensation target LPA interview process',
+    tokenBudget: 800,
+    // no answerType → no scoping (pre-existing behavior preserved)
+  });
+  assert.match(result.formattedContext, /30 LPA|45 LPA/, 'unscoped path keeps the full custom context');
+});
+
+test('customContext: coding answerType drops ALL custom context (forbidden layer)', async () => {
+  const { ModeContextRetriever } = await loadRetriever();
+  const retriever = new ModeContextRetriever();
+  const result = retriever.retrieve(sensitiveCustomMode, [], {
+    query: 'two sum problem with a hash map',
+    tokenBudget: 800,
+    answerType: 'coding_question_answer',
+  });
+  assert.doesNotMatch(result.formattedContext, /interview process|30 LPA|45 LPA/i,
+    'coding answers see no custom context at all');
+});

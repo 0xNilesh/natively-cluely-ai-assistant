@@ -109,7 +109,13 @@ export async function loadProfileThroughUI(app: LaunchedApp, win: Page, paths: P
     process.stdout.write(`[profile-loader] resume upload fired for ${filePath}\n`);
   }
   process.stdout.write('[profile-loader] waiting for hasProfile status\n');
-  const resumeLoaded = await waitForStatus(win, s => !!s?.hasProfile, 90_000);
+  // 180s (not 90s): resume ingestion = structured extraction + STAR-story
+  // generation + embeddings. When the primary model's circuit breaker trips
+  // (gemini-3.1-pro → flash fallback) each LLM step adds ~13-35s, pushing a
+  // legitimate ingestion past 90s. The app DOES finish (verified in logs:
+  // "Cache refreshed: 14 nodes") — the old 90s cap just gave up early and the
+  // harness then closed the app mid-ingest, looking like a crash.
+  const resumeLoaded = await waitForStatus(win, s => !!s?.hasProfile, 180_000);
   process.stdout.write(`[profile-loader] resumeLoaded=${resumeLoaded}\n`);
 
   // ── JD: prime dialog → upload via IPC (same pattern as resume) ─────────────
@@ -136,7 +142,7 @@ export async function loadProfileThroughUI(app: LaunchedApp, win: Page, paths: P
       process.stdout.write(`[profile-loader] JD upload fired for ${jdFilePath}\n`);
     }
     // JD status lives in profileGetProfile().hasActiveJD (profileGetStatus has no JD field).
-    const deadline = Date.now() + 90_000;
+    const deadline = Date.now() + 180_000; // JD ingestion can also hit circuit-breaker delays
     while (Date.now() < deadline) {
       const p = await win.evaluate(async () => (window as any).electronAPI?.profileGetProfile?.()).catch(() => null);
       if (p?.hasActiveJD) { jdLoaded = true; break; }

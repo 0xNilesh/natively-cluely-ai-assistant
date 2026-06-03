@@ -165,18 +165,17 @@ const StartupSequence: React.FC<StartupSequenceProps> = ({ onComplete }) => {
                             onClick={onComplete}
                             whileHover={{ scale: 1.02 }}
                             whileTap={{ scale: 0.98 }}
-                            className="relative w-full max-w-[320px] h-[64px] rounded-[20px] text-[20px] font-medium text-[#eef3ff] flex items-center justify-center cursor-pointer outline-none overflow-hidden"
+                            className="relative w-full max-w-[320px] h-[64px] rounded-[20px] text-[20px] font-medium text-white flex items-center justify-center cursor-pointer outline-none overflow-hidden transition-all"
                             style={{
-                                background: 'linear-gradient(100deg, #5f7ee8 0%, #6f97ee 50%, #88b6f7 100%)',
-                                boxShadow: '0 10px 24px rgba(80,110,255,0.22)',
+                                background: 'linear-gradient(160deg, #5B8EF0 0%, #3B6FE8 50%, #2D5FD4 100%)',
+                                boxShadow: '0 8px 24px rgba(37,99,235,0.35), inset 0 1px 0 rgba(255,255,255,0.2)',
+                                border: 'none',
                             }}
                         >
-                            {/* Gloss (Very Subtle) */}
-                            <span className="absolute inset-0 rounded-[20px] pointer-events-none" style={{
-                                background: 'linear-gradient(to bottom, rgba(255,255,255,0.22), rgba(255,255,255,0.06) 35%, transparent 60%)'
-                            }} />
+                            {/* Gloss Highlight (3D Jelly Clay) */}
+                            <span className="absolute top-1 left-2 right-2 h-[40%] rounded-full bg-gradient-to-b from-white/70 to-white/5 blur-[0.5px] pointer-events-none z-10" />
 
-                            <span className="relative z-10 flex items-center">
+                            <span className="relative z-20 flex items-center">
                                 Continue <span className="ml-[10px] text-[22px] opacity-90">›</span>
                             </span>
                         </motion.button>

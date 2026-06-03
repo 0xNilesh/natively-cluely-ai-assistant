@@ -3,6 +3,25 @@ import { ModeHybridRetriever, ModeRetrievedContext as HybridContext } from './mo
 import { VectorStore } from '../rag/VectorStore';
 import { EmbeddingPipeline } from '../rag/EmbeddingPipeline';
 import { DatabaseManager } from '../db/DatabaseManager';
+// Imported from the leaf module (not the ../llm barrel) to avoid a require cycle.
+import { classifyCustomContext, selectCustomContextForAnswer } from '../llm/customContextClassifier';
+import type { AnswerType } from '../llm/AnswerPlanner';
+
+/**
+ * Gate the mode's raw customContext blob by answer type (Phase 3). Returns only
+ * the chunks the answer type may see — sensitive chunks (salary/pricing/private
+ * strategy) are dropped unless the answer is a negotiation. When `answerType` is
+ * undefined the full blob is returned unchanged (backward compatible). Returns
+ * `{ text, sensitiveDropped }` so the caller can record safety telemetry.
+ */
+function scopeCustomContext(raw: string, answerType?: AnswerType): { text: string; sensitiveDropped: boolean } {
+    const trimmed = raw.trim();
+    if (!trimmed || !answerType) return { text: trimmed, sensitiveDropped: false };
+    const classified = classifyCustomContext(trimmed);
+    const selection = selectCustomContextForAnswer(classified, answerType);
+    const sensitiveDropped = classified.sensitive.length > 0 && !selection.sensitiveIncluded;
+    return { text: selection.included.map(c => c.text).join('\n'), sensitiveDropped };
+}
 
 export interface ModeKnowledgeSource {
     id: string;
@@ -30,6 +49,12 @@ interface RetrieveOptions {
     transcript?: string;
     tokenBudget?: number;
     topK?: number;
+    /**
+     * When set, the mode's customContext is scoped by answer type so sensitive
+     * chunks (salary/pricing/private strategy) never leak into a non-negotiation
+     * answer. Undefined → the full customContext blob is used (backward compat).
+     */
+    answerType?: AnswerType;
 }
 
 const DEFAULT_TOKEN_BUDGET = 1800;
@@ -119,11 +144,21 @@ export class ModeContextRetriever {
 
         const sources: ModeKnowledgeSource[] = [];
 
-        if (mode.customContext.trim()) {
+        // Scope customContext by answer type before it enters retrieval, so a
+        // salary/pricing note in the mode's custom context can't be retrieved
+        // into a coding/identity/behavioral answer. No-op when answerType is
+        // unset (backward compatible).
+        const scopedCustom = scopeCustomContext(mode.customContext, options.answerType);
+        if (scopedCustom.sensitiveDropped) {
+            console.warn('[ModeContextRetriever] dropped sensitive customContext chunk(s) — not relevant to answer type', {
+                answerType: options.answerType,
+            });
+        }
+        if (scopedCustom.text) {
             sources.push({
                 id: `${mode.id}:custom_context`,
                 type: 'custom_context',
-                content: mode.customContext.trim(),
+                content: scopedCustom.text,
             });
         }
 

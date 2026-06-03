@@ -255,3 +255,11 @@ windowswork.md
 
 # Scratch, prompt, and temporary files moved to foxinthehole/
 foxinthehole/
+# Merge-conflict / backup artifacts (e.g. LLMHelper.ts.orig — never commit)
+*.orig
+
+# Eval RUN ARTIFACTS — generated output, never source. The harnesses/scripts ARE
+# committed; their results (screenshots, per-run JSON, reports) are not.
+intelligence-eval*/results/
+playwright-report/
+test-results/

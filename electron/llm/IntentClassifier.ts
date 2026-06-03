@@ -100,8 +100,10 @@ class ZeroShotClassifier {
                 // Bypass TypeScript converting import() to require() for ESM packages
                 const { pipeline, env } = await new Function("return import('@huggingface/transformers')")();
 
+                const isPackaged = Boolean(app?.isPackaged);
+
                 // In production, use bundled model. In dev, allow remote download.
-                if (app.isPackaged) {
+                if (isPackaged) {
                     env.allowRemoteModels = false;
                     env.localModelPath = path.join(process.resourcesPath, 'models');
                 } else {
@@ -114,7 +116,7 @@ class ZeroShotClassifier {
                 this.pipe = await pipeline(
                     'zero-shot-classification',
                     'Xenova/mobilebert-uncased-mnli',
-                    { local_files_only: app.isPackaged }
+                    { local_files_only: isPackaged }
                 );
                 console.log('[IntentClassifier] Zero-shot classifier loaded successfully.');
             } catch (e) {
@@ -197,8 +199,27 @@ function detectIntentByPattern(lastInterviewerTurn: string): IntentResult | null
     }
 
     // Deep dive patterns
-    if (/(tell me more|dive deeper|explain further|walk me through|how does that work)/i.test(text)) {
+    if (/(tell me more|dive deeper|explain further|walk me through|how does that work|how (should|would) (you|i) explain)/i.test(text)) {
         return { intent: 'deep_dive', confidence: 0.85, answerShape: INTENT_ANSWER_SHAPES.deep_dive };
+    }
+
+    // DSA/coding interview patterns. Keep this deterministic and run it
+    // BEFORE behavioral/example matching so prompts like "give me an example
+    // React component in TypeScript" still route to the coding contract.
+    if (/(two\s*sum|longest substring|reverse (a )?linked list|detect a cycle|binary search|sliding window|two pointers?|hash\s?(map|set|table)|stack|queue|heap|trie|union[- ]find|dynamic programming|\bdp\b|backtracking|recursion|graph|tree|\bbfs\b|\bdfs\b|time complexity|space complexity|big[- ]?o)/i.test(text)) {
+        return { intent: 'coding', confidence: 0.95, answerShape: INTENT_ANSWER_SHAPES.coding };
+    }
+
+    // Coding patterns (Broad detection for programming/implementation)
+    if (/(write code|code for|program for|\bprogram\b|\bimplement\b|function for|algorithm for|algorithm|how to code|setup a .* project|using .* library|debug this|snippet|boilerplate|example of .* in .*|best practice for .* code|utility method|component for|logic for|\bsolve\b|solve .* in (javascript|typescript|python|java|c\+\+|sql))/i.test(text)) {
+        return { intent: 'coding', confidence: 0.9, answerShape: INTENT_ANSWER_SHAPES.coding };
+    }
+
+    // Simple programming interview prompts. Keep these deterministic because
+    // terse asks like "odd even code" are common in the manual box and often
+    // lack explicit words like "implement".
+    if (/(odd\s*(?:\/|or|and)?\s*even|even\s*(?:\/|or|and)?\s*odd|prime number|palindrome|factorial|fibonacci|reverse string|sort array|find max|find min|check if|check whether|determine whether|detect whether)/i.test(text)) {
+        return { intent: 'coding', confidence: 0.9, answerShape: INTENT_ANSWER_SHAPES.coding };
     }
 
     // Behavioral patterns
@@ -216,9 +237,11 @@ function detectIntentByPattern(lastInterviewerTurn: string): IntentResult | null
         return { intent: 'summary_probe', confidence: 0.85, answerShape: INTENT_ANSWER_SHAPES.summary_probe };
     }
 
-    // Coding patterns (Broad detection for programming/implementation)
-    if (/(write code|program|implement|function for|algorithm|how to code|setup a .* project|using .* library|debug this|snippet|boilerplate|example of .* in .*|optimize|refactor|best practice for .* code|utility method|component for|logic for)/i.test(text)) {
-        return { intent: 'coding', confidence: 0.9, answerShape: INTENT_ANSWER_SHAPES.coding };
+    // Words like "optimize" and "refactor" appear in normal interview answers
+    // too ("optimize latency", "refactor a process"). Treat them as coding
+    // only when a programming noun is also present.
+    if (/\b(optimi[sz]e|refactor)\b/i.test(text) && /\b(code|function|algorithm|query|sql|typescript|javascript|python|java|class|method|implementation)\b/i.test(text)) {
+        return { intent: 'coding', confidence: 0.85, answerShape: INTENT_ANSWER_SHAPES.coding };
     }
 
     return null; // No clear pattern detected

@@ -1,5 +1,14 @@
 import dns from 'dns';
 
+// TTL-based IP cache for WebSocket DNS lookups.
+// Railway sets a 1-second TTL on their DNS records, so without this every WS
+// reconnect does a fresh resolver call. If the resolver hiccups for even 2-3
+// seconds, the reconnect storm produces a wall of ENOTFOUND even though the
+// server IP hasn't changed. The cache survives that window by serving the last
+// known IP (even if the cache entry is expired — stale-on-error path below).
+const _dnsCache = new Map<string, { addr: string; expires: number }>();
+const DNS_CACHE_TTL_MS = 60_000;
+
 /**
  * IPv4-only DNS resolver for STT WebSocket connections.
  *
@@ -24,37 +33,43 @@ export const ipv4OnlyLookup = (hostname: string, options: any, callback?: any): 
         callback = options;
         options = {};
     }
+
+    const cacheKey = hostname;
+    const cached = _dnsCache.get(cacheKey);
+
+    // Serve from cache if still fresh — avoids hitting the resolver entirely.
+    if (cached && Date.now() < cached.expires) {
+        return callback(null, cached.addr, 4);
+    }
+
+    const store = (addr: string) => {
+        _dnsCache.set(cacheKey, { addr, expires: Date.now() + DNS_CACHE_TTL_MS });
+        callback(null, addr, 4);
+    };
+
     // Primary: use dns.lookup with IPv4 family — fast path when it works.
-    // Fallback: dns.resolve4 if lookup fails. On some networks (e.g. routers
-    // with link-local IPv6 DNS that intermittently drops A-record queries),
-    // getaddrinfo returns ENOTFOUND even though A records exist. resolve4
-    // queries the DNS authoritative server directly and is more reliable.
-    //
-    // Caveat: dns.resolve4 bypasses /etc/hosts, mDNS, and the OS resolver
-    // cache (it talks to configured DNS servers directly). That's exactly what
-    // we want for the public STT endpoints this helper serves, but it means a
-    // future caller pointing this at a localhost/dev hostname won't get the
-    // /etc/hosts override on the fallback path.
-    dns.lookup(hostname, { ...options, family: 4 }, (err, addr, family) => {
-        if (err) {
-            dns.resolve4(hostname, (err4, addrs) => {
-                if (err4) {
-                    callback(err4);
-                } else if (addrs && addrs.length > 0) {
-                    callback(null, addrs[0], 4);
-                } else {
-                    // resolve4 returns either an error or a non-empty array, so
-                    // this is a defensive edge. Emit a real Error (with .code)
-                    // so consumers that do `err instanceof Error` or read
-                    // err.stack behave consistently with the other error paths.
-                    const e = new Error('No A records for ' + hostname) as NodeJS.ErrnoException;
-                    e.code = 'ENOTFOUND';
-                    callback(e);
-                }
-            });
-        } else {
-            callback(null, addr, family);
-        }
+    // Fallback 1: dns.resolve4 if lookup fails (bypasses OS resolver, queries
+    //   authoritative DNS directly — more reliable on some networks).
+    // Fallback 2 (stale-on-error): if both fail but a cached entry exists
+    //   (even expired), serve the old IP rather than propagating ENOTFOUND.
+    //   The server at that IP is almost certainly still alive; only the DNS
+    //   resolver is having a moment (Railway's 1s TTL flap pattern).
+    dns.lookup(hostname, { ...options, family: 4 }, (err, addr) => {
+        if (!err) return store(addr);
+
+        dns.resolve4(hostname, (err4, addrs) => {
+            if (!err4 && addrs?.length > 0) return store(addrs[0]);
+
+            // Both resolver paths failed — serve stale cache if available.
+            if (cached) {
+                console.warn(`[dnsHelpers] resolver failed for ${hostname}, serving stale IP ${cached.addr}`);
+                return callback(null, cached.addr, 4);
+            }
+
+            const e = new Error('No A records for ' + hostname) as NodeJS.ErrnoException;
+            e.code = 'ENOTFOUND';
+            callback(e);
+        });
     });
 };
 

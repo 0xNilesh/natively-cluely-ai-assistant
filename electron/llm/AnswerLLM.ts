@@ -1,6 +1,8 @@
 import { LLMHelper } from "../LLMHelper";
 import { UNIVERSAL_ANSWER_PROMPT } from "./prompts";
 import { TINY_ANSWER_PROMPT } from "./tinyPrompts";
+import { formatAnswerPlanForPrompt } from "./AnswerPlanner";
+import type { AnswerPlan } from "./AnswerPlanner";
 
 export class AnswerLLM {
     private llmHelper: LLMHelper;
@@ -12,10 +14,11 @@ export class AnswerLLM {
     /**
      * Generate a spoken interview answer
      */
-    async generate(question: string, context?: string): Promise<string> {
+    async generate(question: string, context?: string, answerPlan?: AnswerPlan): Promise<string> {
         try {
             const promptOverride = this.llmHelper.getPromptTier() === 'tiny' ? TINY_ANSWER_PROMPT : UNIVERSAL_ANSWER_PROMPT;
-            const fittedContext = context ? this.llmHelper.fitContextForCurrentModel(context) : context;
+            const answerContract = answerPlan ? `\n\n${formatAnswerPlanForPrompt(answerPlan)}` : '';
+            const fittedContext = context ? this.llmHelper.fitContextForCurrentModel(`${context}${answerContract}`) : answerContract.trim() || context;
             const stream = this.llmHelper.streamChat(question, undefined, fittedContext, promptOverride);
 
             let fullResponse = "";

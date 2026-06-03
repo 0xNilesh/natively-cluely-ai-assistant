@@ -89,6 +89,7 @@ import {
   applyWhatToAnswerNullFeedbackMessages,
   finalizeStreamingByIntentMessages,
   prepareIntelligenceStreamPlaceholderMessages,
+  discardStreamingByIntentMessages,
 } from '../lib/overlayMessagePersistence.mjs';
 import {
   resolveCgEventTapAvailable,
@@ -96,6 +97,7 @@ import {
   shouldFireStealthTapStart,
 } from '../lib/overlayStealthFocusGuards.mjs';
 import { shouldAcceptIntelligenceIpc } from '../lib/overlayIntelligenceGeneration.mjs';
+import { widthDerivedScrollMax, verticalScrollCap } from '../lib/overlayScrollBudget.mjs';
 import {
   applyFirstStreamingToken,
   commitStreamingFlush,
@@ -176,7 +178,10 @@ import TopPill from './ui/TopPill';
 // changes every render. Module-scope arrays are stable forever and shared
 // across every ReactMarkdown render in this component.
 const REMARK_PLUGINS = [remarkGfm, remarkMath];
-const REHYPE_PLUGINS = [rehypeKatex];
+// Lenient KaTeX: never throw on malformed math (e.g. a stray/empty `$$` or an
+// unbalanced `$`); render the offending span in error colour instead of letting
+// it cascade into garbled per-character output across the whole answer.
+const REHYPE_PLUGINS: any[] = [[rehypeKatex, { throwOnError: false, strict: false, errorColor: '#cc0000' }]];
 
 interface Message {
   id: string;
@@ -187,6 +192,13 @@ interface Message {
   screenshotPreview?: string;
   isCode?: boolean;
   intent?: string;
+  // Verified code execution: set when the code in this message passed N executed
+  // test cases (renderer shows a small "✓ verified" badge). undefined = not (yet)
+  // verified — we NEVER show the badge speculatively.
+  codeVerified?: { passed: number; total: number; language: string };
+  // Marks a message that was posted as a CORRECTION of an earlier wrong answer.
+  isCorrection?: boolean;
+  correctionNote?: string;
   isNegotiationCoaching?: boolean;
   negotiationCoachingData?: {
     tacticalNote: string;
@@ -493,7 +505,25 @@ const MessageRow = React.memo(
                 <span>Screenshot attached</span>
               </div>
             )}
+            {/* Correction header: this message fixes an earlier wrong answer. */}
+            {msg.role === 'system' && msg.isCorrection && (
+              <div className="flex items-center gap-1.5 mb-1.5 text-[11px] font-medium text-amber-500">
+                <span aria-hidden>↻</span>
+                <span>Corrected answer{msg.correctionNote ? ` — ${msg.correctionNote}` : ''}</span>
+              </div>
+            )}
             {renderMessageText(msg)}
+            {/* Verified badge: the code in this message passed executed tests. */}
+            {msg.role === 'system' && msg.codeVerified && (
+              <div className="flex items-center gap-1 mt-1.5 text-[10px] font-medium text-green-500" title={`Ran ${msg.codeVerified.total} test case(s) successfully`}>
+                <span aria-hidden>✓</span>
+                <span>
+                  {msg.codeVerified.language === 'verified'
+                    ? 'verified by running the code'
+                    : `verified · ${msg.codeVerified.passed}/${msg.codeVerified.total} test case${msg.codeVerified.total === 1 ? '' : 's'} passed`}
+                </span>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -1003,10 +1033,16 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const SHELL_WIDTH_COLLAPSED = 600;
   const SHELL_WIDTH_EXPANDED = 780;
   const shellWidth = useMotionValue(SHELL_WIDTH_COLLAPSED);
-  const scrollMaxH = useTransform(
-    shellWidth,
-    [SHELL_WIDTH_COLLAPSED, SHELL_WIDTH_EXPANDED],
-    [320, 560],
+  // Vertical budget cap for the chat scroll area. Default Infinity = "not yet
+  // measured / unbounded", so the width-derived aesthetic max applies until we
+  // know the display height. measureVerticalCap (below) sets the real value:
+  // floor(workArea.height*0.9) - chrome, mirroring the main-process clamp in
+  // WindowHelper.setOverlayDimensionsCentered. This keeps total content height
+  // ≤ the budget the OS window will be granted, so the footer (model selector /
+  // settings / send) can never be cropped below the clamped window edge.
+  const verticalCap = useMotionValue(Infinity);
+  const scrollMaxH = useTransform([shellWidth, verticalCap], ([w, cap]: number[]) =>
+    Math.min(widthDerivedScrollMax(w), cap),
   );
 
   // isExpanded mirror for closures inside refs/observers that must not
@@ -1220,19 +1256,63 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     // entry flourish stays purely compositor-side.
     const width = Math.round(shellWidth.get());
     const height = contentRef.current.offsetHeight;
+    if (process.env.NODE_ENV === 'development') {
+      const scrollEl = scrollContainerRef.current;
+      console.log('[overlay-resize] reportShellSize', {
+        width,
+        height,
+        attachedContextCount: attachedContext.length,
+        scrollClientHeight: scrollEl?.clientHeight,
+        scrollScrollHeight: scrollEl?.scrollHeight,
+        screenAvailHeight: window.screen?.availHeight,
+      });
+    }
     const api = window.electronAPI as any;
     if (api?.updateContentDimensionsCentered) {
       api.updateContentDimensionsCentered({ width, height });
     } else {
       window.electronAPI?.updateContentDimensions({ width, height });
     }
-  }, [shellWidth]);
+  }, [attachedContext.length, shellWidth]);
+
+  // Compute the vertical budget cap for the chat scroll area and push it into
+  // the `verticalCap` motion value (which scrollMaxH mins against the
+  // width-derived max). Without this, the chat scroll max was width-only
+  // (320→560), so on a short display expanded view + an attached screenshot
+  // made total content exceed the main-process clamp (workArea.height*0.9);
+  // the OS window was clamped but the overflow-hidden shell laid out taller,
+  // cropping the footer (model selector / settings / send) below the edge.
+  //
+  // chrome = total content height − the scroll viewport's OWN client height.
+  // This is every non-scroll pixel (TopPill+gap, status pills, quick actions,
+  // input area, attached-screenshot strip, footer, paddings). It is invariant
+  // under scroll-height changes, so feeding it back to bound the scroll height
+  // is not circular. availHeight uses the display the window sits on.
+  const measureVerticalCap = useCallback(() => {
+    const scrollEl = scrollContainerRef.current;
+    const contentEl = contentRef.current;
+    // No chat panel mounted → nothing to cap; let the width bound apply.
+    if (!scrollEl || !contentEl) {
+      verticalCap.set(Infinity);
+      return;
+    }
+    const availHeight = typeof window !== 'undefined' ? window.screen?.availHeight ?? 0 : 0;
+    const chromeHeight = contentEl.offsetHeight - scrollEl.clientHeight;
+    const nextCap = verticalScrollCap({ availHeight, chromeHeight });
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[overlay-resize] measureVerticalCap', {
+        availHeight,
+        chromeHeight,
+        contentOffsetHeight: contentEl.offsetHeight,
+        scrollClientHeight: scrollEl.clientHeight,
+        nextCap,
+        attachedContextCount: attachedContext.length,
+      });
+    }
+    verticalCap.set(nextCap);
+  }, [attachedContext.length, verticalCap]);
 
   // Drive OS window width from the shell-width motion value, rAF-coalesced
-  // so we emit at most one IPC per paint frame and skip ≤1px deltas. The
-  // main-process handler (setOverlayDimensionsCentered) already early-returns
-  // on sub-pixel deltas as a second-layer dedup. Height comes from the
-  // ResizeObserver in the next effect — the two channels share the same IPC.
   useEffect(() => {
     let rafId: number | null = null;
     let lastSentWidth = Math.round(shellWidth.get());
@@ -1267,8 +1347,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   }, [shellWidth]);
 
   // ResizeObserver: rAF-debounced so the spring can update height without
-  // flooding IPC. Width is constant in expanded mode, so per-frame updates
-  // only carry height changes — no race with the renderer's CSS spring.
   useLayoutEffect(() => {
     if (!contentRef.current) return;
 
@@ -1276,6 +1354,12 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       if (rafDimUpdateRef.current) cancelAnimationFrame(rafDimUpdateRef.current);
       rafDimUpdateRef.current = requestAnimationFrame(() => {
         rafDimUpdateRef.current = null;
+        // Order matters: re-derive the vertical cap from current chrome FIRST,
+        // so the scroll area absorbs any overflow, then report the (already
+        // bounded) content height to the OS. If the cap shrinks the scroll,
+        // the observer fires again and this self-converges in ≤2 frames; chrome
+        // height is scroll-invariant, so there is no feedback loop.
+        measureVerticalCap();
         reportShellSize();
       });
     });
@@ -1288,20 +1372,27 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         rafDimUpdateRef.current = null;
       }
     };
-  }, [reportShellSize]);
+  }, [reportShellSize, measureVerticalCap]);
 
   // attachedContext (screenshots add/remove) and initial-sizing safety:
-  // both just re-run the canonical reporter — no more "what width should I
-  // use right now?" branching against animation flags.
+  // both re-derive the vertical cap (a screenshot strip grows chrome) and
+  // re-run the canonical reporter — no more "what width should I use right
+  // now?" branching against animation flags.
   useEffect(() => {
-    const id = requestAnimationFrame(reportShellSize);
+    const id = requestAnimationFrame(() => {
+      measureVerticalCap();
+      reportShellSize();
+    });
     return () => cancelAnimationFrame(id);
-  }, [attachedContext, reportShellSize]);
+  }, [attachedContext, reportShellSize, measureVerticalCap]);
 
   useEffect(() => {
-    const timer = setTimeout(reportShellSize, 600);
+    const timer = setTimeout(() => {
+      measureVerticalCap();
+      reportShellSize();
+    }, 600);
     return () => clearTimeout(timer);
-  }, [reportShellSize]);
+  }, [reportShellSize, measureVerticalCap]);
 
   // ── Code-expansion ──────────────────────────────────────────────────────
   // The shell's width animates 600↔780 via a Framer tween; every tick is
@@ -2118,6 +2209,64 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       }),
     );
 
+    // Orphaned-scaffold fix: a WTA stream that showed a coding scaffold ended
+    // with no final answer (superseded / declined / errored). Drop the open
+    // scaffold row so the user never sees a permanent "Working on…" card.
+    // Clear streaming refs FIRST (same ordering rationale as the null-feedback
+    // path) so a late token batch can't append onto a row we're removing.
+    cleanups.push(
+      window.electronAPI.onIntelligenceSuggestedAnswerDiscard?.(() => {
+        setIsProcessing(false);
+        if (streamingNodeRef.current) streamingNodeRef.current.innerHTML = '';
+        streamingNodeRef.current = null;
+        streamingTextRef.current = '';
+        streamingMsgIdRef.current = null;
+        streamingIntentRef.current = null;
+        if (streamingRafRef.current !== null) {
+          cancelAnimationFrame(streamingRafRef.current);
+          streamingRafRef.current = null;
+        }
+        setMessages((prev) => discardStreamingByIntentMessages(prev, 'what_to_answer'));
+      }) ?? (() => {}),
+    );
+
+    // Verified code execution: the shown code passed its executed test cases.
+    // Attach a ✓ badge to the most recent assistant (system) message — but ONLY
+    // if it is still the LAST message. If a newer user turn arrived since (the
+    // last row is a user/interviewer message), this badge belongs to a now-
+    // superseded answer, so we drop it rather than badge the wrong row. (The
+    // engine also guards by generationId; this is the renderer-side backstop.)
+    cleanups.push(
+      window.electronAPI.onIntelligenceCodeVerified?.((data) => {
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (!last || last.role !== 'system') return prev; // superseded by a newer turn
+          const next = [...prev];
+          next[next.length - 1] = { ...last, codeVerified: { passed: data.passed, total: data.total, language: data.language } };
+          return next;
+        });
+      }) ?? (() => {}),
+    );
+
+    // Verified code execution: the shown code FAILED and a (re-verified) fix was
+    // produced. Post it as a NEW system message clearly marked as a correction.
+    cleanups.push(
+      window.electronAPI.onIntelligenceCodeCorrection?.((data) => {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `correction-${Date.now()}`,
+            role: 'system',
+            text: data.answer,
+            isCode: true,
+            isCorrection: true,
+            correctionNote: data.note,
+            codeVerified: data.reVerified ? { passed: 1, total: 1, language: 'verified' } : undefined,
+          },
+        ]);
+      }) ?? (() => {}),
+    );
+
     // Sprint 9: time-batched token channel — single subscription that
     // unrolls a kind-tagged items array onto the existing queueToken path.
     // The 5 per-token channels (intelligence-suggested-answer-token,
@@ -2605,9 +2754,14 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 
     // Stream Done
     cleanups.push(
-      window.electronAPI.onGeminiStreamDone(() => {
+      window.electronAPI.onGeminiStreamDone((data) => {
         const pendingText = streamingTextRef.current;
         const pendingMsgId = streamingMsgIdRef.current;
+        // finalText is set ONLY when the backend's coding validate→repair changed
+        // the streamed answer — it authoritatively REPLACES the streamed row text
+        // (in-place, by id) so the user sees the corrected six-section markdown.
+        // Absent in the common case, where the streamed tokens already stand.
+        const finalText = data?.finalText;
         flushToken();
         setIsProcessing(false);
 
@@ -2630,7 +2784,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
             pendingMsgId != null ? prev.findLastIndex((m) => m.id === pendingMsgId) : -1;
           const target = idx !== -1 ? prev[idx] : prev[prev.length - 1];
           if (target && target.role === 'system') {
-            const text = target.text || pendingText;
+            const text = finalText || target.text || pendingText;
             if (!text) return prev;
             const isCode =
               text.includes('```') || text.includes('def ') || text.includes('function ');

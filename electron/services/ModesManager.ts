@@ -1,6 +1,22 @@
 import * as crypto from 'crypto';
 import { DatabaseManager } from '../db/DatabaseManager';
 import { ModeContextRetriever } from './ModeContextRetriever';
+import type { AnswerType } from '../llm/AnswerPlanner';
+import { classifyCustomContext, selectCustomContextForAnswer } from '../llm/customContextClassifier';
+
+/**
+ * Drop sensitive (salary/pricing/strategy) chunks from a raw customContext blob
+ * for a non-negotiation context. Used by the summary path so sensitive notes
+ * don't end up in a stored meeting summary. Returns the original blob unchanged
+ * when there is nothing sensitive.
+ */
+function dropSensitiveCustomContext(raw: string, answerType: AnswerType = 'general_meeting_answer'): string {
+    const trimmed = raw.trim();
+    if (!trimmed) return '';
+    const classified = classifyCustomContext(trimmed);
+    if (classified.sensitive.length === 0) return trimmed;
+    return selectCustomContextForAnswer(classified, answerType).included.map(c => c.text).join('\n');
+}
 import {
     MODE_GENERAL_PROMPT,
     MODE_LOOKING_FOR_WORK_PROMPT,
@@ -398,7 +414,7 @@ export class ModesManager {
     private static readonly MAX_FILE_CHARS = 12_000;
     private static readonly MAX_TOTAL_CHARS = 40_000;
 
-    public buildRetrievedActiveModeContextBlock(query: string, transcript?: string, tokenBudget?: number): string {
+    public buildRetrievedActiveModeContextBlock(query: string, transcript?: string, tokenBudget?: number, answerType?: AnswerType): string {
         const mode = this.getActiveMode();
         if (!mode) return '';
 
@@ -406,6 +422,7 @@ export class ModesManager {
             query,
             transcript,
             tokenBudget,
+            answerType,
         });
 
         return result.formattedContext;
@@ -418,7 +435,7 @@ export class ModesManager {
      * we fall back to the existing sync lexical path so the answer flow
      * never breaks. Telemetry distinguishes hybrid hits from lexical fallback.
      */
-    public async buildRetrievedActiveModeContextBlockHybrid(query: string, transcript?: string, tokenBudget?: number): Promise<string> {
+    public async buildRetrievedActiveModeContextBlockHybrid(query: string, transcript?: string, tokenBudget?: number, answerType?: AnswerType): Promise<string> {
         const mode = this.getActiveMode();
         if (!mode) return '';
         const files = this.getReferenceFiles(mode.id);
@@ -441,6 +458,7 @@ export class ModesManager {
                 query,
                 transcript,
                 tokenBudget,
+                answerType,
             });
             usedHybrid = result.usedHybrid;
             usedFallback = result.usedFallback;
@@ -461,7 +479,7 @@ export class ModesManager {
             console.warn('[ModesManager] hybrid retrieval failed, falling back to lexical:', (err as Error)?.message);
         }
 
-        const lexical = this.buildRetrievedActiveModeContextBlock(query, transcript, tokenBudget);
+        const lexical = this.buildRetrievedActiveModeContextBlock(query, transcript, tokenBudget, answerType);
         try {
             const { telemetryService } = require('./telemetry/TelemetryService');
             telemetryService.track({
@@ -494,8 +512,11 @@ export class ModesManager {
 
         const parts: string[] = [];
 
-        if (mode.customContext.trim()) {
-            parts.push(`<active_mode_custom_instructions format="json">\n${encodeModeContextPayload({ content: mode.customContext.trim() })}\n</active_mode_custom_instructions>`);
+        // Summary path is non-negotiation by nature — drop sensitive customContext
+        // chunks (salary/pricing/strategy) so they can't land in a stored summary.
+        const summaryCustom = dropSensitiveCustomContext(mode.customContext);
+        if (summaryCustom) {
+            parts.push(`<active_mode_custom_instructions format="json">\n${encodeModeContextPayload({ content: summaryCustom })}\n</active_mode_custom_instructions>`);
         }
 
         const includeReferenceSnippets = options?.includeReferenceSnippets !== false;

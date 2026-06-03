@@ -24,7 +24,9 @@ test('generateSuggestion loads active mode prompt suffix and retrieved active mo
   assert.ok(generateSuggestionStart >= 0, 'generateSuggestion should exist');
   assert.match(generateSuggestionSource, /require\('\.\/services\/ModesManager'\)/);
   assert.match(generateSuggestionSource, /getActiveModeSystemPromptSuffix\(\)/);
-  assert.match(generateSuggestionSource, /buildRetrievedActiveModeContextBlock\(lastQuestion, context, 1800\)/);
+  // Retrieved mode context is scoped by a non-negotiation answer type so the
+  // mode's sensitive customContext (salary/pricing) is dropped on this path.
+  assert.match(generateSuggestionSource, /buildRetrievedActiveModeContextBlock\(lastQuestion, context, 1800, 'general_meeting_answer'\)/);
   assert.doesNotMatch(generateSuggestionSource, /\|\| modesMgr\.buildActiveModeContextBlock\(\)/);
 });
 
@@ -38,11 +40,20 @@ test('generateSuggestion keeps active mode suffix in system prompt without user 
 });
 
 test('generateSuggestion sends custom notes and mode context as user message content', () => {
+  // INVARIANT (not exact source shape): custom notes + retrieved mode context are
+  // combined into `suggestionContext` and passed as the USER-content arg, while
+  // `basePrompt` (the trusted system prompt) carries only the mode persona suffix.
   assert.match(generateSuggestionSource, /const suggestionContext = \[customNotesBlock, enrichedContext\]\.filter\(Boolean\)\.join\('\\n\\n'\);/);
-  const streamChatMatches = generateSuggestionSource.match(/streamChat\(promptMessage, undefined, undefined, basePrompt, true\)/g) ?? [];
-  assert.equal(streamChatMatches.length, 2);
-  assert.match(generateSuggestionSource, /generateWithCodexCli\(promptMessage, basePrompt\)/);
+  // The streaming providers receive suggestionContext as the 3rd (context) arg
+  // and basePrompt as the 4th (systemPrompt) arg — context is NOT folded into the
+  // system prompt. Two streaming branches (custom/curl provider + default client).
+  const streamChatMatches = generateSuggestionSource.match(/streamChat\(promptMessage, undefined, suggestionContext, basePrompt, true\)/g) ?? [];
+  assert.equal(streamChatMatches.length, 2, 'both streaming branches pass suggestionContext as user content + basePrompt as system prompt');
+  // Codex/Gemini branch likewise passes suggestionContext as user content.
+  assert.match(generateSuggestionSource, /chatWithGemini\(promptMessage, undefined, suggestionContext, true\)/);
   assert.match(generateSuggestionSource, /callOllama\(promptMessage, undefined, systemPrompt\)/);
+  // Negative guards: the system prompt must never have the transcript/context or
+  // the raw promptMessage concatenated into it.
   assert.doesNotMatch(generateSuggestionSource, /generateWithFlash\(\[\{ text: `\$\{systemPrompt\}/);
   assert.doesNotMatch(generateSuggestionSource, /\$\{systemPrompt\}\\n\\n\$\{promptMessage\}/);
 });
@@ -53,9 +64,17 @@ test('generateSuggestion does not append custom notes to any system prompt branc
 });
 
 test('WhatToAnswerLLM does not append active mode context to system prompt override', () => {
-  assert.match(whatToAnswerSource, /const finalPromptOverride = modePromptSuffix[\s\S]*## ACTIVE MODE\\n\$\{modePromptSuffix\}/);
+  // INVARIANT: the system-prompt override is built from the base prompt + the
+  // trusted mode persona suffix (## ACTIVE MODE) ONLY. The current code added an
+  // `activeSkill ? ... : modePromptSuffix ? ...` ternary on top, so we match the
+  // mode-suffix branch rather than pinning the exact head of the expression.
+  assert.match(whatToAnswerSource, /## ACTIVE MODE\\n\$\{modePromptSuffix\}/);
+  assert.match(whatToAnswerSource, /const finalPromptOverride = activeSkill/);
+  // The retrieved mode CONTEXT block must never be concatenated into the system
+  // prompt override — it travels as untrusted user content via the PromptAssembler.
   assert.doesNotMatch(whatToAnswerSource, /activeModePromptParts = \[modePromptSuffix, modeContextBlock\]/);
   assert.doesNotMatch(whatToAnswerSource, /modeContextBlock\]\.filter\(Boolean\)/);
+  assert.doesNotMatch(whatToAnswerSource, /## ACTIVE MODE\\n\$\{modePromptSuffix\}\\n\\n\$\{modeContextBlock\}/);
 });
 
 test('intent answer shapes require grounding for examples and behavioral stories', () => {

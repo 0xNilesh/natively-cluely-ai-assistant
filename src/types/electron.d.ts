@@ -262,6 +262,10 @@ export interface ElectronAPI {
   onIntelligenceAssistUpdate: (callback: (data: { insight: string }) => void) => () => void
   onIntelligenceSuggestedAnswerToken: (callback: (data: { token: string; question: string; confidence: number }) => void) => () => void
   onIntelligenceSuggestedAnswer: (callback: (data: { answer: string; question: string; confidence: number }) => void) => () => void
+  onIntelligenceSuggestedAnswerDiscard: (callback: (data: { reason: string }) => void) => () => void
+  // Verified code execution (background): ✓ badge + corrected message.
+  onIntelligenceCodeVerified: (callback: (data: { question: string; passed: number; total: number; language: string }) => void) => () => void
+  onIntelligenceCodeCorrection: (callback: (data: { question: string; answer: string; note: string; reVerified: boolean }) => void) => () => void
   // Sprint 7: dedicated negotiation-coaching channel.
   onIntelligenceNegotiationCoaching: (callback: (data: { payload: any }) => void) => () => void
   // Sprint 9: time-batched IPC token channel.
@@ -284,7 +288,7 @@ export interface ElectronAPI {
   // Streaming listeners
   streamGeminiChat: (message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean, ignoreKnowledgeMode?: boolean }) => Promise<void>
   onGeminiStreamToken: (callback: (token: string) => void) => () => void
-  onGeminiStreamDone: (callback: () => void) => () => void
+  onGeminiStreamDone: (callback: (data?: { finalText?: string }) => void) => () => void
   onGeminiStreamError: (callback: (error: string) => void) => () => void;
   cancelChatStream: () => void;
 

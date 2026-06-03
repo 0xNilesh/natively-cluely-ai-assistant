@@ -347,6 +347,15 @@ interface ElectronAPI {
   onIntelligenceSuggestedAnswer: (
     callback: (data: { answer: string; question: string; confidence: number }) => void,
   ) => () => void;
+  onIntelligenceSuggestedAnswerDiscard: (
+    callback: (data: { reason: string }) => void,
+  ) => () => void;
+  onIntelligenceCodeVerified: (
+    callback: (data: { question: string; passed: number; total: number; language: string }) => void,
+  ) => () => void;
+  onIntelligenceCodeCorrection: (
+    callback: (data: { question: string; answer: string; note: string; reVerified: boolean }) => void,
+  ) => () => void;
   onIntelligenceRefinedAnswer: (
     callback: (data: { answer: string; intent: string }) => void,
   ) => () => void;
@@ -484,7 +493,7 @@ interface ElectronAPI {
     options?: { skipSystemPrompt?: boolean; ignoreKnowledgeMode?: boolean },
   ) => Promise<void>;
   onGeminiStreamToken: (callback: (token: string) => void) => () => void;
-  onGeminiStreamDone: (callback: () => void) => () => void;
+  onGeminiStreamDone: (callback: (data?: { finalText?: string }) => void) => () => void;
   onGeminiStreamError: (callback: (error: string) => void) => () => void;
 
   onUndetectableChanged: (callback: (state: boolean) => void) => () => void;
@@ -1439,6 +1448,33 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.removeListener('intelligence-suggested-answer', subscription);
     };
   },
+  // Orphaned-scaffold fix: drop the open what-to-answer scaffold row when a
+  // stream ends with no final answer (superseded / declined / errored).
+  onIntelligenceSuggestedAnswerDiscard: (
+    callback: (data: { reason: string }) => void,
+  ) => {
+    const subscription = (_: any, data: any) => callback(data);
+    ipcRenderer.on('intelligence-suggested-answer-discard', subscription);
+    return () => {
+      ipcRenderer.removeListener('intelligence-suggested-answer-discard', subscription);
+    };
+  },
+  // Verified code execution: ✓ badge when shown code passed executed tests.
+  onIntelligenceCodeVerified: (
+    callback: (data: { question: string; passed: number; total: number; language: string }) => void,
+  ) => {
+    const subscription = (_: any, data: any) => callback(data);
+    ipcRenderer.on('intelligence-code-verified', subscription);
+    return () => { ipcRenderer.removeListener('intelligence-code-verified', subscription); };
+  },
+  // Verified code execution: a NEW corrected message when shown code failed.
+  onIntelligenceCodeCorrection: (
+    callback: (data: { question: string; answer: string; note: string; reVerified: boolean }) => void,
+  ) => {
+    const subscription = (_: any, data: any) => callback(data);
+    ipcRenderer.on('intelligence-code-correction', subscription);
+    return () => { ipcRenderer.removeListener('intelligence-code-correction', subscription); };
+  },
   // Sprint 7: dedicated negotiation-coaching channel.
   onIntelligenceNegotiationCoaching: (callback: (data: { payload: any }) => void) => {
     const subscription = (_: any, data: any) => callback(data);
@@ -1565,8 +1601,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     };
   },
 
-  onGeminiStreamDone: (callback: () => void) => {
-    const subscription = () => callback();
+  onGeminiStreamDone: (callback: (data?: { finalText?: string }) => void) => {
+    const subscription = (_: any, data?: { finalText?: string }) => callback(data);
     ipcRenderer.on('gemini-stream-done', subscription);
     return () => {
       ipcRenderer.removeListener('gemini-stream-done', subscription);

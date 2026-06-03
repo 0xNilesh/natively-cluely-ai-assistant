@@ -30,6 +30,11 @@ export interface TestCase {
   isolationCheck?: boolean;
   personaNoInvention?: boolean;
   noHallucinationWatch?: boolean;
+  // When true, the answer MUST satisfy the six-section coding contract
+  // (## Approach / ## Technique… / ## Code / ## Dry Run / ## Complexity /
+  // ## Interviewer Follow-up Points), in order, code-block present, not
+  // code-first. Validated with the REAL AnswerValidator.validateCodingMarkdown.
+  requireCodingContract?: boolean;
 }
 
 export interface RunOutput {
@@ -176,6 +181,38 @@ export function grade(tc: TestCase, out: RunOutput, budget?: LatencyBudget): Gra
     // routing surfaced grounding (the orchestrator was asked about the target).
     if (!out.groundingFound && !a.includes(norm(tc.followUpTarget))) {
       failReasons.push(`follow_up_target_unresolved:${tc.followUpTarget}`);
+    }
+  }
+
+  // Rule 11: coding answers must satisfy the six-section contract, in order,
+  // with a fenced code block, and must NOT start with code. Deterministic — the
+  // same heading set AnswerValidator enforces (kept inline so the grader has no
+  // dist dependency; mirrors CODING_SECTION_HEADINGS).
+  if (tc.requireCodingContract) {
+    const CODING_HEADINGS = [
+      '## Approach',
+      '## Technique / Data Structure / Algorithm Used',
+      '## Code',
+      '## Dry Run',
+      '## Complexity',
+      '## Interviewer Follow-up Points',
+    ];
+    const raw = out.answer || '';
+    const positions = CODING_HEADINGS.map(h => raw.indexOf(h));
+    const missing = CODING_HEADINGS.filter((_, i) => positions[i] < 0);
+    if (missing.length > 0) {
+      failReasons.push(`coding_missing_sections:${missing.length}`);
+    } else {
+      // in-order check
+      for (let i = 1; i < positions.length; i++) {
+        if (positions[i - 1] >= positions[i]) { failReasons.push('coding_sections_out_of_order'); break; }
+      }
+    }
+    if (/^\s*```/.test(raw.trimStart()) || /^\s*(def|function|class|public|const|let|var|import)\b/.test(raw.trimStart())) {
+      failReasons.push('coding_starts_with_code');
+    }
+    if (!/```[a-zA-Z0-9+#-]*\n[\s\S]+?```/.test(raw)) {
+      failReasons.push('coding_no_code_block');
     }
   }
 

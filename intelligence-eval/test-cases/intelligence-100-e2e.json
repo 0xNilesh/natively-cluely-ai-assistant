@@ -2345,6 +2345,144 @@
       "expectedIntentLike": "identity",
       "critical": true,
       "isolationCheck": true
+    },
+    {
+      "testId": "CODING-ODD-EVEN-MANUAL",
+      "profileId": "backend-engineer",
+      "mode": "manual_input",
+      "pattern": "coding_manual",
+      "question": "what is the code for odd even",
+      "expectedPerspective": "second_person",
+      "requiredFacts": [],
+      "forbiddenFacts": [
+        "Aarav Menon",
+        "job description",
+        "salary",
+        "negotiation"
+      ],
+      "expectedLayers": [],
+      "excludedLayers": [
+        "resume",
+        "jd",
+        "negotiation",
+        "custom_context",
+        "reference_files"
+      ],
+      "expectedIntentLike": "coding",
+      "requireCodingContract": true,
+      "isolationCheck": true,
+      "critical": true
+    },
+    {
+      "testId": "CODING-ODD-EVEN-WTA",
+      "profileId": "backend-engineer",
+      "mode": "what_to_answer",
+      "pattern": "coding_interviewer",
+      "transcript": "Interviewer: Can you write code to check whether a number is odd or even?",
+      "expectedPerspective": "first_person",
+      "expectedSpeaker": "interviewer",
+      "requiredFacts": [],
+      "forbiddenFacts": [
+        "Aarav Menon",
+        "job description",
+        "salary",
+        "negotiation"
+      ],
+      "expectedLayers": [
+        "live_transcript"
+      ],
+      "excludedLayers": [
+        "resume",
+        "jd",
+        "negotiation",
+        "custom_context",
+        "reference_files"
+      ],
+      "expectedIntentLike": "coding",
+      "requireCodingContract": true,
+      "isolationCheck": true,
+      "critical": true
+    },
+    {
+      "testId": "TWO-SUM-WTA",
+      "profileId": "backend-engineer",
+      "mode": "what_to_answer",
+      "pattern": "coding_interviewer",
+      "transcript": "Interviewer: Can you solve two sum?",
+      "expectedPerspective": "first_person",
+      "expectedSpeaker": "interviewer",
+      "requiredFacts": [],
+      "forbiddenFacts": [
+        "Aarav Menon",
+        "job description",
+        "salary"
+      ],
+      "expectedLayers": [
+        "live_transcript"
+      ],
+      "excludedLayers": [
+        "resume",
+        "jd",
+        "negotiation"
+      ],
+      "expectedIntentLike": "coding",
+      "requireCodingContract": true,
+      "isolationCheck": true,
+      "critical": true
+    },
+    {
+      "testId": "CONTEXT-ISOLATION-CODING",
+      "profileId": "backend-engineer",
+      "mode": "manual_input",
+      "pattern": "coding_manual",
+      "question": "write code for odd even",
+      "expectedPerspective": "second_person",
+      "requiredFacts": [],
+      "forbiddenFacts": [
+        "Aarav Menon",
+        "job description",
+        "salary",
+        "negotiation",
+        "company"
+      ],
+      "expectedLayers": [],
+      "excludedLayers": [
+        "resume",
+        "jd",
+        "negotiation",
+        "custom_context",
+        "reference_files"
+      ],
+      "expectedIntentLike": "coding",
+      "requireCodingContract": true,
+      "isolationCheck": true,
+      "critical": true
+    },
+    {
+      "testId": "REVERSE-LINKED-LIST-WTA",
+      "profileId": "backend-engineer",
+      "mode": "what_to_answer",
+      "pattern": "coding_interviewer",
+      "transcript": "Interviewer: How would you reverse a linked list?",
+      "expectedPerspective": "first_person",
+      "expectedSpeaker": "interviewer",
+      "requiredFacts": [],
+      "forbiddenFacts": [
+        "Aarav Menon",
+        "salary"
+      ],
+      "expectedLayers": [
+        "live_transcript"
+      ],
+      "excludedLayers": [
+        "resume",
+        "jd",
+        "negotiation"
+      ],
+      "expectedIntentLike": "coding",
+      "requireCodingContract": true,
+      "isolationCheck": true,
+      "critical": false
     }
   ]
 }

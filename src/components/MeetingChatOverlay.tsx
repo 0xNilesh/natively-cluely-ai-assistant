@@ -226,7 +226,7 @@ const AssistantMessage: React.FC<{ content: string; isStreaming?: boolean }> = (
                 <div className="markdown-content">
                     <ReactMarkdown
                         remarkPlugins={[remarkGfm, remarkMath]}
-                        rehypePlugins={[rehypeKatex]}
+                        rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false, errorColor: '#cc0000' }]]}
                         components={{
                             p: ({ node, ...props }: any) => <p className="mb-[6px] last:mb-0 leading-relaxed whitespace-pre-wrap text-[13.5px]" {...props} />,
                             a: ({ node, ...props }: any) => <a className="text-[#4ade80] hover:underline" {...props} />,

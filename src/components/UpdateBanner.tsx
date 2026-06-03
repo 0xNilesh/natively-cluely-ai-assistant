@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import UpdateModal from './UpdateModal';
 
 const UpdateBanner: React.FC = () => {
@@ -13,6 +13,9 @@ const UpdateBanner: React.FC = () => {
     // any packaged Windows/Linux build). Drives whether "Install" runs the real
     // in-app download flow or falls back to the manual DMG-download instructions.
     const [canAutoUpdate, setCanAutoUpdate] = useState(false);
+    // Tracks whether the user explicitly dismissed the toast — progress events
+    // should not override a deliberate dismiss.
+    const userDismissedRef = useRef(false);
 
     useEffect(() => {
         let cancelled = false;
@@ -38,12 +41,16 @@ const UpdateBanner: React.FC = () => {
                 setParsedNotes(info.parsedNotes);
             }
             setIsVisible(true);
+            // A new update cycle begins — clear any prior dismiss state so the toast shows.
+            userDismissedRef.current = false;
         });
 
         // Listen for download progress
         const unsubProgress = window.electronAPI.onDownloadProgress((progressObj) => {
-            // Ensure modal is visible if download starts
-            setIsVisible(true);
+            // Re-show toast only if user hasn't explicitly dismissed it
+            if (!userDismissedRef.current) {
+                setIsVisible(true);
+            }
             setStatus('downloading');
             setDownloadProgress(progressObj.percent);
         });
@@ -148,6 +155,7 @@ const UpdateBanner: React.FC = () => {
     };
 
     const handleDismiss = () => {
+        userDismissedRef.current = true;
         setIsVisible(false);
         setStatus('idle'); // Reset error/downloading state so next event starts clean
     };

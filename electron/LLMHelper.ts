@@ -30,6 +30,13 @@ import {
   type VisionHealthEntry,
 } from "./llm/visionStreamFallback"
 import {
+  runStreamingTextFallback,
+  orderTextByHealth,
+  DEFAULT_TEXT_FALLBACK_CONFIG,
+  type TextStreamProvider,
+} from "./llm/textStreamFallback"
+import { telemetryService } from "./services/telemetry/TelemetryService"
+import {
   ollamaVisionFromShow,
   resolveOllamaVision,
   customProviderSupportsVision,
@@ -66,6 +73,50 @@ const DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 const DEEPSEEK_MAX_OUTPUT_TOKENS = 8192
 const MAX_OUTPUT_TOKENS = 65536
 const CLAUDE_MAX_OUTPUT_TOKENS = 64000
+
+// ── Interactive-path connect timeout (REPORT_TO_CHATGPT §21 L1) ──────────────
+// The Natively SSE connect phase previously used a 10s ceiling. For the live
+// answer path that is far too long: a healthy connect is sub-second, and a
+// stalled connect should fail over fast. 4s leaves headroom for a transient
+// Railway DNS hiccup (the in-fetch DNS retry adds ~1s) while removing the 10s
+// tail. The TTFT race (textStreamFallback) handles the separate case of a fast
+// connect that then prefills slowly. Override per-call for non-interactive use.
+const INTERACTIVE_CONNECT_TIMEOUT_MS = 4_000;
+
+// ── Deterministic sampling for interview/coding answers (REPORT §22 D1) ──────
+// The text streaming methods previously used scattered temperatures (0.3/0.4/
+// 0.7/1.0) and no seed, so the same question produced structurally different
+// answers across turns and across the fallback chain. Canonicalize the
+// INTERACTIVE TEXT path to one very-low temperature + a fixed seed (where the
+// provider supports it). Structure is separately guaranteed by the
+// deterministic scaffold/validator (Phase 7/8); this removes needless
+// run-to-run variance and keeps the race winner's STYLE consistent with the
+// primary. Vision/multimodal temps are left untouched.
+const INTERACTIVE_TEMPERATURE = 0.2; // "very low" per report; avoids degenerate-0 loops some models show
+const INTERACTIVE_SEED = 7;          // fixed seed where the SDK supports it (Groq/OpenAI; Gemini via config)
+
+// ── Gemini thinking budget (THE dominant TTFT lever on Gemini 3.x Flash) ─────
+// Measured: gemini-3.5-flash with default (dynamic) thinking spent ~5.3s
+// "thinking" BEFORE the first content token on a tiny ~1.3K-token prompt — the
+// thinking phase is NOT streamed, so the user just sees a frozen UI for ~5s.
+// `thinkingBudget: 0` DISABLES thinking (SDK: "0 is DISABLED"), collapsing TTFT
+// to the model's true first-token latency (~0.5s). This is how real-time
+// copilots stay fast on Flash. Set to a small positive number to re-enable a
+// bounded amount of reasoning if answer quality regresses on hard problems.
+// 0 = off, -1 = automatic/dynamic (the slow default we are overriding).
+export const INTERACTIVE_THINKING_BUDGET = 0;
+// Coding/DSA budget — set to 0 (off) based on a MEASURED 12-problem LeetCode
+// sweep on gemini-3.1-flash-lite (4 easy/4 med/4 hard, correctness verified by
+// executing the generated code; see THINKING_BUDGET_BENCHMARK.md):
+//   budget 0   → 12/12 correct incl. 4/4 HARD, TTFT p50 ~0.55s   ← best
+//   budget 512 → 11/12 (a hard miss), TTFT p50 ~0.9s
+//   budget 1024→ 11/12,               TTFT p50 ~2.1s
+//   dynamic(-1)→ slow (TTFT p50 ~5.4s) — the old default we replaced
+// More thinking did NOT add correctness here, cost latency, and occasionally
+// made the model reason in prose and skip the code block entirely. So coding
+// uses 0 too. Raise this only if a future, genuinely harder problem set shows
+// a correctness gain that justifies the TTFT cost.
+export const CODING_THINKING_BUDGET = 0;
 
 // Simple prompt for image analysis (not interview copilot - kept separate)
 const IMAGE_ANALYSIS_PROMPT = `Analyze concisely. Be direct. No markdown formatting. Return plain text only.`
@@ -130,6 +181,12 @@ export class LLMHelper {
   //   - ttftEma: exponentially-weighted moving avg of time-to-first-token (alpha 0.2),
   //     used to reorder healthy providers fastest-first.
   private visionHealth: Map<string, VisionHealthEntry> = new Map();
+
+  // ─── Streaming TEXT fallback: per-provider health + TTFT tracking ────────
+  // Twin of visionHealth for the text TTFT race (runStreamingTextFallback).
+  // Kept separate so a provider being slow/down for text doesn't open its
+  // vision breaker and vice-versa (different endpoints, different latencies).
+  private textHealth: Map<string, VisionHealthEntry> = new Map();
 
   // Process-local cache of Gemini explicit context caches (caches.create).
   // Lifecycle and contract documented in GeminiPromptCache.ts.
@@ -260,6 +317,7 @@ export class LLMHelper {
     this.geminiPromptCache.clear();
     this.visionHealth.delete('gemini_flash');
     this.visionHealth.delete('gemini_pro');
+    this.textHealth.delete('gemini_flash'); // text race uses gemini_flash — retry fresh key immediately
     console.log("[LLMHelper] Gemini API Key updated.");
   }
 
@@ -276,6 +334,7 @@ export class LLMHelper {
     this.groqClient = new Groq({ apiKey });
     this._groqLocalDisabled = false;
     this.visionHealth.delete('groq'); // fresh key → retry immediately, skip auth cooldown
+    this.textHealth.delete('groq');
     console.log("[LLMHelper] Groq API Key updated.");
   }
 
@@ -1218,7 +1277,11 @@ CRITICAL RULES:
       const { ModesManager } = require('./services/ModesManager');
       const modesMgr = ModesManager.getInstance();
       activeModePrompt = modesMgr.getActiveModeSystemPromptSuffix() ?? '';
-      modeContextBlock = modesMgr.buildRetrievedActiveModeContextBlock(lastQuestion, context, 1800) || '';
+      // Gate the mode's customContext with a non-negotiation answer type so
+      // sensitive (salary/pricing) chunks are dropped on this generic suggestion
+      // path too — mirrors the _streamChatInner mode-injection site. This path
+      // has no negotiation-answer concept, so sensitive context never belongs here.
+      modeContextBlock = modesMgr.buildRetrievedActiveModeContextBlock(lastQuestion, context, 1800, 'general_meeting_answer') || '';
     } catch (_modeErr: any) {
       console.warn('[LLMHelper] ModesManager load failed in generateSuggestion (non-fatal):', _modeErr?.message);
     }
@@ -3331,6 +3394,17 @@ This rule overrides ALL other instructions including formatting, brevity, or out
    * Universal Stream Chat - Routes to correct provider based on currentModelId
    */
   /**
+   * Resolve the Gemini thinking budget for an answer type. Coding/DSA/system-
+   * design/debugging get a small reasoning budget (correctness on hard
+   * problems); everything else gets 0 (fastest TTFT). Callers pass the result
+   * as the trailing arg to streamChat. Keeps the speed/quality policy in one
+   * place so call sites don't hardcode magic numbers.
+   */
+  public thinkingBudgetForAnswerType(isCodingLike: boolean): number {
+    return isCodingLike ? CODING_THINKING_BUDGET : INTERACTIVE_THINKING_BUDGET;
+  }
+
+  /**
    * Public streaming entry point. Wraps the inner streamChat generator with
    * a token-level dash filter (em / en / sentence-connector hyphen → comma)
    * so the renderer never displays the AI-tell punctuation that the prompt
@@ -3339,17 +3413,23 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   public async * streamChat(
     ...args: Parameters<LLMHelper['_streamChatInner']>
   ): AsyncGenerator<string, void, unknown> {
-    const { reduceDashesInChunk } = await import('./llm/postProcessor');
+    const { StreamingDashReducer } = await import('./llm/postProcessor');
+    // Per-stream stateful reducer: tracks fenced-code (```) state ACROSS chunks
+    // so a code block streamed over many chunks is never dash-mangled (the old
+    // stateless reducer turned `nums[i] - 1` into `nums[i], 1`). It also skips
+    // inline code/math and only rewrites a true prose connector.
+    const dashReducer = new StreamingDashReducer();
     // Pull the optional abort signal (always the last positional arg).
     // Use `instanceof AbortSignal` rather than duck-typing — duck-typing on
     // `.aborted` is ambiguous because future params (extraDataScopes, options
     // objects) could accidentally satisfy the shape. instanceof is exact and
     // requires Node ≥17 (Electron's runtime is well past that).
-    const lastArg = args[args.length - 1];
-    const abortSignal = lastArg instanceof AbortSignal ? lastArg : undefined;
+    // Find the AbortSignal anywhere in args (position-independent) so adding a
+    // trailing `thinkingBudget` arg below doesn't hide it from the abort check.
+    const abortSignal = args.find((a): a is AbortSignal => a instanceof AbortSignal);
     for await (const chunk of this._streamChatInner(...args)) {
       if (abortSignal?.aborted) return;
-      yield reduceDashesInChunk(chunk);
+      yield dashReducer.reduce(chunk);
     }
   }
 
@@ -3368,8 +3448,19 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     // running to completion (each is bounded by its own per-call timeout —
     // worst-case ~60s for Gemini Pro) but their tokens are dropped at the
     // generator boundary so no UI work or downstream state mutation occurs.
-    abortSignal?: AbortSignal
+    abortSignal?: AbortSignal,
+    // Optional Gemini thinking budget (tokens). Defaults to the fast interactive
+    // value (0 = off). Coding/DSA callers pass CODING_THINKING_BUDGET so hard
+    // problems get a small amount of reasoning without the slow dynamic default.
+    // Threaded only to the Gemini streamers (other providers ignore it).
+    thinkingBudget: number = INTERACTIVE_THINKING_BUDGET
   ): AsyncGenerator<string, void, unknown> {
+
+    // Stage timer (gated): isolates pre-stream work (knowledge intercept,
+    // cache create) from provider TTFT. Set MEASURE_LATENCY=true to see it.
+    const _t0 = Date.now();
+    const _measure = (() => { try { return process.env.MEASURE_LATENCY === 'true' || process.env.PI_LATENCY_TRACE === 'true'; } catch { return false; } })();
+    const _stage = (label: string) => { if (_measure) console.log(`[LLMHelper.stream] +${Date.now() - _t0}ms  ${label}`); };
 
     // ============================================================
     // KNOWLEDGE MODE INTERCEPT (Streaming)
@@ -3385,7 +3476,9 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         // Feed to depth scorer only (not negotiation tracker) — mirrors non-streaming path fix.
         this.knowledgeOrchestrator.feedForDepthScoring(message);
 
+        _stage('processQuestion START');
         const knowledgeResult = await this.knowledgeOrchestrator.processQuestion(message);
+        _stage('processQuestion DONE');
         // Issue #272: gate ALL premium-intercept side-effects (coaching, intro
         // shortcut, prompt/context injection) by active mode. The depth scorer
         // above stays unconditional so it keeps getting signal. When the gate
@@ -3464,7 +3557,11 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         const { ModesManager } = require('./services/ModesManager');
         const modesMgr = ModesManager.getInstance();
         const modePromptSuffix = modesMgr.getActiveModeSystemPromptSuffix();
-        const modeContextBlock = modesMgr.buildRetrievedActiveModeContextBlock(message, context, 1800);
+        // Pass a non-negotiation answer type so the mode's customContext is
+        // sensitive-GATED on this generic legacy path too (salary/pricing chunks
+        // are dropped). Only the WTA path, which knows when an answer is a real
+        // negotiation, can surface sensitive context; this path never does.
+        const modeContextBlock = modesMgr.buildRetrievedActiveModeContextBlock(message, context, 1800, 'general_meeting_answer');
 
         if (modePromptSuffix) {
           const baseForMode = systemPromptOverride || HARD_SYSTEM_PROMPT;
@@ -3523,6 +3620,11 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     const userContent = combinedContext
       ? `CONTEXT:\n${combinedContext}\n\nUSER QUESTION:\n${message}`
       : message;
+
+    // Pre-work done; about to dispatch to a provider. The gap from here to the
+    // first yielded token is the provider TTFT (connect + prefill of a
+    // ~${finalSystemPrompt.length}-char system prompt + ${userContent.length}-char user content).
+    _stage(`provider dispatch START (sysPrompt=${finalSystemPrompt.length}c, userContent=${userContent.length}c, model=${this.currentModelId})`);
 
     // ── UNIFIED MULTIMODAL PATH ────────────────────────────────────────────
     // Every image-bearing request goes through the single streaming vision
@@ -3689,36 +3791,95 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       return;
     }
 
-    // 3b. Natively API
+    // 3b. Natively API — TTFT RACE (REPORT_TO_CHATGPT §21 L1 / §18)
+    // Was: serial Natively→Groq→Gemini waterfall that only fell over on a
+    // THROW. A provider that connected then stalled before the first token
+    // blocked the user for up to the 10s connect budget with no fallback.
+    // Now: a commit-point TTFT race. Each provider is opened but not forwarded
+    // until its first token races a 2.5s budget; the first to produce a token
+    // wins and we commit. A stalled/erroring primary fails over fast. Identical
+    // answer contract to every provider (same finalSystemPrompt), so the race
+    // winner does not change answer STYLE — only who serves it. Multimodal with
+    // images keeps the dedicated Groq-multimodal path (vision is handled by the
+    // separate vision fallback when a vision model is selected).
     if (this.currentModelId === 'natively') {
       const { CredentialsManager } = require('./services/CredentialsManager');
       const nativelyKey = CredentialsManager.getInstance().getNativelyApiKey();
       if (nativelyKey) {
-        try {
-          yield* this.streamWithNatively(userContent, finalSystemPrompt, imagePaths, abortSignal);
-          return;
-        } catch (err: any) {
-          console.warn('[LLMHelper] Natively API failed in streamChat, trying Groq fallback:', err.message);
-          // Try Groq before Gemini — Groq key is more commonly available
-          if (this.groqClient) {
-            try {
-              if (isMultimodal && imagePaths) {
-                const groqSystem = systemPromptOverride || OPENAI_SYSTEM_PROMPT;
-                const finalGroqSystem = this.injectLanguageInstruction(groqSystem);
-                yield* this.streamWithGroqMultimodal(userContent, imagePaths, finalGroqSystem, abortSignal);
-              } else {
-                const groqSystem = systemPromptOverride ? baseSystemPrompt : GROQ_SYSTEM_PROMPT;
-                const finalGroqSystem = this.injectLanguageInstruction(groqSystem);
-                // intentional: emergency fallback waterfall — use stable GROQ_MODEL baseline, not currentModelId
-                // CACHE: pass system separately so Groq prefix-cache hits across turns.
-                yield* this.streamWithGroq(userContent, GROQ_MODEL, finalGroqSystem, abortSignal);
-              }
-              return;
-            } catch (groqErr: any) {
-              console.warn('[LLMHelper] Groq fallback also failed, trying Gemini:', groqErr.message);
-            }
+        const textProviders: TextStreamProvider[] = [];
+        let prio = 0;
+        // Primary: Natively (fast connect budget — TTFT race handles slow prefill).
+        textProviders.push({
+          id: 'natively', name: 'Natively API', isLocal: false, priority: prio++,
+          open: (sig) => this.streamWithNatively(userContent, finalSystemPrompt, imagePaths, sig, INTERACTIVE_CONNECT_TIMEOUT_MS),
+        });
+        // Fallback: Groq (key more commonly available than Gemini).
+        if (this.groqClient) {
+          if (isMultimodal && imagePaths) {
+            const finalGroqSystem = this.injectLanguageInstruction(systemPromptOverride || OPENAI_SYSTEM_PROMPT);
+            textProviders.push({
+              id: 'groq', name: 'Groq (multimodal)', isLocal: false, priority: prio++,
+              open: (sig) => this.streamWithGroqMultimodal(userContent, imagePaths, finalGroqSystem, sig),
+            });
+          } else {
+            const finalGroqSystem = this.injectLanguageInstruction(systemPromptOverride ? baseSystemPrompt : GROQ_SYSTEM_PROMPT);
+            textProviders.push({
+              id: 'groq', name: 'Groq', isLocal: false, priority: prio++,
+              // intentional: emergency fallback uses stable GROQ_MODEL baseline, not currentModelId.
+              open: (sig) => this.streamWithGroq(userContent, GROQ_MODEL, finalGroqSystem, sig),
+            });
           }
-          // Fall through to Gemini
+        }
+        // Fallback: Gemini Flash (cheap, fast) then Pro.
+        if (this.client) {
+          textProviders.push({
+            id: 'gemini_flash', name: `Gemini Flash`, isLocal: false, priority: prio++,
+            open: (sig) => this.streamWithGeminiModel(userContent, GEMINI_FLASH_MODEL, imagePaths, finalSystemPrompt, sig, thinkingBudget),
+          });
+        }
+
+        if (textProviders.length > 0) {
+          const ordered = orderTextByHealth(textProviders, this.textHealth, Date.now());
+          const raceStart = Date.now();
+          let committedProvider: string | null = null;
+          telemetryService.track({ name: 'provider_race_started', properties: { candidates: ordered.map(p => p.id), path: 'text' } });
+          // Wrap each provider's open() so we can record which one wins (first
+          // token committed). The engine itself records TTFT EWMA into textHealth.
+          const instrumented = ordered.map((p) => ({
+            ...p,
+            open: (sig: AbortSignal, attempt: number) => {
+              const inner = p.open(sig, attempt);
+              return (async function* () {
+                for await (const tok of inner) {
+                  // Attribute the win to the first NON-EMPTY token, mirroring the
+                  // engine's own commit predicate (it rejects whitespace-only /
+                  // non-string first tokens as 'empty-stream' and falls past). A
+                  // looser "first token" check would mis-fire provider_race_won
+                  // for a provider the engine then discards, and latch
+                  // committedProvider to that loser so the real winner never
+                  // emits. (debugger Finding 2.)
+                  if (!committedProvider && typeof tok === 'string' && tok.trim().length > 0) {
+                    committedProvider = p.id;
+                    telemetryService.track({
+                      name: 'provider_race_won',
+                      provider: p.id,
+                      durationMs: Date.now() - raceStart,
+                      properties: { path: 'text', ttftMs: Date.now() - raceStart },
+                    });
+                  }
+                  yield tok;
+                }
+              })();
+            },
+          }));
+          try {
+            yield* runStreamingTextFallback(instrumented, this.textHealth, DEFAULT_TEXT_FALLBACK_CONFIG, {}, abortSignal);
+            return;
+          } catch (raceErr: any) {
+            console.warn('[LLMHelper] Text TTFT race exhausted, falling through to Gemini:', raceErr?.message);
+            telemetryService.track({ name: 'provider_error', durationMs: Date.now() - raceStart, properties: { path: 'text', stage: 'race_exhausted' } });
+            // Fall through to the Gemini block below as the final safety net.
+          }
         }
       }
       // No key or all fallbacks failed — fall through to Gemini
@@ -3731,12 +3892,12 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       // `userContent` is not the case — userContent is dynamic — so the system
       // instruction channel is the cacheable surface for Gemini.
       if (this.isGeminiModel(this.currentModelId)) {
-        yield* this.streamWithGeminiModel(userContent, this.currentModelId, imagePaths, finalSystemPrompt, abortSignal);
+        yield* this.streamWithGeminiModel(userContent, this.currentModelId, imagePaths, finalSystemPrompt, abortSignal, thinkingBudget);
         return;
       }
 
       // Race strategy (default)
-      yield* this.streamWithGeminiParallelRace(userContent, imagePaths, finalSystemPrompt, abortSignal);
+      yield* this.streamWithGeminiParallelRace(userContent, imagePaths, finalSystemPrompt, abortSignal, thinkingBudget);
       return;
     }
 
@@ -3758,7 +3919,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
    * Yields the full response in small word-batches so the UI typing effect still plays.
    * Throws on empty response so the fallback chain tries the next provider.
    */
-  private async * streamWithNatively(userContent: string, systemPrompt?: string, imagePaths?: string[], abortSignal?: AbortSignal): AsyncGenerator<string, void, unknown> {
+  private async * streamWithNatively(userContent: string, systemPrompt?: string, imagePaths?: string[], abortSignal?: AbortSignal, connectTimeoutMs: number = INTERACTIVE_CONNECT_TIMEOUT_MS): AsyncGenerator<string, void, unknown> {
     // ── REAL SSE STREAM (replaces the fake word-by-word simulation) ──────────
     // Previous implementation called generateWithNatively() (blocking, waited for
     // the full response), then drip-fed words with setTimeout delays — pure theater.
@@ -3843,8 +4004,8 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     // connect timeout to the connect phase only.
     const streamController = new AbortController();
     let connectTimer: NodeJS.Timeout | null = setTimeout(
-      () => streamController.abort(new Error('Natively API connect timeout (10s)')),
-      10_000,
+      () => streamController.abort(new Error(`Natively API connect timeout (${Math.round(connectTimeoutMs / 1000)}s)`)),
+      connectTimeoutMs,
     );
     const onCallerAbort = () => {
       try { streamController.abort(abortSignal?.reason); } catch { /* already aborted */ }
@@ -3853,12 +4014,34 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
     let response: Response;
     try {
-      response = await fetch(`${NATIVELY_API_URL}/v1/chat`, {
-        method: 'POST',
-        headers: streamHeaders,
-        body: JSON.stringify(body),
-        signal: streamController.signal,
-      });
+      // Retry on transient DNS failures (ENOTFOUND / EAI_AGAIN).
+      // Railway's 1s TTL means the OS resolver can return ENOTFOUND for 2-3s
+      // during a resolver hiccup even when the server is alive. undici (Node's
+      // built-in fetch) wraps the original error in err.cause, so check both.
+      const isDnsError = (e: any) =>
+        e?.code === 'ENOTFOUND' || e?.code === 'EAI_AGAIN' ||
+        e?.cause?.code === 'ENOTFOUND' || e?.cause?.code === 'EAI_AGAIN';
+
+      let lastErr: unknown;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (streamController.signal.aborted) break;
+        try {
+          response = await fetch(`${NATIVELY_API_URL}/v1/chat`, {
+            method: 'POST',
+            headers: streamHeaders,
+            body: JSON.stringify(body),
+            signal: streamController.signal,
+          });
+          lastErr = undefined;
+          break;
+        } catch (fetchErr: any) {
+          lastErr = fetchErr;
+          if (!isDnsError(fetchErr) || attempt >= 2 || streamController.signal.aborted) throw fetchErr;
+          console.warn(`[streamWithNatively] DNS failure (${fetchErr.cause?.code ?? fetchErr.code}), retry ${attempt + 1}/2 in 500ms`);
+          await new Promise<void>(r => setTimeout(r, 500));
+        }
+      }
+      if (lastErr) throw lastErr;
     } finally {
       // Connection established (or failed) — stop the connect-phase timer.
       // The stream body will now be read without any timeout (until/unless
@@ -3943,7 +4126,8 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       model: modelId,
       messages,
       stream: true,
-      temperature: 0.4,
+      temperature: INTERACTIVE_TEMPERATURE,
+      seed: INTERACTIVE_SEED, // Groq honors seed for near-deterministic output
       max_tokens: 8192,
     }, { signal: abortSignal });
 
@@ -4040,6 +4224,8 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       model,
       messages,
       stream: true,
+      temperature: INTERACTIVE_TEMPERATURE,
+      seed: INTERACTIVE_SEED, // OpenAI honors seed for near-deterministic output
       max_completion_tokens: model.toLowerCase().includes('claude') ? this.getClaudeMaxOutput(model) : MAX_OUTPUT_TOKENS,
       ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
     }, { signal: abortSignal });
@@ -4074,6 +4260,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     const stream = this.claudeClient.messages.stream({
       model,
       max_tokens: this.getClaudeMaxOutput(model),
+      temperature: INTERACTIVE_TEMPERATURE, // Claude has no seed param; low temp is the determinism lever
       // CACHE BOUNDARY: system blocks are static; dynamic content lives in `messages` only.
       ...(systemPrompt ? { system: this.buildClaudeSystemBlocks(systemPrompt, model) } : {}),
       messages: [{ role: "user", content: userMessage }],
@@ -4113,6 +4300,8 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       model,
       messages,
       stream: true,
+      temperature: INTERACTIVE_TEMPERATURE,
+      seed: INTERACTIVE_SEED, // DeepSeek is OpenAI-compatible and honors seed
       max_tokens: this.getDeepseekMaxOutput(model),
     }, { signal: abortSignal });
 
@@ -4250,7 +4439,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
    *    haven't migrated. Static content leads that string so implicit caching
    *    still applies.
    */
-  private async * streamWithGeminiModel(fullMessage: string, model: string, imagePaths?: string[], systemInstruction?: string, abortSignal?: AbortSignal): AsyncGenerator<string, void, unknown> {
+  private async * streamWithGeminiModel(fullMessage: string, model: string, imagePaths?: string[], systemInstruction?: string, abortSignal?: AbortSignal, thinkingBudget: number = INTERACTIVE_THINKING_BUDGET): AsyncGenerator<string, void, unknown> {
     if (this.isLocalOnlyMode) throw new Error("Cloud providers disabled in local-only mode");
     if (!this.client) throw new Error("Gemini client not initialized");
     this.assertOutboundScopes('gemini', fullMessage, imagePaths);
@@ -4273,15 +4462,26 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       }
     }
 
+    // Gated stage timing (MEASURE_LATENCY=true) — isolates the cache-create
+    // round-trip and provider TTFT, the prime suspects for slow first token.
+    const _gt0 = Date.now();
+    const _gmeasure = (() => { try { return process.env.MEASURE_LATENCY === 'true' || process.env.PI_LATENCY_TRACE === 'true'; } catch { return false; } })();
+
     // CACHE BOUNDARY: static system content lives in `config.cachedContent`
     // (or `config.systemInstruction` on fallback); dynamic content stays in `contents`.
     const cacheName = systemInstruction
       ? await this.geminiPromptCache.getOrCreate(this.client, model, systemInstruction)
       : null;
+    if (_gmeasure) console.log(`[Gemini.stream] +${Date.now() - _gt0}ms  cache resolve done (cacheHit=${Boolean(cacheName)}, sysPrompt=${systemInstruction?.length ?? 0}c, model=${model})`);
 
     const buildConfig = (useCacheName: string | null) => ({
       maxOutputTokens: MAX_OUTPUT_TOKENS,
-      temperature: 0.4,
+      temperature: INTERACTIVE_TEMPERATURE,
+      seed: INTERACTIVE_SEED, // Gemini v1alpha honors seed in generationConfig
+      // Per-request thinking budget: 0 (off, fast) for conversational/factual
+      // answers; a small budget for coding/DSA where reasoning aids correctness.
+      // Either way far below the slow dynamic default. (Threaded from the caller.)
+      thinkingConfig: { thinkingBudget },
       ...(useCacheName
         ? { cachedContent: useCacheName }
         : systemInstruction
@@ -4316,8 +4516,13 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     // @ts-ignore
     const stream = streamResult.stream || streamResult;
 
+    let _firstChunk = true;
     for await (const chunk of stream) {
       if (abortSignal?.aborted) return;
+      if (_firstChunk) {
+        _firstChunk = false;
+        if (_gmeasure) console.log(`[Gemini.stream] +${Date.now() - _gt0}ms  FIRST TOKEN from provider (this is the provider TTFT — prefill of the system prompt)`);
+      }
       let chunkText = "";
       if (typeof chunk.text === 'function') {
         chunkText = chunk.text();
@@ -4337,7 +4542,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
    * Optional `systemInstruction` is forwarded to both racers so the static
    * system prompt is separated from `fullMessage` (cache-friendly).
    */
-  private async * streamWithGeminiParallelRace(fullMessage: string, imagePaths?: string[], systemInstruction?: string, abortSignal?: AbortSignal): AsyncGenerator<string, void, unknown> {
+  private async * streamWithGeminiParallelRace(fullMessage: string, imagePaths?: string[], systemInstruction?: string, abortSignal?: AbortSignal, thinkingBudget: number = INTERACTIVE_THINKING_BUDGET): AsyncGenerator<string, void, unknown> {
     if (!this.client) throw new Error("Gemini client not initialized");
 
     // BUG-1 fix: use a shared AbortController so the winning model cancels the loser.
@@ -4351,7 +4556,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     const raceController = new AbortController();
 
     const race = async (model: string): Promise<string> => {
-      const result = await this.collectStreamResponse(fullMessage, model, imagePaths, AbortSignal.any([raceController.signal, abortSignal].filter(Boolean) as AbortSignal[]), systemInstruction);
+      const result = await this.collectStreamResponse(fullMessage, model, imagePaths, AbortSignal.any([raceController.signal, abortSignal].filter(Boolean) as AbortSignal[]), systemInstruction, thinkingBudget);
       // This model won — signal the other to stop waiting for its result.
       raceController.abort(new Error(`${model} won the race`));
       return result;
@@ -4383,7 +4588,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
    * Accepts an AbortSignal so the losing model can be cancelled by the winner.
    * Timing reference: Flash 10-15s (up to 30s with images), Pro up to 30s.
    */
-  private async collectStreamResponse(fullMessage: string, model: string, imagePaths?: string[], signal?: AbortSignal, systemInstruction?: string): Promise<string> {
+  private async collectStreamResponse(fullMessage: string, model: string, imagePaths?: string[], signal?: AbortSignal, systemInstruction?: string, thinkingBudget: number = INTERACTIVE_THINKING_BUDGET): Promise<string> {
     if (!this.client) throw new Error("Gemini client not initialized");
     this.assertOutboundScopes('gemini', fullMessage, imagePaths);
 
@@ -4405,15 +4610,26 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       }
     }
 
+    // Gated stage timing (MEASURE_LATENCY=true) — isolates the cache-create
+    // round-trip and provider TTFT, the prime suspects for slow first token.
+    const _gt0 = Date.now();
+    const _gmeasure = (() => { try { return process.env.MEASURE_LATENCY === 'true' || process.env.PI_LATENCY_TRACE === 'true'; } catch { return false; } })();
+
     // CACHE BOUNDARY: static system content lives in `config.cachedContent`
     // (or `config.systemInstruction` on fallback); dynamic content stays in `contents`.
     const cacheName = systemInstruction
       ? await this.geminiPromptCache.getOrCreate(this.client, model, systemInstruction)
       : null;
+    if (_gmeasure) console.log(`[Gemini.stream] +${Date.now() - _gt0}ms  cache resolve done (cacheHit=${Boolean(cacheName)}, sysPrompt=${systemInstruction?.length ?? 0}c, model=${model})`);
 
     const buildConfig = (useCacheName: string | null) => ({
       maxOutputTokens: MAX_OUTPUT_TOKENS,
-      temperature: 0.4,
+      temperature: INTERACTIVE_TEMPERATURE,
+      seed: INTERACTIVE_SEED, // Gemini v1alpha honors seed in generationConfig
+      // Per-request thinking budget: 0 (off, fast) for conversational/factual
+      // answers; a small budget for coding/DSA where reasoning aids correctness.
+      // Either way far below the slow dynamic default. (Threaded from the caller.)
+      thinkingConfig: { thinkingBudget },
       ...(useCacheName
         ? { cachedContent: useCacheName }
         : systemInstruction

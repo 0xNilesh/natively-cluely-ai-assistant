@@ -10,15 +10,42 @@ import {
     FollowUpQuestionsLLM, WhatToAnswerLLM,
     prepareTranscriptForWhatToAnswer, buildTemporalContext,
     AssistantResponse as LLMAssistantResponse, classifyIntent, planNextAssistantAction, PlannerDecision,
-    extractLatestQuestion, toCandidateFraming
+    extractLatestQuestion, toCandidateFraming, planAnswer, validateAnswerStructure, isCodingAnswerType,
+    buildContextRoute, summarizeContextRoute
 } from './llm';
+import { CodingStreamGate } from './llm/codingStreamGate';
 import { DynamicActionEngine } from './services/dynamic-actions/DynamicActionEngine';
 import { DynamicAction } from './services/dynamic-actions/DynamicAction';
 import { ScreenContext } from './services/screen/ScreenContextService';
 import { buildPreparedTranscriptContext as assemblePreparedTranscriptContext } from './utils/preparedTranscriptContext';
+import { PiLatencyTrace } from './services/telemetry/PiLatencyTracer';
 
 // Mode types
 export type IntelligenceMode = 'idle' | 'assist' | 'what_to_say' | 'follow_up' | 'recap' | 'clarify' | 'manual' | 'follow_up_questions' | 'code_hint' | 'brainstorm';
+
+/**
+ * Bound an optional-enrichment promise by a wall-clock budget. If the work
+ * doesn't finish in `ms`, resolve to `fallback` instead of blocking the live
+ * answer path. The slow promise is NOT cancelled (the orchestrator has no
+ * cancel token) but its result is ignored — it can still warm caches for next
+ * time. Used to cap profile grounding on the latency-critical WTA path so a
+ * slow `processQuestion` can never stall first-token (REPORT §21, hypothesis L2).
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<{ value: T; timedOut: boolean }> {
+    return new Promise((resolve) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            resolve({ value: fallback, timedOut: true });
+        }, ms);
+        timer.unref?.();
+        promise.then(
+            (value) => { if (!settled) { settled = true; clearTimeout(timer); resolve({ value, timedOut: false }); } },
+            () => { if (!settled) { settled = true; clearTimeout(timer); resolve({ value: fallback, timedOut: false }); } },
+        );
+    });
+}
 
 // Refinement intent detection (refined to avoid false positives)
 function detectRefinementIntent(userText: string): { isRefinement: boolean; intent: string } {
@@ -47,6 +74,18 @@ export interface IntelligenceModeEvents {
     'assist_update': (insight: string) => void;
     'suggested_answer': (answer: string, question: string, confidence: number) => void;
     'suggested_answer_token': (token: string, question: string, confidence: number) => void;
+    // Emitted when an in-flight what-to-answer stream that ALREADY showed a
+    // deterministic scaffold ends WITHOUT a final answer (superseded by a newer
+    // generation, declined as a non-answer sentinel, or errored). The renderer
+    // must drop the open scaffold row so the user never sees a permanent
+    // "Working on…" card (REPORT C1 follow-up — orphaned-scaffold fix).
+    'suggested_answer_discard': (reason: string) => void;
+    // Verified-code-execution (background, after the answer is shown). 'verified'
+    // fires when the shown code passed N executed test cases (renderer shows a
+    // small "✓ verified" badge). 'correction' fires when the shown code FAILED
+    // and a re-verified fix was produced — renderer posts it as a NEW message.
+    'code_verified': (info: { question: string; passed: number; total: number; language: string }) => void;
+    'code_correction': (info: { question: string; answer: string; note: string; reVerified: boolean }) => void;
     'refined_answer': (answer: string, intent: string) => void;
     'refined_answer_token': (token: string, intent: string) => void;
     'recap': (summary: string) => void;
@@ -119,11 +158,25 @@ export class IntelligenceEngine extends EventEmitter {
     private currentSessionId: string | null = null;
     private currentDynamicActionModeId: string | null = null;
     private currentDynamicActionTemplateType: string | null = null;
+    // Latency trace for the most recent live request (manual/WTA). Exposed via
+    // getLastTraceSnapshot() so evals/debug-metadata can read stage timings
+    // without parsing the telemetry JSONL.
+    private lastTrace: PiLatencyTrace | null = null;
 
     private static isNonAnswerSentinel(answer: string): boolean {
         const normalized = answer.trim().toLowerCase().replace(/[.!?]+$/g, '');
         return normalized === 'nothing actionable right now'
             || normalized === 'nothing to capture right now';
+    }
+
+    /**
+     * Stage-timing snapshot of the most recent live request (manual/WTA), for
+     * eval harnesses and dev debug-metadata. Metadata only — no raw content.
+     * Returns null before any request has run.
+     */
+    getLastTraceSnapshot(): { requestId: string; timings: Record<string, number> } | null {
+        if (!this.lastTrace) return null;
+        return { requestId: this.lastTrace.requestId, timings: this.lastTrace.snapshot() };
     }
 
     constructor(llmHelper: LLMHelper, session: SessionTracker) {
@@ -537,11 +590,29 @@ export class IntelligenceEngine extends EventEmitter {
             this.lastTriggerTime = now;
         }
         // Record the question text so handleSuggestionTrigger can do Jaccard comparison.
-        // Expiry stays at Infinity while the stream is running — set to a close window only on completion.
+        // Bound expiry even while the stream is running so stale speculative
+        // answers cannot be accepted after the conversational moment has moved on.
         if (isSpeculative) {
             this.speculativeText = question ?? null;
-            this.speculativeTextExpiry = Infinity;
+            this.speculativeTextExpiry = now + this.triggerCooldown + 5000;
         }
+
+        // ── Live-path latency trace (click → first useful token → render) ──
+        // Records metadata-only milestones; never carries raw transcript/resume.
+        const trace = new PiLatencyTrace({
+            source: question ? 'manual' : 'what_to_answer',
+            sessionId: this.currentSessionId ?? undefined,
+        });
+        trace.mark(question ? 'question_submitted' : 'what_to_answer_clicked', {
+            hasImages: Boolean(imagePaths && imagePaths.length > 0),
+            speculative: isSpeculative,
+        });
+        this.lastTrace = trace;
+
+        // Method-scope so the abort/sentinel/error paths below (and the catch)
+        // can tell whether a streaming row was opened that must be discarded /
+        // resolved (set true on the first coding/non-coding chunk emitted).
+        let openedStreamRow = false;
 
         try {
             if (!this.whatToAnswerLLM) {
@@ -559,6 +630,10 @@ export class IntelligenceEngine extends EventEmitter {
                     this.setMode('idle');
                     return answer || "Could you repeat that? I want to make sure I address your question properly.";
                 }
+                if (answer && IntelligenceEngine.isNonAnswerSentinel(answer)) {
+                    this.setMode('idle');
+                    return null;
+                }
                 if (answer) {
                     this.session.addAssistantMessage(answer);
                     this.emit('suggested_answer', answer, question || 'inferred', confidence);
@@ -568,6 +643,7 @@ export class IntelligenceEngine extends EventEmitter {
             }
 
             const contextItems = this.session.getContext(180);
+            trace.mark('transcript_window_loaded', { turns: contextItems.length });
 
             // Inject latest interim transcript if available
             const lastInterim = this.session.getLastInterimInterviewer();
@@ -607,6 +683,14 @@ export class IntelligenceEngine extends EventEmitter {
                 preparedTranscript,
                 this.session.getAssistantResponseHistory().length
             );
+            trace.mark('intent_classified', { intent: intentResult.intent, confidence: intentResult.confidence });
+            const extractedQuestion = extractLatestQuestion(transcriptTurns);
+            trace.mark('latest_question_extracted', {
+                questionType: extractedQuestion.questionType,
+                detectedSpeaker: extractedQuestion.detectedSpeaker,
+                isFollowUp: extractedQuestion.isFollowUp,
+                confidence: extractedQuestion.confidence,
+            });
 
             // ── Candidate-profile grounding for interviewer questions ─────────
             // The "What to answer?" path streams with ignoreKnowledgeMode=true, so
@@ -626,7 +710,7 @@ export class IntelligenceEngine extends EventEmitter {
             try {
                 const orchestrator = this.llmHelper.getKnowledgeOrchestrator?.();
                 if (orchestrator?.isKnowledgeMode?.()) {
-                    const extracted = extractLatestQuestion(transcriptTurns);
+                    const extracted = extractedQuestion;
                     // Only ground question types that resolve to the candidate's
                     // own plain facts. jd_alignment/company questions are
                     // deliberately EXCLUDED: they classify as COMPANY_RESEARCH in
@@ -654,7 +738,20 @@ export class IntelligenceEngine extends EventEmitter {
                         if (extracted.isFollowUp && extracted.followUpTarget) {
                             lookupQ = `Tell me about my ${extracted.followUpTarget}`;
                         }
-                        const knowledge = await orchestrator.processQuestion(lookupQ);
+                        // Bound grounding by a strict budget so a slow orchestrator
+                        // call (vector retrieval / cold embedder) can never stall the
+                        // live answer. On timeout we proceed with no candidateProfile
+                        // and flag degraded_context (REPORT §21 L2 / Phase 4).
+                        const GROUNDING_BUDGET_MS = 2000;
+                        const groundStart = Date.now();
+                        const { value: knowledge, timedOut: groundingTimedOut } =
+                            await withTimeout(orchestrator.processQuestion(lookupQ), GROUNDING_BUDGET_MS, null);
+                        if (groundingTimedOut) {
+                            trace.mark('degraded_context', { reason: 'grounding_timeout', budgetMs: GROUNDING_BUDGET_MS });
+                            console.warn(`[IntelligenceEngine] Profile grounding exceeded ${GROUNDING_BUDGET_MS}ms — proceeding without it`);
+                        } else {
+                            trace.mark('context_build_completed', { groundingMs: Date.now() - groundStart, grounded: Boolean(knowledge) });
+                        }
                         // factualRecall is the orchestrator's OWN signal that this
                         // result is the candidate's plain facts (identity/projects/
                         // skills/experience) and NOT the premium coaching layer. It
@@ -705,6 +802,31 @@ export class IntelligenceEngine extends EventEmitter {
                 console.warn('[IntelligenceEngine] Profile grounding skipped:', groundErr?.message);
             }
 
+            const answerPlan = planAnswer({
+                question: question || extractedQuestion.latestQuestion || lastInterviewerTurn,
+                source: question ? 'manual_input' : 'what_to_answer',
+                speakerPerspective: extractedQuestion.detectedSpeaker === 'interviewer' ? 'interviewer' : 'user',
+                extractedQuestion,
+                intentResult,
+                hasCandidateProfile: Boolean(candidateProfile),
+            });
+            trace.mark('answer_type_selected', {
+                answerType: answerPlan.answerType,
+                outputPerspective: answerPlan.outputPerspective,
+                isCoding: isCodingAnswerType(answerPlan.answerType),
+                forbiddenLayers: answerPlan.forbiddenContextLayers.length,
+            });
+
+            // Deterministic context route (Phase 6): turn the plan's required/
+            // forbidden layers into an explicit, auditable include/exclude route
+            // and surface it in telemetry. summarizeContextRoute returns LAYER
+            // NAMES + counts only — never raw content — so this is PII-safe. The
+            // route is the single observable record of which context layers this
+            // answer is allowed to see (isLayerAllowed enforces the same rules at
+            // the prompt builders; this makes the decision visible end-to-end).
+            const contextRoute = buildContextRoute(answerPlan);
+            trace.mark('context_selected', summarizeContextRoute(contextRoute));
+
             const screenContext = options?.screenContext;
             console.log('[IntelligenceEngine] Temporal RAG', {
                 previousResponses: temporalContext.previousResponses.length,
@@ -717,10 +839,49 @@ export class IntelligenceEngine extends EventEmitter {
 
             const generationId = ++this.currentGenerationId;
             let fullAnswer = "";
+
+            // ── CODING SCAFFOLD GATE (REPORT hypothesis C1 / Phase 8) ──────────
+            // For structured answer types (coding/DSA/system-design/debugging)
+            // the UI must NEVER show a raw code-first stream. So we:
+            //   1. emit a deterministic six-section scaffold IMMEDIATELY (the
+            //      user sees correct structure in <500ms), and
+            //   2. BUFFER the model's raw tokens instead of streaming them live,
+            //      then validate→repair and emit the final structured markdown
+            //      ONCE (which replaces the scaffold via finalizeStreamingByIntent).
+            // STREAM LIVE for every answer type — coding included. Coding/DSA use
+            // a CodingStreamGate that holds tokens ONLY until the first "## "
+            // heading is confirmed (proving the answer is not code-first), then
+            // streams every subsequent token live. This restores the real-time
+            // feel (first-useful-token ≈ provider first-token, not full-generation)
+            // while keeping the never-show-code-first guarantee. validate→repair
+            // below is a SAFETY NET that only replaces the row if the streamed
+            // answer actually violated the contract. (Fixes the buffering
+            // regression where coding answers froze for the whole generation.)
+            const isCoding = !isSpeculative && isCodingAnswerType(answerPlan.answerType);
+            const codingGate = isCoding ? new CodingStreamGate() : null;
+            // Suppress the hidden <verification_spec> from the live stream so it
+            // never flashes in the UI (it trails the six sections). The raw
+            // answer kept for verification still has it.
+            const { StreamingSpecStripper } = isCoding ? require('./llm/codingContract') as typeof import('./llm/codingContract') : { StreamingSpecStripper: null as any };
+            const specStripper: import('./llm/codingContract').StreamingSpecStripper | null = isCoding ? new StreamingSpecStripper() : null;
+
+            trace.mark('provider_request_started', { answerType: answerPlan.answerType });
             // RC-03 fix: hold a reference to the generator so we can call .return()
             // to properly terminate the network request when a new generation starts.
-            const stream = this.whatToAnswerLLM.generateStream(preparedTranscript, temporalContext, intentResult, imagePaths, screenContext, options?.promptInstruction, options?.activeSkill, candidateProfile || undefined);
+            const stream = this.whatToAnswerLLM.generateStream(preparedTranscript, temporalContext, intentResult, imagePaths, screenContext, options?.promptInstruction, options?.activeSkill, candidateProfile || undefined, answerPlan);
             let streamAborted = false;
+            let emittedStreamingToken = false;
+            let streamingTokenBuffer = '';
+            const STREAMING_SAFE_PREFIX_CHARS = 160;
+
+            const emitChunk = (chunk: string) => {
+                emittedStreamingToken = true;
+                openedStreamRow = true;
+                if (trace.markFirstUseful({ via: 'stream', answerType: answerPlan.answerType })) {
+                    trace.mark('first_visible_text', { via: 'stream' });
+                }
+                this.emit('suggested_answer_token', chunk, question || 'inferred', confidence);
+            };
 
             for await (const token of stream) {
                 if (this.currentGenerationId !== generationId) {
@@ -732,10 +893,33 @@ export class IntelligenceEngine extends EventEmitter {
                     break;
                 }
                 fullAnswer += token;
+                if (isSpeculative) continue; // speculative prefetch never streams to UI
+                if (codingGate) {
+                    // Coding: gate holds until "## " is confirmed, then streams live.
+                    // Gate output then passes through the spec-stripper so the
+                    // trailing <verification_spec> never reaches the UI.
+                    const gated = codingGate.push(token);
+                    if (gated) {
+                        const visible = specStripper ? specStripper.push(gated) : gated;
+                        if (visible) emitChunk(visible);
+                    }
+                } else {
+                    // Non-coding: 160-char safe-prefix buffer (unchanged behavior).
+                    streamingTokenBuffer += token;
+                    if (streamingTokenBuffer.length >= STREAMING_SAFE_PREFIX_CHARS
+                        && !IntelligenceEngine.isNonAnswerSentinel(streamingTokenBuffer)) {
+                        emitChunk(streamingTokenBuffer);
+                        streamingTokenBuffer = '';
+                    }
+                }
             }
+            trace.mark('response_completed', { chars: fullAnswer.length, coding: isCoding });
 
             if (streamAborted) {
-                // Aborted mid-stream — don't update session or emit final event
+                // Aborted mid-stream — don't update session or emit final event.
+                // If we opened a streaming row, discard it so the superseding
+                // generation's row is the only one (no orphaned partial answer).
+                if (openedStreamRow) this.emit('suggested_answer_discard', 'superseded');
                 if (isSpeculative) {
                     this.speculativeText = null;
                     this.speculativeTextExpiry = Infinity;
@@ -751,7 +935,28 @@ export class IntelligenceEngine extends EventEmitter {
                 fullAnswer = "Could you repeat that? I want to make sure I address your question properly.";
             }
 
+            trace.mark('validation_started', { answerType: answerPlan.answerType });
+            const structureValidation = validateAnswerStructure(answerPlan.answerType, fullAnswer);
+            if (!structureValidation.ok && structureValidation.repaired) {
+                console.warn('[IntelligenceEngine] Repaired answer structure', {
+                    answerType: answerPlan.answerType,
+                    missingSections: structureValidation.missingSections,
+                    hasCodeBlock: structureValidation.hasCodeBlock,
+                    hasComplexity: structureValidation.hasComplexity,
+                });
+                fullAnswer = structureValidation.repaired;
+                trace.mark('validation_failed', { missingSections: structureValidation.missingSections.length });
+                trace.mark('repair_used', { answerType: answerPlan.answerType });
+            } else {
+                trace.mark('validation_completed', { ok: structureValidation.ok });
+            }
+
             if (IntelligenceEngine.isNonAnswerSentinel(fullAnswer)) {
+                // Declined as a non-answer. Discard any open streaming row so it
+                // isn't left as an orphaned partial on the auto path (the manual
+                // path also resolves null via the renderer, but the discard is
+                // idempotent and covers the auto-trigger path too).
+                if (openedStreamRow) this.emit('suggested_answer_discard', 'no_answer');
                 if (isSpeculative) {
                     this.speculativeText = null;
                     this.speculativeTextExpiry = Infinity;
@@ -768,7 +973,39 @@ export class IntelligenceEngine extends EventEmitter {
                 return fullAnswer;
             }
 
-            this.emit('suggested_answer_token', fullAnswer, question || 'inferred', confidence);
+            // Keep the RAW answer (with the hidden <verification_spec>) for
+            // background verification, but STRIP the spec from everything that is
+            // displayed / persisted so it can never reach the UI. The final
+            // 'suggested_answer' replaces the streamed row by id, so even if the
+            // spec briefly streamed at the very end it's overwritten by this
+            // stripped text.
+            const rawAnswerForVerify = fullAnswer;
+            if (isCoding) {
+                const { stripVerificationSpec } = await import('./llm/codingContract');
+                fullAnswer = stripVerificationSpec(fullAnswer);
+            }
+
+            // Token-emit reconciliation — flush whatever is still buffered so the
+            // streamed row holds the complete pre-validation text:
+            //  - Coding: flush the gate's tail (covers a short answer that never
+            //    crossed the "## " heading gate).
+            //  - Non-coding: flush the trailing prefix; if we never crossed the
+            //    160-char threshold, emit the whole answer once.
+            // The final 'suggested_answer' below then REPLACES the row by id with
+            // the validated/repaired text — a visual no-op when unchanged, a clean
+            // in-place swap when repair fixed a contract violation (safety net).
+            if (codingGate) {
+                const gatedTail = codingGate.finish();
+                const tail = specStripper ? (specStripper.push(gatedTail) + specStripper.finish()) : gatedTail;
+                if (tail) this.emit('suggested_answer_token', tail, question || 'inferred', confidence);
+            } else {
+                if (emittedStreamingToken && streamingTokenBuffer.trim()) {
+                    this.emit('suggested_answer_token', streamingTokenBuffer, question || 'inferred', confidence);
+                }
+                if (!emittedStreamingToken) {
+                    this.emit('suggested_answer_token', fullAnswer, question || 'inferred', confidence);
+                }
+            }
             this.session.addAssistantMessage(fullAnswer);
 
             this.session.pushUsage({
@@ -780,14 +1017,101 @@ export class IntelligenceEngine extends EventEmitter {
 
             this.emit('suggested_answer', fullAnswer, question || 'What to Answer', confidence);
 
+            // VERIFIED CODE EXECUTION (background, strictly additive). For coding
+            // answers, run the code against test cases AFTER it's shown — never
+            // awaited, so the user sees the answer with zero added latency. On
+            // pass → 'code_verified' badge; on a re-verified fix → 'code_correction'
+            // new message. Fire-and-forget; failures never affect this return.
+            if (isCoding) {
+                void this.maybeVerifyCoding(rawAnswerForVerify, question || 'What to Answer', screenContext?.ocrText, trace, generationId);
+            }
+
+            trace.mark('ui_render_completed', { chars: fullAnswer.length });
+            trace.finish({ answerType: answerPlan.answerType, chars: fullAnswer.length });
             this.setMode('idle');
             return fullAnswer;
 
         } catch (error) {
             if (isSpeculative) { this.speculativeText = null; this.speculativeTextExpiry = Infinity; }
+            // If we opened a partial streaming row, discard it (the catch returns a
+            // non-null fallback, so the manual path's null-cleanup never runs and
+            // no 'suggested_answer' would otherwise fire) so the error row below is
+            // the only artifact, not an orphaned half-streamed answer.
+            if (openedStreamRow) this.emit('suggested_answer_discard', 'error');
             this.emit('error', error as Error, 'what_to_say');
             this.setMode('idle');
             return "Could you repeat that? I want to make sure I address your question properly.";
+        }
+    }
+
+    /**
+     * Background verification of a coding answer (REPORT: verified code execution).
+     * Runs the model's code against extracted test cases in a sandbox AFTER the
+     * answer is shown. NEVER awaited by the caller, NEVER throws — verification
+     * is strictly additive and must not affect the answer flow. Emits:
+     *   - 'code_verified' when the shown code passed (renderer shows a ✓ badge), or
+     *   - 'code_correction' when it failed and a re-verified fix was produced
+     *     (renderer posts a new corrected message).
+     * Telemetry milestones ride the existing PiLatencyTrace (metadata only).
+     */
+    private async maybeVerifyCoding(
+        shownAnswer: string,
+        question: string,
+        screenText: string | undefined,
+        trace: PiLatencyTrace,
+        generationId: number,
+    ): Promise<void> {
+        // Supersession guard: if the user fired a newer generation while this
+        // background verification ran, its result belongs to a now-abandoned
+        // answer. Bailing before each emit prevents badging/correcting the WRONG
+        // (newer) message — a false-"verified" on code we didn't actually verify.
+        const superseded = () => this.currentGenerationId !== generationId;
+        try {
+            const { verifyCodingAnswer } = await import('./llm/codeVerification/verifyCodingAnswer');
+            const outcome = await verifyCodingAnswer({
+                answer: shownAnswer,
+                question,
+                screenText,
+                // Correction call: regenerate a fixed answer via the same chat path.
+                // Bounded to ONE attempt inside verifyCodingAnswer.
+                correct: async (repairPrompt: string) => {
+                    let fixed = '';
+                    for await (const tok of this.llmHelper.streamChat(repairPrompt, undefined, undefined, undefined, true, true)) {
+                        fixed += tok;
+                    }
+                    return fixed;
+                },
+                onEvent: (name, props) => { try { trace.mark(name as any, props); } catch { /* telemetry never breaks verify */ } },
+            });
+
+            if (superseded()) return; // a newer answer took over — don't badge/correct the stale one
+
+            const v = outcome.verdict;
+            if (v.passed) {
+                this.emit('code_verified', {
+                    question,
+                    passed: v.passedCount,
+                    total: v.total,
+                    language: v.language || 'unknown',
+                });
+                return;
+            }
+            // Only surface a correction when we actually produced one. A skip
+            // (cloud language pending / no runtime / no tests) shows nothing —
+            // we never claim "verified" and never cry wolf on an unrun answer.
+            if (outcome.corrected) {
+                const { answer, note, reVerifiedPassed } = outcome.corrected;
+                // Strip the hidden spec before the corrected answer is displayed.
+                const { stripVerificationSpec } = await import('./llm/codingContract');
+                this.emit('code_correction', {
+                    question,
+                    answer: stripVerificationSpec(answer),
+                    note,
+                    reVerified: reVerifiedPassed,
+                });
+            }
+        } catch (e: any) {
+            console.warn('[IntelligenceEngine] coding verification skipped (non-fatal):', e?.message);
         }
     }
 
@@ -1077,8 +1401,25 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             }
 
-            const context = this.session.getFormattedContext(120);
-            const answer = await this.answerLLM.generate(question, context);
+            const answerPlan = planAnswer({
+                question,
+                source: 'manual_input',
+                speakerPerspective: 'user',
+            });
+            const context = isCodingAnswerType(answerPlan.answerType)
+                ? undefined
+                : this.session.getFormattedContext(120);
+            let answer = await this.answerLLM.generate(question, context, answerPlan);
+            const structureValidation = validateAnswerStructure(answerPlan.answerType, answer);
+            if (!structureValidation.ok && structureValidation.repaired) {
+                console.warn('[IntelligenceEngine] Repaired manual answer structure', {
+                    answerType: answerPlan.answerType,
+                    missingSections: structureValidation.missingSections,
+                    hasCodeBlock: structureValidation.hasCodeBlock,
+                    hasComplexity: structureValidation.hasComplexity,
+                });
+                answer = structureValidation.repaired;
+            }
 
             if (answer) {
                 this.session.addAssistantMessage(answer);

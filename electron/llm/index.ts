@@ -10,7 +10,7 @@ export { FollowUpLLM } from "./FollowUpLLM";
 export { FollowUpQuestionsLLM } from "./FollowUpQuestionsLLM";
 export { RecapLLM } from "./RecapLLM";
 export { WhatToAnswerLLM } from "./WhatToAnswerLLM";
-export { clampResponse, validateResponse } from "./postProcessor";
+export { clampResponse, validateResponse, reduceDashes, reduceDashesInChunk, StreamingDashReducer } from "./postProcessor";
 export {
     cleanTranscript,
     sparsifyTranscript,
@@ -33,6 +33,25 @@ export {
 export type { ConversationIntent, IntentResult } from "./IntentClassifier";
 export { planNextAssistantAction } from "./PlannerDecision";
 export type { PlannerDecision, PlannerDecisionKind, PlannerInput } from "./PlannerDecision";
+export { planAnswer, formatAnswerPlanForPrompt, isCodingAnswerType, shouldScaffold } from "./AnswerPlanner";
+export type { AnswerPlan, AnswerSource, AnswerType, ContextLayer, OutputPerspective, SpeakerPerspective } from "./AnswerPlanner";
+export { renderCodingAnswerMarkdown, repairCodingAnswer, repairCodingMarkdown, validateAnswerStructure, validateCodingMarkdown, buildCodingScaffold } from "./AnswerValidator";
+export type { AnswerValidationResult, CodingAnswer } from "./AnswerValidator";
+export { CODING_CONTRACT, CODING_CONTRACT_TINY, CODING_SECTIONS, CODING_SECTION_HEADINGS, CODING_VERIFICATION_INSTRUCTION, VERIFICATION_SPEC_RE, stripVerificationSpec, StreamingSpecStripper } from "./codingContract";
+export { verifyCodingAnswer } from "./codeVerification/verifyCodingAnswer";
+export type { VerifyCodingOptions, CorrectionFn } from "./codeVerification/verifyCodingAnswer";
+export type { Verdict, VerificationOutcome, VerifyLanguage, TestCase, RunResult, VerificationSpec } from "./codeVerification/types";
+export { extractVerificationSpec, parseProblemExamples, extractCodeBlock } from "./codeVerification/extractTests";
+export { buildContextRoute, isLayerAllowed, summarizeContextRoute } from "./contextRoute";
+export type { ContextRoute, ContextRouteLayer } from "./contextRoute";
+export {
+    classifyCustomContext,
+    splitCustomContextChunks,
+    selectCustomContextForAnswer,
+    buildScopedCustomContext,
+    summarizeCustomContextSelection,
+} from "./customContextClassifier";
+export type { CustomContextCategory, CustomContextChunk, ClassifiedCustomContext, CustomContextSelection } from "./customContextClassifier";
 export { routeLLMProviders } from "./ProviderRouter";
 export type { LLMProviderId, ProviderAttempt, ProviderAttemptStatus, ProviderAvailabilityState, ProviderCapability, ProviderModelState, ProviderRouteOptions, ProviderUnavailableReason } from "./ProviderRouter";
 export { MODE_CONFIGS } from "./types";

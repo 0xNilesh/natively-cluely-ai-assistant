@@ -16,7 +16,15 @@ import { SkillsManager } from './services/SkillsManager';
 import { TRIAL_SENTINEL_KEY } from './config/constants';
 import { AI_RESPONSE_LANGUAGES, RECOGNITION_LANGUAGES } from './config/languages';
 import { planAnswer, formatAnswerPlanForPrompt, isCodingAnswerType, validateAnswerStructure } from './llm';
+import { CodingStreamGate } from './llm/codingStreamGate';
+import { PiLatencyTrace } from './services/telemetry/PiLatencyTracer';
 import { CHAT_MODE_PROMPT } from './llm/prompts';
+import {
+  isAssistantIdentityQuestion,
+  logManualProfileRoute,
+  profileFactsReady,
+  tryBuildManualProfileFastPathAnswer,
+} from './llm/manualProfileIntelligence';
 
 export function initializeIpcHandlers(appState: AppState): void {
   const safeHandle = (
@@ -106,6 +114,27 @@ export function initializeIpcHandlers(appState: AppState): void {
     } catch (err: any) {
       console.error('[IPC] test-release-fetch failed:', err);
       return { success: false, error: err.message };
+    }
+  });
+
+  // DEV-ONLY: thinking-budget sweep against the app's LIVE Gemini key (the .env
+  // key is billing-dead). Trigger from devtools:
+  //   await window.electronAPI.invoke?.('dev:thinking-budget-bench', { budgets:[0,128,512,1024,-1], repeats:1 })
+  // or via the exposed helper if present. Writes userData/thinking-budget-bench-results.json.
+  safeHandle('dev:thinking-budget-bench', async (_event, opts?: { budgets?: number[]; repeats?: number }) => {
+    try {
+      const llmHelper = appState.processingHelper?.getLLMHelper?.();
+      if (!llmHelper) return { ok: false, error: 'LLMHelper unavailable' };
+      const { runThinkingBudgetBench } = require('./services/dev/ThinkingBudgetBench');
+      const report = await runThinkingBudgetBench(llmHelper, {
+        budgets: opts?.budgets,
+        repeats: opts?.repeats,
+        log: (s: string) => console.log(s),
+      });
+      return { ok: true, summary: report.summary, path: require('electron').app.getPath('userData') + '/thinking-budget-bench-results.json' };
+    } catch (err: any) {
+      console.error('[IPC] dev:thinking-budget-bench failed:', err);
+      return { ok: false, error: String(err?.message || err) };
     }
   });
 
@@ -621,12 +650,85 @@ export function initializeIpcHandlers(appState: AppState): void {
 
         let fullResponse = '';
 
+        // Per-request latency trace (MEASURE_LATENCY=true prints a stage
+        // breakdown to the console so we can see exactly where the wall time
+        // goes: pre-work in streamChat → provider first token → stream).
+        const chatTrace = new PiLatencyTrace({ source: 'manual' });
+        chatTrace.mark('question_submitted');
+
         const answerPlan = planAnswer({
           question: message,
           source: 'manual_input',
           speakerPerspective: 'user',
         });
         const isCodingChat = isCodingAnswerType(answerPlan.answerType);
+        chatTrace.mark('answer_type_selected', { answerType: answerPlan.answerType, isCoding: isCodingChat });
+
+        // Manual Profile Intelligence preflight: simple profile facts must not fall
+        // through to generic CHAT_MODE_PROMPT, where the assistant identity can win
+        // over the loaded candidate identity. Structured resume/JD facts are ready
+        // before embeddings/AOT, so answer these deterministically with no provider.
+        if (!imagePaths?.length && !isCodingChat && !isAssistantIdentityQuestion(message)) {
+          try {
+            const orchestrator = llmHelper.getKnowledgeOrchestrator?.();
+            const activeResume = (orchestrator as any)?.activeResume?.structured_data ?? null;
+            const activeJD = (orchestrator as any)?.activeJD?.structured_data ?? null;
+            const fastPath = tryBuildManualProfileFastPathAnswer({
+              question: message,
+              profile: activeResume,
+              jobDescription: activeJD,
+              source: 'manual_input',
+            });
+            const routeLog = logManualProfileRoute({
+              source: 'manual_input',
+              question: message,
+              route: fastPath,
+              profileFactsReady: profileFactsReady(activeResume),
+            });
+            if (fastPath || routeLog.profileFactsReady) {
+              console.log('[ProfileIntelligence] manual route', routeLog);
+            }
+            if (fastPath) {
+              if (_chatStreamsBySender.get(senderId)?.streamId !== myStreamId) return null;
+              event.sender.send('gemini-stream-token', fastPath.answer);
+              event.sender.send('gemini-stream-done', { finalText: fastPath.answer });
+              try { PhoneMirrorService.getInstance().publishToken(String(myStreamId), fastPath.answer); } catch (_) { /* noop */ }
+              try { PhoneMirrorService.getInstance().publishDone(String(myStreamId), fastPath.answer); } catch (_) { /* noop */ }
+              intelligenceManager.addAssistantMessage(fastPath.answer);
+              intelligenceManager.logUsage('chat', message, fastPath.answer);
+              chatTrace.markFirstUseful({ via: 'profile_fast_path' });
+              chatTrace.mark('response_completed', { chars: fastPath.answer.length, deterministic: true });
+              chatTrace.finish({ chars: fastPath.answer.length });
+              return null;
+            }
+          } catch (profileRouteError: any) {
+            console.warn('[ProfileIntelligence] manual route preflight failed; falling back to generic chat:', profileRouteError?.message || profileRouteError);
+          }
+        }
+
+        if (!isCodingChat) {
+          try {
+            const orchestrator = llmHelper.getKnowledgeOrchestrator?.();
+            const activeResume = (orchestrator as any)?.activeResume?.structured_data ?? null;
+            const profileReady = profileFactsReady(activeResume);
+            const wantsProfileContext = answerPlan.requiredContextLayers.some((layer) =>
+              layer === 'stable_identity' || layer === 'resume' || layer === 'jd' || layer === 'negotiation'
+            );
+            if (wantsProfileContext || profileReady) {
+              console.log('[ProfileIntelligence] manual route', {
+                source: 'manual_input',
+                questionHash: crypto.createHash('sha256').update(message).digest('hex').slice(0, 12),
+                answerType: answerPlan.answerType,
+                selectedContextLayers: wantsProfileContext ? answerPlan.requiredContextLayers : [],
+                excludedContextLayers: answerPlan.forbiddenContextLayers,
+                profileFactsReady: profileReady,
+                usedDeterministicFastPath: false,
+                providerUsed: true,
+                promptContainsProfileContext: Boolean(profileReady && wantsProfileContext),
+              });
+            }
+          } catch { /* safe logging only */ }
+        }
 
         if (!context && autoContextSnapshot && !isCodingChat) {
           context = autoContextSnapshot;
@@ -654,6 +756,11 @@ export function initializeIpcHandlers(appState: AppState): void {
           // is superseded or explicitly cancelled via gemini-chat-stream-stop.
           // The signature accepts a final optional `abortSignal?: AbortSignal`
           // that streamChat extracts from its variadic args.
+          // NOTE: streamChat does its pre-stream work (knowledge intercept /
+          // processQuestion, cache create, provider connect) lazily on the first
+          // `for await` pull — so the gap between this mark and first_useful_token
+          // below is exactly the pre-work + provider TTFT we're hunting.
+          chatTrace.mark('provider_request_started', { ignoreKnowledgeMode: isCodingChat ? true : Boolean(options?.ignoreKnowledgeMode) });
           const stream = llmHelper.streamChat(
             message,
             imagePaths,
@@ -663,7 +770,32 @@ export function initializeIpcHandlers(appState: AppState): void {
             isCodingChat, // skipModeInjection; coding chat must not pull active-mode resume/JD/reference context
             [],    // extraDataScopes
             myController.signal,
+            // Coding gets a small reasoning budget (correctness); everything else
+            // streams with thinking off (fastest TTFT).
+            llmHelper.thinkingBudgetForAnswerType(isCodingChat),
           );
+
+          // Coding chat STREAMS LIVE through a gate that holds tokens only until
+          // the first "## " heading is confirmed (never code-first), then passes
+          // every token through. This fixes the regression where coding chat
+          // buffered the whole response and the user waited the full generation
+          // time with no visible progress. validate→repair below is a SAFETY NET:
+          // if repair changed the answer, we send the corrected final text on
+          // 'gemini-stream-done' so the renderer replaces the row in place.
+          const codingGate = isCodingChat ? new CodingStreamGate() : null;
+          // Suppress the trailing hidden <verification_spec> from the live stream.
+          const { StreamingSpecStripper } = require('./llm/codingContract') as typeof import('./llm/codingContract');
+          const chatSpecStripper = isCodingChat ? new StreamingSpecStripper() : null;
+          const sendChunk = (chunk: string) => {
+            const visible = chatSpecStripper ? chatSpecStripper.push(chunk) : chunk;
+            if (!visible) return;
+            event.sender.send('gemini-stream-token', visible);
+            try {
+              PhoneMirrorService.getInstance().publishToken(String(myStreamId), visible);
+            } catch (_) {
+              /* noop */
+            }
+          };
 
           for await (const token of stream) {
             // Bail if a newer stream has taken over (user triggered a new request)
@@ -674,18 +806,40 @@ export function initializeIpcHandlers(appState: AppState): void {
               return null;
             }
 
+            // First token back from the provider — the gap from
+            // provider_request_started is pre-work + provider TTFT (the real cost).
+            chatTrace.markFirstUseful({ via: codingGate ? 'gated' : 'stream' });
+
             fullResponse += token;
 
-            if (!isCodingChat) {
-              event.sender.send('gemini-stream-token', token);
-              try {
-                PhoneMirrorService.getInstance().publishToken(String(myStreamId), token);
-              } catch (_) {
-                /* noop */
-              }
+            if (codingGate) {
+              const out = codingGate.push(token);
+              if (out) sendChunk(out);
+            } else {
+              sendChunk(token);
             }
           }
 
+          // Flush any tokens still held by the gate (short answer that never
+          // crossed the "## " heading), so the streamed row holds the full text.
+          if (codingGate) {
+            const gatedTail = codingGate.finish();
+            const tail = chatSpecStripper ? (chatSpecStripper.push(gatedTail) + chatSpecStripper.finish()) : gatedTail;
+            if (tail) {
+              event.sender.send('gemini-stream-token', tail);
+              try { PhoneMirrorService.getInstance().publishToken(String(myStreamId), tail); } catch (_) { /* noop */ }
+            }
+          }
+
+          // Keep the RAW response (with the hidden <verification_spec>) for
+          // background verification; strip it from everything displayed/persisted.
+          const rawResponseForVerify = fullResponse;
+          const { stripVerificationSpec: _stripSpec } = require('./llm/codingContract') as typeof import('./llm/codingContract');
+          if (isCodingChat) fullResponse = _stripSpec(fullResponse);
+
+          // Safety net: validate the STREAMED coding answer; only when repair
+          // actually changes it do we hand the renderer a corrective finalText.
+          let finalText: string | undefined;
           if (isCodingChat) {
             const structureValidation = validateAnswerStructure(answerPlan.answerType, fullResponse);
             if (!structureValidation.ok && structureValidation.repaired) {
@@ -695,21 +849,22 @@ export function initializeIpcHandlers(appState: AppState): void {
                 hasCodeBlock: structureValidation.hasCodeBlock,
                 hasComplexity: structureValidation.hasComplexity,
               });
+              if (structureValidation.repaired !== fullResponse) {
+                finalText = structureValidation.repaired;
+              }
               fullResponse = structureValidation.repaired;
             }
           }
 
           // Final check: only send done if we are still the active stream
           if (_chatStreamsBySender.get(senderId)?.streamId === myStreamId) {
-            if (isCodingChat && fullResponse.trim().length > 0) {
-              event.sender.send('gemini-stream-token', fullResponse);
-              try {
-                PhoneMirrorService.getInstance().publishToken(String(myStreamId), fullResponse);
-              } catch (_) {
-                /* noop */
-              }
-            }
-            event.sender.send('gemini-stream-done');
+            // finalText is set ONLY when repair changed the streamed answer — the
+            // renderer replaces the streamed row in place (no double-render). When
+            // the streamed answer was already valid, finalText is undefined and the
+            // already-streamed tokens stand.
+            event.sender.send('gemini-stream-done', finalText ? { finalText } : undefined);
+            chatTrace.mark('response_completed', { chars: fullResponse.length, repaired: Boolean(finalText) });
+            chatTrace.finish({ chars: fullResponse.length });
             try {
               PhoneMirrorService.getInstance().publishDone(String(myStreamId), fullResponse);
             } catch (_) {
@@ -721,6 +876,51 @@ export function initializeIpcHandlers(appState: AppState): void {
               intelligenceManager.addAssistantMessage(fullResponse);
               // Log Usage for streaming chat
               intelligenceManager.logUsage('chat', message, fullResponse);
+            }
+
+            // VERIFIED CODE EXECUTION (background, strictly additive). For coding
+            // chat answers, run the code against test cases AFTER it's shown —
+            // never awaited, so first answer has zero added latency. Emits a ✓
+            // badge on pass or a corrected message on a re-verified fix.
+            if (isCodingChat && fullResponse.trim().length > 0) {
+              // Verify against the RAW response (keeps the spec); if repair changed
+              // the answer, prefer the repaired (already spec-free) text.
+              const verifyTarget = finalText || rawResponseForVerify;
+              void (async () => {
+                try {
+                  const { verifyCodingAnswer } = await import('./llm/codeVerification/verifyCodingAnswer');
+                  const { stripVerificationSpec } = await import('./llm/codingContract');
+                  const outcome = await verifyCodingAnswer({
+                    answer: verifyTarget,
+                    question: message,
+                    correct: async (repairPrompt: string) => {
+                      let fixed = '';
+                      for await (const tok of llmHelper.streamChat(repairPrompt, undefined, undefined, undefined, true, true)) {
+                        fixed += tok;
+                      }
+                      return fixed;
+                    },
+                  });
+                  if (_chatStreamsBySender.get(senderId)?.streamId !== myStreamId) return; // superseded
+                  if (outcome.verdict.passed) {
+                    event.sender.send('intelligence-code-verified', {
+                      question: message,
+                      passed: outcome.verdict.passedCount,
+                      total: outcome.verdict.total,
+                      language: outcome.verdict.language || 'unknown',
+                    });
+                  } else if (outcome.corrected) {
+                    event.sender.send('intelligence-code-correction', {
+                      question: message,
+                      answer: stripVerificationSpec(outcome.corrected.answer),
+                      note: outcome.corrected.note,
+                      reVerified: outcome.corrected.reVerifiedPassed,
+                    });
+                  }
+                } catch (verifyErr: any) {
+                  console.warn('[IPC] chat coding verification skipped (non-fatal):', verifyErr?.message);
+                }
+              })();
             }
           }
         } catch (streamError: any) {
@@ -4194,6 +4394,17 @@ export function initializeIpcHandlers(appState: AppState): void {
       }
       const { DocType } = require('../premium/electron/knowledge/types');
       const result = await orchestrator.ingestDocument(resolvedPath, DocType.RESUME);
+      if (result?.success) {
+        const activeResume = (orchestrator as any)?.activeResume?.structured_data ?? null;
+        const factsReady = profileFactsReady(activeResume);
+        console.log('[ProfileIntelligence] profileFactsReady', {
+          profileFactsReady: factsReady,
+          hasName: Boolean(activeResume?.identity?.name),
+          experienceCount: Array.isArray(activeResume?.experience) ? activeResume.experience.length : 0,
+          projectCount: Array.isArray(activeResume?.projects) ? activeResume.projects.length : 0,
+          skillsCount: Array.isArray(activeResume?.skills) ? activeResume.skills.length : 0,
+        });
+      }
       return result;
     } catch (error: any) {
       console.error('[IPC] profile:upload-resume error:', error);
@@ -4207,14 +4418,25 @@ export function initializeIpcHandlers(appState: AppState): void {
       if (!orchestrator) {
         return { hasProfile: false, profileMode: false };
       }
-      // Map new KnowledgeStatus back to legacy UI shape temporarily
+      // Map new KnowledgeStatus back to legacy UI shape temporarily, plus explicit
+      // readiness flags used by eval/UI polling. profileFactsReady is true as soon
+      // as structured resume extraction is saved; it does NOT wait for embeddings
+      // or the JD AOT pipeline.
       const status = orchestrator.getStatus();
+      const activeResume = (orchestrator as any)?.activeResume?.structured_data ?? null;
+      const activeJD = (orchestrator as any)?.activeJD?.structured_data ?? null;
       return {
         hasProfile: status.hasResume,
         profileMode: status.activeMode,
         name: status.resumeSummary?.name,
         role: status.resumeSummary?.role,
         totalExperienceYears: status.resumeSummary?.totalExperienceYears,
+        resume_structured_extraction_complete: Boolean(activeResume),
+        resume_profile_facts_ready: profileFactsReady(activeResume),
+        profileFactsReady: profileFactsReady(activeResume),
+        jd_structured_extraction_complete: Boolean(activeJD),
+        jdFactsReady: Boolean(activeJD),
+        aot_pipeline_running: Boolean((orchestrator as any)?.getAOTPipeline?.()?.isRunning?.()),
       };
     } catch (error: any) {
       return { hasProfile: false, profileMode: false };

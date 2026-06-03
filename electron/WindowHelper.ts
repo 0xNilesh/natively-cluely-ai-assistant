@@ -1,4 +1,5 @@
 import { app, BrowserWindow, Menu, screen } from 'electron';
+import fs from 'node:fs';
 import path from 'node:path';
 import { AppState } from './main';
 import { KeybindManager } from './services/KeybindManager';
@@ -13,6 +14,19 @@ console.log(
 
 // Force production mode if running as packaged app or inside app bundle
 const isDev = isEnvDev && !isPackaged;
+const overlayResizeTracePath = '/tmp/natively-overlay-resize-trace.log';
+
+function traceOverlayResize(event: string, data: Record<string, unknown>): void {
+  if (!isDev) return;
+  try {
+    fs.appendFileSync(
+      overlayResizeTracePath,
+      `${new Date().toISOString()} ${event} ${JSON.stringify(data)}\n`,
+    );
+  } catch {
+    // Dev-only diagnostics must never affect overlay behavior.
+  }
+}
 
 const startUrl = isDev
   ? 'http://localhost:5180'
@@ -175,6 +189,15 @@ export class WindowHelper {
     const maxAllowedHeight = Math.floor(workArea.height * 0.9);
     const newWidth = Math.min(Math.max(width, 300), maxAllowedWidth);
     const newHeight = Math.min(Math.max(height, 1), maxAllowedHeight);
+    traceOverlayResize('setOverlayDimensionsCentered:request', {
+      requested: { width, height },
+      currentBounds,
+      currentContentSize,
+      workArea,
+      maxAllowed: { width: maxAllowedWidth, height: maxAllowedHeight },
+      computed: { width: newWidth, height: newHeight },
+      clampedHeight: newHeight !== height,
+    });
 
     // Compute X so the content's horizontal center stays put across the resize.
     const widthDelta = newWidth - currentContentSize[0];
@@ -191,6 +214,12 @@ export class WindowHelper {
       newX === currentBounds.x &&
       newY === currentBounds.y
     ) {
+      traceOverlayResize('setOverlayDimensionsCentered:noop', {
+        requested: { width, height },
+        currentBounds,
+        currentContentSize,
+        computed: { x: newX, y: newY, width: newWidth, height: newHeight },
+      });
       return;
     }
 
@@ -199,6 +228,11 @@ export class WindowHelper {
     // is what causes the shell to visibly slide and snap during code-expansion.
     this.overlayWindow.setBounds({ x: newX, y: newY, width: newWidth, height: newHeight });
     this.overlayBounds = this.overlayWindow.getBounds();
+    traceOverlayResize('setOverlayDimensionsCentered:applied', {
+      requested: { width, height },
+      appliedBounds: this.overlayBounds,
+      contentSizeAfter: this.overlayWindow.getContentSize(),
+    });
   }
 
   public createWindow(): void {
