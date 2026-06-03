@@ -79,15 +79,17 @@ export interface PlanAnswerInput {
 // planner's template can never drift from the prompts/validator. Adds the two
 // answer-contract rules that are planner-specific (no context leakage, no
 // Natively mention) on top of the shared section spec.
+// NOTE: the hidden <verification_spec> instruction is appended at PROMPT-BUILD
+// time (formatAnswerPlanForPrompt) only when code verification is enabled, so a
+// disabled kill-switch also stops the model wasting tokens emitting the spec.
+// Keeping it OUT of this base template also keeps AnswerPlanner pure/testable.
 const CODING_TEMPLATE = `You are generating a live coding interview answer.
 
 ${CODING_CONTRACT}
 
 Additional rules:
 - Do not include resume, JD, salary, negotiation, or unrelated profile context unless explicitly asked.
-- Do not mention Natively.
-
-${CODING_VERIFICATION_INSTRUCTION}`;
+- Do not mention Natively.`;
 
 const BEHAVIORAL_TEMPLATE = `Use exactly these sections:
 
@@ -421,7 +423,18 @@ export const shouldScaffold = (answerType: AnswerType): boolean =>
   || answerType === 'system_design_answer'
   || answerType === 'debugging_question_answer';
 
-export const formatAnswerPlanForPrompt = (plan: AnswerPlan): string => `<answer_contract>
+/**
+ * Render the plan as the prompt's answer-contract block. When
+ * `includeVerificationSpec` is true (code verification enabled) AND this is a
+ * coding/DSA answer, the hidden <verification_spec> instruction is appended so
+ * the model emits test cases; when false (kill-switch off), it's omitted so no
+ * tokens are wasted on a spec nothing will run.
+ */
+export const formatAnswerPlanForPrompt = (plan: AnswerPlan, includeVerificationSpec = false): string => {
+  const verificationBlock = (includeVerificationSpec && isCodingAnswerType(plan.answerType))
+    ? `\n\n${CODING_VERIFICATION_INSTRUCTION}`
+    : '';
+  return `<answer_contract>
 answerType: ${plan.answerType}
 source: ${plan.source}
 speakerPerspective: ${plan.speakerPerspective}
@@ -431,5 +444,6 @@ forbiddenContextLayers: ${plan.forbiddenContextLayers.join(', ') || 'none'}
 maxInitialLatencyMs: ${plan.maxInitialLatencyMs}
 
 STRICT RESPONSE TEMPLATE:
-${plan.responseTemplate}
+${plan.responseTemplate}${verificationBlock}
 </answer_contract>`;
+};

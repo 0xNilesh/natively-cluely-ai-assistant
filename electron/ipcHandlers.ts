@@ -16,6 +16,7 @@ import { SkillsManager } from './services/SkillsManager';
 import { TRIAL_SENTINEL_KEY } from './config/constants';
 import { AI_RESPONSE_LANGUAGES, RECOGNITION_LANGUAGES } from './config/languages';
 import { planAnswer, formatAnswerPlanForPrompt, isCodingAnswerType, validateAnswerStructure } from './llm';
+import { isCodeVerificationEnabled } from './llm/codeVerification/verificationEnabled';
 import { CodingStreamGate } from './llm/codingStreamGate';
 import { PiLatencyTrace } from './services/telemetry/PiLatencyTracer';
 import { CHAT_MODE_PROMPT } from './llm/prompts';
@@ -736,7 +737,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             `[IPC] Auto-injected 100s context for gemini-chat-stream (${context.length} chars)`,
           );
         } else if (isCodingChat) {
-          context = formatAnswerPlanForPrompt(answerPlan);
+          context = formatAnswerPlanForPrompt(answerPlan, isCodeVerificationEnabled());
           console.log('[IPC] Coding chat detected; excluding rolling resume/JD/transcript context and enforcing answer contract', {
             answerType: answerPlan.answerType,
           });
@@ -882,7 +883,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             // chat answers, run the code against test cases AFTER it's shown —
             // never awaited, so first answer has zero added latency. Emits a ✓
             // badge on pass or a corrected message on a re-verified fix.
-            if (isCodingChat && fullResponse.trim().length > 0) {
+            if (isCodingChat && fullResponse.trim().length > 0 && isCodeVerificationEnabled()) {
               // Verify against the RAW response (keeps the spec); if repair changed
               // the answer, prefer the repaired (already spec-free) text.
               const verifyTarget = finalText || rawResponseForVerify;

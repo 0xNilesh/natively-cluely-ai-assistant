@@ -14,6 +14,7 @@ import {
     buildContextRoute, summarizeContextRoute
 } from './llm';
 import { CodingStreamGate } from './llm/codingStreamGate';
+import { isCodeVerificationEnabled } from './llm/codeVerification/verificationEnabled';
 import { DynamicActionEngine } from './services/dynamic-actions/DynamicActionEngine';
 import { DynamicAction } from './services/dynamic-actions/DynamicAction';
 import { ScreenContext } from './services/screen/ScreenContextService';
@@ -1022,7 +1023,7 @@ export class IntelligenceEngine extends EventEmitter {
             // awaited, so the user sees the answer with zero added latency. On
             // pass → 'code_verified' badge; on a re-verified fix → 'code_correction'
             // new message. Fire-and-forget; failures never affect this return.
-            if (isCoding) {
+            if (isCoding && isCodeVerificationEnabled()) {
                 void this.maybeVerifyCoding(rawAnswerForVerify, question || 'What to Answer', screenContext?.ocrText, trace, generationId);
             }
 

@@ -50,6 +50,10 @@ export interface AppSettings {
         // allowed; only the cloud path consults this (local py/js never sends).
         code_execution?: boolean;
     };
+    // Kill-switch for verified code execution (running model code against test
+    // cases in a sandbox after the answer). Default ON; set false to disable at
+    // runtime without a redeploy. Also overridable by env NATIVELY_CODE_VERIFY=off.
+    codeVerificationEnabled?: boolean;
     // Screen-understanding routing — VISION-ONLY architecture (legacy OCR removed from runtime).
     //   vision_first   — Default. Send screenshot to the first available vision-capable provider; cascade through fallback chain on failure.
     //   vision_only    — Stricter: require vision-capable provider. No text-only provider fallback. No OCR fallback.

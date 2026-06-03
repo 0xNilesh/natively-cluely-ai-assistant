@@ -11,6 +11,7 @@ import { formatAnswerPlanForPrompt, isCodingAnswerType } from "./AnswerPlanner";
 import type { AnswerPlan, AnswerType } from "./AnswerPlanner";
 import { isLayerAllowed } from "./contextRoute";
 import type { ProviderDataScope } from "./ProviderRouter";
+import { isCodeVerificationEnabled } from "./codeVerification/verificationEnabled";
 
 // Wall-clock budget for the pre-stream mode-context HYBRID retrieval await.
 // The hybrid retriever embeds the live query, and the embedder's own hard
@@ -141,7 +142,7 @@ ANSWER SHAPE: ${intentResult.answerShape}
 </intent_and_shape>`);
             }
             if (answerPlan) {
-                intentContextParts.push(formatAnswerPlanForPrompt(answerPlan));
+                intentContextParts.push(formatAnswerPlanForPrompt(answerPlan, isCodeVerificationEnabled()));
             }
             if (instructionContext) {
                 intentContextParts.push(instructionContext);
