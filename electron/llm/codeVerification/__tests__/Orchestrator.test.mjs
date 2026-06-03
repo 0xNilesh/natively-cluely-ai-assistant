@@ -99,6 +99,32 @@ describe('verifyCodingAnswer — skips (never throws, never false-positive)', ()
     assert.equal(out.verdict.skipReason, 'unsupported_language');
     assert.equal(out.verdict.language, 'c');
   });
+  // REGRESSION: an UNKNOWN language declared in the spec (rust/kotlin/php/…) must
+  // SKIP cleanly — NOT fall through to inference and run foreign code in the wrong
+  // interpreter (the spec used to default language to 'python', silently running
+  // e.g. Rust as Python). Must never execute a subprocess, never a false verdict.
+  for (const [label, lang, code] of [
+    ['rust', 'rust', 'fn f(a:i32)->i32{a}'],
+    ['kotlin', 'kotlin', 'fun f(a:Int)=a'],
+    ['ruby', 'ruby', 'def f(a)=a'],
+    ['php', 'php', 'function f($a){return $a;}'],
+    ['csharp', 'csharp', 'int F(int a)=>a;'],
+  ]) {
+    test(`unsupported declared language (${label}) → skipped(unsupported), never executed`, async () => {
+      let executed = false;
+      const out = await verifyCodingAnswer({
+        answer: `\`\`\`${lang}\n${code}\n\`\`\`\n<verification_spec>{"entry":"f","language":"${lang}","cases":[{"input":[1],"expected":1}]}</verification_spec>`,
+        languageAvailable: async () => true,
+        runCase: async () => { executed = true; return { case: { input: [1], expected: 1, source: 'model' }, status: 'pass', stdout: '', actual: 1, ms: 0 }; },
+        onEvent: (n) => { if (n === 'code_executed') executed = true; },
+      });
+      assert.equal(out.verdict.passed, false, 'must never falsely pass');
+      assert.equal(out.verdict.skipped, true, 'must be a clean skip');
+      assert.equal(out.verdict.skipReason, 'unsupported_language');
+      assert.equal(executed, false, 'must NOT run a subprocess for an unsupported language');
+    });
+  }
+
   test('java with NO toolchain → skipped(runtime_unavailable), never run, never false verdict', async () => {
     const out = await verifyCodingAnswer({
       answer: '```java\nclass Solution { int f(int x){return x;} }\n```',

@@ -58,6 +58,10 @@ export interface SqlSpec {
 export interface VerificationSpec {
   entry: string;            // function/method name to call, e.g. "twoSum"
   language: VerifyLanguage;
+  /** The RAW language string the model declared, before normalization (e.g.
+   * "rust", "kotlin"). Lets the orchestrator reject an unsupported language
+   * instead of coercing it to a default. '' / undefined when none declared. */
+  declaredLanguageRaw?: string;
   cases: TestCase[];
   /** OPTIONAL per-argument structure hints (Python/JS linked-list/tree problems).
    * Length should match the arg count; missing/extra entries default to 'value'.

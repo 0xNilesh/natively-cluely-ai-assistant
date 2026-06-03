@@ -10,6 +10,10 @@ import type { TestCase, VerifyLanguage, VerificationSpec } from './types';
 export interface ExtractedCode {
   code: string;
   language: VerifyLanguage | null;
+  /** The RAW fenced-block language tag as written (e.g. "rust", "kotlin"),
+   * BEFORE normalization — lets the caller distinguish "declared a language we
+   * don't support" (skip) from "no tag at all" (infer). '' when no tag. */
+  declaredTag: string;
   /** Raw fenced block including the ``` fences (for stash-and-strip). */
   block: string | null;
 }
@@ -53,10 +57,11 @@ export const inferLanguageFromText = (text: string): VerifyLanguage | null => {
 /** Extract the FIRST fenced code block (language tag + body + raw block). */
 export const extractCodeBlock = (answer: string): ExtractedCode => {
   const match = answer.match(/```([a-zA-Z0-9+#.\-]*)\s*\n([\s\S]+?)```/);
-  if (!match) return { code: '', language: null, block: null };
+  if (!match) return { code: '', language: null, declaredTag: '', block: null };
   return {
     code: (match[2] || '').trim(),
     language: normalizeLanguage(match[1]),
+    declaredTag: (match[1] || '').trim(),
     block: match[0],
   };
 };
@@ -107,8 +112,14 @@ export const extractVerificationSpec = (answer: string): { spec: VerificationSpe
     const asHint = (h: any): 'value' | 'list' | 'tree' => (h === 'list' || h === 'tree') ? h : 'value';
     const argTypes = Array.isArray(parsed.argTypes) ? parsed.argTypes.map(asHint) : undefined;
     const retType = parsed.retType !== undefined ? asHint(parsed.retType) : undefined;
+    // Preserve the model's RAW declared language so the orchestrator can reject
+    // an unsupported one (rust/kotlin/php/…). We must NOT coerce an unknown
+    // language to 'python' — that silently ran foreign code in the wrong
+    // interpreter. `language` stays the normalized value when known (else
+    // 'python' as a last-resort default ONLY when nothing was declared).
+    const declaredLanguageRaw = typeof parsed.language === 'string' ? parsed.language.trim() : '';
     return {
-      spec: { entry: parsed.entry.trim(), language: (language ?? 'python'), cases, argTypes, retType },
+      spec: { entry: parsed.entry.trim(), language: (language ?? 'python'), declaredLanguageRaw, cases, argTypes, retType },
       block: m[0],
     };
   } catch {

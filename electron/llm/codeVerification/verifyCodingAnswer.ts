@@ -125,10 +125,24 @@ export const verifyCodingAnswer = async (opts: VerifyCodingOptions): Promise<Ver
       return { verdict: emptyVerdict('no_code') };
     }
 
-    // Resolve language: spec > fenced tag > inferred from question/answer.
+    // Resolve language. CRITICAL: if the model EXPLICITLY declared a language
+    // (in the spec or the fenced code tag) but it's not one we model
+    // (`normalizeLanguage` → null), that's an UNSUPPORTED language — skip
+    // immediately. We must NOT fall through to inferLanguageFromText, which would
+    // guess a wrong language (e.g. PHP→javascript, Ruby→python) and run foreign
+    // code in the wrong interpreter. Inference is only for when NO language was
+    // declared at all.
+    // Use the spec's RAW declared language (NOT spec.language, which defaults to
+    // 'python' for unknowns) and the fenced tag. Either being present-but-
+    // unrecognized means "unsupported" → skip without inferring.
+    const declaredRaw = (spec?.declaredLanguageRaw ?? '').trim() || (codeBlock.declaredTag ?? '').trim();
+    const declaredLang = declaredRaw ? normalizeLanguage(declaredRaw) : null;
+    if (declaredRaw && !declaredLang) {
+      emit('code_verify_skipped', { reason: 'unsupported_language', declared: declaredRaw.slice(0, 24) });
+      return { verdict: emptyVerdict('unsupported_language') };
+    }
     const language: VerifyLanguage | null =
-      (spec?.language && normalizeLanguage(spec.language)) ||
-      codeBlock.language ||
+      declaredLang ||
       inferLanguageFromText(`${opts.question || ''}\n${opts.answer}`);
     if (!language) {
       emit('code_verify_skipped', { reason: 'unknown_language' });
