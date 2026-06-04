@@ -415,7 +415,24 @@ export interface ElectronAPI {
 
   // Profile Engine API
   profileUploadResume: (filePath: string) => Promise<{ success: boolean; error?: string }>
-  profileGetStatus: () => Promise<{ hasProfile: boolean; profileMode: boolean; name?: string; role?: string; totalExperienceYears?: number }>
+  // D3 (PROFILE_INTELLIGENCE_RESEARCH_AND_REDESIGN.md §15 R3): the backend
+  // returns explicit readiness flags so the UI can poll "profile is USABLE"
+  // (resume_profile_facts_ready) rather than the coarser hasProfile. Facts are
+  // ready as soon as structured extraction is saved — NOT gated on embeddings/AOT.
+  profileGetStatus: () => Promise<{
+    hasProfile: boolean
+    profileMode: boolean
+    name?: string
+    role?: string
+    totalExperienceYears?: number
+    resume_structured_extraction_complete?: boolean
+    resume_profile_facts_ready?: boolean
+    profileFactsReady?: boolean
+    jd_structured_extraction_complete?: boolean
+    jdFactsReady?: boolean
+    aot_pipeline_running?: boolean
+    extractionMode?: 'llm' | 'heuristic' | 'none'
+  }>
   profileSetMode: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
   profileDelete: () => Promise<{ success: boolean; error?: string }>
   profileGetProfile: () => Promise<any>

@@ -43,6 +43,9 @@ import {
   customProviderIsLocal,
 } from "./llm/visionCapability"
 import { assertProviderDataScopes, getDeniedDataScopes, routeWithScopeFallback, ProviderRouter, type ProviderDataScope, type ProviderDataScopePolicy } from "./llm/ProviderRouter"
+// D1 (PROFILE_INTELLIGENCE_RESEARCH_AND_REDESIGN.md §15 R1): make the routing
+// decision authoritative at this central execution choke-point.
+import { profileInterceptAllowedByRoute, modeAnswerType, type StreamRouteOptions } from "./llm/streamContextPolicy"
 import type { TranscriptTurn } from "./llm/transcriptCleaner"
 import { deepVariableReplacer, getByPath, injectImageIntoMessages } from './utils/curlUtils';
 import curl2Json from "@bany/curl-to-json";
@@ -3513,7 +3516,12 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     // value (0 = off). Coding/DSA callers pass CODING_THINKING_BUDGET so hard
     // problems get a small amount of reasoning without the slow dynamic default.
     // Threaded only to the Gemini streamers (other providers ignore it).
-    thinkingBudget: number = INTERACTIVE_THINKING_BUDGET
+    thinkingBudget: number = INTERACTIVE_THINKING_BUDGET,
+    // D1/R1: optional routing decision from a caller that already computed an
+    // AnswerPlan. When present, the in-stream profile/mode injection below
+    // HONORS it (skip profile for resume-forbidden answers; scope custom context
+    // by the real answer type). Absent → legacy behavior (no change).
+    routeOptions?: StreamRouteOptions
   ): AsyncGenerator<string, void, unknown> {
 
     // Stage timer (gated): isolates pre-stream work (knowledge intercept,
@@ -3531,6 +3539,13 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       !this.groqFastTextMode &&
       this.knowledgeOrchestrator?.isKnowledgeMode();
 
+    // D1/R1: a resume-forbidden answer type (coding/technical/sales/lecture,
+    // spec §8.3) gets NO profile. We still run the depth scorer (kept
+    // unconditional) but SUPPRESS the profile injection (intro shortcut + persona
+    // + contextBlock) below. Defence-in-depth on top of the orchestrator's own
+    // applyFullProfileGrounding gate; absent route options → allowed (legacy).
+    const profileInjectionAllowed = profileInterceptAllowedByRoute(routeOptions);
+
     if (shouldRunKnowledge) {
       try {
         // Feed to depth scorer only (not negotiation tracker) — mirrors non-streaming path fix.
@@ -3546,7 +3561,9 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         // call with no premium-flavored injection.
         // Identity recall (intro/name questions) passes through regardless of mode compatibility —
         // the intro shortcut is factual recall, not persona injection, so it is always safe.
-        if (knowledgeResult?.isIntroQuestion && knowledgeResult?.introResponse) {
+        // D1/R1: but never for a resume-forbidden answer type (a coding/sales/
+        // lecture turn must not be answered with the candidate's intro).
+        if (profileInjectionAllowed && knowledgeResult?.isIntroQuestion && knowledgeResult?.introResponse) {
           console.log('[LLMHelper] Knowledge mode (stream): returning generated intro response (mode-gate bypassed for identity recall)');
           yield knowledgeResult.introResponse;
           return;
@@ -3558,6 +3575,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         // this, candidate context is silently dropped in technical-interview/
         // team-meet/lecture modes and the base assistant answers in third person.
         const knowledgeInterceptAllowedStream = knowledgeResult
+          && profileInjectionAllowed
           && (this.isPremiumKnowledgeInterceptAllowed() || knowledgeResult.factualRecall === true);
         if (knowledgeResult && knowledgeInterceptAllowedStream) {
           // Live negotiation coaching short-circuit — bypass second LLM call.
@@ -3617,11 +3635,15 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         const { ModesManager } = require('./services/ModesManager');
         const modesMgr = ModesManager.getInstance();
         const modePromptSuffix = modesMgr.getActiveModeSystemPromptSuffix();
-        // Pass a non-negotiation answer type so the mode's customContext is
-        // sensitive-GATED on this generic legacy path too (salary/pricing chunks
-        // are dropped). Only the WTA path, which knows when an answer is a real
-        // negotiation, can surface sensitive context; this path never does.
-        const modeContextBlock = modesMgr.buildRetrievedActiveModeContextBlock(message, context, 1800, 'general_meeting_answer');
+        // D1/R1: scope the mode's customContext by the REAL answer type when the
+        // caller supplied one (modeAnswerType), so sensitive chunks (salary/
+        // pricing) are correctly gated — included ONLY for a negotiation answer,
+        // excluded everywhere else. Falls back to 'general_meeting_answer' (the
+        // prior hardcoded value) when no route was passed, so legacy callers are
+        // unchanged. Previously this was ALWAYS hardcoded, which both blocked
+        // sensitive context from legitimate negotiation turns AND mis-scoped
+        // every other answer type.
+        const modeContextBlock = modesMgr.buildRetrievedActiveModeContextBlock(message, context, 1800, modeAnswerType(routeOptions));
 
         if (modePromptSuffix) {
           const baseForMode = systemPromptOverride || HARD_SYSTEM_PROMPT;

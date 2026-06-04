@@ -761,6 +761,11 @@ export function initializeIpcHandlers(appState: AppState): void {
             // Coding gets a small reasoning budget (correctness); everything else
             // streams with thinking off (fastest TTFT).
             llmHelper.thinkingBudgetForAnswerType(isCodingChat),
+            // D1/R1: thread the deterministic routing decision into the execution
+            // path so the knowledge intercept + active-mode injection HONOR the
+            // answer type's forbidden layers (no profile for coding/technical/
+            // sales/lecture) and scope custom context by the real answer type.
+            { answerType: answerPlan.answerType, forbiddenContextLayers: answerPlan.forbiddenContextLayers },
           );
 
           // Coding chat STREAMS LIVE through a gate that holds tokens only until
@@ -4469,6 +4474,11 @@ export function initializeIpcHandlers(appState: AppState): void {
         jd_structured_extraction_complete: Boolean(activeJD),
         jdFactsReady: Boolean(activeJD),
         aot_pipeline_running: Boolean((orchestrator as any)?.getAOTPipeline?.()?.isRunning?.()),
+        // D3: surface how the resume was parsed so the UI can hint that a
+        // heuristic (LLM-down) profile may be re-extracted for richer facts.
+        extractionMode: activeResume
+          ? ((activeResume as any)?._extraction_mode === 'heuristic' ? 'heuristic' : 'llm')
+          : 'none',
       };
     } catch (error: any) {
       return { hasProfile: false, profileMode: false };

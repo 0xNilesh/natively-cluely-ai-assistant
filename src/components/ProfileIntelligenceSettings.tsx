@@ -547,12 +547,20 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
     const isLight = useResolvedTheme() === 'light';
 
     // Profile Engine State
+    // D3: the backend exposes explicit readiness flags. hasProfile reflects a
+    // saved resume (post-D2 ingest resilience, this is true even when the
+    // extraction LLM was down and the heuristic fallback ran). profileFactsReady
+    // is the stricter "usable facts present" signal; extractionMode hints whether
+    // a heuristic profile could be re-extracted for richer facts.
     const [profileStatus, setProfileStatus] = useState<{
         hasProfile: boolean;
         profileMode: boolean;
         name?: string;
         role?: string;
         totalExperienceYears?: number;
+        resume_profile_facts_ready?: boolean;
+        profileFactsReady?: boolean;
+        extractionMode?: 'llm' | 'heuristic' | 'none';
     }>({ hasProfile: false, profileMode: false });
     const [profileUploading, setProfileUploading] = useState(false);
     const [profileError, setProfileError] = useState('');
