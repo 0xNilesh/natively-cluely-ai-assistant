@@ -1,1 +1,0 @@
-Include specific reliability metrics and SLAs when relevant. Technical depth preferred.
