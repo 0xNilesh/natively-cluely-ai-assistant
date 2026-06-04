@@ -37,6 +37,10 @@ export { planAnswer, formatAnswerPlanForPrompt, isCodingAnswerType, shouldScaffo
 export type { AnswerPlan, AnswerSource, AnswerType, ContextLayer, OutputPerspective, SpeakerPerspective } from "./AnswerPlanner";
 export { renderCodingAnswerMarkdown, repairCodingAnswer, repairCodingMarkdown, validateAnswerStructure, validateCodingMarkdown, buildCodingScaffold } from "./AnswerValidator";
 export type { AnswerValidationResult, CodingAnswer } from "./AnswerValidator";
+export { validateProfileOutput, buildProfileRepairInstruction } from "./ProfileOutputValidator";
+export type { ProfileValidationResult, ProfileViolation, ProfileViolationCode, ProfileValidationInput } from "./ProfileOutputValidator";
+export { decideProfileIntelligence } from "./ProfileIntelligenceRouter";
+export type { ProfileIntelligenceDecision, ProfileContextType, AnswerPerspective, DecideProfileInput } from "./ProfileIntelligenceRouter";
 export { CODING_CONTRACT, CODING_CONTRACT_TINY, CODING_SECTIONS, CODING_SECTION_HEADINGS, CODING_VERIFICATION_INSTRUCTION, VERIFICATION_SPEC_RE, stripVerificationSpec, StreamingSpecStripper } from "./codingContract";
 export { verifyCodingAnswer } from "./codeVerification/verifyCodingAnswer";
 export type { VerifyCodingOptions, CorrectionFn } from "./codeVerification/verifyCodingAnswer";

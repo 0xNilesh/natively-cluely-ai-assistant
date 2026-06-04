@@ -802,20 +802,54 @@ export function ProfileIntelligenceSettings({ onClose }: { onClose: () => void }
                                                     </div>
                                                 </div>
 
-                                                {profileData?.skills && profileData.skills.length > 0 && (
-                                                    <div className="mt-5">
-                                                        <div className="text-[10px] font-bold text-text-primary uppercase tracking-wide mb-2">
-                                                            Top Skills
+                                                {(() => {
+                                                    // Skills are now sub-categorized {languages, frameworks, cloud,
+                                                    // databases, ml, devops, tools}. Render each non-empty category
+                                                    // as its own labeled group so the user can SEE the buckets and
+                                                    // spot a miscategorization. Falls back to a flat list for any
+                                                    // legacy/array shape.
+                                                    const raw = profileData?.skills;
+                                                    const CATS: { key: string; label: string }[] = [
+                                                        { key: 'languages', label: 'Languages' },
+                                                        { key: 'frameworks', label: 'Frameworks' },
+                                                        { key: 'cloud', label: 'Cloud' },
+                                                        { key: 'databases', label: 'Databases' },
+                                                        { key: 'ml', label: 'AI / ML' },
+                                                        { key: 'devops', label: 'DevOps' },
+                                                        { key: 'tools', label: 'Tools' },
+                                                    ];
+                                                    const chip = (skill: string, i: number) => (
+                                                        <span key={i} className="text-[10px] font-medium text-text-secondary px-2 py-1 rounded-md border border-border-subtle bg-bg-input">
+                                                            {skill}
+                                                        </span>
+                                                    );
+                                                    if (raw && !Array.isArray(raw) && typeof raw === 'object') {
+                                                        const groups = CATS.filter(c => Array.isArray(raw[c.key]) && raw[c.key].length > 0);
+                                                        if (groups.length === 0) return null;
+                                                        return (
+                                                            <div className="mt-5 space-y-3">
+                                                                {groups.map(c => (
+                                                                    <div key={c.key}>
+                                                                        <div className="text-[10px] font-bold text-text-primary uppercase tracking-wide mb-2">{c.label}</div>
+                                                                        <div className="flex flex-wrap gap-1.5">
+                                                                            {raw[c.key].map((s: string, i: number) => chip(s, i))}
+                                                                        </div>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        );
+                                                    }
+                                                    const flat = Array.isArray(raw) ? raw : (Array.isArray(profileData?.skillsFlat) ? profileData.skillsFlat : []);
+                                                    if (flat.length === 0) return null;
+                                                    return (
+                                                        <div className="mt-5">
+                                                            <div className="text-[10px] font-bold text-text-primary uppercase tracking-wide mb-2">Top Skills</div>
+                                                            <div className="flex flex-wrap gap-1.5">
+                                                                {flat.slice(0, 15).map((s: string, i: number) => chip(s, i))}
+                                                            </div>
                                                         </div>
-                                                        <div className="flex flex-wrap gap-1.5">
-                                                            {profileData.skills.slice(0, 15).map((skill: string, i: number) => (
-                                                                <span key={i} className="text-[10px] font-medium text-text-secondary px-2 py-1 rounded-md border border-border-subtle bg-bg-input">
-                                                                    {skill}
-                                                                </span>
-                                                            ))}
-                                                        </div>
-                                                    </div>
-                                                )}
+                                                    );
+                                                })()}
                                             </div>
                                         </div>
                                     </BezelCard>

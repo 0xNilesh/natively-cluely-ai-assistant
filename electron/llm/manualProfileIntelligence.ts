@@ -57,6 +57,12 @@ export interface StructuredJobFacts {
   role?: unknown;
   position?: unknown;
   jobTitle?: unknown;
+  company?: unknown;
+  requirements?: unknown;
+  nice_to_haves?: unknown;
+  responsibilities?: unknown;
+  technologies?: unknown;
+  keywords?: unknown;
 }
 
 export interface ManualProfileFastPathInput {
@@ -157,6 +163,14 @@ const ROLE_PATTERNS = [
   /\btarget\s+(role|job|position)\b/,
 ];
 
+const JD_FIT_PATTERNS = [
+  /\bhow\s+do\s+i\s+fit\s+(this\s+)?(jd|job|role|position)\b/,
+  /\bhow\s+am\s+i\s+a\s+(fit|match)\b/,
+  /\bwhy\s+am\s+i\s+a\s+(good\s+)?(fit|match)\b/,
+  /\bfit\s+(this\s+)?(jd|job|role|position)\b/,
+  /\bmatch\s+(this\s+)?(jd|job|role|position)\b/,
+];
+
 const profileName = (profile: MaybeStructured<StructuredProfileFacts>): string => firstNonEmpty(
   profile?.identity?.name,
   profile?.name,
@@ -164,6 +178,7 @@ const profileName = (profile: MaybeStructured<StructuredProfileFacts>): string =
 );
 
 const jdTitle = (jd: MaybeStructured<StructuredJobFacts>): string => firstNonEmpty(jd?.title, jd?.role, jd?.position, jd?.jobTitle);
+const jdCompany = (jd: MaybeStructured<StructuredJobFacts>): string => firstNonEmpty(jd?.company);
 
 const formatInlineList = (items: string[], max = 8): string => {
   const values = items.map(clean).filter(Boolean).slice(0, max);
@@ -178,8 +193,23 @@ const profileProjects = (profile: MaybeStructured<StructuredProfileFacts>): Prof
   asArray(profile?.projects) as ProfileProject[];
 const profileEducation = (profile: MaybeStructured<StructuredProfileFacts>): ProfileEducation[] =>
   asArray(profile?.education) as ProfileEducation[];
-const profileSkills = (profile: MaybeStructured<StructuredProfileFacts>): SkillItem[] =>
-  asArray(profile?.skills) as SkillItem[];
+// Skills may be a flat array (legacy) OR a categorized object
+// {languages:[], frameworks:[], cloud:[], ...} (v2). Flatten either shape, and
+// prefer the derived skills_flat when present.
+const profileSkills = (profile: MaybeStructured<StructuredProfileFacts>): SkillItem[] => {
+  const flat = (profile as any)?.skills_flat ?? (profile as any)?.skillsFlat;
+  if (Array.isArray(flat)) return flat.filter(Boolean) as SkillItem[];
+  const raw = (profile as any)?.skills;
+  if (Array.isArray(raw)) return raw.filter(Boolean) as SkillItem[];
+  if (raw && typeof raw === 'object') {
+    const out: SkillItem[] = [];
+    for (const v of Object.values(raw)) {
+      if (Array.isArray(v)) out.push(...(v.filter(Boolean) as SkillItem[]));
+    }
+    return out;
+  }
+  return [];
+};
 
 const formatExperience = (profile: MaybeStructured<StructuredProfileFacts>): string => {
   const entries = profileExperience(profile);
@@ -224,6 +254,55 @@ const formatEducation = (profile: MaybeStructured<StructuredProfileFacts>): stri
   return lines.length ? `Your education includes ${lines.join('; ')}.` : '';
 };
 
+const structuredJobTerms = (jd: MaybeStructured<StructuredJobFacts>): string[] => [
+  ...asArray(jd?.requirements),
+  ...asArray(jd?.nice_to_haves),
+  ...asArray(jd?.responsibilities),
+  ...asArray(jd?.technologies),
+  ...asArray(jd?.keywords),
+].map(clean).filter(Boolean);
+
+const normalizedTermSet = (terms: string[]): Set<string> => new Set(
+  terms
+    .flatMap((term) => term.split(/[^a-zA-Z0-9+#.]+/g))
+    .map((term) => term.trim().toLowerCase())
+    .filter((term) => term.length >= 2),
+);
+
+const profileSkillNames = (profile: MaybeStructured<StructuredProfileFacts>): string[] =>
+  profileSkills(profile).map((skill) => typeof skill === 'string' ? skill : firstNonEmpty(skill.name, skill.skill)).filter(Boolean);
+
+const matchingSkillsForJD = (
+  profile: MaybeStructured<StructuredProfileFacts>,
+  jd: MaybeStructured<StructuredJobFacts>,
+): string[] => {
+  const jdTerms = normalizedTermSet(structuredJobTerms(jd));
+  return profileSkillNames(profile).filter((skill) => {
+    const normalizedSkill = skill.toLowerCase();
+    return jdTerms.has(normalizedSkill) || normalizedSkill.split(/[^a-z0-9+#.]+/g).some((part) => jdTerms.has(part));
+  });
+};
+
+const formatJDFit = (
+  profile: MaybeStructured<StructuredProfileFacts>,
+  jd: MaybeStructured<StructuredJobFacts>,
+): string => {
+  const title = jdTitle(jd);
+  const company = jdCompany(jd);
+  const matchedSkills = matchingSkillsForJD(profile, jd);
+  const skills = matchedSkills.length ? matchedSkills : profileSkillNames(profile).slice(0, 3);
+  const experience = profileExperience(profile);
+  const projects = profileProjects(profile);
+  const anchors = [
+    skills.length ? `${formatInlineList(skills, 6)} ${matchedSkills.length ? 'match the role requirements' : 'are relevant resume skills'}` : '',
+    experience[0] ? `${firstNonEmpty(experience[0].role, experience[0].title, experience[0].position)} experience${firstNonEmpty(experience[0].company, experience[0].organization, experience[0].employer) ? ` at ${firstNonEmpty(experience[0].company, experience[0].organization, experience[0].employer)}` : ''}` : '',
+    projects[0] ? `${firstNonEmpty(projects[0].name, projects[0].title)} project work` : '',
+  ].filter(Boolean);
+
+  if (!title || !company || anchors.length === 0) return '';
+  return `You fit the ${title} role at ${company} because ${anchors.join('; ')}.`;
+};
+
 export const isAssistantIdentityQuestion = (question: string): boolean => {
   const q = normalize(question);
   return hasAny(q, ASSISTANT_IDENTITY_PATTERNS);
@@ -239,6 +318,7 @@ export const isCandidateProfileQuestion = (question: string): boolean => {
     ...SKILL_PATTERNS,
     ...EDUCATION_PATTERNS,
     ...ROLE_PATTERNS,
+    ...JD_FIT_PATTERNS,
   ]);
 };
 
@@ -266,6 +346,42 @@ const makeRoute = (
   providerUsed: false,
 });
 
+// The deterministic fast-path answers SIMPLE, UNFILTERED listing questions
+// ("what are my projects?", "what are my skills?") with a canned template. But a
+// question that carries a QUALIFIER the template can't honor — a filter ("...that
+// use REST API"), a constraint ("...related to ML"), a selection ("which one
+// used GraphQL"), a comparison, or a "how/why" — must NOT get the canned dump;
+// it has to go to the grounded LLM which sees the full profile and can actually
+// reason. This regex detects such qualifiers so the fast path DEFERS (returns
+// null) instead of dumping every item verbatim and ignoring the filter.
+const QUALIFIER_PATTERNS = [
+  /\b(that|which|where|whose|who)\b.*\b(use[ds]?|using|used|built|made|involve[ds]?|with|related|based|for|require[ds]?|need[s]?)\b/,
+  /\b(use[ds]?|using|used|involv\w+|relat\w+|based\s+on|about|regarding|with)\b\s+\w/,
+  /\bwhich\s+(one|project|skill|role|job|experience)\b/,
+  /\bany\s+(project|experience|skill)s?\b.*\b(with|using|in|for|that)\b/,
+  /\b(only|just|specifically|particular|specific)\b/,
+  /\b(more|most|best|top|strongest|relevant|fit)\b/,
+  /\bhow\s+(did|do|have|does)\b|\bwhy\b/,
+  /\bcompare|versus|vs\.?\b|\bdifference\b/,
+  /\bin\s+(python|java|javascript|typescript|go|rust|c\+\+|sql|react|node|aws|gcp|azure)\b/,
+];
+
+// "How do I fit this role/JD?" is the CANONICAL jd-fit phrasing — the JD-fit
+// template already performs skill/experience matching, so the "how" here is not
+// an unhandled filter. Exempt it so jd-fit keeps fast-pathing.
+const JD_FIT_CANONICAL = /\b(how|why)\s+(do\s+i|am\s+i|are\s+you|would\s+i)\b.*\bfit\b/;
+
+/**
+ * True when the question carries a qualifier/filter/selection/constraint that the
+ * canned listing template cannot honor — meaning the fast path must defer to the
+ * grounded LLM. e.g. "projects that used REST API", "which project used GraphQL".
+ * Exempts the canonical "how do I fit this role" jd-fit phrasing.
+ */
+export const hasUnhandledQualifier = (normalizedQuestion: string): boolean => {
+  if (JD_FIT_CANONICAL.test(normalizedQuestion)) return false;
+  return hasAny(normalizedQuestion, QUALIFIER_PATTERNS);
+};
+
 export const tryBuildManualProfileFastPathAnswer = ({
   question,
   profile,
@@ -276,6 +392,22 @@ export const tryBuildManualProfileFastPathAnswer = ({
   if (!firstPerson && isAssistantIdentityQuestion(question)) return null;
 
   const q = normalize(question);
+
+  // A qualified/filtered question must reach the grounded LLM, not the canned
+  // template. Identity (name) and the JD role lookup are exact single-fact
+  // answers with no list to filter, so they're allowed through below; everything
+  // that returns a LIST (experience/projects/skills/education/jd-fit) defers when
+  // a qualifier is present.
+  const qualified = hasUnhandledQualifier(q);
+
+  // JD-fit is itself a "reasoning" answer; if the user adds a further qualifier,
+  // let the grounded LLM handle it rather than the deterministic anchor template.
+  if (hasAny(q, JD_FIT_PATTERNS) && !qualified) {
+    if (!profileFactsReady(profile)) return null;
+    const answer = formatJDFit(profile, jobDescription);
+    if (!answer) return null;
+    return makeRoute(firstPerson ? answer.replace(/^You fit/i, 'I fit') : answer, 'jd_fit_answer', ['resume', 'jd']);
+  }
 
   if (hasAny(q, ROLE_PATTERNS)) {
     const title = jdTitle(jobDescription);
@@ -301,25 +433,28 @@ export const tryBuildManualProfileFastPathAnswer = ({
     );
   }
 
-  if (hasAny(q, EXPERIENCE_PATTERNS)) {
+  // List-returning answers: a canned dump can't honor a filter/qualifier, so
+  // defer to the grounded LLM when one is present (e.g. "projects that use REST
+  // API", "skills in Python", "experience related to ML").
+  if (hasAny(q, EXPERIENCE_PATTERNS) && !qualified) {
     const answer = formatExperience(profile);
     if (!answer) return null;
     return makeRoute(firstPerson ? answer.replace(/^Your experience includes/i, 'My experience includes') : answer, 'experience_answer', ['resume']);
   }
 
-  if (hasAny(q, PROJECT_PATTERNS)) {
+  if (hasAny(q, PROJECT_PATTERNS) && !qualified) {
     const answer = formatProjects(profile);
     if (!answer) return null;
     return makeRoute(firstPerson ? answer.replace(/^Your projects include/i, 'My projects include') : answer, 'project_answer', ['resume', 'projects']);
   }
 
-  if (hasAny(q, SKILL_PATTERNS)) {
+  if (hasAny(q, SKILL_PATTERNS) && !qualified) {
     const answer = formatSkills(profile);
     if (!answer) return null;
     return makeRoute(firstPerson ? answer.replace(/^Your skills include/i, 'My skills include') : answer, 'skills_answer', ['resume']);
   }
 
-  if (hasAny(q, EDUCATION_PATTERNS)) {
+  if (hasAny(q, EDUCATION_PATTERNS) && !qualified) {
     const answer = formatEducation(profile);
     if (!answer) return null;
     return makeRoute(firstPerson ? answer.replace(/^Your education includes/i, 'My education includes') : answer, 'profile_fact_answer', ['resume']);

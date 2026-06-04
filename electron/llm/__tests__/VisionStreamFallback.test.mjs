@@ -22,7 +22,9 @@ const {
   classifyVisionError,
   orderVisionByHealth,
   runStreamingVisionFallback,
+  openHedged,
   markVisionUnhealthy,
+  markVisionHealthy,
   recordVisionTtft,
   DEFAULT_VISION_FALLBACK_CONFIG,
 } = await import(pathToFileURL(modPath).href);
@@ -32,10 +34,15 @@ const {
 function okProvider(id, tokens, opts = {}) {
   return {
     id, name: id, isLocal: !!opts.isLocal, priority: opts.priority ?? 0,
+    ...(opts.ttftTimeoutMs !== undefined ? { ttftTimeoutMs: opts.ttftTimeoutMs } : {}),
     _calls: 0,
     open(_signal, _attempt) {
       this._calls++;
-      return (async function* () { for (const t of tokens) yield t; })();
+      const firstDelayMs = opts.firstDelayMs ?? 0;
+      return (async function* () {
+        if (firstDelayMs > 0) await new Promise((r) => setTimeout(r, firstDelayMs));
+        for (const t of tokens) yield t;
+      })();
     },
   };
 }
@@ -301,6 +308,24 @@ describe('runStreamingVisionFallback — commit point + fallback', () => {
     assert.ok(health.get('openai').openUntil > 0, 'slow provider breaker opened on timeout');
   });
 
+  test('per-provider ttftTimeoutMs overrides the config default', async () => {
+    // Provider takes ~80ms to first token. cfg default is 40ms (would abort),
+    // but the provider declares its own 5000ms budget → must commit, not fail over.
+    const slowButAllowed = okProvider('gemini_pro', ['pro-answer'], { firstDelayMs: 80, ttftTimeoutMs: 5_000 });
+    const backup = okProvider('natively', ['backup']);
+    const cfg = { ...CFG, maxAttempts: 1, ttftTimeoutMs: 40 };
+    // real timers so the 80ms delay actually elapses against the 5000ms budget
+    const out = await collect(runStreamingVisionFallback([slowButAllowed, backup], cfg, new Map(),
+      { now: () => Date.now(), random: () => 0, sleep: async () => {}, log: () => {}, warn: () => {} }));
+    assert.deepEqual(out, ['pro-answer'], 'provider with its own generous ttft budget should commit, not time out');
+    assert.equal(backup._calls, 0, 'backup must not be reached');
+  });
+
+  test('default config TTFT budget is generous enough for vision (>=15s)', () => {
+    assert.ok(DEFAULT_VISION_FALLBACK_CONFIG.ttftTimeoutMs >= 15_000,
+      `vision TTFT default should be >=15s (was the aggressive 8s bug), got ${DEFAULT_VISION_FALLBACK_CONFIG.ttftTimeoutMs}`);
+  });
+
   test('no_vision failure opens the breaker so the dead model is demoted next time', async () => {
     const a = throwBeforeFirst('groq', 'model does not support image input');
     const b = okProvider('openai', ['ok']);
@@ -378,5 +403,87 @@ describe('runStreamingVisionFallback — commit point + fallback', () => {
     await collect(runStreamingVisionFallback([p], CFG, health, hooks));
     assert.ok(health.get('openai').ttftEma != null, 'ttft EWMA recorded after commit');
     assert.equal(health.get('openai').consecutiveFails, 0);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+describe('openHedged (tail-latency vision hedge)', () => {
+  const realHooks = () => ({ now: () => Date.now(), random: () => 0, sleep: async () => {}, log: () => {}, warn: () => {} });
+  // small hedge delays so tests are fast
+  const hedgeCfg = (over = {}) => ({
+    ...DEFAULT_VISION_FALLBACK_CONFIG, hedgeEnabled: true,
+    hedgeDelayDefaultMs: 60, hedgeDelayMinMs: 40, hedgeDelayMaxMs: 120, hedgeDelayEmaFactor: 0.6,
+    ...over,
+  });
+  // build a provider with a hedgeWith partner from two okProvider/neverFirst-like specs
+  function prov(id, mk, partner) {
+    const p = mk(id);
+    p.hedgeWith = partner ? { id: partner.id, name: partner.id, open: (s, a) => partner.open(s, a) } : undefined;
+    return p;
+  }
+
+  test('primary fast → wins solo, partner never launched (no hedge fired)', async () => {
+    const partner = okProvider('gemini_flash_lite', ['lite']);
+    const primary = prov('gemini_flash', (id) => okProvider(id, ['flash-fast']), partner);
+    const health = new Map();
+    const out = await collect(openHedged(primary, hedgeCfg(), health, realHooks(), new AbortController().signal, 1));
+    assert.deepEqual(out, ['flash-fast']);
+    assert.equal(partner._calls, 0, 'partner must not be launched when primary is fast');
+    assert.ok(health.get('gemini_flash')?.ttftEma != null, 'TTFT recorded against the winner (flash)');
+  });
+
+  test('primary slow → hedge fires, partner wins, primary aborted', async () => {
+    const partner = okProvider('gemini_flash_lite', ['lite-wins']);
+    // primary delays its first token well past the hedge delay
+    const primary = prov('gemini_flash', (id) => okProvider(id, ['too-slow'], { firstDelayMs: 500 }), partner);
+    const health = new Map();
+    const out = await collect(openHedged(primary, hedgeCfg(), health, realHooks(), new AbortController().signal, 1));
+    assert.deepEqual(out, ['lite-wins']);
+    assert.equal(partner._calls, 1, 'partner launched once');
+    assert.ok(health.get('gemini_flash_lite')?.ttftEma != null, 'TTFT recorded against the winner (lite)');
+  });
+
+  test('primary fails fast → partner wins', async () => {
+    const partner = okProvider('gemini_flash_lite', ['lite-rescue']);
+    const primary = prov('gemini_flash', (id) => throwBeforeFirst(id, 'boom'), partner);
+    const out = await collect(openHedged(primary, hedgeCfg(), new Map(), realHooks(), new AbortController().signal, 1));
+    assert.deepEqual(out, ['lite-rescue']);
+    assert.equal(partner._calls, 1);
+  });
+
+  test('both branches fail pre-token → throws (engine then advances)', async () => {
+    const partner = throwBeforeFirst('gemini_flash_lite', 'lite-down');
+    const primary = prov('gemini_flash', (id) => okProvider(id, ['too-slow'], { firstDelayMs: 500 }), partner);
+    // make primary also fail by giving it a stream that ends empty after delay
+    primary.open = (_s, _a) => (async function* () { await new Promise(r => setTimeout(r, 80)); throw new Error('flash-down'); })();
+    await assert.rejects(
+      () => collect(openHedged(primary, hedgeCfg(), new Map(), realHooks(), new AbortController().signal, 1)),
+      /all-branches-failed|empty-stream|flash-down|lite-down/,
+    );
+  });
+
+  test('partner breaker OPEN → no hedge, primary runs solo', async () => {
+    const partner = okProvider('gemini_flash_lite', ['lite']);
+    const primary = prov('gemini_flash', (id) => okProvider(id, ['flash-ok'], { firstDelayMs: 300 }), partner);
+    const health = new Map();
+    markVisionUnhealthy(health, 'gemini_flash_lite', 60_000, Date.now()); // partner cooling
+    const out = await collect(openHedged(primary, hedgeCfg(), health, realHooks(), new AbortController().signal, 1));
+    assert.deepEqual(out, ['flash-ok'], 'primary should win solo even though slow — partner breaker is open');
+    assert.equal(partner._calls, 0, 'partner must NOT launch while its breaker is open');
+  });
+
+  test('engine integration: hedgeEnabled provider routes through openHedged', async () => {
+    const partner = okProvider('gemini_flash_lite', ['lite-via-engine']);
+    const primary = prov('gemini_flash', (id) => okProvider(id, ['slow'], { firstDelayMs: 500 }), partner);
+    const out = await collect(runStreamingVisionFallback([primary], hedgeCfg({ maxAttempts: 1 }), new Map(), realHooks()));
+    assert.deepEqual(out, ['lite-via-engine']);
+  });
+
+  test('hedge disabled → primary used directly, no partner', async () => {
+    const partner = okProvider('gemini_flash_lite', ['lite']);
+    const primary = prov('gemini_flash', (id) => okProvider(id, ['flash-only'], { firstDelayMs: 300 }), partner);
+    const out = await collect(runStreamingVisionFallback([primary], { ...hedgeCfg(), hedgeEnabled: false, maxAttempts: 1, ttftTimeoutMs: 5000 }, new Map(), realHooks()));
+    assert.deepEqual(out, ['flash-only']);
+    assert.equal(partner._calls, 0, 'hedge disabled → partner never launched');
   });
 });

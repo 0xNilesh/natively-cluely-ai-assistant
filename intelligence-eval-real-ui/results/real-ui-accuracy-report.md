@@ -1,24 +1,14 @@
 # Real UI Accuracy Report
 
-18/20 passed (90.0%). Critical 5/5.
+5/10 passed (50.0%). Critical 0/2.
 
-- ML-001 [identity_manual] PASS
-- ML-002 [identity_interviewer] PASS
-- ML-003 [projects_manual] PASS
-- ML-004 [projects_interviewer] PASS
-- ML-005 [jd_alignment] FAIL — empty_answer
-- ML-006 [skills] PASS
-- ML-007 [follow_up] PASS
-- ML-008 [persona] PASS
-- ML-009 [unknown] FAIL — missing_not_admitted:exact model accuracy
-- ML-010 [context_isolation] PASS
-- PM-001 [identity_manual] PASS
-- PM-002 [interviewer_intro] PASS
-- PM-003 [projects_manual] PASS
-- PM-004 [behavioral] PASS
-- PM-005 [jd_alignment] PASS
-- PM-006 [metrics_guard] PASS
-- PM-007 [follow_up] PASS
-- PM-008 [negotiation] PASS
-- PM-009 [unknown] PASS
-- PM-010 [context_isolation] PASS
+- DA-001 [identity_manual] FAIL — missing_required_fact:Chen Wei, forbidden_fact_in_answer:Natively
+- DA-002 [interviewer_intro] FAIL — missing_required_fact:Chen Wei
+- DA-003 [projects_manual] FAIL — missing_required_fact:ABTest-Framework, missing_any_of_facts:ABTest-Framework|SQL-Copilot
+- DA-004 [skill] PASS
+- DA-005 [jd_alignment] PASS
+- DA-006 [followup] PASS
+- DA-007 [metrics_manual] PASS
+- DA-008 [negotiation] PASS
+- DA-009 [unknown] FAIL — missing_not_admitted:exact revenue increase
+- DA-010 [regression_projects] FAIL — missing_required_fact:ABTest-Framework, missing_required_fact:SQL-Copilot

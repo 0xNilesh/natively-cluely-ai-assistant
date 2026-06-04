@@ -4,29 +4,33 @@
 Endpoint: `https://api.natively.software/v1/chat`
 API key: len=52:natively_sk_**** (redacted)
 
-Total tests: 100
-Passed: 100
-Failed: 0
-Overall accuracy: 100.0%
+Total tests: 105
+Passed: 89
+Failed: 16
+Overall accuracy: 84.8%
 
 Real API usage:
-- Real API sessions created: 100
-- Real streaming responses: 71
-- Provider-backed responses: 71
+- Real API sessions created: 105
+- Real streaming responses: 76
+- Provider-backed responses: 76
 - Deterministic fast-path responses: 29
 - Mock/stub responses detected: 0
 
-Critical tests: 22/22
+Critical tests: 25/26 (failed: TWO-SUM-WTA)
 
 Latency (real, ms):
-- Manual factual p50/p95 first useful token: 0.12/0.474
-- Manual LLM p50/p95 first useful token: 5710.438/8658.241
-- What-to-answer p50/p95 first useful token: 4559.322/8806.715
-- What-to-answer extraction p95: 1.044
-- Total response p50/p95: 5734.443/9314.07
+- Manual factual p50/p95 first useful token: 0.035/3.333
+- Manual LLM p50/p95 first useful token: 7165.603/53638.029
+- What-to-answer p50/p95 first useful token: 6050.963/23651.559
+- What-to-answer extraction p95: 0.596
+- Total response p50/p95: 6634.969/30162.14
 
 Top failures:
-none
+1. BE-003 [projects_manual] — latency_stall:firstUseful_20956ms
+2. ML-004 [projects_interviewer] — latency_stall:firstUseful_22263ms
+3. UX-003 [projects_manual] — latency_stall:firstUseful_19158ms
+4. DA-005 [jd_alignment] — latency_stall:firstUseful_21404ms
+5. DA-007 [metrics_manual] — latency_stall:firstUseful_12054ms
 
 Context pollution findings:
 1. none
@@ -36,4 +40,4 @@ Provider/network bottlenecks:
 2. Network RTT to https://api.natively.software/v1/chat
 3. n/a
 
-Release gate: PASS
+Release gate: FAIL

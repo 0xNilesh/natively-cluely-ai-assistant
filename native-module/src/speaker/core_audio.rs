@@ -8,6 +8,12 @@ use ringbuf::{
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+fn strip_audio_suffix(s: &str) -> &str {
+    s.strip_suffix(":output")
+        .or_else(|| s.strip_suffix(":input"))
+        .unwrap_or(s)
+}
+
 struct Ctx {
     format: arc::R<av::AudioFormat>,
     producer: HeapProd<f32>,
@@ -44,11 +50,22 @@ impl SpeakerInput {
         // 1. Find the target output device
         let output_device = match device_id {
             Some(ref uid) if !uid.is_empty() && uid != "default" => {
+                let requested_uid = strip_audio_suffix(uid);
                 let devices = ca::System::devices()?;
-                devices
-                    .into_iter()
-                    .find(|d| d.uid().map(|u| u.to_string() == *uid).unwrap_or(false))
-                    .unwrap_or(ca::System::default_output_device()?)
+                match devices.into_iter().find(|d| {
+                    d.uid()
+                        .map(|u| strip_audio_suffix(&u.to_string()).eq_ignore_ascii_case(requested_uid))
+                        .unwrap_or(false)
+                }) {
+                    Some(device) => device,
+                    None => {
+                        println!(
+                            "[CoreAudioTap] Requested output UID '{}' not found; falling back to default output device",
+                            uid
+                        );
+                        ca::System::default_output_device()?
+                    }
+                }
             }
             _ => ca::System::default_output_device()?,
         };

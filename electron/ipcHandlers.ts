@@ -15,17 +15,13 @@ import { SkillsManager } from './services/SkillsManager';
 
 import { TRIAL_SENTINEL_KEY } from './config/constants';
 import { AI_RESPONSE_LANGUAGES, RECOGNITION_LANGUAGES } from './config/languages';
-import { planAnswer, formatAnswerPlanForPrompt, isCodingAnswerType, validateAnswerStructure } from './llm';
+import { planAnswer, formatAnswerPlanForPrompt, isCodingAnswerType, validateAnswerStructure, validateProfileOutput } from './llm';
 import { isCodeVerificationEnabled } from './llm/codeVerification/verificationEnabled';
 import { CodingStreamGate } from './llm/codingStreamGate';
 import { PiLatencyTrace } from './services/telemetry/PiLatencyTracer';
 import { CHAT_MODE_PROMPT } from './llm/prompts';
-import {
-  isAssistantIdentityQuestion,
-  logManualProfileRoute,
-  profileFactsReady,
-  tryBuildManualProfileFastPathAnswer,
-} from './llm/manualProfileIntelligence';
+import { isAssistantIdentityQuestion, profileFactsReady } from './llm/manualProfileIntelligence';
+import { buildManualProfileBackendAnswer } from './llm/profileAnswerBackend';
 
 export function initializeIpcHandlers(appState: AppState): void {
   const safeHandle = (
@@ -672,19 +668,10 @@ export function initializeIpcHandlers(appState: AppState): void {
         if (!imagePaths?.length && !isCodingChat && !isAssistantIdentityQuestion(message)) {
           try {
             const orchestrator = llmHelper.getKnowledgeOrchestrator?.();
-            const activeResume = (orchestrator as any)?.activeResume?.structured_data ?? null;
-            const activeJD = (orchestrator as any)?.activeJD?.structured_data ?? null;
-            const fastPath = tryBuildManualProfileFastPathAnswer({
+            const { route: fastPath, routeLog } = buildManualProfileBackendAnswer({
               question: message,
-              profile: activeResume,
-              jobDescription: activeJD,
+              orchestrator,
               source: 'manual_input',
-            });
-            const routeLog = logManualProfileRoute({
-              source: 'manual_input',
-              question: message,
-              route: fastPath,
-              profileFactsReady: profileFactsReady(activeResume),
             });
             if (fastPath || routeLog.profileFactsReady) {
               console.log('[ProfileIntelligence] manual route', routeLog);
@@ -854,6 +841,34 @@ export function initializeIpcHandlers(appState: AppState): void {
                 finalText = structureValidation.repaired;
               }
               fullResponse = structureValidation.repaired;
+            }
+          } else {
+            // Spec §7 / §12.9: validate PROFILE answers post-generation. Detects
+            // the assistant-identity leak ("I am Natively"), false "no access" /
+            // "no experience" refusals when the profile exists, wrong perspective,
+            // and sensitive/salary leaks. Deterministic, no extra LLM call on the
+            // hot path; logged for telemetry. A future iteration can trigger a
+            // bounded regeneration with buildProfileRepairInstruction.
+            try {
+              const orchestrator = llmHelper.getKnowledgeOrchestrator?.();
+              const activeResume = (orchestrator as any)?.activeResume?.structured_data ?? null;
+              const profileAvailable = profileFactsReady(activeResume);
+              const profileValidation = validateProfileOutput({
+                answer: fullResponse,
+                plan: answerPlan,
+                profileAvailable,
+                // Manual chat: the user is asking; only treat as candidate-directed
+                // when the answer type speaks as the candidate AND a profile exists.
+                candidateDirected: profileAvailable,
+              });
+              if (!profileValidation.ok) {
+                console.warn('[ProfileIntelligence] profile output violations', {
+                  answerType: answerPlan.answerType,
+                  violations: profileValidation.violations.map(v => v.code),
+                });
+              }
+            } catch (validationError: any) {
+              console.warn('[ProfileIntelligence] profile output validation failed (non-fatal):', validationError?.message || validationError);
             }
           }
 
@@ -4396,6 +4411,18 @@ export function initializeIpcHandlers(appState: AppState): void {
       const { DocType } = require('../premium/electron/knowledge/types');
       const result = await orchestrator.ingestDocument(resolvedPath, DocType.RESUME);
       if (result?.success) {
+        // RC-8 fix: uploading a resume must make it immediately usable. Previously
+        // knowledge mode was a SEPARATE manual toggle, so a freshly-uploaded resume
+        // sat inert until the user found the switch — every question fell through to
+        // the bare chat prompt and got "I don't have access to your information".
+        // Enable + persist so it survives restart (main.ts:1113 restores the setting).
+        try {
+          orchestrator.setKnowledgeMode(true);
+          const { SettingsManager } = require('./services/SettingsManager');
+          SettingsManager.getInstance().set('knowledgeMode', true);
+        } catch (e) {
+          console.warn('[IPC] profile:upload-resume: failed to auto-enable knowledge mode', e);
+        }
         const activeResume = (orchestrator as any)?.activeResume?.structured_data ?? null;
         const factsReady = profileFactsReady(activeResume);
         console.log('[ProfileIntelligence] profileFactsReady', {
@@ -4403,7 +4430,11 @@ export function initializeIpcHandlers(appState: AppState): void {
           hasName: Boolean(activeResume?.identity?.name),
           experienceCount: Array.isArray(activeResume?.experience) ? activeResume.experience.length : 0,
           projectCount: Array.isArray(activeResume?.projects) ? activeResume.projects.length : 0,
-          skillsCount: Array.isArray(activeResume?.skills) ? activeResume.skills.length : 0,
+          skillsCount: Array.isArray(activeResume?.skills)
+            ? activeResume.skills.length
+            : (activeResume?.skills && typeof activeResume.skills === 'object'
+                ? Object.values(activeResume.skills).reduce((n: number, v: any) => n + (Array.isArray(v) ? v.length : 0), 0)
+                : 0),
         });
       }
       return result;
@@ -4541,6 +4572,19 @@ export function initializeIpcHandlers(appState: AppState): void {
       }
       const { DocType } = require('../premium/electron/knowledge/types');
       const result = await orchestrator.ingestDocument(resolvedPath, DocType.JD);
+      if (result?.success) {
+        // RC-8 fix: a JD is only useful with knowledge mode on. If a resume is already
+        // loaded, setKnowledgeMode(true) takes effect immediately; if not, it no-ops
+        // safely (the gate still requires a resume) but we persist the intent so the
+        // JD becomes active as soon as a resume is uploaded.
+        try {
+          orchestrator.setKnowledgeMode(true);
+          const { SettingsManager } = require('./services/SettingsManager');
+          SettingsManager.getInstance().set('knowledgeMode', true);
+        } catch (e) {
+          console.warn('[IPC] profile:upload-jd: failed to auto-enable knowledge mode', e);
+        }
+      }
       return result;
     } catch (error: any) {
       console.error('[IPC] profile:upload-jd error:', error);

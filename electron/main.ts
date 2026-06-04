@@ -2515,17 +2515,47 @@ export class AppState {
     // Resolve the output UID to its friendly name and compare to the input
     // name (input IDs from cpal ARE the device name, e.g. "Evin's AirPods Pro").
     try {
-      const outputs = AudioDevices.getOutputDevices();
-      const outputMatch = outputs.find(d => stripSuffix(d.id).toLowerCase() === outputBase);
-      if (outputMatch && outputMatch.name) {
-        if (outputMatch.name.toLowerCase() === inputId.toLowerCase()) {
-          return outputMatch.name;
-        }
+      const outputName = this.getEffectiveOutputDeviceName(outputId);
+      if (outputName && outputName.toLowerCase() === inputId.toLowerCase()) {
+        return outputName;
       }
     } catch {
       // Native module unavailable — fall through to "no conflict detected".
     }
     return undefined;
+  }
+
+  /**
+   * Resolve an explicit output device id — or the current default output route
+   * when the user selected Default — to the friendly output name. This is only
+   * for HFP/default-input decision-making; it must not pin the persisted Default
+   * output selection to a concrete device id.
+   */
+  private getEffectiveOutputDeviceName(outputDeviceId?: string): string {
+    const stripSuffix = (s: string) => s.replace(/:(input|output)$/i, '');
+
+    try {
+      const outputs = AudioDevices.getOutputDevices();
+      const resolveOutputName = (id?: string): string => {
+        if (!id) return '';
+        const outputBase = stripSuffix(id).toLowerCase();
+        return outputs.find(
+          d => stripSuffix(d.id).toLowerCase() === outputBase,
+        )?.name ?? '';
+      };
+
+      const explicitName = resolveOutputName(outputDeviceId);
+      if (explicitName) return explicitName;
+
+      const NativeModule: any = loadNativeModule();
+      if (NativeModule && typeof NativeModule.getDefaultOutputDeviceId === 'function') {
+        const defaultOutputId = NativeModule.getDefaultOutputDeviceId() || undefined;
+        return resolveOutputName(defaultOutputId);
+      }
+      return '';
+    } catch {
+      return '';
+    }
   }
 
   /**
@@ -2589,7 +2619,8 @@ export class AppState {
     const families = [
       'airpods', 'beats', 'bose', 'sony wh', 'sony wf', 'wh-1000', 'wf-1000',
       'jabra', 'galaxy buds', 'pixel buds', 'soundcore', 'jbl', 'sennheiser',
-      'momentum', 'bluetooth',
+      'momentum', 'oneplus', 'one plus', 'buds', 'earbuds', 'earbud', 'tws',
+      'bluetooth',
     ];
     return families.some(f => n.includes(f));
   }
@@ -2669,7 +2700,6 @@ export class AppState {
     // switch above fired, or no built-in mic exists (e.g. Mac mini / desktop).
     if (!micAutoSwitched) {
       try {
-        const stripSuffix = (s: string) => s.replace(/:(input|output)$/i, '');
         const inputs = AudioDevices.getInputDevices();
 
         const explicitName = wantedInput
@@ -2677,18 +2707,11 @@ export class AppState {
           : '';
         const inputIsExplicitBt = !!explicitName && this.isBluetoothInputName(explicitName);
 
-        let outputIsBt = false;
-        let outputName = '';
-        if (wantedOutput) {
-          const outBase = stripSuffix(wantedOutput).toLowerCase();
-          outputName =
-            AudioDevices.getOutputDevices().find(
-              o => stripSuffix(o.id).toLowerCase() === outBase,
-            )?.name ?? '';
-          outputIsBt = !!outputName && this.isBluetoothInputName(outputName);
-        }
+        const outputName = this.getEffectiveOutputDeviceName(wantedOutput);
+        const outputIsBt = !!outputName && this.isBluetoothInputName(outputName);
+        const outputResolutionUnknown = !!wantedOutput && !outputName;
         const inputIsDefault = !wantedInput;
-        const willBeHfp = inputIsExplicitBt || (inputIsDefault && outputIsBt);
+        const willBeHfp = inputIsExplicitBt || (inputIsDefault && (outputIsBt || outputResolutionUnknown));
 
         if (willBeHfp) {
           const fromLabel = inputIsExplicitBt ? explicitName : (outputName || 'Bluetooth mic');
@@ -2734,8 +2757,9 @@ export class AppState {
       // destroy() calls stop() AND removeAllListeners(), preventing EventEmitter listener leaks.
       // Using stop()+null would orphan all 'data', 'speech_ended', 'sample_rate_changed'
       // closures (they still hold a ref to `this`) and trigger them on the next meeting.
-      this.systemAudioCapture.destroy();
+      const oldSystemAudioCapture = this.systemAudioCapture;
       this.systemAudioCapture = null;
+      await oldSystemAudioCapture.destroy();
     }
 
     const screenCapability = await resolveMacScreenCaptureCapability('audio reconfigure');
@@ -2792,8 +2816,9 @@ export class AppState {
     // 2. Microphone (Input Capture)
     if (this.microphoneCapture) {
       // destroy() calls stop() AND removeAllListeners(), preventing EventEmitter listener leaks.
-      this.microphoneCapture.destroy();
+      const oldMicrophoneCapture = this.microphoneCapture;
       this.microphoneCapture = null;
+      await oldMicrophoneCapture.destroy();
     }
 
     try {
@@ -2879,6 +2904,13 @@ export class AppState {
           });
         }
       }
+    }
+
+    if (this.isMeetingActive) {
+      this.systemAudioCapture?.start();
+      this.microphoneCapture?.start();
+      this.googleSTT?.start();
+      this.googleSTT_User?.start();
     }
   }
 
@@ -3234,16 +3266,13 @@ export class AppState {
     if (!this.microphoneCapture) return;
 
     this.microphoneCapture.on('error', async (err: Error) => {
-      // Guard with live isMeetingActive — it's flipped to false synchronously in
-      // endMeeting() BEFORE any audio teardown, so any error from the previous
-      // meeting immediately returns without restarting the capture. The old
-      // generation-based guard used a closure-captured value that could pass
-      // if endMeeting() ran but _meetingGeneration hadn't been bumped by a new
-      // meeting yet — allowing a stale error handler to restart the mic after
-      // the user had already stopped.
-      if (!this.isMeetingActive) return;
-
-      const isMicRecoveryCurrentMeeting = () => this.isMeetingActive;
+      // Guard with both live isMeetingActive and the meeting generation. The
+      // live flag drops errors after Stop, while the generation check prevents
+      // an old meeting's delayed recovery timer from restarting the mic after a
+      // new meeting has begun.
+      const micRecoveryMeetingGeneration = this._meetingGeneration;
+      const isMicRecoveryCurrentMeeting = () => this.isMeetingActive && this._meetingGeneration === micRecoveryMeetingGeneration;
+      if (!isMicRecoveryCurrentMeeting()) return;
 
       if (this._micRecoveryInProgress || this._micRecoveryAttempts >= 3) {
         console.warn(
@@ -5347,6 +5376,29 @@ async function initializeApp() {
       }
     })();
     return; // skip the rest of startup (no meeting/STT prewarm needed for the bench)
+  }
+
+  // DEV-ONLY: thinking MATRIX (budgets × levels) on a focused problem subset.
+  //   THINKING_MATRIX=1 THINKING_BENCH_MODEL=gemini-3.5-flash THINKING_BENCH_DATASET=$(pwd)/electron/services/dev/cf10.json npm run electron:build
+if (process.env.THINKING_MATRIX === '1') {
+    (async () => {
+      try {
+        const llmHelper = appState.processingHelper?.getLLMHelper?.();
+        if (!llmHelper) { console.error('[ThinkingMatrix] LLMHelper unavailable'); app.quit(); return; }
+        const { runThinkingMatrix } = require('./services/dev/ThinkingBudgetBench');
+        const model = process.env.THINKING_BENCH_MODEL || 'gemini-3.1-flash-lite';
+        const delayMs = Number(process.env.THINKING_BENCH_DELAY_MS || '500');
+        const configs = process.env.THINKING_MATRIX_CONFIGS || undefined;
+        await new Promise(r => setTimeout(r, 2000));
+        await runThinkingMatrix(llmHelper, { model, delayMs, configs, log: (s: string) => console.log(s) });
+      } catch (e: any) {
+        console.error('[ThinkingMatrix] failed:', e?.message || e);
+      } finally {
+        console.log('[ThinkingMatrix] done — quitting.');
+        app.quit();
+      }
+    })();
+    return;
   }
 
   // PERF: pre-construct STT provider objects so the meeting-start critical

@@ -5,6 +5,86 @@
 
 ---
 
+## SESSION ADDENDUM (2026-06-03) — dynamic backend profile context, replacement, and anti-hardcoding audit
+
+### Scope
+
+Per user direction, Real UI / Playwright is not part of this acceptance pass. The proof uses the actual backend callable path that the frontend chat IPC now invokes: `gemini-chat-stream` → `buildManualProfileBackendAnswer()` → active orchestrator structured resume/JD data → deterministic profile answer.
+
+### Files changed
+
+- `electron/llm/profileAnswerBackend.ts` — shared backend boundary for manual Profile Intelligence preflight. IPC and tests call the same function.
+- `electron/ipcHandlers.ts` — `gemini-chat-stream` now delegates profile preflight to `buildManualProfileBackendAnswer()` instead of duplicating structured-data reads inline.
+- `electron/llm/manualProfileIntelligence.ts` — dynamic JD-fit answers from structured resume skills/experience/projects plus structured JD title/company/requirements/technologies/keywords. Returns `null` rather than fabricating when required facts are missing.
+- `electron/llm/__tests__/profileAnswerBackend.test.mjs` — backend integration-style tests with five synthetic profiles, resume replacement, restart-like reload, and multi-session isolation.
+- `premium/electron/knowledge/StructuredExtractor.ts` and `premium/electron/knowledge/KnowledgeOrchestrator.ts` — removed production fallback value `Unknown Company`; absent JD company now stays blank instead of inserting a fixture-like company.
+- `docs/superpowers/specs/2026-06-03-dynamic-profile-backend-context-design.md` and `docs/superpowers/plans/2026-06-03-dynamic-profile-backend-context.md` — design and implementation plan.
+
+### Backend dynamic profile tests
+
+The backend test suite uses five distinct synthetic profiles:
+
+- Aarav Menon — Backend Engineer — Inventory API — Node.js/PostgreSQL — Senior Backend Engineer at Nimbus Retail
+- Maya Iyer — Data Analyst — Sales Dashboard — SQL/Tableau — Analytics Consultant at Northstar Insights
+- Rahul Nair — DevOps Engineer — Kubernetes Rollout — Kubernetes/Terraform — Platform Reliability Engineer at Orbit Systems
+- Sara Thomas — Product Manager — Roadmap Portal — Roadmapping/User Research — Growth Product Manager at Helio Apps
+- Daniel Joseph — Sales Development Rep — Pipeline Sequencer — Prospecting/HubSpot — Enterprise SDR at QuotaSpring
+
+For each profile, tests ask:
+
+- `what is my name?`
+- `what are my experiences?`
+- `what projects have I done?`
+- `what are my skills?`
+- `how do I fit this JD?`
+
+Each answer must contain current-profile facts and must not contain facts from the other profiles.
+
+Additional tests prove:
+
+- Resume replacement A → B changes answers to B and does not mention A.
+- A fresh backend object after restart-like reload answers from the latest persisted structured profile.
+- Two backend session objects do not cross-contaminate project/profile facts.
+
+### Anti-hardcoding audit
+
+Ran the required grep audit against production roots:
+
+```bash
+grep -R "Evin John" electron src premium --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=dist-electron
+grep -R "evin" electron src premium --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=dist-electron
+grep -R "Data Analyst" electron src premium --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=dist-electron
+grep -R "Unknown Company" electron src premium --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=dist-electron
+grep -R "what is my name" electron src premium --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=dist-electron
+grep -R "what are my experiences" electron src premium --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=dist-electron
+grep -R "what all projects have you done" electron src premium --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=dist-electron
+grep -R "if.*name" electron src premium --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=dist-electron
+grep -R "includes(.*Evin" electron src premium --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=dist-electron
+grep -R "NODE_ENV.*test" electron src premium --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=dist-electron
+```
+
+Results:
+
+- `Unknown Company`: **no remaining production matches** after replacing fallback values with empty strings.
+- `Data Analyst`, `what are my experiences`, `what all projects have you done`: matches are in tests only.
+- `Evin John` / `evin`: production matches are assistant creator/about-page metadata and explicit identity guard text that prevents candidate-name confusion. They are not candidate/resume/JD fast paths and are not used as profile facts.
+- `what is my name`: production matches are routing comments/patterns; tests contain fixture questions.
+- `if.*name`: broad regex mostly matched normal property/error/model-name checks. The relevant production profile checks use dynamic fields (`resume.identity.name`, project `name`, certification `name`) rather than fixture values.
+- `includes(.*Evin`: no matches.
+- `NODE_ENV.*test`: matches are test-only IPC/eval bridges and cooldown test guards, not profile-answer behavior branches.
+
+### Verification
+
+Focused verification command:
+
+```bash
+npm run build:electron && node --test \
+  electron/llm/__tests__/profileAnswerBackend.test.mjs \
+  electron/llm/__tests__/manualProfileIntelligence.test.mjs
+```
+
+Result: **build PASS, 14/14 focused backend/manual profile tests PASS**.
+
 ## SESSION ADDENDUM (2026-06-03) — manual Profile Intelligence routing fixed
 
 ### Root cause

@@ -96,6 +96,7 @@ import {
   shouldBlockFocus as shouldBlockStealthFocus,
   shouldFireStealthTapStart,
 } from '../lib/overlayStealthFocusGuards.mjs';
+import { shouldEagerExpandForCodeToken } from '../lib/overlayCodeExpansion.mjs';
 import { shouldAcceptIntelligenceIpc } from '../lib/overlayIntelligenceGeneration.mjs';
 import { widthDerivedScrollMax, verticalScrollCap } from '../lib/overlayScrollBudget.mjs';
 import {
@@ -1813,6 +1814,13 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       });
     }
 
+    if (
+      shouldEagerExpandForCodeToken(intent, token, streamingTextRef.current) &&
+      !codeExpandedRef.current
+    ) {
+      startTransition(SHELL_WIDTH_EXPANDED);
+    }
+
     streamingTextRef.current += token;
     streamingIntentRef.current = intent;
 
@@ -1888,7 +1896,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       });
     });
     scheduleMarkdownRender();
-  }, [scheduleMarkdownRender]);
+  }, [scheduleMarkdownRender, startTransition, SHELL_WIDTH_EXPANDED]);
 
   // registerStreamingNode: ref-callback wired to the streaming bubble's div.
   // Called by React when the node mounts/unmounts.

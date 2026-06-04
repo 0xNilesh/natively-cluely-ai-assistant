@@ -25,7 +25,7 @@ Required facts found: OpenRate
 Missing facts: none
 Forbidden facts present: none
 Context pollution: none
-Pass: true
+Pass: false
 
 ### BE-004 (projects_interviewer)
 Mode: what_to_answer | path: provider_streaming | intent: profile_detail | speaker: interviewer
@@ -124,7 +124,7 @@ Required facts found: (none required)
 Missing facts: none
 Forbidden facts present: none
 Context pollution: none
-Pass: true
+Pass: false
 
 ### ML-005 (jd_alignment)
 Mode: what_to_answer | path: provider_streaming | intent: technical | speaker: interviewer
@@ -385,7 +385,7 @@ Required facts found: DesignToken.io
 Missing facts: none
 Forbidden facts present: none
 Context pollution: none
-Pass: true
+Pass: false
 
 ### UX-004 (process)
 Mode: what_to_answer | path: provider_streaming | intent: technical | speaker: interviewer
@@ -493,7 +493,7 @@ Required facts found: (none required)
 Missing facts: none
 Forbidden facts present: none
 Context pollution: none
-Pass: true
+Pass: false
 
 ### DA-006 (followup)
 Mode: what_to_answer | path: provider_streaming | intent: general | speaker: interviewer
@@ -511,7 +511,7 @@ Required facts found: (none required)
 Missing facts: none
 Forbidden facts present: none
 Context pollution: none
-Pass: true
+Pass: false
 
 ### DA-008 (negotiation)
 Mode: what_to_answer | path: provider_streaming | intent: negotiation | speaker: interviewer
@@ -691,7 +691,7 @@ Required facts found: (none required)
 Missing facts: none
 Forbidden facts present: none
 Context pollution: none
-Pass: true
+Pass: false
 
 ### CSM-008 (negotiation)
 Mode: what_to_answer | path: provider_streaming | intent: negotiation | speaker: interviewer
@@ -745,7 +745,7 @@ Required facts found: ThreatHunter-Playbook
 Missing facts: none
 Forbidden facts present: none
 Context pollution: none
-Pass: true
+Pass: false
 
 ### CY-004 (approach)
 Mode: what_to_answer | path: provider_streaming | intent: general | speaker: interviewer
@@ -754,7 +754,7 @@ Required facts found: (none required)
 Missing facts: none
 Forbidden facts present: none
 Context pollution: none
-Pass: true
+Pass: false
 
 ### CY-005 (jd_alignment)
 Mode: manual_input | path: provider_streaming | intent: profile_detail | speaker: user
@@ -763,7 +763,7 @@ Required facts found: (none required)
 Missing facts: none
 Forbidden facts present: none
 Context pollution: none
-Pass: true
+Pass: false
 
 ### CY-006 (skills)
 Mode: what_to_answer | path: provider_streaming | intent: general | speaker: interviewer
@@ -790,7 +790,7 @@ Required facts found: (none required)
 Missing facts: none
 Forbidden facts present: none
 Context pollution: none
-Pass: true
+Pass: false
 
 ### CY-009 (unknown)
 Mode: manual_input | path: provider_streaming | intent: general | speaker: user
@@ -799,7 +799,7 @@ Required facts found: (none required)
 Missing facts: none
 Forbidden facts present: none
 Context pollution: none
-Pass: true
+Pass: false
 
 ### CY-010 (context_isolation)
 Mode: what_to_answer | path: deterministic_fast_path | intent: intro | speaker: interviewer
@@ -853,7 +853,7 @@ Required facts found: (none required)
 Missing facts: none
 Forbidden facts present: none
 Context pollution: none
-Pass: true
+Pass: false
 
 ### FND-006 (metrics_guard)
 Mode: what_to_answer | path: provider_streaming | intent: general | speaker: interviewer
@@ -862,7 +862,7 @@ Required facts found: (none required)
 Missing facts: none
 Forbidden facts present: none
 Context pollution: none
-Pass: true
+Pass: false
 
 ### FND-007 (follow_up)
 Mode: what_to_answer | path: provider_streaming | intent: general | speaker: interviewer
@@ -880,7 +880,7 @@ Required facts found: (none required)
 Missing facts: none
 Forbidden facts present: none
 Context pollution: none
-Pass: true
+Pass: false
 
 ### FND-009 (unknown)
 Mode: manual_input | path: provider_streaming | intent: general | speaker: user
@@ -900,11 +900,56 @@ Forbidden facts present: none
 Context pollution: none
 Pass: true
 
+### CODING-ODD-EVEN-MANUAL (coding_manual)
+Mode: manual_input | path: provider_streaming | intent: technical | speaker: user
+Selected context: persona
+Required facts found: (none required)
+Missing facts: none
+Forbidden facts present: none
+Context pollution: none
+Pass: true
+
+### CODING-ODD-EVEN-WTA (coding_interviewer)
+Mode: what_to_answer | path: provider_streaming | intent: technical | speaker: interviewer
+Selected context: persona, live_transcript
+Required facts found: (none required)
+Missing facts: none
+Forbidden facts present: none
+Context pollution: none
+Pass: true
+
+### TWO-SUM-WTA (coding_interviewer)
+Mode: what_to_answer | path: provider_streaming | intent: general | speaker: interviewer
+Selected context: experience, resume, custom_context, persona, live_transcript
+Required facts found: (none required)
+Missing facts: none
+Forbidden facts present: none
+Context pollution: forbidden_context_layer_selected:resume
+Pass: false
+
+### CONTEXT-ISOLATION-CODING (coding_manual)
+Mode: manual_input | path: provider_streaming | intent: technical | speaker: user
+Selected context: persona
+Required facts found: (none required)
+Missing facts: none
+Forbidden facts present: none
+Context pollution: none
+Pass: true
+
+### REVERSE-LINKED-LIST-WTA (coding_interviewer)
+Mode: what_to_answer | path: provider_streaming | intent: general | speaker: interviewer
+Selected context: experience, resume, custom_context, persona, live_transcript
+Required facts found: (none required)
+Missing facts: none
+Forbidden facts present: none
+Context pollution: forbidden_context_layer_selected:resume
+Pass: false
+
 ## Summary
 Resume used correctly: OK (31 recall cases, all required facts present)
 JD used correctly: OK (10 relevant cases, no leakage)
-Custom context used correctly: OK (custom_context surfaced where loaded; 75 cases)
-Persona used correctly: style-only (persona layer present on 100 cases; no invented-metric failures: true)
+Custom context used correctly: OK (custom_context surfaced where loaded; 77 cases)
+Persona used correctly: style-only (persona layer present on 105 cases; no invented-metric failures: true)
 Negotiation used correctly: OK (9 relevant cases, no leakage)
 Transcript used correctly: OK (live_transcript on what_to_answer cases; follow-up targets resolved: true)
 Reference files used correctly: n/a (no reference files in synthetic fixtures)

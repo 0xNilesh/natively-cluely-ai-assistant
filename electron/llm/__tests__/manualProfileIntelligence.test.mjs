@@ -7,6 +7,7 @@ const {
   tryBuildManualProfileFastPathAnswer,
   isAssistantIdentityQuestion,
   logManualProfileRoute,
+  hasUnhandledQualifier,
 } = require('../../../dist-electron/electron/llm/manualProfileIntelligence.js');
 
 const PROFILE = {
@@ -161,5 +162,45 @@ describe('manual Profile Intelligence deterministic fast path', () => {
     assert.equal(log.usedDeterministicFastPath, true);
     assert.equal(log.providerUsed, false);
     assert.doesNotMatch(JSON.stringify(log), /Evin John|Acme Analytics|Revenue Forecasting/);
+  });
+});
+
+// REGRESSION: the deterministic fast path used to fire a canned "your projects
+// include ..." dump for ANY question containing "projects", ignoring filters like
+// "...that I used REST API". Those qualified questions must DEFER to the grounded
+// LLM (return null) so it can actually reason over the filter, not dump verbatim.
+describe('manual Profile Intelligence: qualified questions defer to the LLM', () => {
+  test('bare listing questions still FIRE the fast path', () => {
+    assert.ok(fast('what are my projects?'), 'plain projects listing should fast-path');
+    assert.ok(fast('what are my skills?'), 'plain skills listing should fast-path');
+    assert.ok(fast('what is my name?'), 'name lookup should fast-path');
+    assert.ok(fast('what are your experiences?'), 'plain experience listing should fast-path');
+  });
+
+  test('FILTERED project question DEFERS (the reported "dumb" bug)', () => {
+    assert.equal(fast('what are my projects that i have used rest api'), null,
+      'a project question with a tech filter must defer to the grounded LLM');
+    assert.equal(fast('which project used graphql'), null);
+    assert.equal(fast('tell me about my projects related to machine learning'), null);
+    assert.equal(fast('any projects with kubernetes'), null);
+  });
+
+  test('FILTERED skill question DEFERS', () => {
+    assert.equal(fast('what skills do i have in python'), null);
+    assert.equal(fast('which skills are most relevant for this role'), null);
+  });
+
+  test('comparison / how / why questions DEFER', () => {
+    assert.equal(fast('how did i use redis in my projects'), null);
+    assert.equal(fast('why are my projects a good fit'), null);
+  });
+
+  test('hasUnhandledQualifier detects filters but not plain listings', () => {
+    assert.equal(hasUnhandledQualifier('what are my projects'), false);
+    assert.equal(hasUnhandledQualifier('what are my skills'), false);
+    assert.equal(hasUnhandledQualifier('projects that used rest api'), true);
+    assert.equal(hasUnhandledQualifier('which project used graphql'), true);
+    assert.equal(hasUnhandledQualifier('skills in python'), true);
+    assert.equal(hasUnhandledQualifier('how did i build it'), true);
   });
 });

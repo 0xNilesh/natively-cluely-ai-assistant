@@ -292,6 +292,165 @@ function loadRefDataset(log: (s: string) => void): RefProblem[] {
   return [];
 }
 
+// ── Thinking MATRIX: budgets × levels on a focused problem subset ──────────────
+// Mirrors the coding path (CHAT_MODE_PROMPT system + answer-plan context) but
+// calls the client DIRECTLY so it can set EITHER thinkingBudget (number) OR
+// thinkingLevel (enum) — streamChat only threads a numeric budget. Grades
+// correctness with the same consensus oracle + name-agnostic runner, and
+// captures thoughtsTokenCount so we can see how much the model actually thought.
+interface MatrixConfig { label: string; cfg: any; }
+
+const DEFAULT_MATRIX_CONFIGS: MatrixConfig[] = [
+  { label: 'budget:0',    cfg: { thinkingConfig: { thinkingBudget: 0 } } },
+  { label: 'budget:512',  cfg: { thinkingConfig: { thinkingBudget: 512 } } },
+  { label: 'budget:1024', cfg: { thinkingConfig: { thinkingBudget: 1024 } } },
+  { label: 'level:minimal', cfg: { thinkingConfig: { thinkingLevel: 'minimal' } } },
+  { label: 'level:low',     cfg: { thinkingConfig: { thinkingLevel: 'low' } } },
+  { label: 'level:medium',  cfg: { thinkingConfig: { thinkingLevel: 'medium' } } },
+];
+
+// Parse a config spec like "budget:0,budget:512,level:low,level:medium,level:high".
+// Per Gemini 3.x docs: numeric thinkingBudget is DEPRECATED in favor of the
+// thinkingLevel enum (minimal|low|medium|high); gemini-3.1-pro-preview CANNOT
+// disable thinking (rejects budget:0 / has no minimal) — use level low/medium/high.
+function parseMatrixConfigs(spec?: string): MatrixConfig[] {
+  if (!spec) return DEFAULT_MATRIX_CONFIGS;
+  const out: MatrixConfig[] = [];
+  for (const tok of spec.split(',').map(s => s.trim()).filter(Boolean)) {
+    const [kind, val] = tok.split(':');
+    if (kind === 'budget') out.push({ label: tok, cfg: { thinkingConfig: { thinkingBudget: Number(val) } } });
+    else if (kind === 'level') out.push({ label: tok, cfg: { thinkingConfig: { thinkingLevel: val } } });
+    else if (kind === 'default') out.push({ label: 'default', cfg: {} });
+  }
+  return out.length ? out : DEFAULT_MATRIX_CONFIGS;
+}
+
+export async function runThinkingMatrix(llmHelper: LLMHelper, opts: { model?: string; log?: (s: string) => void; delayMs?: number; configs?: string } = {}): Promise<any> {
+  const log = opts.log ?? ((s: string) => console.log(s));
+  const model = opts.model || 'gemini-3.1-flash-lite';
+  const delayMs = opts.delayMs ?? 500;
+  const MATRIX_CONFIGS = parseMatrixConfigs(opts.configs);
+  const appClient = (llmHelper as any).client;
+  if (!appClient) { log('[matrix] no Gemini client'); return null; }
+
+  // KEY ROTATION (opt-in): Pro free-tier is 250 req/day/key AND has a ~30s RPM
+  // window. Rotating across several keys multiplies effective throughput. When
+  // THINKING_BENCH_KEYS_FROM_NATIVELY=1, load every GEMINI_API_KEY* from
+  // natively-api/.env, build a client per key, rotate per call, and on a 429
+  // retry on the NEXT key after a short backoff. Falls back to the app client.
+  const clients: any[] = [];
+  if (process.env.THINKING_BENCH_KEYS_FROM_NATIVELY === '1') {
+    try {
+      const { GoogleGenAI } = require('@google/genai');
+      const envPath = path.join(process.cwd(), 'natively-api/.env');
+      const env = fs.readFileSync(envPath, 'utf8');
+      let keys = [...env.matchAll(/^GEMINI_API_KEY(?:_\d+)?="?([^"\n]+)"?$/mg)].map(m => m[1].trim());
+      keys = Array.from(new Set(keys));
+      // THINKING_BENCH_KEY_INDICES="1,3" → use only those 1-based keys (skip
+      // daily-capped/blocked ones so rotation doesn't waste retries on them).
+      const only = (process.env.THINKING_BENCH_KEY_INDICES || '').split(',').map(s => Number(s.trim())).filter(n => n > 0);
+      if (only.length) keys = only.map(n => keys[n - 1]).filter(Boolean);
+      for (const k of keys) clients.push(new GoogleGenAI({ apiKey: k }));
+      log(`[matrix] rotating across ${clients.length} keys from natively-api/.env${only.length ? ` (indices ${only.join(',')})` : ''}`);
+    } catch (e: any) { log(`[matrix] key load failed: ${e?.message}; using app client`); }
+  }
+  if (!clients.length) clients.push(appClient);
+  let keyIdx = 0;
+
+  // Load the focused subset + consensus pre-flight (same oracle as the sweep).
+  const refSet = loadRefDataset(log);
+  if (!refSet.length) { log('[matrix] no dataset (set THINKING_BENCH_DATASET to cf10.json)'); return null; }
+  log(`[matrix] pre-flight: consensus-deriving expected for ${refSet.length} problems...`);
+  const problems: Problem[] = [];
+  for (const rp of refSet) {
+    const { problem, reason } = await deriveExpected(rp);
+    if (problem) problems.push(problem); else log(`[matrix] dropped ${rp.id} (${reason})`);
+  }
+  log(`[matrix] ${problems.length} problems usable\n`);
+
+  const MAX_OUTPUT_TOKENS = 65536;
+  const all: any[] = [];
+  log(`[matrix] model=${model} configs=[${MATRIX_CONFIGS.map(c => c.label).join(', ')}] problems=${problems.length}`);
+
+  for (const mc of MATRIX_CONFIGS) {
+    for (const p of problems) {
+      // Faithful coding request: answer-plan context + CHAT_MODE_PROMPT, mirroring
+      // ipcHandlers' coding-chat path, but as a direct client call.
+      const plan = planAnswer({ question: p.prompt, source: 'manual_input', speakerPerspective: 'user' });
+      const context = formatAnswerPlanForPrompt(plan);
+      const userContent = `CONTEXT:\n${context}\n\nUSER QUESTION:\n${p.prompt}`;
+      let ttft: number | null = null; let full = ''; let usage: any = null; let err: string | null = null;
+      let t0 = Number(process.hrtime.bigint() / 1000000n);
+      // Try across keys: on a 429 (RPM/quota), rotate to the next key and retry.
+      const maxAttempts = Math.max(clients.length * 2, 3);
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const client = clients[keyIdx % clients.length];
+        keyIdx++;
+        ttft = null; full = ''; usage = null; err = null;
+        t0 = Number(process.hrtime.bigint() / 1000000n);
+        try {
+          const stream = await client.models.generateContentStream({
+            model, contents: [{ text: userContent }],
+            config: {
+              maxOutputTokens: MAX_OUTPUT_TOKENS, temperature: 0.2, seed: 7,
+              systemInstruction: { parts: [{ text: CHAT_MODE_PROMPT }] },
+              ...mc.cfg,
+            },
+          });
+          for await (const ch of stream) {
+            const tx = typeof ch.text === 'function' ? ch.text() : (ch.text || '');
+            if (tx && ttft === null) ttft = Number(process.hrtime.bigint() / 1000000n) - t0;
+            if (tx) full += tx;
+            if (ch.usageMetadata) usage = ch.usageMetadata;
+          }
+          break; // success
+        } catch (e: any) {
+          err = String(e?.message || e).replace(/\s+/g, " ").slice(0, 240);
+          const is429 = /"code":\s*429|RESOURCE_EXHAUSTED|Too Many Requests/.test(err);
+          if (is429 && attempt < maxAttempts - 1) {
+            // short backoff before trying the next key (per-minute window ~30s,
+            // but with N keys we usually only wait a little)
+            await new Promise(r => setTimeout(r, clients.length > 1 ? 1200 : 32000));
+            continue;
+          }
+          break; // non-429, or out of attempts
+        }
+      }
+      const totalMs = Number(process.hrtime.bigint() / 1000000n) - t0;
+      const thoughts = usage?.thoughtsTokenCount ?? 0;
+      let verify: any = { ran: false, pass: 0, total: p.cases.length, reason: err ? 'api_error' : 'no_code_block' };
+      if (!err) {
+        const code = extractCode(full);
+        verify = code ? await runPython(code, p.cases, p.entry) : verify;
+      }
+      const allPass = verify.ran && verify.pass === verify.total;
+      log(`  ${mc.label.padEnd(13)} ${p.difficulty.padEnd(6)} ${p.id.padEnd(34)} ttft=${err ? 'ERR' : String(ttft).padStart(5) + 'ms'} total=${String(totalMs).padStart(5)}ms thoughts=${String(thoughts).padStart(4)} ${err ? err : (verify.ran ? `${verify.pass}/${verify.total}${allPass ? ' OK' : ' X'}` : `(${verify.reason})`)}`);
+      all.push({ config: mc.label, id: p.id, difficulty: p.difficulty, ttft, totalMs, thoughts, pass: verify.pass, total: verify.total, allPass, ran: verify.ran, reason: verify.reason, err });
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+
+  // Summary per config
+  const pctl = (a: number[], p: number) => { if (!a.length) return 0; const s = [...a].sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(s.length * p))]; };
+  log(`\n[matrix] SUMMARY (model=${model}, ${problems.length} problems)`);
+  log(`config        | ttft p50 | ttft p95 | total p50 | thoughts avg | correct`);
+  const summary: any[] = [];
+  for (const mc of MATRIX_CONFIGS) {
+    const rows = all.filter(r => r.config === mc.label && !r.err);
+    if (!rows.length) { log(`${mc.label.padEnd(13)} | (all errored)`); continue; }
+    const tt = rows.map(r => r.ttft).filter((x: any) => x != null);
+    const th = rows.map(r => r.thoughts);
+    const correct = rows.filter(r => r.allPass).length;
+    const thoughtsAvg = Math.round(th.reduce((a, b) => a + b, 0) / th.length);
+    summary.push({ config: mc.label, ttft_p50: pctl(tt, 0.5), ttft_p95: pctl(tt, 0.95), total_p50: pctl(rows.map(r => r.totalMs), 0.5), thoughts_avg: thoughtsAvg, correct: `${correct}/${rows.length}` });
+    log(`${mc.label.padEnd(13)} | ${String(pctl(tt, 0.5)).padStart(8)} | ${String(pctl(tt, 0.95)).padStart(8)} | ${String(pctl(rows.map(r => r.totalMs), 0.5)).padStart(9)} | ${String(thoughtsAvg).padStart(12)} | ${correct}/${rows.length}`);
+  }
+
+  const outPath = path.join(app.getPath('userData'), `thinking-matrix-${model.replace(/[^a-z0-9]/gi, '_')}.json`);
+  try { fs.writeFileSync(outPath, JSON.stringify({ model, ranAt: new Date().toISOString(), summary, raw: all }, null, 2)); log(`\n[matrix] wrote ${outPath}`); } catch { /* ignore */ }
+  return { model, summary, raw: all };
+}
+
 export interface BenchOptions { budgets?: number[]; repeats?: number; log?: (s: string) => void; model?: string; }
 
 /**
@@ -329,7 +488,7 @@ export async function probeThinkingConfig(llmHelper: LLMHelper, model: string, l
         if (tx) full += tx;
         if (ch.usageMetadata) usage = ch.usageMetadata;
       }
-    } catch (e: any) { err = String(e?.message || e).slice(0, 120); }
+    } catch (e: any) { err = String(e?.message || e).replace(/\s+/g, " ").slice(0, 240); }
     const thoughts = usage?.thoughtsTokenCount ?? null;
     const cand = usage?.candidatesTokenCount ?? null;
     out.push({ label, ttft, thoughts, candidates: cand, chars: full.length, err });

@@ -71,11 +71,17 @@ describe('WTA interviewer-question regressions', () => {
       ['candidate', 'Sure, I would use a hash map.'],
       ['interviewer', 'What is the time complexity?'],
     ));
-    // Complexity is a DSA pattern → coding/dsa; either way it must NOT pull resume/JD.
+    // Complexity is a technical question → coding/dsa, technical_concept, or
+    // follow-up. Any of these is fine; the CONTRACT is it must NOT pull resume/JD.
     assert.ok(
-      isCodingAnswerType(plan.answerType) || plan.answerType === 'follow_up_answer',
+      isCodingAnswerType(plan.answerType)
+        || plan.answerType === 'technical_concept_answer'
+        || plan.answerType === 'follow_up_answer',
       `got ${plan.answerType}`,
     );
+    // The real invariant: no profile layers for a complexity question.
+    assert.ok(plan.forbiddenContextLayers.includes('resume'), 'must forbid resume');
+    assert.ok(plan.forbiddenContextLayers.includes('jd'), 'must forbid jd');
   });
 
   test('Interviewer: "Can you explain that project in more detail?" → follow-up, uses transcript', () => {

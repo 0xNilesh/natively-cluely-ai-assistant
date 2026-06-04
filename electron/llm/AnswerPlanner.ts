@@ -7,14 +7,18 @@ export type AnswerType =
   | 'profile_fact_answer'
   | 'project_answer'
   | 'skills_answer'
+  | 'skill_experience_answer'
   | 'experience_answer'
   | 'jd_fit_answer'
   | 'behavioral_interview_answer'
   | 'coding_question_answer'
   | 'dsa_question_answer'
+  | 'technical_concept_answer'
   | 'system_design_answer'
   | 'debugging_question_answer'
   | 'negotiation_answer'
+  | 'sales_answer'
+  | 'lecture_answer'
   | 'follow_up_answer'
   | 'unknown_answer'
   | 'general_meeting_answer';
@@ -181,6 +185,23 @@ const GENERAL_TEMPLATE = `Answer naturally and directly. Use only relevant conte
 
 const includesAny = (text: string, patterns: RegExp[]): boolean => patterns.some(pattern => pattern.test(text));
 
+// CS/technical subject terms that, when combined with explain/what-is framing,
+// mark a generic technical-concept question (no profile). Deliberately broad —
+// the gate is "explain/what-is + (a DSA term OR one of these)", so a plain
+// profile question like "what is my name" never reaches here (IDENTITY wins
+// first), and "what projects have I done" lacks both a DSA term and these.
+const TECHNICAL_SUBJECT_PATTERNS = [
+  /\b(deadlock|mutex|semaphore|thread|process|concurrency|race condition)\b/i,
+  /\b(tcp|udp|http|https|dns|ip|osi|latency|throughput|socket)\b/i,
+  /\b(database|index|normalization|acid|transaction|sharding|replication)\b/i,
+  /\b(amortized|complexity|big[- ]?o|asymptotic|np[- ]?complete)\b/i,
+  /\b(closure|hoisting|prototype|garbage collection|event loop|promise|async)\b/i,
+  /\b(rest|graphql|grpc|microservice|monolith|cache|cdn|load balanc)\b/i,
+  /\b(encryption|hashing|oauth|jwt|tls|ssl|cors|xss|csrf|sql injection)\b/i,
+  /\b(pointer|reference|stack|heap|recursion|iteration|polymorphism|inheritance)\b/i,
+];
+const isLikelyTechnicalConcept = (text: string): boolean => includesAny(text, TECHNICAL_SUBJECT_PATTERNS);
+
 const DSA_PATTERNS = [
   /\btwo\s*sum\b/i,
   /\blongest substring\b/i,
@@ -246,25 +267,77 @@ const NEGOTIATION_PATTERNS = [
 ];
 
 const IDENTITY_PATTERNS = [
-  /\bwhat(?:'s| is) my name\b/i,
+  // Both "my name" (manual/user asking) and "your name" (interviewer asking the
+  // candidate) — spec §1/§11 require both. The candidate-voice perspective is
+  // decided separately from the answerType, so "your name" still answers
+  // "My name is ..." in first person when an interviewer asks.
+  /\bwhat(?:'s| is) (my|your) name\b/i,
   /\bwho am i\b/i,
+  /\bwho are you\b/i,
   /\bintroduce yourself\b/i,
   /\btell me about yourself\b/i,
   /\bstate your name\b/i,
+  /\bwhat(?:'s| is) your (full )?name\b/i,
 ];
 
 const JD_FIT_PATTERNS = [
-  /\bwhy (this role|us|our company|are you a good fit)\b/i,
+  /\bwhy (this role|this company|us|our company|are you a good fit)\b/i,
+  // "Why do you want to work here / for us / at <company>" — the canonical
+  // company-motivation interview question (spec §11.11). Profile + JD/company
+  // context, NOT a generic meeting answer.
+  /\bwhy (do|would) (you|i) want to (work|join)\b/i,
+  /\bwhy (do you )?want to work (here|with us|for us|for this)\b/i,
   /\bfit (for|this|the) (this |the )?role\b|\bmatch(?:es)? the job\b/i,
-  /\b(why|how) (do |would |are )?you (a good )?fit\b/i,
+  /\b(why|how) (do |would |are )?(you|i) (a good )?fit\b/i,
+  /\bhow (do|would|can) (i|you) fit\b/i,
   /\bgood fit for\b|\bright (fit|candidate) for\b|\bsuited (for|to) (this|the) (role|job|position)\b/i,
   /\bhow.*experience.*(role|job|position)\b/i,
+  // "how do I fit this <role> JD/role/position" and tailoring asks against the JD.
+  /\bfit (this|the|that) (data analyst |[a-z ]+)?(role|job|position|jd|description)\b/i,
+  /\b(tailor|match|align) (my |the )?(answer|resume|experience|skills?|background).*(jd|job|role|position)\b/i,
+  /\b(gaps?|strengths?).*(this|the).*(jd|role|job|position|data analyst)\b/i,
 ];
 
 const SKILLS_PATTERNS = [/\b(skills|tools|technologies|frameworks|tech stack)\b/i];
+// Spec Case F exception: "have you used / worked with / do you know <tech>" is a
+// SKILL-EXPERIENCE question about the USER (profile YES, first person) — NOT a
+// generic technical concept. This must be checked BEFORE coding/DSA patterns so
+// "have you used a hashmap?" routes to skills, not to the coding contract.
+const SKILL_EXPERIENCE_PATTERNS = [
+  /\bhave you (ever )?(used|worked with|worked on|built with|written|coded in|programmed in)\b/i,
+  /\bdo you (know|have experience (with|in)|use)\b/i,
+  /\bare you (familiar|comfortable|proficient|experienced) (with|in)\b/i,
+  /\byour experience (with|in|using)\b/i,
+  /\bhow (much |many years )?(experience|familiar).*\b(with|in|using)\b/i,
+  /\bever (used|worked with|built)\b/i,
+];
+// Generic technical-concept questions ("explain BFS", "what is a deadlock") —
+// no profile, generic_ai voice. Distinct from coding (which asks to WRITE code)
+// and from skill_experience (which asks about the USER). Checked only when there
+// is no coding verb and no skill-experience framing.
+const TECHNICAL_CONCEPT_PATTERNS = [
+  /\b(explain|what(?:'s| is| are)|describe|how does|how do|define|difference between|compare)\b/i,
+];
 const PROJECT_PATTERNS = [/\b(project|projects|built|shipped|worked on)\b/i];
-const EXPERIENCE_PATTERNS = [/\bexperience|background|previous role|last role|work history\b/i];
+const EXPERIENCE_PATTERNS = [/\bexperience|background|previous role|last role|work history|internship|interned|worked at|time at\b/i];
 const BEHAVIORAL_PATTERNS = [/\btell me about a time\b|\bdescribe a situation\b|\bexample of when\b|\bconflict\b|\bfailure\b|\bchallenge\b/i];
+// Sales: pricing/product/competitor/objection questions (spec Case G). Uses sales
+// context, NOT resume/JD/negotiation. The active mode also signals sales, but the
+// answerType lets the selector exclude resume/salary regardless of mode.
+const SALES_PATTERNS = [
+  /\b(pricing|price|cost|expensive|cheaper|discount|quote|deal|contract)\b/i,
+  /\bcompare(?:d)? to (your )?competitor|vs\.? (a )?competitor|competitor\b/i,
+  /\b(your|the) product\b.*\b(do|offer|cost|price|compare|better|why)\b/i,
+  /\bwhy (should|would) (i|we) (buy|choose|pick|go with)\b/i,
+  /\b(roi|return on investment|value proposition|use case)\b/i,
+];
+// Lecture: questions about lecture/slide/lecture material (spec Case H). Uses
+// lecture materials + screen + reference files, NOT resume/JD/negotiation.
+const LECTURE_PATTERNS = [
+  /\b(this slide|the slide|lecture slide|this diagram|the diagram|the professor|the lecturer|the lecture|lecture)\b/i,
+  /\bwhat (did|does) (the )?(professor|lecturer|teacher) (mean|say)\b/i,
+  /\bon (the|this) (slide|board|screen)\b/i,
+];
 const FOLLOW_UP_PATTERNS = [/\b(that|this) (project|approach|answer|solution)\b|\bcan you (expand|optimize|dry run|explain)\b|\bwhat about complexity\b|\bwhy did you choose\b/i];
 
 const templateFor = (answerType: AnswerType): string => {
@@ -284,10 +357,18 @@ const templateFor = (answerType: AnswerType): string => {
       return SYSTEM_DESIGN_TEMPLATE;
     case 'debugging_question_answer':
       return DEBUGGING_TEMPLATE;
+    case 'technical_concept_answer':
+      // Generic technical explanation — no profile, no persona. Same shape as
+      // general but explicitly free of candidate framing.
+      return GENERAL_TEMPLATE;
     case 'identity_answer':
     case 'profile_fact_answer':
     case 'skills_answer':
+    case 'skill_experience_answer':
       return DIRECT_SHORT_TEMPLATE;
+    case 'sales_answer':
+    case 'lecture_answer':
+      return GENERAL_TEMPLATE;
     default:
       return GENERAL_TEMPLATE;
   }
@@ -300,6 +381,7 @@ const requiredLayersFor = (answerType: AnswerType): ContextLayer[] => {
     case 'profile_fact_answer':
     case 'project_answer':
     case 'skills_answer':
+    case 'skill_experience_answer':
     case 'experience_answer':
     case 'behavioral_interview_answer':
       return ['resume', 'custom_context', 'ai_persona'];
@@ -307,11 +389,16 @@ const requiredLayersFor = (answerType: AnswerType): ContextLayer[] => {
       return ['resume', 'jd', 'custom_context', 'ai_persona'];
     case 'coding_question_answer':
     case 'dsa_question_answer':
+    case 'technical_concept_answer':
     case 'system_design_answer':
     case 'debugging_question_answer':
       return ['live_transcript', 'active_mode', 'screen_context', 'preferred_language'];
     case 'negotiation_answer':
       return ['negotiation', 'jd', 'custom_context', 'ai_persona'];
+    case 'sales_answer':
+      return ['custom_context', 'reference_files', 'active_mode', 'ai_persona'];
+    case 'lecture_answer':
+      return ['live_transcript', 'screen_context', 'reference_files', 'active_mode'];
     case 'follow_up_answer':
       return ['live_transcript', 'prior_assistant_responses', 'active_mode'];
     default:
@@ -325,13 +412,32 @@ const forbiddenLayersFor = (answerType: AnswerType): ContextLayer[] => {
       return ['jd', 'negotiation', 'reference_files'];
     case 'coding_question_answer':
     case 'dsa_question_answer':
+    case 'technical_concept_answer':
     case 'system_design_answer':
     case 'debugging_question_answer':
+      // Spec §8.3: generic coding/technical answers must NOT use any profile.
       return ['resume', 'jd', 'negotiation', 'custom_context', 'reference_files'];
+    case 'skill_experience_answer':
+    case 'skills_answer':
+    case 'profile_fact_answer':
+      // About the user's own facts — resume YES, but not JD/negotiation (spec §8:
+      // negotiation context only for salary answers).
+      return ['jd', 'negotiation', 'reference_files'];
+    case 'project_answer':
+    case 'experience_answer':
+    case 'behavioral_interview_answer':
+      // Profile narrative answers — never the negotiation/salary layer.
+      return ['negotiation'];
     case 'jd_fit_answer':
       return ['negotiation'];
     case 'negotiation_answer':
       return ['reference_files'];
+    case 'sales_answer':
+      // Sales answers must not pull the user's resume/JD or negotiation/salary.
+      return ['resume', 'jd', 'negotiation'];
+    case 'lecture_answer':
+      // Lecture answers must not pull resume/JD/negotiation.
+      return ['resume', 'jd', 'negotiation'];
     default:
       return [];
   }
@@ -348,17 +454,41 @@ export const planAnswer = (input: PlanAnswerInput): AnswerPlan => {
 
   let answerType: AnswerType = 'general_meeting_answer';
 
+  // Skill-experience framing ("have you used X?", "do you know X?") is about the
+  // USER, so it must win BEFORE coding/DSA/technical patterns — otherwise
+  // "have you used a hashmap?" mis-routes to the coding contract. It still yields
+  // to explicit negotiation/identity (those are higher-priority profile asks).
+  const hasSkillExperienceFraming = includesAny(text, SKILL_EXPERIENCE_PATTERNS);
+
   if (!question) {
     answerType = 'unknown_answer';
   } else if (includesAny(text, NEGOTIATION_PATTERNS)) {
     answerType = 'negotiation_answer';
   } else if (includesAny(text, IDENTITY_PATTERNS) || extractedType === 'identity') {
     answerType = 'identity_answer';
+  } else if (hasSkillExperienceFraming && !includesAny(text, SYSTEM_DESIGN_PATTERNS)) {
+    // "Have you used WebRTC / a hashmap / AWS?" → profile skill-experience answer
+    // in first person. Wins over coding/DSA/technical-concept routing below.
+    answerType = 'skill_experience_answer';
+  } else if (includesAny(text, SALES_PATTERNS)) {
+    answerType = 'sales_answer';
+  } else if (includesAny(text, LECTURE_PATTERNS)) {
+    answerType = 'lecture_answer';
   } else if (includesAny(text, SYSTEM_DESIGN_PATTERNS)) {
     answerType = 'system_design_answer';
   } else if (includesAny(text, DEBUGGING_PATTERNS) && !includesAny(text, DSA_PATTERNS)) {
     answerType = 'debugging_question_answer';
+  } else if (includesAny(text, TECHNICAL_CONCEPT_PATTERNS) &&
+             !includesAny(text, CODING_PATTERNS) &&
+             (includesAny(text, DSA_PATTERNS) || isLikelyTechnicalConcept(text))) {
+    // "Explain BFS", "what is a deadlock", "difference between TCP and UDP" —
+    // generic technical CONCEPT, NO profile, generic_ai voice (spec Case F).
+    // Checked before DSA/coding: a DSA noun with explain/what-is framing and NO
+    // coding verb ("write/implement/solve") is a concept, not a coding task.
+    answerType = 'technical_concept_answer';
   } else if (includesAny(text, DSA_PATTERNS)) {
+    // Named DSA problem ("two sum", "reverse a linked list", "solve two sum").
+    // Kept BEFORE generic CODING so the specific DSA label/template wins.
     answerType = 'dsa_question_answer';
   } else if (includesAny(text, CODING_PATTERNS) || input.intentResult?.intent === 'coding') {
     answerType = 'coding_question_answer';
@@ -380,11 +510,22 @@ export const planAnswer = (input: PlanAnswerInput): AnswerPlan => {
 
   const speakerPerspective = input.speakerPerspective
     || (input.source === 'what_to_answer' || input.source === 'transcript' ? 'interviewer' : 'user');
-  const outputPerspective: OutputPerspective = speakerPerspective === 'interviewer'
-    ? 'first_person_candidate'
-    : input.source === 'manual_input'
-      ? 'second_person_user'
-      : 'assistant_explanation';
+  // Generic technical/coding/sales/lecture answers are NEVER the candidate's
+  // first-person voice — even when an interviewer asks them. "Explain BFS" from
+  // an interviewer wants a technical explanation, not "I would say BFS is...".
+  // Only profile-directed answer types speak as the candidate (spec §5 perspective).
+  const nonCandidateVoiceTypes: AnswerType[] = [
+    'coding_question_answer', 'dsa_question_answer', 'technical_concept_answer',
+    'system_design_answer', 'debugging_question_answer', 'sales_answer',
+    'lecture_answer', 'general_meeting_answer',
+  ];
+  const outputPerspective: OutputPerspective = nonCandidateVoiceTypes.includes(answerType)
+    ? (input.source === 'manual_input' ? 'assistant_explanation' : 'assistant_explanation')
+    : speakerPerspective === 'interviewer'
+      ? 'first_person_candidate'
+      : input.source === 'manual_input'
+        ? 'second_person_user'
+        : 'assistant_explanation';
 
   const fastPathTypes: AnswerType[] = ['identity_answer', 'profile_fact_answer'];
   const latencyMs = isCodingAnswerType(answerType) || answerType === 'system_design_answer'

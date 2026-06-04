@@ -34,6 +34,28 @@ export interface VisionStreamProvider {
   priority: number;
   /** 1-based attempt; cloud families walk model tiers tier1→tier2→tier3. */
   open: (signal: AbortSignal, attempt: number) => AsyncGenerator<string, void, unknown>;
+  /**
+   * Optional per-provider time-to-first-token budget (ms). Overrides the
+   * config-level `ttftTimeoutMs` for THIS provider only. Vision is slower than
+   * text — heavier models (Pro) and multi-screenshot requests need a longer
+   * budget so we don't abort a healthy-but-slow first token. When omitted the
+   * provider uses cfg.ttftTimeoutMs.
+   */
+  ttftTimeoutMs?: number;
+  /**
+   * Optional intra-family HEDGE partner. When set AND cfg.hedgeEnabled, the
+   * engine opens this provider normally, then — if no first token has arrived
+   * within a short EWMA-derived delay — launches the partner IN PARALLEL. The
+   * first usable first-token wins; the loser is aborted immediately. Used to cut
+   * tail latency when the primary flash model is intermittently slow, without
+   * paying for a duplicate call on the fast common case. Partner is skipped if
+   * its circuit breaker is OPEN. (See openHedged.)
+   */
+  hedgeWith?: {
+    id: string;
+    name: string;
+    open: (signal: AbortSignal, attempt: number) => AsyncGenerator<string, void, unknown>;
+  };
 }
 
 export interface VisionHealthEntry {
@@ -56,6 +78,16 @@ export interface VisionFallbackConfig {
   backoffMaxMs: number;
   /** Upper bound on closing a provider's upstream iterator so teardown can't hang the chain. */
   cleanupTimeoutMs: number;
+  // ── Hedging (tail-latency) — only applies to providers with `hedgeWith` set ──
+  /** Master switch. When false, hedgeWith is ignored (byte-identical to no-hedge). */
+  hedgeEnabled: boolean;
+  /** Hedge delay when the primary has no measured TTFT EWMA yet. */
+  hedgeDelayDefaultMs: number;
+  /** Fraction of the primary's ttftEma to wait before launching the partner (~p50 trigger). */
+  hedgeDelayEmaFactor: number;
+  /** Lower/upper clamp on the hedge delay so it stays well below ttftTimeoutMs. */
+  hedgeDelayMinMs: number;
+  hedgeDelayMaxMs: number;
 }
 
 export interface VisionFallbackHooks {
@@ -69,7 +101,11 @@ export interface VisionFallbackHooks {
 
 export const DEFAULT_VISION_FALLBACK_CONFIG: VisionFallbackConfig = {
   maxAttempts: 3,
-  ttftTimeoutMs: 8_000,
+  // Vision TTFT is slower than text (image encode + multimodal prefill). 8s was
+  // too aggressive and aborted healthy first tokens on screenshots — especially
+  // multi-screenshot requests. 20s base; per-provider overrides bump Pro higher
+  // and the call site scales with image count.
+  ttftTimeoutMs: 20_000,
   interChunkTimeoutMs: 15_000,
   authCooldownMs: 300_000,
   transientCooldownMs: 30_000,
@@ -77,6 +113,12 @@ export const DEFAULT_VISION_FALLBACK_CONFIG: VisionFallbackConfig = {
   backoffInitialMs: 250,
   backoffMaxMs: 10_000,
   cleanupTimeoutMs: 2_000,
+  // Hedging defaults — off unless the caller opts in (and a provider sets hedgeWith).
+  hedgeEnabled: false,
+  hedgeDelayDefaultMs: 3_000,
+  hedgeDelayEmaFactor: 0.6,
+  hedgeDelayMinMs: 2_500,
+  hedgeDelayMaxMs: 6_000,
 };
 
 /**
@@ -175,6 +217,135 @@ export function recordVisionTtft(health: Map<string, VisionHealthEntry>, id: str
   health.set(id, h);
 }
 
+// Time-bounded close of a provider's upstream iterator. .return() runs the
+// generator's finally blocks (reader.cancel / stream.abort), which for a dead
+// socket can stall — so we never await it unbounded. Module-level so the hedge
+// helper reuses the exact same teardown as the engine loop.
+export async function closeIteratorBounded(it: AsyncIterator<string> | null, cleanupTimeoutMs: number): Promise<void> {
+  if (!it || typeof it.return !== 'function') return;
+  try {
+    await Promise.race([
+      Promise.resolve(it.return(undefined as any)).catch(() => { }),
+      new Promise<void>((resolve) => setTimeout(resolve, cleanupTimeoutMs)),
+    ]);
+  } catch { /* ignore */ }
+}
+
+/**
+ * Hedged open: start `primary`, and if it hasn't produced a first token within
+ * an EWMA-derived delay, launch `primary.hedgeWith` IN PARALLEL. The first
+ * branch to yield a usable first token wins; the loser is aborted + closed.
+ * Returns the winner's live stream (first token re-injected). Throws if BOTH
+ * branches fail pre-token (the engine then advances to the next provider).
+ *
+ * TTFT is recorded against the WINNING id so health/ordering stay accurate.
+ * The partner is skipped (primary runs solo) when its circuit breaker is OPEN.
+ */
+export async function* openHedged(
+  primary: VisionStreamProvider,
+  cfg: VisionFallbackConfig,
+  health: Map<string, VisionHealthEntry>,
+  hooks: VisionFallbackHooks,
+  outerSignal: AbortSignal,
+  attempt: number,
+): AsyncGenerator<string, void, unknown> {
+  const now = hooks.now ?? Date.now;
+  const log = hooks.log ?? (() => { });
+  const partner = primary.hedgeWith;
+
+  // Hedge delay from the primary's measured TTFT EWMA (~p50 trigger), clamped.
+  const ema = health.get(primary.id)?.ttftEma ?? null;
+  const rawDelay = ema != null ? Math.round(ema * cfg.hedgeDelayEmaFactor) : cfg.hedgeDelayDefaultMs;
+  const hedgeDelayMs = Math.min(cfg.hedgeDelayMaxMs, Math.max(cfg.hedgeDelayMinMs, rawDelay));
+
+  // Skip the partner if its breaker is OPEN — don't pour requests into a cooling provider.
+  const partnerBreakerClosed = partner ? (health.get(partner.id)?.openUntil ?? 0) <= now() : false;
+  const useHedge = !!partner && partnerBreakerClosed;
+
+  interface Branch {
+    id: string; name: string; ctrl: AbortController; it: AsyncIterator<string>;
+    started: number;
+    /** Resolves to the branch+first-token on a USABLE first token; rejects on
+     *  error or empty/done first chunk. Never rejects the outer race directly. */
+    firstUsable: Promise<{ branch: Branch; first: IteratorResult<string> }>;
+  }
+  const branches: Branch[] = [];
+  const startBranch = (p: { id: string; name: string; open: (s: AbortSignal, a: number) => AsyncGenerator<string, void, unknown> }): Branch => {
+    const ctrl = new AbortController();
+    const onAbort = () => { try { ctrl.abort(); } catch { } };
+    outerSignal.addEventListener('abort', onAbort, { once: true });
+    const it = p.open(ctrl.signal, attempt)[Symbol.asyncIterator]();
+    const branch: Branch = { id: p.id, name: p.name, ctrl, it, started: now(), firstUsable: undefined as any };
+    branch.firstUsable = it.next().then((res) => {
+      if (res.done || typeof res.value !== 'string' || res.value.trim().length === 0) {
+        throw new Error('empty-stream');
+      }
+      return { branch, first: res };
+    });
+    branch.firstUsable.catch(() => { }); // swallow when this branch loses/fails
+    return branch;
+  };
+
+  // First-usable-token race over a set of branch promises: resolves with the
+  // first success; rejects only when ALL provided promises have rejected.
+  const firstSuccess = (ps: Promise<{ branch: Branch; first: IteratorResult<string> }>[]) =>
+    new Promise<{ branch: Branch; first: IteratorResult<string> }>((resolve, reject) => {
+      let remaining = ps.length; let settled = false;
+      for (const p of ps) p.then(
+        (v) => { if (!settled) { settled = true; resolve(v); } },
+        () => { remaining--; if (remaining === 0 && !settled) { settled = true; reject(new Error('all-branches-failed')); } },
+      );
+    });
+
+  branches.push(startBranch(primary));
+  let winner: Branch; let first: IteratorResult<string>;
+
+  if (!useHedge) {
+    // No hedge: just await the primary's first usable token (engine's own
+    // ttftTimeoutMs still wraps this call as the hard ceiling).
+    ({ branch: winner, first } = await branches[0].firstUsable);
+  } else {
+    // Wait for the primary to win OR the hedge delay to elapse.
+    let hedgeTimer: ReturnType<typeof setTimeout> | null = null;
+    const hedgeElapsed = new Promise<'hedge'>((resolve) => { hedgeTimer = setTimeout(() => resolve('hedge'), hedgeDelayMs); });
+    const primaryOutcome = branches[0].firstUsable.then((v) => ({ kind: 'win' as const, v }), (e) => ({ kind: 'fail' as const, e }));
+
+    const race = await Promise.race([primaryOutcome, hedgeElapsed]);
+    if (hedgeTimer) clearTimeout(hedgeTimer);
+
+    if (race !== 'hedge' && race.kind === 'win') {
+      // Primary produced a usable token before the hedge delay — no duplicate call.
+      ({ branch: winner, first } = race.v);
+    } else {
+      // Either the delay elapsed (primary still pending) or the primary failed
+      // fast — launch the partner and race whatever is still live.
+      log(`[Vision] hedge fired after ${hedgeDelayMs}ms → racing ${partner!.name}`);
+      branches.push(startBranch(partner!));
+      // If the primary already failed fast, only the partner is in the race;
+      // otherwise race both still-pending first tokens.
+      const pool = (race !== 'hedge' && race.kind === 'fail')
+        ? [branches[1].firstUsable]
+        : [branches[0].firstUsable, branches[1].firstUsable];
+      ({ branch: winner, first } = await firstSuccess(pool));
+    }
+  }
+
+  // Abort + close every loser immediately (free socket/quota).
+  for (const b of branches) {
+    if (b !== winner) { try { b.ctrl.abort(new Error('hedge-lost')); } catch { } void closeIteratorBounded(b.it, cfg.cleanupTimeoutMs); }
+  }
+  recordVisionTtft(health, winner.id, now() - winner.started);
+  if (branches.length > 1) log(`[Vision] hedge winner: ${winner.name} (ttft=${now() - winner.started}ms)`);
+
+  // Re-inject the winning first token, then delegate to its live stream.
+  yield first.value as string;
+  try {
+    yield* { [Symbol.asyncIterator]: () => winner.it } as AsyncIterable<string>;
+  } finally {
+    await closeIteratorBounded(winner.it, cfg.cleanupTimeoutMs);
+  }
+}
+
 /**
  * Run the streaming vision fallback over an already-ordered provider list.
  * Yields content tokens from the first provider that produces a first chunk.
@@ -204,18 +375,9 @@ export async function* runStreamingVisionFallback(
 
   const failures: string[] = [];
 
-  // Time-bounded close of a provider's upstream iterator. .return() runs the
-  // generator's finally blocks (reader.cancel / stream.abort), which for a dead
-  // socket can stall — so we never await it unbounded.
-  const closeIterator = async (it: AsyncIterator<string> | null): Promise<void> => {
-    if (!it || typeof it.return !== 'function') return;
-    try {
-      await Promise.race([
-        Promise.resolve(it.return(undefined as any)).catch(() => { }),
-        new Promise<void>((resolve) => setTimeout(resolve, cfg.cleanupTimeoutMs)),
-      ]);
-    } catch { /* ignore */ }
-  };
+  // Time-bounded close of a provider's upstream iterator (module helper).
+  const closeIterator = (it: AsyncIterator<string> | null): Promise<void> =>
+    closeIteratorBounded(it, cfg.cleanupTimeoutMs);
 
   for (const provider of orderedProviders) {
     let providerFatal = false;
@@ -232,14 +394,23 @@ export async function* runStreamingVisionFallback(
       let committed = false;
 
       try {
-        it = provider.open(ctrl.signal, attempt)[Symbol.asyncIterator]();
+        // Hedge group: when enabled and this provider declares a partner, the
+        // first usable token is raced across primary+partner (delayed launch).
+        // Otherwise plain single-provider open. Either way the engine's own TTFT
+        // timeout below wraps it as the hard ceiling.
+        const src = (cfg.hedgeEnabled && provider.hedgeWith && (health.get(provider.id)?.openUntil ?? 0) <= now())
+          ? openHedged(provider, cfg, health, hooks, ctrl.signal, attempt)
+          : provider.open(ctrl.signal, attempt);
+        it = src[Symbol.asyncIterator]();
 
         // ── Race chunk #1 against the TTFT timeout (the only safe fallback point) ──
         const firstNext = it.next();
         firstNext.catch(() => { }); // swallow late rejection if the timeout wins
         let ttftTimer: ReturnType<typeof setTimeout> | null = null;
+        // Per-provider TTFT budget when set (e.g. Pro is slower), else config default.
+        const providerTtftMs = provider.ttftTimeoutMs ?? cfg.ttftTimeoutMs;
         const ttft = new Promise<never>((_, rej) => {
-          ttftTimer = setTimeout(() => { try { ctrl.abort(); } catch { } rej(new Error('ttft-timeout')); }, cfg.ttftTimeoutMs);
+          ttftTimer = setTimeout(() => { try { ctrl.abort(); } catch { } rej(new Error('ttft-timeout')); }, providerTtftMs);
         });
         let first: IteratorResult<string>;
         try {

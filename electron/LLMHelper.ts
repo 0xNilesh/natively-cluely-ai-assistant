@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai"
+import { GoogleGenAI, ThinkingLevel } from "@google/genai"
 import Groq from "groq-sdk"
 import OpenAI from "openai"
 import Anthropic from "@anthropic-ai/sdk"
@@ -65,6 +65,14 @@ interface OllamaResponse {
 const GEMINI_FLASH_MODEL = "gemini-3.5-flash"
 const GEMINI_FLASH_LITE_MODEL = "gemini-3.1-flash-lite"
 const GEMINI_PRO_MODEL = "gemini-3.1-pro-preview"
+
+// Vision tail-latency hedging: when ON, the Gemini Flash vision provider hedges
+// with flash-lite — if 3.5-flash hasn't produced a first token within a short
+// EWMA-derived delay, flash-lite is launched in parallel and the first usable
+// token wins (loser aborted). Cuts the slow-tail TTFT (the >20s screenshot
+// stalls) without doubling quota on the fast common case. Env kill-switch;
+// default ON (set NATIVELY_VISION_HEDGE=0 to disable).
+const VISION_HEDGE_ENABLED = process.env.NATIVELY_VISION_HEDGE !== '0';
 const GROQ_MODEL = "llama-3.3-70b-versatile"
 const OPENAI_MODEL = "gpt-5.4"
 const CLAUDE_MODEL = "claude-sonnet-4-6"
@@ -117,6 +125,39 @@ export const INTERACTIVE_THINKING_BUDGET = 0;
 // uses 0 too. Raise this only if a future, genuinely harder problem set shows
 // a correctness gain that justifies the TTFT cost.
 export const CODING_THINKING_BUDGET = 0;
+
+// Translate the threaded numeric thinking budget + target model into the
+// doc-correct Gemini 3.x thinkingConfig. Per the official docs the numeric
+// `thinkingBudget` is DEPRECATED in favor of the `thinkingLevel` enum
+// (minimal|low|medium|high), and gemini-3.1-pro CANNOT disable thinking — it
+// rejects budget:0 / 'minimal' with a 400, so Pro gets 'low' (its floor).
+// A budget of 0 (or negative) maps to 'minimal' (verified to drive
+// thoughtsTokenCount→0 on flash/flash-lite); a positive budget is preserved
+// verbatim for callers that explicitly want a bounded token budget.
+// Keep the Pro→LOW / flash→MINIMAL policy in sync with the server's
+// thinkingConfigForModel() in natively-api/lib/flashModelPicker.js.
+// Match "pro" as a SEGMENT (not a loose substring) so only real Pro ids hit the
+// floor — Pro rejects MINIMAL/budget:0 with a 400.
+const PRO_MODEL_RE = /(?:^|[-/])pro(?:[-/]|$)/i;
+export function buildThinkingConfig(model: string | undefined, budget: number): { thinkingLevel: ThinkingLevel } | { thinkingBudget: number } {
+  if (typeof model === 'string' && PRO_MODEL_RE.test(model)) return { thinkingLevel: ThinkingLevel.LOW };
+  if (budget <= 0) return { thinkingLevel: ThinkingLevel.MINIMAL };
+  return { thinkingBudget: budget };
+}
+
+// OpenAI reasoning effort for the interactive path. Per the openai-node docs,
+// `reasoning_effort` (none|minimal|low|medium|high|xhigh) constrains reasoning;
+// models before gpt-5.1 default to the slow `medium` and DON'T support `none`,
+// so we use 'minimal' (lowest universally-supported) to cut TTFT — the same
+// "kill the hidden default reasoning" lever as Gemini's thinkingLevel:minimal.
+// Only returned for genuine OpenAI gpt-* models; when the OpenAI-compatible
+// client proxies a non-OpenAI model (e.g. Claude), no reasoning_effort is sent.
+export const OPENAI_REASONING_EFFORT = 'minimal';
+function openaiReasoningParam(model: string): { reasoning_effort: 'minimal' } | {} {
+  const m = (model || '').toLowerCase();
+  const isGptReasoner = /\bgpt-5/.test(m) || /\bo[0-9]/.test(m); // gpt-5.x / o-series reasoners
+  return isGptReasoner ? { reasoning_effort: OPENAI_REASONING_EFFORT } : {};
+}
 
 // Simple prompt for image analysis (not interview copilot - kept separate)
 const IMAGE_ANALYSIS_PROMPT = `Analyze concisely. Be direct. No markdown formatting. Return plain text only.`
@@ -2304,6 +2345,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         model,
         messages,
         max_completion_tokens: model.toLowerCase().includes('claude') ? this.getClaudeMaxOutput(model) : MAX_OUTPUT_TOKENS,
+        ...openaiReasoningParam(model), // minimal reasoning for gpt-5/o-series (fast TTFT)
         ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
       })),
       60000,
@@ -2460,6 +2502,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         const stream = this.claudeClient!.messages.stream({
           model,
           max_tokens: this.getClaudeMaxOutput(model),
+          thinking: { type: 'disabled' }, // extended thinking off (default, made explicit) for low TTFT
           // CACHE BOUNDARY: system blocks are static; dynamic content lives in `messages` only.
           ...(systemPrompt ? { system: this.buildClaudeSystemBlocks(systemPrompt, model) } : {}),
           messages: [{ role: "user", content }],
@@ -3304,6 +3347,17 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       return attempt <= 1 ? entry.tier1 : attempt === 2 ? entry.tier2 : entry.tier3;
     };
 
+    // ── Per-provider TTFT budgets (vision is slower than text) ──────────────
+    // Screenshot analysis (esp. multiple screenshots) needs a longer first-token
+    // budget than text — the old 8s default aborted healthy-but-slow vision
+    // responses. Base 20s for flash/flash-lite/other; 30s for the heavier Pro.
+    // Each extra screenshot beyond the first adds 5s (multimodal prefill scales
+    // with image count), capped so a runaway request still fails over.
+    const imgCount = Math.max(1, imagePaths?.length ?? 1);
+    const imageBumpMs = Math.min((imgCount - 1) * 5_000, 20_000);
+    const FLASH_TTFT_MS = Math.min(20_000 + imageBumpMs, 40_000);
+    const PRO_TTFT_MS = Math.min(30_000 + imageBumpMs, 50_000);
+
     // ── Build the candidate provider list ──────────────────────────────────
     const cloud: VisionStreamProvider[] = [];
     const localOnly = this.isLocalOnlyMode;
@@ -3311,25 +3365,31 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
     if (!localOnly) {
       if (this.openaiClient) {
-        cloud.push({ id: 'openai', name: 'OpenAI', isLocal: false, priority: prio++,
+        cloud.push({ id: 'openai', name: 'OpenAI', isLocal: false, priority: prio++, ttftTimeoutMs: FLASH_TTFT_MS,
           open: (sig, att) => this.streamWithOpenaiMultimodal(userContent, imagePaths, systemPrompt, tierModel(ModelFamily.OPENAI, att), sig) });
       }
       if (this.claudeClient) {
-        cloud.push({ id: 'claude', name: 'Claude', isLocal: false, priority: prio++,
+        cloud.push({ id: 'claude', name: 'Claude', isLocal: false, priority: prio++, ttftTimeoutMs: FLASH_TTFT_MS,
           open: (sig, att) => this.streamWithClaudeMultimodal(userContent, imagePaths, systemPrompt, tierModel(ModelFamily.CLAUDE, att), sig) });
       }
       if (this.client) {
-        cloud.push({ id: 'gemini_flash', name: 'Gemini Flash', isLocal: false, priority: prio++,
-          open: (sig, att) => this.streamWithGeminiModel(userContent, tierModel(ModelFamily.GEMINI_FLASH, att) || GEMINI_FLASH_MODEL, imagePaths, systemPrompt, sig) });
-        cloud.push({ id: 'gemini_pro', name: 'Gemini Pro', isLocal: false, priority: prio++,
+        cloud.push({ id: 'gemini_flash', name: 'Gemini Flash', isLocal: false, priority: prio++, ttftTimeoutMs: FLASH_TTFT_MS,
+          open: (sig, att) => this.streamWithGeminiModel(userContent, tierModel(ModelFamily.GEMINI_FLASH, att) || GEMINI_FLASH_MODEL, imagePaths, systemPrompt, sig),
+          // Tail-latency hedge: race flash-lite (minimal thinking) if 3.5-flash
+          // is slow to first token. First usable token wins; loser aborted.
+          hedgeWith: VISION_HEDGE_ENABLED ? {
+            id: 'gemini_flash_lite', name: 'Gemini Flash-Lite',
+            open: (sig) => this.streamWithGeminiModel(userContent, GEMINI_FLASH_LITE_MODEL, imagePaths, systemPrompt, sig, INTERACTIVE_THINKING_BUDGET),
+          } : undefined });
+        cloud.push({ id: 'gemini_pro', name: 'Gemini Pro', isLocal: false, priority: prio++, ttftTimeoutMs: PRO_TTFT_MS,
           open: (sig, att) => this.streamWithGeminiModel(userContent, tierModel(ModelFamily.GEMINI_PRO, att) || GEMINI_PRO_MODEL, imagePaths, systemPrompt, sig) });
       }
       if (this.groqClient) {
-        cloud.push({ id: 'groq', name: 'Groq Llama-4 Scout', isLocal: false, priority: prio++,
+        cloud.push({ id: 'groq', name: 'Groq Llama-4 Scout', isLocal: false, priority: prio++, ttftTimeoutMs: FLASH_TTFT_MS,
           open: (sig) => this.streamWithGroqMultimodal(userContent, imagePaths, systemPrompt, sig) });
       }
       if (this.hasNatively()) {
-        cloud.push({ id: 'natively', name: 'Natively API', isLocal: false, priority: prio++,
+        cloud.push({ id: 'natively', name: 'Natively API', isLocal: false, priority: prio++, ttftTimeoutMs: FLASH_TTFT_MS,
           open: (sig) => this.streamWithNatively(userContent, systemPrompt, imagePaths, sig) });
       }
     }
@@ -3383,7 +3443,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     // Delegate the first-token-commit + retry + circuit-breaker state machine.
     yield* runStreamingVisionFallback(
       ordered,
-      DEFAULT_VISION_FALLBACK_CONFIG,
+      { ...DEFAULT_VISION_FALLBACK_CONFIG, hedgeEnabled: VISION_HEDGE_ENABLED },
       this.visionHealth,
       { log: (m) => console.log(m), warn: (m) => console.warn(m) },
       abortSignal,
@@ -4227,6 +4287,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       temperature: INTERACTIVE_TEMPERATURE,
       seed: INTERACTIVE_SEED, // OpenAI honors seed for near-deterministic output
       max_completion_tokens: model.toLowerCase().includes('claude') ? this.getClaudeMaxOutput(model) : MAX_OUTPUT_TOKENS,
+      ...openaiReasoningParam(model), // minimal reasoning for gpt-5/o-series (fast TTFT)
       ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
     }, { signal: abortSignal });
 
@@ -4261,6 +4322,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       model,
       max_tokens: this.getClaudeMaxOutput(model),
       temperature: INTERACTIVE_TEMPERATURE, // Claude has no seed param; low temp is the determinism lever
+      thinking: { type: 'disabled' }, // extended thinking off (default, made explicit) for low TTFT
       // CACHE BOUNDARY: system blocks are static; dynamic content lives in `messages` only.
       ...(systemPrompt ? { system: this.buildClaudeSystemBlocks(systemPrompt, model) } : {}),
       messages: [{ role: "user", content: userMessage }],
@@ -4350,6 +4412,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       messages,
       stream: true,
       max_completion_tokens: model.toLowerCase().includes('claude') ? this.getClaudeMaxOutput(model) : MAX_OUTPUT_TOKENS,
+      ...openaiReasoningParam(model), // minimal reasoning for gpt-5/o-series (fast TTFT)
       ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
     }, { signal: abortSignal });
 
@@ -4398,6 +4461,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     const stream = this.claudeClient.messages.stream({
       model,
       max_tokens: this.getClaudeMaxOutput(model),
+      thinking: { type: 'disabled' }, // extended thinking off (default, made explicit) for low TTFT
       // CACHE BOUNDARY: system blocks are static; image bytes + user text stay in `messages`.
       ...(systemPrompt ? { system: this.buildClaudeSystemBlocks(systemPrompt, model) } : {}),
       messages: [{
@@ -4469,8 +4533,15 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
     // CACHE BOUNDARY: static system content lives in `config.cachedContent`
     // (or `config.systemInstruction` on fallback); dynamic content stays in `contents`.
+    //
+    // LATENCY (perf fix): use the NON-BLOCKING cache resolve. A cache HIT returns
+    // the name synchronously; a MISS returns null instantly and warms the cache
+    // in the BACKGROUND for the next request. This moves the multi-second
+    // `caches.create` round-trip OFF the first-token path — measured at 2.4s of
+    // dead time before any token when create ran inline. On a miss this request
+    // streams immediately with `systemInstruction` (implicit caching still helps).
     const cacheName = systemInstruction
-      ? await this.geminiPromptCache.getOrCreate(this.client, model, systemInstruction)
+      ? this.geminiPromptCache.getCachedOrWarmInBackground(this.client, model, systemInstruction)
       : null;
     if (_gmeasure) console.log(`[Gemini.stream] +${Date.now() - _gt0}ms  cache resolve done (cacheHit=${Boolean(cacheName)}, sysPrompt=${systemInstruction?.length ?? 0}c, model=${model})`);
 
@@ -4478,10 +4549,11 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       maxOutputTokens: MAX_OUTPUT_TOKENS,
       temperature: INTERACTIVE_TEMPERATURE,
       seed: INTERACTIVE_SEED, // Gemini v1alpha honors seed in generationConfig
-      // Per-request thinking budget: 0 (off, fast) for conversational/factual
-      // answers; a small budget for coding/DSA where reasoning aids correctness.
-      // Either way far below the slow dynamic default. (Threaded from the caller.)
-      thinkingConfig: { thinkingBudget },
+      // Per-request thinking config (doc-correct 3.x thinkingLevel): 'minimal'
+      // (off, fast) for budget≤0, 'low' for Pro (which can't disable), or an
+      // explicit numeric budget when a caller passes a positive one. Threaded
+      // budget comes from the caller; model picks the level/floor.
+      thinkingConfig: buildThinkingConfig(model, thinkingBudget),
       ...(useCacheName
         ? { cachedContent: useCacheName }
         : systemInstruction
@@ -4617,8 +4689,15 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
     // CACHE BOUNDARY: static system content lives in `config.cachedContent`
     // (or `config.systemInstruction` on fallback); dynamic content stays in `contents`.
+    //
+    // LATENCY (perf fix): use the NON-BLOCKING cache resolve. A cache HIT returns
+    // the name synchronously; a MISS returns null instantly and warms the cache
+    // in the BACKGROUND for the next request. This moves the multi-second
+    // `caches.create` round-trip OFF the first-token path — measured at 2.4s of
+    // dead time before any token when create ran inline. On a miss this request
+    // streams immediately with `systemInstruction` (implicit caching still helps).
     const cacheName = systemInstruction
-      ? await this.geminiPromptCache.getOrCreate(this.client, model, systemInstruction)
+      ? this.geminiPromptCache.getCachedOrWarmInBackground(this.client, model, systemInstruction)
       : null;
     if (_gmeasure) console.log(`[Gemini.stream] +${Date.now() - _gt0}ms  cache resolve done (cacheHit=${Boolean(cacheName)}, sysPrompt=${systemInstruction?.length ?? 0}c, model=${model})`);
 
@@ -4626,10 +4705,11 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       maxOutputTokens: MAX_OUTPUT_TOKENS,
       temperature: INTERACTIVE_TEMPERATURE,
       seed: INTERACTIVE_SEED, // Gemini v1alpha honors seed in generationConfig
-      // Per-request thinking budget: 0 (off, fast) for conversational/factual
-      // answers; a small budget for coding/DSA where reasoning aids correctness.
-      // Either way far below the slow dynamic default. (Threaded from the caller.)
-      thinkingConfig: { thinkingBudget },
+      // Per-request thinking config (doc-correct 3.x thinkingLevel): 'minimal'
+      // (off, fast) for budget≤0, 'low' for Pro (which can't disable), or an
+      // explicit numeric budget when a caller passes a positive one. Threaded
+      // budget comes from the caller; model picks the level/floor.
+      thinkingConfig: buildThinkingConfig(model, thinkingBudget),
       ...(useCacheName
         ? { cachedContent: useCacheName }
         : systemInstruction

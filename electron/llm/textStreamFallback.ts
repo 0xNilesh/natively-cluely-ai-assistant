@@ -57,6 +57,13 @@ export const DEFAULT_TEXT_FALLBACK_CONFIG: VisionFallbackConfig = {
   backoffInitialMs: 200,
   backoffMaxMs: 4_000,
   cleanupTimeoutMs: 2_000,
+  // Text never hedges (it's already fast: 2.5s TTFT budget). Fields present to
+  // satisfy the shared VisionFallbackConfig type.
+  hedgeEnabled: false,
+  hedgeDelayDefaultMs: 3_000,
+  hedgeDelayEmaFactor: 0.6,
+  hedgeDelayMinMs: 2_500,
+  hedgeDelayMaxMs: 6_000,
 };
 
 /** Re-export the health-ordering helper under a text-flavored name. */

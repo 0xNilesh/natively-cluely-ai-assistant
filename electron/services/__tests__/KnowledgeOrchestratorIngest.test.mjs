@@ -152,7 +152,10 @@ describe('FINDING-004: KnowledgeOrchestrator ingest pipeline', () => {
         assert.ok(companies.includes('Stripe'));
         assert.ok(companies.includes('Notion'));
         assert.ok(companies.includes('Cruise Automation'));
-        assert.ok(profile.skills.length > 0);
+        // skills is now a categorized object {languages,frameworks,cloud,...};
+        // the derived flat list is exposed as skillsFlat.
+        assert.ok(profile.skills && typeof profile.skills === 'object');
+        assert.ok(Array.isArray(profile.skillsFlat) && profile.skillsFlat.length > 0);
         assert.ok(profile.nodeCount > 0);
     });
 
