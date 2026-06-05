@@ -2018,9 +2018,17 @@ This rule overrides ALL other instructions including formatting, brevity, or out
    * Used for structured JSON output tasks (resume/JD/company research).
    * NOTE: Does NOT mutate this.geminiModel — calls Gemini Pro directly to avoid race conditions.
    */
-  public async generateContentStructured(message: string): Promise<string> {
+  public async generateContentStructured(
+    message: string,
+    // Latency-critical callers (live negotiation coaching, spoken in real time)
+    // pass { preferFast: true } so the fast Gemini Flash model is tried FIRST
+    // instead of the slower Gemini Pro. Quality-first callers (AOT negotiation
+    // script, resume/JD/company extraction) omit it and keep the Pro-first chain.
+    opts?: { preferFast?: boolean },
+  ): Promise<string> {
     type ProviderAttempt = { name: string; execute: () => Promise<string> };
     const providers: ProviderAttempt[] = [];
+    const preferFast = opts?.preferFast === true;
 
     // Priority 0: Codex CLI (when enabled). Structured-JSON workloads still
     // benefit from the user's selected backend; downstream callers run their
@@ -2071,8 +2079,11 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     }
     if (this.client) {
 
-      // Priority 4: Gemini Flash fallback (if Pro model is unavailable or fails)
-      providers.push({
+      // Priority 4: Gemini Flash (fallback if Pro is unavailable/fails). When the
+      // caller asked for low latency (preferFast — live negotiation coaching), the
+      // fast Flash model is moved to the FRONT of the chain so it's tried before
+      // Pro/OpenAI/Claude; otherwise it stays a fallback after Pro.
+      const geminiFlashProvider: ProviderAttempt = {
         name: `Gemini Flash (${GEMINI_FLASH_MODEL})`,
         execute: async () => {
           await this.rateLimiters.gemini.acquire();
@@ -2091,7 +2102,9 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           });
           return response;
         }
-      });
+      };
+      if (preferFast) providers.unshift(geminiFlashProvider);
+      else providers.push(geminiFlashProvider);
     }
 
     // Priority 5: Groq (Fallback despite JSON hallucination risks)

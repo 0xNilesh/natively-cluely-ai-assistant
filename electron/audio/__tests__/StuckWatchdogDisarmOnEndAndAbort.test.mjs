@@ -87,21 +87,24 @@ test('wireMicCapture attaches __disarmStuckWatchdog on the capture instance', ()
 test('endMeeting disarms watchdogs BEFORE stopping captures', () => {
   const sysDisarmIdx = endMeetingBody.search(/\(\s*this\.systemAudioCapture\s+as\s+any\s*\)\?\.\s*__disarmStuckWatchdog\?\.\(\s*\)/);
   const micDisarmIdx = endMeetingBody.search(/\(\s*this\.microphoneCapture\s+as\s+any\s*\)\?\.\s*__disarmStuckWatchdog\?\.\(\s*\)/);
-  const sysStopIdx   = endMeetingBody.search(/this\.systemAudioCapture\?\.\s*stop\s*\(\s*\)/);
-  const micStopIdx   = endMeetingBody.search(/this\.microphoneCapture\?\.\s*stop\s*\(\s*\)/);
+  // Capture teardown is now a snapshot-then-destroy (the live wrappers are
+  // nulled synchronously and torn down via destroy(), which internally calls
+  // stop()). The watchdog disarm must still precede that teardown.
+  const sysStopIdx   = endMeetingBody.search(/dyingSystemCapture\?\.\s*destroy\s*\(\s*\)/);
+  const micStopIdx   = endMeetingBody.search(/dyingMicrophoneCapture\?\.\s*destroy\s*\(\s*\)/);
 
   assert.ok(sysDisarmIdx >= 0, 'BUG: endMeeting() must call __disarmStuckWatchdog on systemAudioCapture.');
   assert.ok(micDisarmIdx >= 0, 'BUG: endMeeting() must call __disarmStuckWatchdog on microphoneCapture.');
-  assert.ok(sysStopIdx >= 0, 'sanity: endMeeting() should still call systemAudioCapture.stop().');
-  assert.ok(micStopIdx >= 0, 'sanity: endMeeting() should still call microphoneCapture.stop().');
+  assert.ok(sysStopIdx >= 0, 'sanity: endMeeting() should still tear down the system capture (dyingSystemCapture?.destroy()).');
+  assert.ok(micStopIdx >= 0, 'sanity: endMeeting() should still tear down the mic capture (dyingMicrophoneCapture?.destroy()).');
 
   assert.ok(
     sysDisarmIdx < sysStopIdx,
-    'BUG: endMeeting() must disarm the system-audio watchdog BEFORE stop() — ordering matters because stop() schedules a deferred native teardown, and any future refactor that moves the on("stop") emit into that deferred body would leave the watchdog armed past Stop without this explicit disarm.',
+    'BUG: endMeeting() must disarm the system-audio watchdog BEFORE the capture teardown — ordering matters because destroy() schedules a deferred native teardown, and any future refactor that moves the on("stop") emit into that deferred body would leave the watchdog armed past Stop without this explicit disarm.',
   );
   assert.ok(
     micDisarmIdx < micStopIdx,
-    'BUG: endMeeting() must disarm the mic watchdog BEFORE stop() for the same ordering reason as the system path.',
+    'BUG: endMeeting() must disarm the mic watchdog BEFORE the capture teardown for the same ordering reason as the system path.',
   );
 });
 

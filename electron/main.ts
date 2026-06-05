@@ -999,11 +999,26 @@ export class AppState {
         const llmHelper = this.processingHelper.getLLMHelper();
 
         // generateContent function for LLM calls
+        // Join ALL content parts (some callers — e.g. live negotiation coaching —
+        // pass [{text: systemPrefix}, {text: prompt}]; reading only [0] dropped the
+        // prompt). Single-item callers (extraction, script) are unaffected.
+        const joinContents = (contents: any[]) =>
+          (Array.isArray(contents) ? contents : [contents])
+            .map((c: any) => (typeof c === 'string' ? c : c?.text || ''))
+            .filter(Boolean)
+            .join('\n\n');
         this.knowledgeOrchestrator.setGenerateContentFn(async (contents: any[]) => {
-          return await llmHelper.generateContentStructured(
-            contents[0]?.text || ''
-          );
+          return await llmHelper.generateContentStructured(joinContents(contents));
         });
+
+        // Low-latency generation for LIVE negotiation coaching (spoken in real
+        // time): Flash-first chain so the tactical note appears fast. The AOT
+        // negotiation script + all extraction keep the quality-first fn above.
+        if (typeof this.knowledgeOrchestrator.setLiveCoachingContentFn === 'function') {
+          this.knowledgeOrchestrator.setLiveCoachingContentFn(async (contents: any[]) => {
+            return await llmHelper.generateContentStructured(joinContents(contents), { preferFast: true });
+          });
+        }
 
         // Embedding function — lazily delegate to the cascaded EmbeddingPipeline
         // (OpenAI → Gemini → Ollama → Local bundled model).
@@ -2915,10 +2930,56 @@ export class AppState {
   }
 
   /**
+   * Serialization mutex for reconfigureSttProvider.
+   *
+   * Crash/hang fix (2026-06-05): a single "save Natively API key" action can
+   * fire up to TWO reconfigure calls back-to-back — one from the
+   * `set-natively-api-key` handler (which auto-promotes the STT provider to
+   * 'natively' and reconfigures), and one from the renderer's follow-up
+   * `set-stt-provider('natively')` call. Each call tears down and rebuilds the
+   * native captures (SystemAudioCapture / MicrophoneCapture → CoreAudio /
+   * ScreenCaptureKit / WASAPI). Two interleaved teardown+construct sequences
+   * against the same native device handles is a native-resource race that
+   * deadlocks the OS audio stack or crashes the process — manifesting as the
+   * "app hangs / freezes the system right after entering the key" reports on
+   * BOTH macOS and Windows (the bug is in this cross-platform JS orchestration,
+   * not in any OS-specific native code).
+   *
+   * Every other capture-mutating flow in this class is already guarded
+   * (`_systemAudioRecoveryInProgress`, `_defaultOutputSwitchInProgress`); this
+   * path was the one gap. We serialize rather than drop: the second caller
+   * genuinely needs to apply the latest provider config, so it awaits the
+   * in-flight reconfigure and then runs its own against fresh state.
+   */
+  private _sttReconfigureChain: Promise<void> = Promise.resolve();
+
+  /**
    * Reconfigure STT provider mid-session (called from IPC when user changes provider)
-   * Destroys existing STT instances and recreates them with the new provider
+   * Destroys existing STT instances and recreates them with the new provider.
+   *
+   * Concurrency: serialized via `_sttReconfigureChain`. Concurrent callers are
+   * queued and run one-at-a-time, so the native captures are never torn down /
+   * rebuilt in parallel. A throw in one queued reconfigure must not break the
+   * chain for the next caller, so the chain link swallows the error here and
+   * re-throws to THIS caller only.
    */
   public async reconfigureSttProvider(): Promise<void> {
+    const run = this._sttReconfigureChain.then(
+      () => this._doReconfigureSttProvider(),
+      // Previous link rejected — its error already surfaced to its own caller.
+      // Don't let it poison this link; proceed with our reconfigure.
+      () => this._doReconfigureSttProvider(),
+    );
+    // Keep the chain alive regardless of this run's outcome so a failure never
+    // wedges all future reconfigures.
+    this._sttReconfigureChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  private async _doReconfigureSttProvider(): Promise<void> {
     console.log('[Main] Reconfiguring STT Provider...');
 
     // RC-01 fix: pause audio captures FIRST so their EventEmitter queues drain
@@ -3900,6 +3961,33 @@ export class AppState {
     // user can only escape via force-quit. Hide first, then broadcast.
     this.windowHelper.setWindowMode('launcher');
 
+    // ─── CLEAR THE OVERLAY TREE WHILE IT IS HIDDEN ─────────────────────────
+    // The overlay BrowserWindow is PERSISTENT — created once with show:false
+    // and thereafter only hide()/show()'d; its React tree is never unmounted
+    // between meetings. The line above just hid it. If we don't clear it now,
+    // the previous meeting's messages + expanded width survive into the next
+    // meeting and are briefly VISIBLE the instant startMeeting() show()s the
+    // window again — then torn down ON SCREEN (chat-list unmount + height
+    // recompute + the shellWidth→OS-resize shrink) when the start-side
+    // session-reset finally lands a few frames after show(). That on-screen
+    // teardown is the "old UI flashes, then a choppy collapse" the user sees.
+    //
+    // Clearing HERE — after the window is hidden, with a whole meeting of idle
+    // time before the next show() — means the overlay's mounted state is
+    // already the clean collapsed baseline by the next meeting, so its FIRST
+    // visible frame is clean and there is nothing to resize/tear down on
+    // screen. The renderer's onSessionReset handler does the full synchronous
+    // clear (messages, shellWidth→collapsed, code-expansion refs/timers); the
+    // only change is that it now runs while hidden instead of while visible.
+    //
+    // Safe: the overlay is already hidden above and shows nothing post-stop —
+    // trailing transcript finals (_isDraining), meeting save, and the
+    // title/summary all run against the DB / other windows, never this tree.
+    // The start-side session-reset (in startMeeting) is kept as a safety net
+    // for the cold-start / crash-recovery path where endMeeting never ran; on
+    // the normal Stop→Start path it is now a no-op (state already clean).
+    this.getWindowHelper().getOverlayWindow()?.webContents.send('session-reset');
+
     // ─── UX STATE FLIP — SYNCHRONOUS ───────────────────────────────────────
     // Now flip the UX-facing meeting flag and broadcast. The launcher's
     // "Meeting ongoing" pill reverts to "Start Natively" immediately;
@@ -3942,17 +4030,36 @@ export class AppState {
     (this.systemAudioCapture as any)?.__disarmStuckWatchdog?.();
     (this.microphoneCapture as any)?.__disarmStuckWatchdog?.();
 
-    // Captures are deferred-stop wrappers (see SystemAudioCapture.stop /
-    // MicrophoneCapture.stop) — they flip the JS-side isRecording flag
-    // immediately so no new audio reaches STT, but defer the blocking native
-    // teardown to setImmediate. Returns within ~1ms.
-    // Pre-warm is disabled so the pre-warmed native monitor from the previous
-    // meeting is NOT re-started when the next meeting begins. destroy() does
-    // this in its own path; stop() alone does not, so a pre-warmed monitor
-    // would keep the DSP thread running under a new meeting's start() call.
-    this.microphoneCapture?.disablePreWarm();
-    this.systemAudioCapture?.stop();
-    this.microphoneCapture?.stop();
+    // ─── CAPTURE TEARDOWN — DESTROY + RECREATE, NOT STOP + REUSE ───────────
+    // Snapshot the live capture wrappers, then null the fields SYNCHRONOUSLY.
+    // This is the fix for the second-meeting UI freeze: if we leave the
+    // wrappers in place, a fast Stop→Start on the SAME device skips the
+    // reconfigureAudio destroy+recreate path ("reconfigure skipped — device
+    // IDs unchanged") and setupSystemAudioPipeline's `if (!this.microphoneCapture)`
+    // guard, so MicrophoneCapture.start() ends up SYNCHRONOUSLY constructing a
+    // fresh `new RustMicCapture` on the main thread WHILE the previous meeting's
+    // deferred `monitor.stop()` is still releasing the same CoreAudio device —
+    // both grab the HAL property-listener lock and deadlock the main thread.
+    // Nulling here forces the next meeting down the serialized reconstruction
+    // path, and the destroy() promises below are threaded into _pendingTeardown
+    // (awaited by the next startMeeting) so the dying native handle is fully
+    // released BEFORE any new capture is constructed on the same device.
+    //
+    // destroy() = disablePreWarm + (deferred) stop + removeAllListeners + null
+    // monitor. It returns within ~1ms (the native teardown is on setImmediate);
+    // we do NOT await it here — endMeeting still returns instantly.
+    const dyingSystemCapture = this.systemAudioCapture;
+    const dyingMicrophoneCapture = this.microphoneCapture;
+    this.systemAudioCapture = null;
+    this.microphoneCapture = null;
+    const captureTeardownPromise = Promise.all([
+      Promise.resolve(dyingSystemCapture?.destroy()).catch((e) => {
+        console.error('[Main] System capture teardown failed:', e);
+      }),
+      Promise.resolve(dyingMicrophoneCapture?.destroy()).catch((e) => {
+        console.error('[Main] Microphone capture teardown failed:', e);
+      }),
+    ]).then(() => {});
 
     // Stop the default-output watcher — no point polling CoreAudio while
     // there's no active capture to rebind.
@@ -3973,6 +4080,15 @@ export class AppState {
     // session on the (still-shared) STT instances.
     const ragManager = this.ragManager;
     this._pendingTeardown = (async () => {
+      // CRITICAL ORDERING: await the native capture teardown FIRST, before any
+      // of the STT/RAG drain below. startMeeting() awaits this whole
+      // _pendingTeardown promise before it constructs/starts a new capture, so
+      // resolving captureTeardownPromise inside it guarantees the previous
+      // meeting's `monitor.stop()` has released the CoreAudio device before the
+      // next meeting opens it — closing the HAL-lock deadlock window. It is
+      // awaited up front (not in parallel) so even a slow native release blocks
+      // the next start rather than racing it.
+      await captureTeardownPromise;
       try {
         // 0. Revert to Default Model. Moved into BG: getDefaultModel() and the
         //    provider list reads touch disk, and the 'model-changed' broadcast

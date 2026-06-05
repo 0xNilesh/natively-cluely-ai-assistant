@@ -371,9 +371,20 @@ ANSWER SHAPE: ${intentResult.answerShape}
                 console.log(`  Total E2E:              ${totalMs.toFixed(1)}ms`);
             }
 
-        } catch (error) {
+        } catch (error: any) {
             console.error("[WhatToAnswerLLM] Stream failed:", error);
-            yield "Could you repeat that? I want to make sure I address your question properly.";
+            // Distinguish a provider/transport failure (expired key, 429 rate
+            // limit, billing) from a genuinely empty completion. Masking the
+            // former as "Could you repeat that?" made a dead API key look like the
+            // app simply didn't hear the question — undiagnosable for users and
+            // support. Surface an actionable message for provider failures.
+            const msg = String(error?.message ?? error ?? '').toLowerCase();
+            const isProviderFailure = /\b(401|403|429)\b|api key|unauthor|forbidden|quota|rate.?limit|billing|exhausted|permission/.test(msg);
+            if (isProviderFailure) {
+                yield "I couldn't reach the AI provider — this looks like an API key or rate-limit issue. Check your API keys / plan in Settings and try again.";
+            } else {
+                yield "Could you repeat that? I want to make sure I address your question properly.";
+            }
         }
     }
 }

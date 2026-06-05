@@ -292,4 +292,15 @@ intelligence-eval-answer-quality
 intelligence-eval-real-api
 intelligence-eval-real-ui
 intelligence-eval-results
-
+AUTOPILOT_PROFILE_INTELLIGENCE_RELEASE_REPORT.md
+dodopayments.llm
+PROFILE_INTELLIGENCE_BENCHMARKING.md
+PROFILE_INTELLIGENCE_FIX_REPORT.md
+PROFILE_INTELLIGENCE_IMPROVEMENT_REPORT.md
+PROFILE_INTELLIGENCE_MANUAL_TESTS.md
+PROFILE_INTELLIGENCE_RESEARCH_AND_REDESIGN.md
+PROFILE_INTELLIGENCE_TEST_PLAN.md
+reportforai.md
+WHAT_TO_ANSWER_FIX_REPORT.md
+benchmarks/profile-intelligence/
+intelligence-eval-routing-200

@@ -10,6 +10,8 @@ export { FollowUpLLM } from "./FollowUpLLM";
 export { FollowUpQuestionsLLM } from "./FollowUpQuestionsLLM";
 export { RecapLLM } from "./RecapLLM";
 export { WhatToAnswerLLM } from "./WhatToAnswerLLM";
+export { shouldThrottleTrigger } from "./triggerGate";
+export type { TriggerGateInput } from "./triggerGate";
 export { clampResponse, validateResponse, reduceDashes, reduceDashesInChunk, StreamingDashReducer } from "./postProcessor";
 export {
     cleanTranscript,
@@ -35,10 +37,20 @@ export { planNextAssistantAction } from "./PlannerDecision";
 export type { PlannerDecision, PlannerDecisionKind, PlannerInput } from "./PlannerDecision";
 export { planAnswer, formatAnswerPlanForPrompt, isCodingAnswerType, shouldScaffold } from "./AnswerPlanner";
 export type { AnswerPlan, AnswerSource, AnswerType, ContextLayer, OutputPerspective, SpeakerPerspective } from "./AnswerPlanner";
+export { resolveFollowUp } from "./FollowUpResolver";
+export {
+  raceStreamWithDeadline, firstUsefulDeadlineMs,
+  LIVE_FIRST_USEFUL_BUDGET_MS, LIVE_PROVIDER_FIRST_USEFUL_HARD_TIMEOUT_MS,
+  LIVE_PROVIDER_FIRST_USEFUL_COMPLEX_TIMEOUT_MS, LIVE_TOTAL_HARD_TIMEOUT_MS,
+  LIVE_INTER_TOKEN_STALL_MS, BENCHMARK_PER_QUESTION_HARD_TIMEOUT_MS,
+} from "./liveDeadlines";
+export type { FollowUpContext, ResolvedFollowUp } from "./FollowUpResolver";
 export { renderCodingAnswerMarkdown, repairCodingAnswer, repairCodingMarkdown, validateAnswerStructure, validateCodingMarkdown, buildCodingScaffold } from "./AnswerValidator";
 export type { AnswerValidationResult, CodingAnswer } from "./AnswerValidator";
 export { validateProfileOutput, buildProfileRepairInstruction } from "./ProfileOutputValidator";
 export type { ProfileValidationResult, ProfileViolation, ProfileViolationCode, ProfileValidationInput } from "./ProfileOutputValidator";
+export { validateProfileEvidence } from "./profileEvidenceValidator";
+export type { EvidenceValidationResult, EvidenceViolation, EvidenceViolationCode, EvidenceValidationInput } from "./profileEvidenceValidator";
 export { decideProfileIntelligence } from "./ProfileIntelligenceRouter";
 export type { ProfileIntelligenceDecision, ProfileContextType, AnswerPerspective, DecideProfileInput } from "./ProfileIntelligenceRouter";
 export { CODING_CONTRACT, CODING_CONTRACT_TINY, CODING_SECTIONS, CODING_SECTION_HEADINGS, CODING_VERIFICATION_INSTRUCTION, VERIFICATION_SPEC_RE, stripVerificationSpec, StreamingSpecStripper } from "./codingContract";

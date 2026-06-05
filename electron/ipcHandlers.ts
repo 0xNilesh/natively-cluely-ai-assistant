@@ -15,7 +15,8 @@ import { SkillsManager } from './services/SkillsManager';
 
 import { TRIAL_SENTINEL_KEY } from './config/constants';
 import { AI_RESPONSE_LANGUAGES, RECOGNITION_LANGUAGES } from './config/languages';
-import { planAnswer, formatAnswerPlanForPrompt, isCodingAnswerType, validateAnswerStructure, validateProfileOutput } from './llm';
+import { planAnswer, formatAnswerPlanForPrompt, isCodingAnswerType, validateAnswerStructure, validateProfileOutput, validateProfileEvidence, buildProfileRepairInstruction, raceStreamWithDeadline, firstUsefulDeadlineMs } from './llm';
+import { buildLiveFallbackAnswer } from './llm/manualProfileIntelligence';
 import { isCodeVerificationEnabled } from './llm/codeVerification/verificationEnabled';
 import { CodingStreamGate } from './llm/codingStreamGate';
 import { PiLatencyTrace } from './services/telemetry/PiLatencyTracer';
@@ -790,28 +791,46 @@ export function initializeIpcHandlers(appState: AppState): void {
             }
           };
 
-          for await (const token of stream) {
-            // Bail if a newer stream has taken over (user triggered a new request)
-            if (_chatStreamsBySender.get(senderId)?.streamId !== myStreamId) {
-              console.log(
-                `[IPC] gemini-chat-stream ${myStreamId} superseded for sender ${senderId}, stopping.`,
-              );
-              return null;
-            }
-
-            // First token back from the provider — the gap from
-            // provider_request_started is pre-work + provider TTFT (the real cost).
-            chatTrace.markFirstUseful({ via: codingGate ? 'gated' : 'stream' });
-
-            fullResponse += token;
-
-            if (codingGate) {
-              const out = codingGate.push(token);
-              if (out) sendChunk(out);
-            } else {
-              sendChunk(token);
-            }
-          }
+          // LIVE LATENCY GUARD (manual chat) — the centralized deadline driver
+          // (electron/llm/liveDeadlines.ts). A `for await` blocks forever on a
+          // hung provider and even `await iterator.return()` blocks if the
+          // generator is stuck in an await, so the driver fire-and-forgets
+          // cleanup. First-useful budget (per answer type) then an inter-token
+          // stall guard (not a wall-clock cap, so long coding answers stream in
+          // full). This is the no-134s / no-30s-hang guarantee (Issue 1, P0).
+          let manualFirstUseful = false;
+          let manualSuperseded = false;
+          await raceStreamWithDeadline({
+            stream: stream as AsyncGenerator<string>,
+            firstUsefulDeadlineMs: firstUsefulDeadlineMs(answerPlan.answerType),
+            isUsefulYet: () => manualFirstUseful,
+            shouldAbort: () => {
+              if (_chatStreamsBySender.get(senderId)?.streamId !== myStreamId) {
+                console.log(`[IPC] gemini-chat-stream ${myStreamId} superseded for sender ${senderId}, stopping.`);
+                manualSuperseded = true; return true;
+              }
+              return false;
+            },
+            onFirstUsefulTimeout: () => { chatTrace.mark('provider_timeout', { reason: 'first_useful' }); },
+            onStallTimeout: () => { chatTrace.mark('provider_timeout', { reason: 'inter_token_stall' }); },
+            // Abort the underlying provider request on timeout/supersession so a
+            // stalled HTTP stream doesn't leak (the signal was passed to streamChat).
+            onCleanup: () => { try { myController?.abort(); } catch { /* noop */ } },
+            onToken: (token: string) => {
+              manualFirstUseful = true;
+              // First token back from the provider — the gap from
+              // provider_request_started is pre-work + provider TTFT (the real cost).
+              chatTrace.markFirstUseful({ via: codingGate ? 'gated' : 'stream' });
+              fullResponse += token;
+              if (codingGate) {
+                const out = codingGate.push(token);
+                if (out) sendChunk(out);
+              } else {
+                sendChunk(token);
+              }
+            },
+          });
+          if (manualSuperseded) return null;
 
           // Flush any tokens still held by the gate (short answer that never
           // crossed the "## " heading), so the streamed row holds the full text.
@@ -822,6 +841,31 @@ export function initializeIpcHandlers(appState: AppState): void {
               event.sender.send('gemini-stream-token', tail);
               try { PhoneMirrorService.getInstance().publishToken(String(myStreamId), tail); } catch (_) { /* noop */ }
             }
+          }
+
+          // DEADLINE FALLBACK (manual chat): the provider stalled past the
+          // first-useful budget and streamed nothing useful — substitute a
+          // deterministic grounded answer (profile routes) or an honest
+          // insufficient-context line, so a live answer is NEVER blank when a safe
+          // fallback exists (Issue 1 / spec). Only when !manualFirstUseful.
+          if (!manualFirstUseful && !fullResponse.trim()) {
+            let fb = '';
+            try {
+              const orchFb = llmHelper.getKnowledgeOrchestrator?.();
+              const resumeFb = (orchFb as any)?.activeResume?.structured_data ?? null;
+              const jdFb = (orchFb as any)?.activeJD?.structured_data ?? null;
+              if (resumeFb && answerPlan.profileContextPolicy === 'required') {
+                fb = buildLiveFallbackAnswer({ question: message, answerType: answerPlan.answerType, profile: resumeFb, jobDescription: jdFb }) || '';
+              }
+            } catch { /* best effort */ }
+            if (!fb) {
+              fb = (answerPlan.answerType === 'general_meeting_answer' || answerPlan.answerType === 'lecture_answer')
+                ? "I don't have enough context from the conversation to answer that yet."
+                : 'Let me come back to that in just a moment.';
+            }
+            fullResponse = fb;
+            sendChunk(fb);
+            chatTrace.mark('fallback_answer_used' as any, { answerType: answerPlan.answerType });
           }
 
           // Keep the RAW response (with the hidden <verification_spec>) for
@@ -857,20 +901,74 @@ export function initializeIpcHandlers(appState: AppState): void {
             try {
               const orchestrator = llmHelper.getKnowledgeOrchestrator?.();
               const activeResume = (orchestrator as any)?.activeResume?.structured_data ?? null;
+              const activeJD = (orchestrator as any)?.activeJD?.structured_data ?? null;
               const profileAvailable = profileFactsReady(activeResume);
-              const profileValidation = validateProfileOutput({
+              // Phase 6: evidence-aware validation. Composes the perspective /
+              // identity / refusal / leak checks AND flags FABRICATED metrics
+              // ("25% retention") or companies not present in the grounded facts.
+              // Evidence = the profile facts the model was grounded in. Deterministic,
+              // log-only on this hot path (no re-generation → no added latency); the
+              // violation CODES are logged, never raw profile content.
+              const evidence = `${JSON.stringify(activeResume || {})}\n${JSON.stringify(activeJD || {})}`;
+              const profileValidation = validateProfileEvidence({
                 answer: fullResponse,
                 plan: answerPlan,
+                evidence,
                 profileAvailable,
                 // Manual chat: the user is asking; only treat as candidate-directed
                 // when the answer type speaks as the candidate AND a profile exists.
                 candidateDirected: profileAvailable,
               });
               if (!profileValidation.ok) {
-                console.warn('[ProfileIntelligence] profile output violations', {
+                console.warn('[ProfileIntelligence] profile evidence violations', {
                   answerType: answerPlan.answerType,
                   violations: profileValidation.violations.map(v => v.code),
                 });
+              }
+
+              // Phase 4/7: CRITICAL-violation REPAIR (manual path). A profile/
+              // identity answer must never answer as "Natively / an AI" or falsely
+              // refuse ("I can't share that", "I don't have your resume loaded")
+              // when the profile IS loaded. On such a violation we do ONE bounded
+              // regeneration grounded in the candidate facts and hand the renderer
+              // a corrective finalText (in-place replace via gemini-stream-done).
+              // Only fires on a real detected violation → zero happy-path latency.
+              const CRITICAL_CODES = new Set(['assistant_identity_leak', 'false_no_access_refusal', 'false_no_experience_refusal']);
+              const critical = profileAvailable
+                && answerPlan.profileContextPolicy === 'required'
+                && validateProfileOutput({ answer: fullResponse, plan: answerPlan, profileAvailable: true, candidateDirected: true })
+                  .violations.find(v => v.severity === 'error' && CRITICAL_CODES.has(v.code));
+              if (critical && _chatStreamsBySender.get(senderId)?.streamId === myStreamId) {
+                try {
+                  const orch2 = llmHelper.getKnowledgeOrchestrator?.();
+                  let facts = '';
+                  try { facts = (await orch2?.processQuestion?.(message))?.contextBlock || ''; } catch { /* best effort */ }
+                  if (!facts) facts = `${JSON.stringify(activeResume || {})}`;
+                  const repairInstruction = buildProfileRepairInstruction({ ok: false, violations: [critical] } as any);
+                  const repairPrompt = `${repairInstruction}\n\nCandidate facts (ground every claim in these; second person to the user is fine, but NEVER say you are Natively or an AI, and NEVER claim the profile is missing):\n${facts}\n\nQuestion: ${message}\n\nRewrite the answer now.`;
+                  let repaired = '';
+                  // Deadline-guarded (4s) so a stalled repair provider can't re-hang
+                  // the request after a streamed answer already showed (Issue 1).
+                  await raceStreamWithDeadline({
+                    stream: llmHelper.streamChat(repairPrompt, undefined, undefined, undefined, true, true) as AsyncGenerator<string>,
+                    firstUsefulDeadlineMs: 4000,
+                    isUsefulYet: () => repaired.length >= 5,
+                    shouldAbort: () => repaired.length > 1200,
+                    onToken: (tok: string) => { repaired += tok; },
+                  });
+                  const repairedTrim = repaired.trim();
+                  if (repairedTrim.length >= 5) {
+                    const reCheck = validateProfileOutput({ answer: repairedTrim, plan: answerPlan, profileAvailable: true, candidateDirected: true });
+                    const stillCritical = reCheck.violations.some(v => v.severity === 'error' && CRITICAL_CODES.has(v.code));
+                    if (!stillCritical) {
+                      fullResponse = repairedTrim;
+                      finalText = repairedTrim;
+                      console.warn('[ProfileIntelligence] manual profile repair applied', { code: critical.code });
+                    }
+                  }
+                } catch (repairErr: any) {
+                  console.warn('[ProfileIntelligence] manual profile repair failed (non-fatal):', repairErr?.message || repairErr);
+                }
               }
             } catch (validationError: any) {
               console.warn('[ProfileIntelligence] profile output validation failed (non-fatal):', validationError?.message || validationError);
@@ -915,10 +1013,15 @@ export function initializeIpcHandlers(appState: AppState): void {
                     answer: verifyTarget,
                     question: message,
                     correct: async (repairPrompt: string) => {
+                      // Background coding-correction (post-answer). Deadline-guarded
+                      // so a stalled provider can't leave a hung background task.
                       let fixed = '';
-                      for await (const tok of llmHelper.streamChat(repairPrompt, undefined, undefined, undefined, true, true)) {
-                        fixed += tok;
-                      }
+                      await raceStreamWithDeadline({
+                        stream: llmHelper.streamChat(repairPrompt, undefined, undefined, undefined, true, true) as AsyncGenerator<string>,
+                        firstUsefulDeadlineMs: 6000,
+                        isUsefulYet: () => fixed.length >= 5,
+                        onToken: (tok: string) => { fixed += tok; },
+                      });
                       return fixed;
                     },
                   });
@@ -1646,8 +1749,33 @@ export function initializeIpcHandlers(appState: AppState): void {
         await appState.reconfigureSttProvider();
       }
 
+      // Refresh any open settings UI. The Natively-key flow mutates the STT
+      // provider and default model server-side (CredentialsManager.setNativelyApiKey
+      // auto-promotes/reverts both). The SettingsOverlay STT dropdown re-reads
+      // credentials only on the 'credentials-changed' event, so without this
+      // broadcast the dropdown shows a stale provider after a key save/clear.
+      // (Previously this refresh came transitively from the renderer's extra
+      // setSttProvider() call, which we removed to kill the double-reconfigure
+      // race — so the broadcast now has to happen here, at the source of truth.)
+      BrowserWindow.getAllWindows().forEach((win) => {
+        if (!win.isDestroyed()) win.webContents.send('credentials-changed');
+      });
+
       // Auto-activate Natively Pro for pro/max/ultra API plans.
       // Skips silently if the user already has a Gumroad/Dodo lifetime license.
+      //
+      // This is awaited inline — NOT detached. The await is what serializes a
+      // rapid set→clear (or clear→set) sequence: it keeps the renderer's
+      // "Saving…" state (and the disabled button) active until the license
+      // mutation completes, so the user physically cannot fire the conflicting
+      // call mid-flight. Detaching it removed that backpressure and opened an
+      // ordering race where a fire-and-forget activate could land its
+      // storeLicense AFTER a clear's deactivate, leaving Pro active with no key
+      // (an entitlement leak), since LicenseManager has no cross-call mutex.
+      // The crash/hang this whole change set fixes is closed by the
+      // reconfigureSttProvider serialization alone; this activation already ran
+      // strictly AFTER reconfigure completed (never concurrent with it), so
+      // there is nothing to gain by detaching it and a billing bug to lose.
       if (apiKey) {
         try {
           const { LicenseManager } = require('../premium/electron/services/LicenseManager');
@@ -3535,7 +3663,13 @@ export function initializeIpcHandlers(appState: AppState): void {
           0.8,
           validatedImagePaths,
           {
-            skipCooldown: process.env.NODE_ENV === 'test',
+            // A manual hotkey/button press is explicit user intent and must never
+            // be throttled by the auto-trigger cooldown — the speculative pre-fetch
+            // keeps refreshing lastTriggerTime on every interviewer question, which
+            // otherwise leaves manual presses landing inside the cooldown window and
+            // returning null ("What to answer stops responding after a few messages"
+            // P0). The cooldown still throttles the automatic speculative path.
+            skipCooldown: true,
             screenContext,
             promptInstruction:
               typeof options?.promptInstruction === 'string'
@@ -5432,26 +5566,36 @@ export function initializeIpcHandlers(appState: AppState): void {
 
       try {
         const llmHelper = appState.processingHelper.getLLMHelper();
-        const stream = llmHelper.streamChat(message, undefined, context, CHAT_MODE_PROMPT);
+        // AbortController so the live-deadline driver can cancel a stalled provider
+        // request (not just stop emitting) — mirrors the desktop chat path.
+        const phoneController = new AbortController();
+        const stream = llmHelper.streamChat(message, undefined, context, CHAT_MODE_PROMPT, false, false, [], phoneController.signal);
         let full = '';
-        for await (const token of stream) {
-          // Bail if a newer stream has taken over (phone or desktop chat).
-          if (_chatStreamId !== myStreamId) {
-            console.log(
-              `[PhoneMirror] phone-chat ${myStreamId} superseded by ${_chatStreamId}, stopping.`,
-            );
-            return;
-          }
-          // Cancel early if all phones have disconnected — no point burning LLM
-          // tokens when nobody is receiving them and we have no desktop renderer
-          // context to show the result in either.
-          if (!phoneMirror.hasClients() && win?.isDestroyed()) break;
-          try {
-            phoneMirror.publishToken(String(myStreamId), token);
-          } catch (_) {}
-          win?.webContents.send('gemini-stream-token', token);
-          full += token;
-        }
+        let phoneSuperseded = false;
+        // Deadline-guarded (Issue 1) — this is a live streaming surface too: a hung
+        // provider must never block it forever. Uses the standard chat first-useful
+        // budget; an inter-token stall guard protects long answers.
+        await raceStreamWithDeadline({
+          stream: stream as AsyncGenerator<string>,
+          firstUsefulDeadlineMs: firstUsefulDeadlineMs('general_meeting_answer'),
+          isUsefulYet: () => full.trim().length >= 5,
+          shouldAbort: () => {
+            if (_chatStreamId !== myStreamId) {
+              console.log(`[PhoneMirror] phone-chat ${myStreamId} superseded by ${_chatStreamId}, stopping.`);
+              phoneSuperseded = true; return true;
+            }
+            // Cancel early if all phones disconnected and there's no desktop renderer.
+            if (!phoneMirror.hasClients() && win?.isDestroyed()) return true;
+            return false;
+          },
+          onToken: (token: string) => {
+            try { phoneMirror.publishToken(String(myStreamId), token); } catch (_) {}
+            win?.webContents.send('gemini-stream-token', token);
+            full += token;
+          },
+          onCleanup: () => { try { phoneController.abort(); } catch { /* noop */ } },
+        });
+        if (phoneSuperseded) return;
         if (_chatStreamId === myStreamId) {
           try {
             phoneMirror.publishDone(String(myStreamId), full);

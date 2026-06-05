@@ -98,12 +98,16 @@ test('endMeeting aborts and awaits this._audioInitPromise BEFORE touching captur
   const abortIdx = endMeetingBody.search(/this\._audioInitController[\s\S]{0,40}\.abort\s*\(\s*\)/);
   const awaitIdx = endMeetingBody.search(/await\s+this\._audioInitPromise/);
   const disarmIdx = endMeetingBody.search(/__disarmStuckWatchdog/);
-  const capStopIdx = endMeetingBody.search(/this\.systemAudioCapture\?\.\s*stop\s*\(\s*\)/);
+  // Capture teardown is now a snapshot-then-destroy: the live wrapper is
+  // nulled synchronously and torn down via destroy() (see the second-meeting
+  // freeze fix). The load-bearing ordering invariant is unchanged — this must
+  // happen AFTER the _audioInitPromise await.
+  const capStopIdx = endMeetingBody.search(/dyingSystemCapture\?\.\s*destroy\s*\(\s*\)/);
 
   assert.ok(abortIdx >= 0, 'BUG: endMeeting must call this._audioInitController.abort() to cancel the in-flight init.');
   assert.ok(awaitIdx >= 0, 'BUG: endMeeting must `await this._audioInitPromise` so the init body finishes (or its abort cleanup runs) before destroy.');
   assert.ok(disarmIdx >= 0, 'sanity: endMeeting must call __disarmStuckWatchdog later in the flow');
-  assert.ok(capStopIdx >= 0, 'sanity: endMeeting must call systemAudioCapture?.stop() later in the flow');
+  assert.ok(capStopIdx >= 0, 'sanity: endMeeting must tear down systemAudioCapture (dyingSystemCapture?.destroy()) later in the flow');
 
   assert.ok(
     abortIdx < awaitIdx,
@@ -115,7 +119,7 @@ test('endMeeting aborts and awaits this._audioInitPromise BEFORE touching captur
   );
   assert.ok(
     awaitIdx < capStopIdx,
-    'BUG: endMeeting must await this._audioInitPromise BEFORE calling capture.stop() — otherwise the init body can construct a fresh capture AFTER stop, leaving a dangling native handle.',
+    'BUG: endMeeting must await this._audioInitPromise BEFORE tearing down the captures — otherwise the init body can construct a fresh capture AFTER teardown, leaving a dangling native handle.',
   );
 });
 

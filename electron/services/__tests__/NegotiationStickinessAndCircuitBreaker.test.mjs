@@ -64,6 +64,21 @@ describe('negotiation: conversational stickiness', () => {
     assert.equal(classifyIntentWithContext('tell me about my education', ctx), 'profile_detail');
   });
 
+  test('REGRESSION (live 2026-06-05): skill SELF-RATING does NOT stick to negotiation', () => {
+    // "...how much would you rate yourself?" contains the "how much" follow-up
+    // signal, which under an active comp thread wrongly fired the salary script.
+    // A skill self-rating is never compensation.
+    assert.notEqual(
+      classifyIntentWithContext('What are your coding levels at? Out of 10, how much would you rate yourself?', ctx),
+      'negotiation',
+      'coding self-rating must not stick to negotiation',
+    );
+    assert.notEqual(classifyIntentWithContext('how good are you at Python out of 10', ctx), 'negotiation');
+    assert.notEqual(classifyIntentWithContext('on a scale of 1 to 10 how would you rate yourself', ctx), 'negotiation');
+    // A real comp follow-up still sticks.
+    assert.equal(classifyIntentWithContext('what about the range', ctx), 'negotiation');
+  });
+
   test('without context, an ambiguous follow-up does NOT become negotiation', () => {
     assert.equal(classifyIntentWithContext('what about the range', {}), classifyIntent('what about the range'));
     // "range" alone is not negotiation without context.

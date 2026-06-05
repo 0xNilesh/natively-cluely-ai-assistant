@@ -10,8 +10,10 @@ import {
     FollowUpQuestionsLLM, WhatToAnswerLLM,
     prepareTranscriptForWhatToAnswer, buildTemporalContext,
     AssistantResponse as LLMAssistantResponse, classifyIntent, planNextAssistantAction, PlannerDecision,
-    extractLatestQuestion, toCandidateFraming, planAnswer, validateAnswerStructure, isCodingAnswerType,
-    buildContextRoute, summarizeContextRoute
+    extractLatestQuestion, toCandidateFraming, planAnswer, validateAnswerStructure, isCodingAnswerType, resolveFollowUp,
+    buildContextRoute, summarizeContextRoute, shouldThrottleTrigger,
+    validateProfileOutput, buildProfileRepairInstruction,
+    raceStreamWithDeadline, firstUsefulDeadlineMs, LIVE_INTER_TOKEN_STALL_MS, LIVE_TOTAL_HARD_TIMEOUT_MS
 } from './llm';
 import { CodingStreamGate } from './llm/codingStreamGate';
 import { isCodeVerificationEnabled } from './llm/codeVerification/verificationEnabled';
@@ -573,9 +575,21 @@ export class IntelligenceEngine extends EventEmitter {
         const isSpeculative = options?.speculative === true;
         const skipCooldown = options?.skipCooldown === true;
 
-        // Cooldown bypass: explicit images (user intent), speculative pre-fetch, or test harness.
-        const hasImages = imagePaths && imagePaths.length > 0;
-        if (!hasImages && !isSpeculative && !skipCooldown && now - this.lastTriggerTime < this.triggerCooldown) {
+        // Cooldown bypass: explicit images (user intent), speculative pre-fetch, or
+        // explicit skip (manual hotkey/button press, tests). The cooldown only
+        // throttles the AUTOMATIC speculative pre-fetch — it must never silence an
+        // explicit user action, or the manual "What to answer" hotkey dies once the
+        // speculative system starts refreshing lastTriggerTime on every interviewer
+        // question. See triggerGate.ts.
+        const hasImages = Boolean(imagePaths && imagePaths.length > 0);
+        if (shouldThrottleTrigger({
+            hasImages,
+            isSpeculative,
+            skipCooldown,
+            now,
+            lastTriggerTime: this.lastTriggerTime,
+            triggerCooldown: this.triggerCooldown,
+        })) {
             return null;
         }
 
@@ -620,7 +634,15 @@ export class IntelligenceEngine extends EventEmitter {
                 if (!this.answerLLM) {
                     if (isSpeculative) { this.speculativeText = null; this.speculativeTextExpiry = Infinity; }
                     this.setMode('idle');
-                    return "Please configure your API Keys in Settings to use this feature.";
+                    const noKeyMsg = "Please configure your API Keys in Settings to use this feature.";
+                    // The renderer renders the answer via the 'suggested_answer'
+                    // EVENT (the IPC return value's non-null answer is only used to
+                    // detect the null/empty-feedback case). Returning a non-null
+                    // string WITHOUT emitting leaves the thinking-dots placeholder
+                    // hanging forever — a silent dead-end. Emit so the message is
+                    // actually shown. (Speculative runs have no placeholder.)
+                    if (!isSpeculative) this.emit('suggested_answer', noKeyMsg, question || 'inferred', confidence);
+                    return noKeyMsg;
                 }
                 const context = this.session.getFormattedContext(180);
                 const answer = await this.answerLLM.generate(question || '', context);
@@ -638,9 +660,17 @@ export class IntelligenceEngine extends EventEmitter {
                 if (answer) {
                     this.session.addAssistantMessage(answer);
                     this.emit('suggested_answer', answer, question || 'inferred', confidence);
+                    this.setMode('idle');
+                    return answer;
                 }
+                // Empty answer on the legacy answerLLM path. The renderer renders
+                // via the 'suggested_answer' EVENT, so a non-null return that is
+                // never emitted hangs the thinking-dots placeholder forever. Return
+                // null instead so the renderer's null-feedback branch shows the
+                // "could not generate" message (the manual hotkey bypasses cooldown,
+                // so the user can retry immediately).
                 this.setMode('idle');
-                return answer || "Could you repeat that? I want to make sure I address your question properly.";
+                return null;
             }
 
             const contextItems = this.session.getContext(180);
@@ -686,6 +716,30 @@ export class IntelligenceEngine extends EventEmitter {
             );
             trace.mark('intent_classified', { intent: intentResult.intent, confidence: intentResult.confidence });
             const extractedQuestion = extractLatestQuestion(transcriptTurns);
+            // Bare follow-up resolution ("And SQL?", "What about complexity?",
+            // "Why?") — resolve into a concrete question + inherited answer type so
+            // it routes correctly instead of falling to general/unknown. Only
+            // overrides when confident; otherwise the extractor's result stands.
+            if (!question && extractedQuestion.latestQuestion) {
+                try {
+                    // The PRIOR interviewer turn = the latest interviewer turn whose
+                    // text differs from the fragment we just extracted (so a
+                    // follow-up never "riffs on itself").
+                    const latestQ = extractedQuestion.latestQuestion.trim().toLowerCase();
+                    const priorInterviewer = [...transcriptTurns].reverse()
+                        .find((t) => t.role === 'interviewer' && t.text.trim().toLowerCase() !== latestQ);
+                    const fr = resolveFollowUp({
+                        latestQuestion: extractedQuestion.latestQuestion,
+                        previousQuestion: priorInterviewer?.text,
+                        lastEntity: extractedQuestion.followUpTarget || undefined,
+                    });
+                    if (fr && fr.confidence >= 0.7 && fr.resolvedQuestion) {
+                        extractedQuestion.latestQuestion = fr.resolvedQuestion;
+                        if (fr.resolvedEntity) extractedQuestion.followUpTarget = fr.resolvedEntity;
+                        trace.mark('repair_used', { reason: 'followup_resolved', resolved: fr.reason });
+                    }
+                } catch { /* keep extractor result */ }
+            }
             trace.mark('latest_question_extracted', {
                 questionType: extractedQuestion.questionType,
                 detectedSpeaker: extractedQuestion.detectedSpeaker,
@@ -803,6 +857,38 @@ export class IntelligenceEngine extends EventEmitter {
                 console.warn('[IntelligenceEngine] Profile grounding skipped:', groundErr?.message);
             }
 
+            // Phase 4/7 DETERMINISTIC IDENTITY/PROFILE FALLBACK. If the orchestrator
+            // grounding above produced NO candidateProfile but the interviewer asked
+            // a plain identity/profile fact ("who are you?", "what's your name?",
+            // "where did you study?"), derive the grounding straight from the
+            // structured résumé via the manual fast-path builder. Without this, an
+            // empty candidateProfile lets the model answer "I'm Natively, an AI
+            // assistant" or "I can't share that" — the exact benchmark failures.
+            // This supplies FACTS only; the first-person VOICE is owned by the
+            // WhatToAnswer prompt. Best-effort and fully guarded.
+            if (!candidateProfile) {
+                try {
+                    const orch = this.llmHelper.getKnowledgeOrchestrator?.();
+                    const resume = (orch as any)?.activeResume?.structured_data ?? null;
+                    const jd = (orch as any)?.activeJD?.structured_data ?? null;
+                    const identityQ = extractedQuestion.detectedSpeaker === 'interviewer'
+                        && (extractedQuestion.questionType === 'identity' || extractedQuestion.questionType === 'profile_detail');
+                    if (resume && identityQ) {
+                        const { tryBuildManualProfileFastPathAnswer } = await import('./llm/manualProfileIntelligence');
+                        const fp = tryBuildManualProfileFastPathAnswer({
+                            question: extractedQuestion.latestQuestion || lastInterviewerTurn,
+                            profile: resume, jobDescription: jd, source: 'what_to_answer',
+                        });
+                        if (fp?.answer) {
+                            candidateProfile = `<candidate_identity_fact>\n${fp.answer}\n</candidate_identity_fact>`;
+                            trace.mark('repair_used', { reason: 'identity_fastpath_grounding' });
+                        }
+                    }
+                } catch (fbErr: any) {
+                    console.warn('[IntelligenceEngine] identity fast-path grounding skipped:', fbErr?.message);
+                }
+            }
+
             const answerPlan = planAnswer({
                 question: question || extractedQuestion.latestQuestion || lastInterviewerTurn,
                 source: question ? 'manual_input' : 'what_to_answer',
@@ -875,6 +961,47 @@ export class IntelligenceEngine extends EventEmitter {
             let streamingTokenBuffer = '';
             const STREAMING_SAFE_PREFIX_CHARS = 160;
 
+            // ── LIVE LATENCY GUARDRAIL (Phase 9) ───────────────────────────────
+            // The live copilot must NEVER make the user wait 10s+ or show an empty
+            // answer. We arm a first-useful-token DEADLINE: if the provider hasn't
+            // produced a useful token within the plan's budget (+ grace), we abort
+            // the stream and emit a deterministic, grounded fallback for profile
+            // routes (coding keeps its scaffold). Non-live (speculative) prefetch
+            // is exempt — it has no user waiting. The deadline is generous enough
+            // (>= 3.5s) that healthy responses are never pre-empted.
+            // Precompute the deterministic fallback up front. Its EXISTENCE
+            // decides the deadline: when we have a safe answer to substitute we
+            // abort a stalled provider at the first-useful budget; when we don't
+            // (negotiation/meeting/coding have no profile fallback) we must NOT
+            // abort to empty, so we extend to the total live budget (~9s) and let
+            // the stream finish.
+            let liveFallbackAnswer = '';
+            if (!isSpeculative && answerPlan.profileContextPolicy === 'required') {
+                try {
+                    const orch = this.llmHelper.getKnowledgeOrchestrator?.();
+                    const resume = (orch as any)?.activeResume?.structured_data ?? null;
+                    const jd = (orch as any)?.activeJD?.structured_data ?? null;
+                    if (resume) {
+                        const { buildLiveFallbackAnswer } = await import('./llm/manualProfileIntelligence');
+                        liveFallbackAnswer = buildLiveFallbackAnswer({
+                            question: extractedQuestion.latestQuestion || lastInterviewerTurn,
+                            answerType: answerPlan.answerType, profile: resume, jobDescription: jd,
+                        }) || '';
+                    }
+                } catch { /* no fallback */ }
+            }
+            const hasLiveFallback = liveFallbackAnswer.length > 0;
+            // First-useful deadline: when we have a deterministic fallback we abort
+            // fast (the spec's hard/complex cap) and swap it in; when we don't
+            // (negotiation/meeting/coding with no profile fallback) we extend to the
+            // total live ceiling so we never abort to empty. After streaming begins,
+            // an inter-token STALL guard (not a wall-clock cap) protects long
+            // answers from truncation while still killing a mid-stream hang.
+            const firstUsefulDeadline = hasLiveFallback
+                ? firstUsefulDeadlineMs(answerPlan.answerType)
+                : LIVE_TOTAL_HARD_TIMEOUT_MS;
+            let liveDeadlineFired = false;
+
             const emitChunk = (chunk: string) => {
                 emittedStreamingToken = true;
                 openedStreamRow = true;
@@ -884,37 +1011,78 @@ export class IntelligenceEngine extends EventEmitter {
                 this.emit('suggested_answer_token', chunk, question || 'inferred', confidence);
             };
 
-            for await (const token of stream) {
-                if (this.currentGenerationId !== generationId) {
-                    console.log('[IntelligenceEngine] _what_to_say stream aborted by new generation');
-                    // RC-03 fix: .return() signals the generator to clean up and stops
-                    // the underlying network request (SDK generators honour this).
-                    await stream.return(undefined);
-                    streamAborted = true;
-                    break;
-                }
-                fullAnswer += token;
-                if (isSpeculative) continue; // speculative prefetch never streams to UI
-                if (codingGate) {
-                    // Coding: gate holds until "## " is confirmed, then streams live.
-                    // Gate output then passes through the spec-stripper so the
-                    // trailing <verification_spec> never reaches the UI.
-                    const gated = codingGate.push(token);
-                    if (gated) {
-                        const visible = specStripper ? specStripper.push(gated) : gated;
-                        if (visible) emitChunk(visible);
+            // Centralized live-deadline driver (electron/llm/liveDeadlines.ts) — a
+            // `for await` blocks forever on a hung provider, and even `await
+            // iterator.return()` blocks if the generator is stuck in an await, so
+            // the driver fire-and-forgets cleanup. This is the no-10s-wait / no-134s
+            // guarantee (Issue 1, P0).
+            const raceOutcome = await raceStreamWithDeadline({
+                stream: stream as AsyncGenerator<string>,
+                firstUsefulDeadlineMs: firstUsefulDeadline,
+                interTokenStallMs: LIVE_INTER_TOKEN_STALL_MS,
+                isSpeculative,
+                // "Useful" = the provider has actually delivered real content (raw
+                // arrival), NOT the gate's emit threshold — otherwise a coding
+                // answer buffering in the CodingStreamGate could trip the strict
+                // first-useful timeout while the provider is healthy (code-review LOW).
+                isUsefulYet: () => emittedStreamingToken || fullAnswer.trim().length >= STREAMING_SAFE_PREFIX_CHARS,
+                shouldAbort: () => {
+                    if (this.currentGenerationId !== generationId) { streamAborted = true; return true; }
+                    return false;
+                },
+                onFirstUsefulTimeout: () => { liveDeadlineFired = true; trace.mark('provider_timeout', { budgetMs: firstUsefulDeadline, answerType: answerPlan.answerType }); },
+                onStallTimeout: () => { liveDeadlineFired = true; trace.mark('provider_timeout', { reason: 'inter_token_stall', answerType: answerPlan.answerType }); },
+                onToken: (token: string) => {
+                    fullAnswer += token;
+                    if (isSpeculative) return; // speculative prefetch never streams to UI
+                    if (codingGate) {
+                        const gated = codingGate.push(token);
+                        if (gated) {
+                            const visible = specStripper ? specStripper.push(gated) : gated;
+                            if (visible) emitChunk(visible);
+                        }
+                    } else {
+                        streamingTokenBuffer += token;
+                        if (streamingTokenBuffer.length >= STREAMING_SAFE_PREFIX_CHARS
+                            && !IntelligenceEngine.isNonAnswerSentinel(streamingTokenBuffer)) {
+                            emitChunk(streamingTokenBuffer);
+                            streamingTokenBuffer = '';
+                        }
                     }
-                } else {
-                    // Non-coding: 160-char safe-prefix buffer (unchanged behavior).
-                    streamingTokenBuffer += token;
-                    if (streamingTokenBuffer.length >= STREAMING_SAFE_PREFIX_CHARS
-                        && !IntelligenceEngine.isNonAnswerSentinel(streamingTokenBuffer)) {
-                        emitChunk(streamingTokenBuffer);
-                        streamingTokenBuffer = '';
-                    }
-                }
+                },
+            });
+            if (raceOutcome === 'aborted' && this.currentGenerationId !== generationId) {
+                console.log('[IntelligenceEngine] _what_to_say stream aborted by new generation');
             }
             trace.mark('response_completed', { chars: fullAnswer.length, coding: isCoding });
+
+            // LIVE LATENCY FALLBACK: the deadline fired before any useful token,
+            // so the partial/empty stream is unusable. Substitute the precomputed
+            // deterministic answer (profile routes) so the candidate always has
+            // something correct to say. For fallback-less routes we kept streaming
+            // to the total budget, so reaching here without content means a genuine
+            // outage — the non-answer guard below substitutes a graceful line.
+            if (liveDeadlineFired && !emittedStreamingToken && !isSpeculative
+                && this.currentGenerationId === generationId) {
+                // Discard any stale partial provider text that never crossed the
+                // emit threshold so it can't be flushed AFTER the fallback (and
+                // double-render) below (code-review 2026-06-05, MEDIUM).
+                streamingTokenBuffer = '';
+                if (hasLiveFallback) {
+                    fullAnswer = liveFallbackAnswer;
+                    emitChunk(liveFallbackAnswer);
+                    trace.mark('fallback_answer_used', { answerType: answerPlan.answerType });
+                } else if (!fullAnswer.trim()) {
+                    // No grounded fallback (meeting/lecture with no context, etc.) —
+                    // emit an honest insufficient-context line, never an empty answer.
+                    const safe = (answerPlan.answerType === 'general_meeting_answer' || answerPlan.answerType === 'lecture_answer')
+                        ? "I don't have enough context from the conversation to answer that yet."
+                        : "Let me come back to that in just a moment.";
+                    fullAnswer = safe;
+                    emitChunk(safe);
+                    trace.mark('fallback_answer_used', { answerType: answerPlan.answerType });
+                }
+            }
 
             if (streamAborted) {
                 // Aborted mid-stream — don't update session or emit final event.
@@ -950,6 +1118,78 @@ export class IntelligenceEngine extends EventEmitter {
                 trace.mark('repair_used', { answerType: answerPlan.answerType });
             } else {
                 trace.mark('validation_completed', { ok: structureValidation.ok });
+            }
+
+            // Phase 4/7: profile-OUTPUT safety net for the what-to-answer path. The
+            // interview-copilot surface must NEVER answer a candidate question as
+            // "Natively / an AI assistant", and must NEVER falsely refuse ("I can't
+            // share that", "I don't have your resume loaded") when the profile IS
+            // loaded. These are CRITICAL correctness failures, so — unlike the
+            // log-only manual evidence check — we REPAIR them here with ONE bounded
+            // regeneration. Only fires when (a) the answer speaks as the candidate,
+            // (b) a profile is loaded, and (c) a violation is actually detected, so
+            // the happy path adds ZERO latency.
+            try {
+                const profileLoaded = Boolean(candidateProfile && candidateProfile.trim().length > 0);
+                if (profileLoaded && answerPlan.voicePerspective === 'first_person_candidate') {
+                    const pv = validateProfileOutput({
+                        answer: fullAnswer,
+                        plan: answerPlan,
+                        profileAvailable: true,
+                        candidateDirected: true,
+                    });
+                    // WTA candidate-voice contract: identity leak, false refusal,
+                    // AND wrong-person voice (second/third person about the user)
+                    // are all critical — the live copilot must say what the
+                    // candidate says aloud, in first person.
+                    const criticalViolation = pv.violations.find(v =>
+                        v.severity === 'error' && (
+                            v.code === 'assistant_identity_leak'
+                            || v.code === 'false_no_access_refusal'
+                            || v.code === 'false_no_experience_refusal'
+                            || v.code === 'wrong_perspective_not_first_person'));
+                    if (criticalViolation && this.currentGenerationId === generationId) {
+                        trace.mark('repair_used', { reason: 'profile', code: criticalViolation.code });
+                        const repairInstruction = buildProfileRepairInstruction(pv);
+                        const repairPrompt =
+                            `${repairInstruction}\n\nCandidate facts (ground every claim in these, first person, never say you are Natively or an AI):\n${candidateProfile}\n\nQuestion: ${question || ''}\n\nRewrite the answer now as the candidate.`;
+                        let repaired = '';
+                        // Bounded single regeneration via the centralized deadline
+                        // driver (4s) so a stalled repair provider can't re-hang the
+                        // live answer after text already showed. Fire-and-forget
+                        // cleanup — no `await iterator.return()` anti-pattern.
+                        try {
+                            await raceStreamWithDeadline({
+                                stream: this.llmHelper.streamChat(repairPrompt, undefined, undefined, undefined, true, true) as AsyncGenerator<string>,
+                                firstUsefulDeadlineMs: 4000,
+                                isUsefulYet: () => repaired.length >= 5,
+                                shouldAbort: () => repaired.length > 1200,
+                                onToken: (tok: string) => { repaired += tok; },
+                            });
+                        } catch { /* keep partial repaired */ }
+                        const repairedTrim = repaired.trim();
+                        if (repairedTrim.length >= 5) {
+                            const reCheck = validateProfileOutput({
+                                answer: repairedTrim, plan: answerPlan,
+                                profileAvailable: true, candidateDirected: true,
+                            });
+                            // Accept the repair only if NO critical violation remains
+                            // — not just the original one (a regen that fixes the
+                            // identity leak but introduces a false refusal must be
+                            // rejected too — code-review 2026-06-05, MED).
+                            const CRITICAL_CODES = new Set(['assistant_identity_leak', 'false_no_access_refusal', 'false_no_experience_refusal']);
+                            const stillCritical = reCheck.violations.some(v => v.severity === 'error' && CRITICAL_CODES.has(v.code));
+                            if (!stillCritical) {
+                                fullAnswer = repairedTrim;
+                                trace.mark('repair_used', { reason: 'profile_applied', code: criticalViolation.code });
+                            } else {
+                                trace.mark('validation_completed', { reason: 'profile_repair_rejected', code: criticalViolation.code });
+                            }
+                        }
+                    }
+                }
+            } catch (profileRepairErr: any) {
+                console.warn('[IntelligenceEngine] profile repair failed (non-fatal):', profileRepairErr?.message || profileRepairErr);
             }
 
             if (IntelligenceEngine.isNonAnswerSentinel(fullAnswer)) {
@@ -1076,10 +1316,16 @@ export class IntelligenceEngine extends EventEmitter {
                 // Correction call: regenerate a fixed answer via the same chat path.
                 // Bounded to ONE attempt inside verifyCodingAnswer.
                 correct: async (repairPrompt: string) => {
+                    // Background coding-correction (post-answer, fire-and-forget) —
+                    // deadline-guarded so a stalled provider can't leave a hung
+                    // background task / leaked request (Issue 1 consistency).
                     let fixed = '';
-                    for await (const tok of this.llmHelper.streamChat(repairPrompt, undefined, undefined, undefined, true, true)) {
-                        fixed += tok;
-                    }
+                    await raceStreamWithDeadline({
+                        stream: this.llmHelper.streamChat(repairPrompt, undefined, undefined, undefined, true, true) as AsyncGenerator<string>,
+                        firstUsefulDeadlineMs: 6000,
+                        isUsefulYet: () => fixed.length >= 5,
+                        onToken: (tok: string) => { fixed += tok; },
+                    });
                     return fixed;
                 },
                 onEvent: (name, props) => { try { trace.mark(name as any, props); } catch { /* telemetry never breaks verify */ } },

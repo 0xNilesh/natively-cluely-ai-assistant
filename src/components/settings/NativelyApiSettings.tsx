@@ -658,10 +658,13 @@ export const NativelyApiSettings: React.FC = () => {
         setIsSaved(true);
         setJustSaved(true);
         setTimeout(() => setJustSaved(false), 2500);
-        // @ts-ignore
-        window.electronAPI?.setDefaultModel?.('natively').catch(console.error);
-        // @ts-ignore
-        window.electronAPI?.setSttProvider?.('natively').catch(console.error);
+        // NOTE: do NOT also call setDefaultModel('natively') / setSttProvider('natively')
+        // here. The main-process `set-natively-api-key` handler already auto-promotes
+        // both the default model and the STT provider server-side (see
+        // CredentialsManager.setNativelyApiKey) and runs reconfigureSttProvider once.
+        // Firing those extra IPCs raced a SECOND audio-pipeline rebuild against the
+        // first, which deadlocked/crashed the native audio stack right after a key
+        // save (the "app hangs after entering the key" bug, macOS + Windows).
       } else {
         setError(r.error || 'Failed to save API key');
       }

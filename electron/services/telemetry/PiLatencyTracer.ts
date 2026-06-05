@@ -38,6 +38,9 @@ export type PiMilestone =
   | 'retry_used'
   | 'degraded_context'
   | 'ui_render_completed'
+  // What-to-answer live-copilot guardrails (Phase 9 / Phase 4 telemetry).
+  | 'provider_timeout'
+  | 'fallback_answer_used'
   // Verified code execution (background, post-answer).
   | 'code_verify_started'
   | 'code_verify_skipped'

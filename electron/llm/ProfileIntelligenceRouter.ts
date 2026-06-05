@@ -13,7 +13,7 @@
 // the eval one canonical decision object to converge on and assert against.
 
 import { planAnswer } from './AnswerPlanner';
-import type { AnswerType, AnswerSource, SpeakerPerspective, ContextLayer } from './AnswerPlanner';
+import type { AnswerType, AnswerSource, SpeakerPerspective, ContextLayer, ProfileContextPolicy } from './AnswerPlanner';
 import { buildContextRoute } from './contextRoute';
 
 // The spec's ProfileContextType vocabulary (§3).
@@ -51,6 +51,13 @@ export interface ProfileIntelligenceDecision {
   reason: string;
   answerType: AnswerType;
   answerPerspective: AnswerPerspective;
+  /**
+   * The plan's profile-context POLICY (Phase 2): required | allowed | forbidden.
+   * Disambiguates `shouldUseProfile` for audits — e.g. negotiation is a
+   * candidate-voice profile answer (shouldUseProfile may be true) but its policy
+   * is `allowed`, not `required` (profile is leverage, not the subject).
+   */
+  profileContextPolicy: ProfileContextPolicy;
   profileContextTypes: ProfileContextType[];
   excludedContextTypes: ProfileContextType[];
   sensitiveContextAllowed: boolean;
@@ -72,8 +79,8 @@ export interface DecideProfileInput {
 
 // Answer types that speak as the candidate in first person when interviewer-asked.
 const PROFILE_ANSWER_TYPES: ReadonlySet<AnswerType> = new Set<AnswerType>([
-  'identity_answer', 'profile_fact_answer', 'project_answer', 'skills_answer',
-  'skill_experience_answer', 'experience_answer', 'jd_fit_answer',
+  'identity_answer', 'profile_fact_answer', 'project_answer', 'project_followup_answer',
+  'skills_answer', 'skill_experience_answer', 'experience_answer', 'jd_fit_answer',
   'behavioral_interview_answer', 'negotiation_answer',
 ]);
 
@@ -208,6 +215,7 @@ export function decideProfileIntelligence(input: DecideProfileInput): ProfileInt
     reason,
     answerType,
     answerPerspective,
+    profileContextPolicy: plan.profileContextPolicy,
     profileContextTypes,
     excludedContextTypes,
     sensitiveContextAllowed,

@@ -21,3 +21,8 @@ export function commitStreamingFlush<T extends { id: string; text: string; isStr
   msgId: string,
   text: string,
 ): T[];
+
+export function finalizeImperativeStreamMessages<T extends { id: string; role?: string; text: string; intent?: string; isStreaming?: boolean }>(
+  messages: T[],
+  params: { msgId: string | null; intent?: string; bufferedText: string; finalText?: string | null },
+): T[];

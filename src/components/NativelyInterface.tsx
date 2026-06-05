@@ -96,12 +96,18 @@ import {
   shouldBlockFocus as shouldBlockStealthFocus,
   shouldFireStealthTapStart,
 } from '../lib/overlayStealthFocusGuards.mjs';
-import { shouldEagerExpandForCodeToken } from '../lib/overlayCodeExpansion.mjs';
+import {
+  CODE_EXPANSION_TRANSITION,
+  shouldEagerExpandForCodeToken,
+  shouldHoldEagerCodeExpansion,
+} from '../lib/overlayCodeExpansion.mjs';
 import { shouldAcceptIntelligenceIpc } from '../lib/overlayIntelligenceGeneration.mjs';
+import { shouldUseStreamingCodeUi } from '../lib/overlayStreamingCodeUi.mjs';
 import { widthDerivedScrollMax, verticalScrollCap } from '../lib/overlayScrollBudget.mjs';
 import {
   applyFirstStreamingToken,
   commitStreamingFlush,
+  finalizeImperativeStreamMessages,
   shouldFlushPreviousStream,
 } from '../lib/streamingTokenQueue.mjs';
 import SyntaxHighlighter from 'react-syntax-highlighter/dist/esm/prism-light';
@@ -702,9 +708,13 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const rafDimUpdateRef = useRef<number | null>(null);
   const codeExpandedRef = useRef(false);
+  // Set when token streaming has proven the current row is code before React has
+  // mounted a [data-code-msg] row. While true, the visibility scanner must not
+  // immediately contradict eager expansion and schedule a collapse.
+  const eagerCodeExpansionHoldRef = useRef(false);
   const animationControlsRef = useRef<ReturnType<typeof animate> | null>(null);
   // Stability gate for code-visibility transitions. Scroll fires at ~60Hz;
-  // without this, fast scrolls cancel and restart the 0.7s tween repeatedly,
+  // without this, fast scrolls cancel and restart the width tween repeatedly,
   // producing stutter (and sometimes a snap when start≈target). The pending
   // visibility must hold its new state for STABILITY_MS before we commit to
   // a transition.
@@ -1422,16 +1432,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         wasAtBottomRef.current = distanceFromBottom <= 8;
       }
 
-      // Symmetric ease-in-out-cubic. Smooth ramp on both ends — no perceived
-      // velocity break at the start or finish, which is what makes a width
-      // animation read as "buttery" rather than "snappy". The cubic poly
-      // is gentle enough that the 1px-per-frame motion at the edges is
-      // visually subliminal at 60Hz, eliminating the "settle" jitter you
-      // get with steeper ease-out curves on width-driven reflow.
+      // Frequent coding expansions must feel immediate. A short, strong
+      // ease-out makes the shell respond right away; the eager hold below keeps
+      // the visibility scanner from reversing it before the code row mounts.
       animationControlsRef.current = animate(shellWidth, targetWidth, {
-        type: 'tween' as const,
-        ease: [0.65, 0, 0.35, 1],
-        duration: 0.7,
+        ...CODE_EXPANSION_TRANSITION,
         onUpdate: () => {
           if (!wasAtBottomRef.current) return;
           const c = scrollContainerRef.current;
@@ -1478,6 +1483,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     const codeEls = container.querySelectorAll('[data-code-msg]');
     let visible = false;
     if (codeEls.length > 0) {
+      // The real code row now exists, so visibility scanning can take ownership
+      // again. This restores scroll-away contraction after the pre-DOM eager
+      // expansion gap has passed.
+      eagerCodeExpansionHoldRef.current = false;
       const cRect = container.getBoundingClientRect();
       for (const el of codeEls) {
         const r = el.getBoundingClientRect();
@@ -1486,6 +1495,16 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           break;
         }
       }
+    }
+
+    if (
+      shouldHoldEagerCodeExpansion({
+        hasCodeElements: codeEls.length > 0,
+        hasVisibleCodeElement: visible,
+        eagerExpansionHold: eagerCodeExpansionHoldRef.current,
+      })
+    ) {
+      visible = true;
     }
 
     // Already in the correct state — clear any pending change so a
@@ -1563,6 +1582,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         stableVisibilityTimerRef.current = null;
       }
       pendingVisibilityRef.current = null;
+      eagerCodeExpansionHoldRef.current = false;
       // PERF: cancel any pending token-flush RAF so we don't try to
       // setState on an unmounted component.
       if (tokenBufRef.current.raf !== null) {
@@ -1576,6 +1596,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       streamingTextRef.current = '';
       streamingMsgIdRef.current = null;
       streamingIntentRef.current = null;
+      streamingRenderModeRef.current = 'imperative';
+      if (streamingCodeRafRef.current !== null) {
+        cancelAnimationFrame(streamingCodeRafRef.current);
+        streamingCodeRafRef.current = null;
+      }
       if (rollingPartialDebounceRef.current !== null) {
         clearTimeout(rollingPartialDebounceRef.current);
         rollingPartialDebounceRef.current = null;
@@ -1660,8 +1685,41 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     const unsubscribe = window.electronAPI.onSessionReset(() => {
       console.log('[NativelyInterface] Resetting session state...');
       setMessages([]);
+      eagerCodeExpansionHoldRef.current = false;
       answerPanelPinnedRef.current = false;
       setAnswerPanelPinned(false);
+
+      // ─── COLLAPSE THE CODE-WIDTH EXPANSION SYNCHRONOUSLY ───────────────────
+      // The overlay window/renderer is reused across meetings (never
+      // destroyed), so the PREVIOUS meeting's expanded coding/answer view —
+      // its wide shell width and the deferred visibility machinery — survives
+      // into the next meeting. Clearing `messages` above is not enough: the
+      // shell only contracts later via checkCodeVisibility (rAF → 120ms
+      // stability gate → 0.7s spring), so on restart the user briefly sees the
+      // old meeting at its expanded width before it "refreshes" a second or
+      // two later. Snap everything back to the collapsed baseline NOW so the
+      // first paint of the new meeting is already clean.
+      //
+      // We touch the code-width state (shellWidth / codeExpandedRef), NOT
+      // isExpanded — isExpanded is the vertical content-shown flag whose
+      // mounted default (true) is already correct for a fresh meeting, and
+      // setIsExpanded(false) would trigger hideWindow() (see the [isExpanded]
+      // effect), wrongly hiding a just-started meeting.
+      if (animationControlsRef.current) {
+        animationControlsRef.current.stop();
+        animationControlsRef.current = null;
+      }
+      codeExpandedRef.current = false;
+      if (stableVisibilityTimerRef.current) {
+        clearTimeout(stableVisibilityTimerRef.current);
+        stableVisibilityTimerRef.current = null;
+      }
+      pendingVisibilityRef.current = null;
+      // Imperative .set() (not animate) — no transient wide frame. The
+      // shellWidth 'change' listener drives the OS window resize on the next
+      // rAF, so the window contracts to collapsed in the same paint cycle as
+      // the overlay becoming visible.
+      shellWidth.set(SHELL_WIDTH_COLLAPSED);
       setInputValue('');
       setAttachedContext([]);
       setManualTranscript('');
@@ -1758,6 +1816,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const streamingMsgIdRef  = useRef<string | null>(null);
   const streamingIntentRef = useRef<string | null>(null);
   const streamingRafRef    = useRef<number | null>(null);
+  const streamingRenderModeRef = useRef<'imperative' | 'react-code'>('imperative');
+  const streamingCodeRafRef = useRef<number | null>(null);
 
   // Helper: render accumulated markdown to the streaming DOM node via RAF.
   // Called after every token write. Schedules at most one RAF per frame.
@@ -1771,6 +1831,26 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       // DOMPurify strips any script/event-handler injection.
       const rawHtml = marked.parse(streamingTextRef.current, { async: false }) as string;
       node.innerHTML = DOMPurify.sanitize(rawHtml);
+    });
+  }, []);
+
+  const scheduleStreamingCodeRender = useCallback(() => {
+    if (streamingCodeRafRef.current !== null) return;
+    streamingCodeRafRef.current = requestAnimationFrame(() => {
+      streamingCodeRafRef.current = null;
+      const msgId = streamingMsgIdRef.current;
+      const text = streamingTextRef.current;
+      const intent = streamingIntentRef.current;
+      if (!msgId || !text) return;
+      setMessages((prev) => {
+        const idx = prev.findLastIndex((m) => m.id === msgId);
+        if (idx === -1) return prev;
+        const row = prev[idx];
+        if (row.text === text && row.isStreaming && row.intent === intent) return prev;
+        const updated = [...prev];
+        updated[idx] = { ...row, text, intent: intent ?? row.intent, isStreaming: true };
+        return updated;
+      });
     });
   }, []);
 
@@ -1797,9 +1877,14 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       streamingTextRef.current  = '';
       streamingMsgIdRef.current = null;
       streamingIntentRef.current = null;
+      streamingRenderModeRef.current = 'imperative';
       if (streamingRafRef.current !== null) {
         cancelAnimationFrame(streamingRafRef.current);
         streamingRafRef.current = null;
+      }
+      if (streamingCodeRafRef.current !== null) {
+        cancelAnimationFrame(streamingCodeRafRef.current);
+        streamingCodeRafRef.current = null;
       }
       reactStartTransition(() => {
         setMessages((prev) => {
@@ -1814,17 +1899,32 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       });
     }
 
-    if (
-      shouldEagerExpandForCodeToken(intent, token, streamingTextRef.current) &&
-      !codeExpandedRef.current
-    ) {
-      startTransition(SHELL_WIDTH_EXPANDED);
+    const shouldUseReactCodeUi = shouldUseStreamingCodeUi(intent, token, streamingTextRef.current);
+    if (shouldEagerExpandForCodeToken(intent, token, streamingTextRef.current)) {
+      eagerCodeExpansionHoldRef.current = true;
+      if (!codeExpandedRef.current) {
+        startTransition(SHELL_WIDTH_EXPANDED);
+      }
+    }
+    if (shouldUseReactCodeUi) {
+      streamingRenderModeRef.current = 'react-code';
+      if (streamingRafRef.current !== null) {
+        cancelAnimationFrame(streamingRafRef.current);
+        streamingRafRef.current = null;
+      }
+      if (streamingNodeRef.current) {
+        streamingNodeRef.current.innerHTML = '';
+      }
     }
 
     streamingTextRef.current += token;
     streamingIntentRef.current = intent;
 
     if (streamingMsgIdRef.current !== null) {
+      if (streamingRenderModeRef.current === 'react-code') {
+        scheduleStreamingCodeRender();
+        return;
+      }
       // Mid-stream: write directly to DOM, schedule markdown render.
       if (streamingNodeRef.current) {
         // Fast path: update textContent immediately so the user sees the
@@ -1929,6 +2029,12 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       streamingNodeRef.current = null;
       streamingTextRef.current = '';
       streamingIntentRef.current = null;
+      streamingRenderModeRef.current = 'imperative';
+      eagerCodeExpansionHoldRef.current = false;
+      if (streamingCodeRafRef.current !== null) {
+        cancelAnimationFrame(streamingCodeRafRef.current);
+        streamingCodeRafRef.current = null;
+      }
       return;
     }
     // Placeholder with no tokens yet — keep refs wired so queueToken does not spawn rows.
@@ -1937,15 +2043,20 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     }
     // Reset imperative refs BEFORE setMessages so the streaming short-circuit
     // in renderMessageText is no longer active when React re-renders the row.
-    // Also wipe innerHTML so the imperatively-rendered marked.parse output
-    // cannot stack underneath React's reconciled finalized JSX (without this,
-    // and without the key="streaming" swap, the user sees the answer rendered
-    // TWICE — once via marked.parse and once via ReactMarkdown).
-    if (node) node.innerHTML = '';
+    // Do NOT blank node.innerHTML here: the user is already looking at this
+    // streamed DOM. React will unmount key="streaming" during the same commit;
+    // clearing it before that commit creates the visible finalization flicker.
     streamingNodeRef.current = null;
     streamingTextRef.current = '';
     streamingMsgIdRef.current = null;
     streamingIntentRef.current = null;
+    streamingRenderModeRef.current = 'imperative';
+    if (streamingCodeRafRef.current !== null) {
+      cancelAnimationFrame(streamingCodeRafRef.current);
+      streamingCodeRafRef.current = null;
+    }
+    // Keep eagerCodeExpansionHoldRef until the finalized React row mounts; the
+    // visibility scanner clears it as soon as it sees a real [data-code-msg].
     // NOT wrapped in startTransition — ordering must hold.
     setMessages((prev) => commitStreamingFlush(prev, msgId, text));
   }, []);
@@ -1971,6 +2082,15 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 
   const endOverlayAction = useCallback((actionKey: string) => {
     overlayActionInFlightRef.current.delete(actionKey);
+    // Clear the dedupe stamp once the action has fully completed. The stamp only
+    // exists to collapse a near-simultaneous double-fire of the SAME trigger; the
+    // in-flight Set already blocks true concurrency. Leaving it set meant a
+    // COMPLETED action kept dedupe-blocking the user's next intentional press for
+    // up to 5s — making the hotkey feel dead (part of the "What to answer does
+    // nothing" P0). A press after completion is fresh intent and must go through.
+    if (lastOverlayActionRef.current?.key === actionKey) {
+      lastOverlayActionRef.current = null;
+    }
   }, []);
 
   const finalizeStreamingByIntent = useCallback(
@@ -2007,6 +2127,33 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       }
       const streamingMsgId =
         activeStreamIntent === intent ? streamingMsgIdRef.current : null;
+      const bufferedText = streamingMsgId ? streamingTextRef.current : '';
+
+      if (streamingMsgId && bufferedText) {
+        if (streamingRafRef.current !== null) {
+          cancelAnimationFrame(streamingRafRef.current);
+          streamingRafRef.current = null;
+        }
+        streamingNodeRef.current = null;
+        streamingTextRef.current = '';
+        streamingMsgIdRef.current = null;
+        streamingIntentRef.current = null;
+        streamingRenderModeRef.current = 'imperative';
+        if (streamingCodeRafRef.current !== null) {
+          cancelAnimationFrame(streamingCodeRafRef.current);
+          streamingCodeRafRef.current = null;
+        }
+        setMessages((prev) =>
+          finalizeImperativeStreamMessages(prev, {
+            msgId: streamingMsgId,
+            intent,
+            bufferedText,
+            finalText: text,
+          }),
+        );
+        return;
+      }
+
       flushToken();
       setMessages((prev) =>
         finalizeStreamingByIntentMessages(
@@ -2041,9 +2188,14 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       streamingIntentRef.current = intent;
       streamingTextRef.current = '';
       streamingNodeRef.current = null;
+      streamingRenderModeRef.current = 'imperative';
       if (streamingRafRef.current !== null) {
         cancelAnimationFrame(streamingRafRef.current);
         streamingRafRef.current = null;
+      }
+      if (streamingCodeRafRef.current !== null) {
+        cancelAnimationFrame(streamingCodeRafRef.current);
+        streamingCodeRafRef.current = null;
       }
       pinAnswerPanel();
       setMessages((prev) =>
@@ -2230,9 +2382,15 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         streamingTextRef.current = '';
         streamingMsgIdRef.current = null;
         streamingIntentRef.current = null;
+        streamingRenderModeRef.current = 'imperative';
+        eagerCodeExpansionHoldRef.current = false;
         if (streamingRafRef.current !== null) {
           cancelAnimationFrame(streamingRafRef.current);
           streamingRafRef.current = null;
+        }
+        if (streamingCodeRafRef.current !== null) {
+          cancelAnimationFrame(streamingCodeRafRef.current);
+          streamingCodeRafRef.current = null;
         }
         setMessages((prev) => discardStreamingByIntentMessages(prev, 'what_to_answer'));
       }) ?? (() => {}),
@@ -2481,7 +2639,16 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   }, []);
 
   const handleWhatToSay = async (promptInstruction?: string | React.MouseEvent) => {
-    if (!tryBeginOverlayAction('what_to_say')) return;
+    if (!tryBeginOverlayAction('what_to_say')) {
+      // The press was blocked because a prior 'what_to_say' is still streaming.
+      // Surface a brief hint instead of silently doing nothing, so a blocked
+      // press is never indistinguishable from a crash / dead hotkey.
+      setMessages((prev) => [
+        ...prev,
+        { id: genMessageId(), role: 'system', text: 'Still finishing the previous answer — one moment…' },
+      ]);
+      return;
+    }
     const dynamicPromptInstruction =
       typeof promptInstruction === 'string' ? promptInstruction : undefined;
     setIsExpanded(true);
@@ -2553,9 +2720,15 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         streamingTextRef.current = '';
         streamingMsgIdRef.current = null;
         streamingIntentRef.current = null;
+        streamingRenderModeRef.current = 'imperative';
+        eagerCodeExpansionHoldRef.current = false;
         if (streamingRafRef.current !== null) {
           cancelAnimationFrame(streamingRafRef.current);
           streamingRafRef.current = null;
+        }
+        if (streamingCodeRafRef.current !== null) {
+          cancelAnimationFrame(streamingCodeRafRef.current);
+          streamingCodeRafRef.current = null;
         }
         setMessages((prev) => applyWhatToAnswerNullFeedbackMessages(prev, feedback));
         pinAnswerPanel();
@@ -2674,6 +2847,16 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   };
 
   const handleCodeHint = async () => {
+    // In-flight guard (every other overlay action has one). Without it a rapid
+    // double-press of the code-hint hotkey spawned two concurrent IPC/LLM streams;
+    // engine generation-id supersession aborted the older one, but both fired.
+    if (!tryBeginOverlayAction('code_hint')) {
+      setMessages((prev) => [
+        ...prev,
+        { id: genMessageId(), role: 'system', text: 'Still generating the code hint — one moment…' },
+      ]);
+      return;
+    }
     setIsExpanded(true);
     setIsProcessing(true);
     pinAnswerPanel();
@@ -2712,6 +2895,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         },
       ]);
     } finally {
+      endOverlayAction('code_hint');
       setIsProcessing(false);
     }
   };
@@ -2781,7 +2965,19 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         // (in-place, by id) so the user sees the corrected six-section markdown.
         // Absent in the common case, where the streamed tokens already stand.
         const finalText = data?.finalText;
-        flushToken();
+        if (streamingRafRef.current !== null) {
+          cancelAnimationFrame(streamingRafRef.current);
+          streamingRafRef.current = null;
+        }
+        if (streamingCodeRafRef.current !== null) {
+          cancelAnimationFrame(streamingCodeRafRef.current);
+          streamingCodeRafRef.current = null;
+        }
+        streamingNodeRef.current = null;
+        streamingTextRef.current = '';
+        streamingMsgIdRef.current = null;
+        streamingIntentRef.current = null;
+        streamingRenderModeRef.current = 'imperative';
         setIsProcessing(false);
 
         // Calculate latency if we have a start time
@@ -3192,9 +3388,14 @@ Provide only the answer, nothing else.`;
     streamingIntentRef.current = 'chat';
     streamingTextRef.current = '';
     streamingNodeRef.current = null;
+    streamingRenderModeRef.current = 'imperative';
     if (streamingRafRef.current !== null) {
       cancelAnimationFrame(streamingRafRef.current);
       streamingRafRef.current = null;
+    }
+    if (streamingCodeRafRef.current !== null) {
+      cancelAnimationFrame(streamingCodeRafRef.current);
+      streamingCodeRafRef.current = null;
     }
     setMessages((prev) => [
       ...prev,
@@ -3287,7 +3488,9 @@ Provide only the answer, nothing else.`;
       // without going through React reconciliation.
       // On stream completion, flushToken() resets streamingMsgIdRef and the
       // next render falls through to the normal intent-specific path below.
-      if (msg.isStreaming && msg.role === 'system' && !msg.isNegotiationCoaching) {
+      const isActiveReactCodeStream =
+        msg.id === streamingMsgIdRef.current && streamingRenderModeRef.current === 'react-code';
+      if (msg.isStreaming && msg.role === 'system' && !msg.isNegotiationCoaching && !isActiveReactCodeStream) {
         if (msg.id === streamingMsgIdRef.current) {
           // CRITICAL: key="streaming" forces React to UNMOUNT this div (taking
           // the imperative innerHTML with it) when the row transitions to the
@@ -3368,6 +3571,8 @@ Provide only the answer, nothing else.`;
           <NegotiationCoachingCard
             {...msg.negotiationCoachingData}
             phase={msg.negotiationCoachingData.phase as any}
+            interfaceTheme={interfaceTheme}
+            isLightTheme={isLightTheme}
             onSilenceTimerEnd={() => {
               setMessages((prev) =>
                 prev.map((m) =>
@@ -3390,7 +3595,7 @@ Provide only the answer, nothing else.`;
       // We split by code blocks to keep the "Code Solution" UI intact for the code parts
       // But use ReactMarkdown for the text parts around it
       if (msg.isCode || (msg.role === 'system' && msg.text.includes('```'))) {
-        const parts = msg.text.split(/(```[\s\S]*?```)/g);
+        const parts = msg.text.split(/(```[\s\S]*?(?:```|$))/g);
         return (
           <div className={`w-full rounded-[20px] rounded-tl-[4px] p-[14px_18px] ai-response-card ${cardBgBorderClass} my-2.5 transition-all duration-300 relative group`}>
             <div className="absolute top-[-16px] right-[-16px] z-20 opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none group-hover:pointer-events-auto">
@@ -3405,10 +3610,12 @@ Provide only the answer, nothing else.`;
             <div className="space-y-2 text-[14.5px] leading-relaxed">
               {parts.map((part, i) => {
                 if (part.startsWith('```')) {
-                  const match = part.match(/```(\w+)?\n?([\s\S]*?)```/);
-                  if (match) {
-                    const lang = match[1] || 'python';
-                    const code = match[2].trim();
+                  const match = part.match(/```(\w*)\s+([\s\S]*?)(?:```|$)/);
+                  if (match || part.startsWith('```')) {
+                    const lang = match && match[1] ? match[1] : 'python';
+                    const code = (match && match[2]
+                      ? match[2]
+                      : part.replace(/^```\w*\s*/, '').replace(/```$/, '')).trim();
                     return (
                       <HighlightedCode
                         key={i}

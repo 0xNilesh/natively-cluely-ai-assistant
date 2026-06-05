@@ -13,6 +13,7 @@ import {
   simulatePrewiredPlaceholderWithSyncFinalize,
   simulateSameIntentTokenStream,
   simulateLateWtaAfterChatPlaceholder,
+  finalizeImperativeStreamMessages,
 } from '../streamingTokenQueue.mjs';
 import { prepareIntelligenceStreamPlaceholderMessages } from '../overlayMessagePersistence.mjs';
 
@@ -142,6 +143,38 @@ test('commitStreamingFlush writes buffered tokens onto placeholder row', () => {
   assert.equal(flushed.length, 1);
   assert.equal(flushed[0].text, 'Hello world!');
   assert.equal(flushed[0].isStreaming, false);
+});
+
+test('finalizeImperativeStreamMessages commits final text once without intermediate buffered replacement', () => {
+  const messages = [
+    { id: 'ph', role: 'system', text: '', intent: 'chat', isStreaming: true },
+  ];
+  const finalized = finalizeImperativeStreamMessages(messages, {
+    msgId: 'ph',
+    intent: 'chat',
+    bufferedText: '```js\nconsole.log("old")\n```',
+    finalText: '```js\nconsole.log("final")\n```',
+  });
+
+  assert.equal(finalized.length, 1);
+  assert.equal(finalized[0].text, '```js\nconsole.log("final")\n```');
+  assert.equal(finalized[0].isStreaming, false);
+});
+
+test('finalizeImperativeStreamMessages appends by reserved id if row has not mounted yet', () => {
+  const finalized = finalizeImperativeStreamMessages([], {
+    msgId: 'reserved-id',
+    intent: 'what_to_answer',
+    bufferedText: '```python\nprint(1)\n```',
+    finalText: '```python\nprint(1)\n```',
+  });
+
+  assert.equal(finalized.length, 1);
+  assert.equal(finalized[0].id, 'reserved-id');
+  assert.equal(finalized[0].role, 'system');
+  assert.equal(finalized[0].intent, 'what_to_answer');
+  assert.equal(finalized[0].text, '```python\nprint(1)\n```');
+  assert.equal(finalized[0].isStreaming, false);
 });
 
 test('pre-wired placeholder stream keeps one bubble with visible text after flush', () => {

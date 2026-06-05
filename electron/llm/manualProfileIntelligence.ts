@@ -123,6 +123,15 @@ const NAME_PATTERNS = [
   /\bwhat\s+s\s+my\s+name\b/,
   /\bwho\s+am\s+i\b/,
   /\bstate\s+my\s+name\b/,
+  // Interviewer→candidate identity asks (benchmark 2026-06-05). These are a
+  // single deterministic fact (the loaded name) and MUST be answered by the
+  // fast path in every mode so they can never reach the LLM and leak "I'm
+  // Natively, an AI assistant" / a false refusal.
+  /\bwhat\s+(is|s)\s+your\s+(full\s+)?name\b/,
+  /\bwhat\s+should\s+(i|we)\s+call\s+you\b/,
+  /\bwho\s+are\s+you\b/,
+  /\bstate\s+your\s+name\b/,
+  /\bcan\s+you\s+(tell\s+me\s+)?your\s+name\b/,
 ];
 
 const EXPERIENCE_PATTERNS = [
@@ -131,7 +140,29 @@ const EXPERIENCE_PATTERNS = [
   /\bwork\s+experience\b/,
   /\bwork\s+history\b/,
   /\bprevious\s+roles?\b/,
-  /\bbackground\b/,
+  /\b(?<!educational\s)(?<!education\s)background\b/,
+  // "what do you currently do?", "what's your current role?", "what companies
+  // have you worked with/at?", "where have you worked?" (Issue 7).
+  /\bwhat\s+do\s+(you|i)\s+(currently|now)\s*do\b/,
+  /\bwhat\s+(are|r)\s+(you|u)\s+(currently\s+)?working\s+on\b/,
+  /\bwhat(?:'s| is)\s+(your|my)\s+current\s+(role|job|position|title)\b/,
+  /\bwhat\s+companies?\s+have\s+(you|i)\s+worked\b/,
+  /\bwhere\s+have\s+(you|i)\s+worked\b/,
+];
+// INTRO ("tell me about yourself", "give me a quick introduction", "describe
+// yourself professionally", "introduce yourself") — answered deterministically
+// with a grounded first-person intro so it never reaches the LLM (which was
+// leaking "I'm Natively" / refusing). Distinct from a bare NAME ask.
+const INTRO_PATTERNS = [
+  /\btell\s+me\s+about\s+(yourself|your\s*self)\b/,
+  /\b(give|tell)\s+(me\s+)?(a\s+)?(quick|brief|short)?\s*(introduction|intro|overview of yourself|rundown)\b/,
+  /\b(can\s+you\s+)?(quickly\s+)?introduce\s+yourself\b/,
+  /\bdescribe\s+yourself\b/,
+  /\bhow\s+(would|do)\s+you\s+describe\s+yourself\b/,
+  /\bsummari[sz]e\s+who\s+you\s+are\b/,
+  /\b(walk\s+me\s+through|tell\s+me\s+about)\s+your\s+(background|journey|career|profile)\b/,
+  /\bgive\s+(me\s+)?your\s+background\b/,
+  /\bwho\s+are\s+you\s+as\s+a\s+(candidate|person|professional)\b/,
 ];
 
 const PROJECT_PATTERNS = [
@@ -142,19 +173,23 @@ const PROJECT_PATTERNS = [
 ];
 
 const SKILL_PATTERNS = [
-  /\b(my|your)\s+skills?\b/,
+  /\b(my|your)\s+(main\s+|technical\s+|key\s+|core\s+)?skills?\b/,
   /\bskills?\s+do\s+i\s+have\b/,
   /\btech\s+stack\b/,
   /\btools?\s+(do\s+i|have\s+you)\b/,
   /\btechnologies?\b/,
+  // "what programming/coding languages do you know/use?" (Issue 7).
+  /\bwhat\s+(programming|coding)\s+languages?\s+do\s+(you|i)\b/,
+  /\bwhat\s+languages?\s+do\s+(you|i)\s+(know|use)\b/,
 ];
 
 const EDUCATION_PATTERNS = [
-  /\b(my|your)\s+education\b/,
-  /\bwhere\s+did\s+i\s+(go\s+to\s+school|study)\b/,
+  /\b(my|your)\s+education(al)?\b/,
+  /\bwhere\s+did\s+(i|you)\s+(go\s+to\s+school|study|graduate)\b/,
   /\bdegree\b/,
   /\bschool\b/,
   /\buniversity\b/,
+  /\bwhat(?:'s| is)\s+(your|my)\s+educational?\s+background\b/,
 ];
 
 const ROLE_PATTERNS = [
@@ -211,6 +246,33 @@ const profileSkills = (profile: MaybeStructured<StructuredProfileFacts>): SkillI
   return [];
 };
 
+// Deterministic first-person INTRO from structured facts — "I'm <name>, a
+// <role>. ..." with current role/company + a couple of grounded highlights.
+// This is the safe fallback for "tell me about yourself" / "give me a quick
+// introduction" so an intro NEVER has to reach the LLM (where it was leaking
+// "I'm Natively" / refusing). Returns '' when the name is missing.
+const formatIntro = (profile: MaybeStructured<StructuredProfileFacts>): string => {
+  const name = profileName(profile);
+  if (!name) return '';
+  const exp = profileExperience(profile);
+  const cur = exp[0];
+  const role = cur ? firstNonEmpty(cur.role, cur.title, cur.position) : '';
+  const company = cur ? firstNonEmpty(cur.company, cur.organization, cur.employer) : '';
+  const skills = profileSkills(profile)
+    .map((s) => (typeof s === 'string' ? s : firstNonEmpty(s.name, s.skill)))
+    .filter(Boolean).slice(0, 4);
+  const projects = profileProjects(profile)
+    .map((p) => firstNonEmpty(p.name, p.title)).filter(Boolean).slice(0, 1);
+
+  const parts: string[] = [];
+  const article = role && /^[aeiou]/i.test(role.trim()) ? 'an' : 'a';
+  if (role) parts.push(`I'm ${name}, ${article} ${role}${company ? ` at ${company}` : ''}.`);
+  else parts.push(`I'm ${name}.`);
+  if (skills.length) parts.push(`I work mainly with ${formatInlineList(skills, 4)}.`);
+  if (projects.length) parts.push(`One project I'm proud of is ${projects[0]}.`);
+  return parts.join(' ');
+};
+
 const formatExperience = (profile: MaybeStructured<StructuredProfileFacts>): string => {
   const entries = profileExperience(profile);
   if (entries.length === 0) return '';
@@ -236,6 +298,80 @@ const formatProjects = (profile: MaybeStructured<StructuredProfileFacts>): strin
     return `${name}${description ? ` — ${description}` : ''}${tech ? ` (${tech})` : ''}`;
   }).filter(Boolean);
   return lines.length ? `Your projects include ${lines.join('; ')}.` : '';
+};
+
+// Phase 10: a single-project deterministic answer for "tell me about <project>",
+// "best project", "tech stack of <project>". Reads the matched project node from
+// structured data (NOT hardcoded) and renders a concise first/second-person
+// answer with NO provider round-trip. Returns '' when no project matches so the
+// caller falls through to the grounded LLM (e.g. a narrative drill-in).
+const findProjectByName = (profile: MaybeStructured<StructuredProfileFacts>, q: string): ProfileProject | null => {
+  const entries = profileProjects(profile);
+  if (!entries.length) return null;
+  // Explicit name match: the project's primary name token appears in the
+  // question. Project names are often "Natively – Open Source AI Meeting Copilot"
+  // while the question just says "natively", so match on the FIRST significant
+  // name token (split on space/dash/en-dash) rather than the full string.
+  for (const p of entries) {
+    const name = firstNonEmpty(p.name, p.title);
+    if (!name) continue;
+    const lowerName = name.toLowerCase();
+    if (q.includes(lowerName)) return p;
+    const head = lowerName.split(/[\s–—\-:|]+/).filter(Boolean)[0];
+    if (head && head.length >= 4 && new RegExp(`\\b${head.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(q)) return p;
+  }
+  // "best / most important / strongest / main PROJECT" → the first listed project
+  // (resumes lead with the flagship). REQUIRES a project noun so "best approach",
+  // "main responsibilities", "biggest risk", "top priorities" do NOT wrongly
+  // return the flagship project (code-review 2026-06-05, HIGH).
+  if (/\b(best|most important|strongest|main|biggest|favou?rite|top)\b/.test(q)
+      && /\b(project|projects|work|app|product|system|build|built)\b/.test(q)) {
+    return entries[0];
+  }
+  return null;
+};
+const formatSingleProject = (project: ProfileProject): string => {
+  const name = firstNonEmpty(project.name, project.title);
+  const description = firstNonEmpty(project.description, project.summary);
+  const tech = formatInlineList(asArray(project.technologies || project.tech_stack || project.tools).map(clean).filter(Boolean), 6);
+  if (!name) return '';
+  const parts = [`Your project ${name}`];
+  if (description) parts.push(`is ${description}`);
+  const head = parts.join(' ');
+  return `${head}.${tech ? ` It was built with ${tech}.` : ''}`;
+};
+
+// Find a skill token in the question that the profile actually lists, and which
+// projects use it. Returns null when the skill isn't recognised in the profile
+// (so we defer to the LLM rather than guess). Grounded — never invented.
+const SKILL_TOKEN_RE = /\b(python|sql|java(?:script)?|typescript|react|node(?:\.?js)?|c\+\+|go(?:lang)?|rust|aws|gcp|azure|docker|kubernetes|graphql|rest|fastapi|django|flask|spring|pandas|numpy|spark|hadoop|tableau|power\s?bi|excel|tensorflow|pytorch|sql|nosql|mongodb|postgres(?:ql)?|redis|data analysis|analytics|machine learning|ml|statistics)\b/i;
+const findProfileSkill = (profile: MaybeStructured<StructuredProfileFacts>, q: string): { skill: string; projects: string[] } | null => {
+  const m = q.match(SKILL_TOKEN_RE);
+  if (!m) return null;
+  const skill = m[0];
+  const all = profileSkills(profile)
+    .map((s) => (typeof s === 'string' ? s : firstNonEmpty(s.name, s.skill)))
+    .filter(Boolean).map((s) => s.toLowerCase());
+  const projects = profileProjects(profile)
+    .filter((p) => {
+      const tech = asArray(p.technologies || p.tech_stack || p.tools).map((t) => clean(t).toLowerCase());
+      const desc = firstNonEmpty(p.description, p.summary).toLowerCase();
+      return tech.some((t) => t.includes(skill.toLowerCase())) || desc.includes(skill.toLowerCase());
+    })
+    .map((p) => firstNonEmpty(p.name, p.title)).filter(Boolean).slice(0, 2);
+  // Only fast-path when the skill is genuinely in the profile (skill list OR a project).
+  const inSkills = all.some((s) => s.includes(skill.toLowerCase()) || skill.toLowerCase().includes(s));
+  if (!inSkills && projects.length === 0) return null;
+  return { skill, projects };
+};
+const formatSkillExperience = (profile: MaybeStructured<StructuredProfileFacts>, q: string): string => {
+  const found = findProfileSkill(profile, q);
+  if (!found) return '';
+  const { skill, projects } = found;
+  if (projects.length) {
+    return `Yes, I've worked with ${skill} — I used it in ${formatInlineList(projects, 2)}.`;
+  }
+  return `Yes, ${skill} is one of the skills I work with.`;
 };
 
 const formatSkills = (profile: MaybeStructured<StructuredProfileFacts>): string => {
@@ -389,9 +525,27 @@ export const tryBuildManualProfileFastPathAnswer = ({
   source = 'manual_input',
 }: ManualProfileFastPathInput): ManualProfileRouteResult | null => {
   const firstPerson = source === 'what_to_answer' || source === 'transcript';
+  const qNorm = normalize(question);
+  // "What is your name?" / "Who are you?" are in ASSISTANT_IDENTITY_PATTERNS so a
+  // profile-less chat answers as the assistant. BUT when a candidate profile is
+  // loaded, these are interview identity asks that must be answered AS the
+  // candidate (deterministically), never sent to the LLM where it can leak "I'm
+  // Natively, an AI assistant" (benchmark 2026-06-05). So only bail to the
+  // assistant path for GENUINE assistant-meta questions (are-you-an-AI / what
+  // model / who made you / what is Natively) — NOT for a name/who-are-you ask
+  // when the profile is ready.
+  // In MANUAL chat the user is talking to the assistant, so "who are you?" /
+  // "what is your name?" legitimately address Natively (preserved — a user
+  // chatting with the app asking "who are you" wants to know about the assistant,
+  // not be told their own name). The fast path therefore still bails for these in
+  // manual mode. In INTERVIEW / what-to-answer / transcript mode (firstPerson),
+  // the SAME phrasings are the interviewer asking the CANDIDATE, so they must be
+  // answered as the candidate via the name fast path below and NEVER reach the
+  // LLM (where the benchmark caught "I'm Natively, an AI assistant"). firstPerson
+  // already skips this guard entirely, so no extra handling is needed there.
   if (!firstPerson && isAssistantIdentityQuestion(question)) return null;
 
-  const q = normalize(question);
+  const q = qNorm;
 
   // A qualified/filtered question must reach the grounded LLM, not the canned
   // template. Identity (name) and the JD role lookup are exact single-fact
@@ -433,6 +587,17 @@ export const tryBuildManualProfileFastPathAnswer = ({
     );
   }
 
+  // INTRO: a grounded first-person introduction built from structured facts.
+  // Only the interview/transcript (firstPerson) surface gets the deterministic
+  // intro — manual chat keeps the richer LLM intro. This guarantees the live
+  // copilot never refuses or leaks "I'm Natively" on "tell me about yourself".
+  // NOTE: does NOT gate on `qualified` — "tell me ABOUT yourself" trips the
+  // generic about-qualifier, but INTRO_PATTERNS is already precise.
+  if (firstPerson && hasAny(q, INTRO_PATTERNS)) {
+    const intro = formatIntro(profile);
+    if (intro) return makeRoute(intro, 'identity_answer', ['stable_identity', 'resume']);
+  }
+
   // List-returning answers: a canned dump can't honor a filter/qualifier, so
   // defer to the grounded LLM when one is present (e.g. "projects that use REST
   // API", "skills in Python", "experience related to ML").
@@ -442,10 +607,48 @@ export const tryBuildManualProfileFastPathAnswer = ({
     return makeRoute(firstPerson ? answer.replace(/^Your experience includes/i, 'My experience includes') : answer, 'experience_answer', ['resume']);
   }
 
+  // Phase 10: single-project FAST PATH — "tell me about Natively", "best
+  // project", "tech stack of Natively". Deterministic from the matched project
+  // node (zero provider latency). Narrative drill-ins ("how was it developed?",
+  // "hardest part?", "what did you learn?", "your role?") are NOT handled here —
+  // they deserve a richer grounded answer, so we only fast-path the factual
+  // "what is it / what stack" shape and defer everything else to the LLM.
+  // NOTE: this branch does NOT gate on `qualified` — "tell me ABOUT Natively"
+  // trips the generic `about`-qualifier, but findProjectByName already scopes the
+  // answer to the named project, so the qualifier guard would wrongly suppress a
+  // perfectly answerable direct project ask. Narrative drill-ins are excluded
+  // explicitly below so they still reach the richer grounded LLM.
+  const isNarrativeDrillIn = /\b(how (was|is|did)|hardest|challenge|learn|your role|why did you|proud|improve|optimi[sz]e|architecture|coordinat)\b/.test(q);
+  const isProjectFactAsk = /\b(tell me about|talk about|explain|describe|what(?:'s| is)?|tech ?stack|technolog|stack of|built with|made with)\b/.test(q);
+  if (isProjectFactAsk && !isNarrativeDrillIn) {
+    const project = findProjectByName(profile, q);
+    if (project) {
+      const answer = formatSingleProject(project);
+      if (answer) {
+        return makeRoute(
+          firstPerson ? answer.replace(/^Your project/i, 'My project') : answer,
+          'project_answer', ['resume', 'projects'],
+        );
+      }
+    }
+  }
+
   if (hasAny(q, PROJECT_PATTERNS) && !qualified) {
     const answer = formatProjects(profile);
     if (!answer) return null;
     return makeRoute(firstPerson ? answer.replace(/^Your projects include/i, 'My projects include') : answer, 'project_answer', ['resume', 'projects']);
+  }
+
+  // SKILL-EXPERIENCE fast path: "what is your experience with Python?", "have you
+  // used SQL?", "your data analysis experience" — grounded confirmation + where
+  // it's used. NOT skill RATINGS ("rate your Python 8/10") — a number is a
+  // judgment we leave to the grounded LLM. Returns '' (→ LLM) if the skill isn't
+  // genuinely in the profile.
+  const isSkillExperienceQ = /\b(experience\s+(with|in|using)|have\s+(you|i)\s+(used|worked\s+with)|worked\s+with|familiar\s+with)\b/.test(q)
+    && !/\brate|out of (?:10|ten)|scale\b/.test(q);
+  if (isSkillExperienceQ) {
+    const answer = formatSkillExperience(profile, q);
+    if (answer) return makeRoute(firstPerson ? answer : answer.replace(/^Yes, I've/i, "Yes, you've"), 'skill_experience_answer', ['resume']);
   }
 
   if (hasAny(q, SKILL_PATTERNS) && !qualified) {
@@ -460,6 +663,58 @@ export const tryBuildManualProfileFastPathAnswer = ({
     return makeRoute(firstPerson ? answer.replace(/^Your education includes/i, 'My education includes') : answer, 'profile_fact_answer', ['resume']);
   }
 
+  return null;
+};
+
+/**
+ * LIVE LATENCY FALLBACK (Phase 9). When the provider stalls past the live-copilot
+ * budget on a profile-grounded answer, we must still say SOMETHING grounded — never
+ * an empty answer or a 10s+ wait. This always returns a first-person answer for a
+ * profile route by trying, in order: the exact deterministic fast-path, then a
+ * grounded intro, then an experience/skills summary. Returns null only when the
+ * route is not profile-grounded (coding/meeting handle their own fallback) or no
+ * profile is loaded — the caller then keeps whatever partial text streamed.
+ */
+export const buildLiveFallbackAnswer = ({
+  question,
+  answerType,
+  profile,
+  jobDescription,
+}: {
+  question: string;
+  answerType: string;
+  profile: MaybeStructured<StructuredProfileFacts>;
+  jobDescription?: MaybeStructured<StructuredJobFacts>;
+}): string | null => {
+  if (!profileFactsReady(profile)) return null;
+  const profileRoutes = new Set([
+    'identity_answer', 'profile_fact_answer', 'project_answer', 'project_followup_answer',
+    'skills_answer', 'skill_experience_answer', 'experience_answer', 'jd_fit_answer',
+    'behavioral_interview_answer',
+  ]);
+  if (!profileRoutes.has(answerType)) return null;
+
+  // 1. Exact deterministic fast-path (handles name/intro/role/jd-fit/projects/etc.).
+  try {
+    const fp = tryBuildManualProfileFastPathAnswer({ question, profile, jobDescription, source: 'what_to_answer' });
+    if (fp?.answer) return fp.answer;
+  } catch { /* fall through */ }
+
+  // 2. JD-fit specific summary.
+  if (answerType === 'jd_fit_answer') {
+    const fit = formatJDFit(profile, jobDescription);
+    if (fit) return fit.replace(/^You fit/i, 'I fit');
+  }
+
+  // 3. A grounded intro is a safe, on-topic answer for any "about me" route.
+  const intro = formatIntro(profile);
+  if (intro) return intro;
+
+  // 4. Last resort: an experience or skills line.
+  const exp = formatExperience(profile);
+  if (exp) return exp.replace(/^Your experience includes/i, 'My experience includes');
+  const skills = formatSkills(profile);
+  if (skills) return skills.replace(/^Your skills include/i, 'My skills include');
   return null;
 };
 

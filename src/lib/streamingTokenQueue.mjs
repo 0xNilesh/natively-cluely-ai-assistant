@@ -93,6 +93,27 @@ export function commitStreamingFlush(messages, msgId, text) {
 }
 
 /**
+ * Finalize an imperatively-rendered stream with exactly one React state commit.
+ * Prefer authoritative finalText when present (repair / server post-processing),
+ * otherwise preserve the visible buffered stream text.
+ */
+export function finalizeImperativeStreamMessages(
+  messages,
+  { msgId, intent, bufferedText, finalText },
+) {
+  if (!Array.isArray(messages) || !msgId) return messages;
+  const text = finalText || bufferedText;
+  if (!text) return messages;
+  const idx = messages.findLastIndex((m) => m.id === msgId);
+  if (idx === -1) {
+    return [...messages, { id: msgId, role: 'system', text, intent, isStreaming: false }];
+  }
+  const updated = [...messages];
+  updated[idx] = { ...updated[idx], text, intent: intent ?? updated[idx].intent, isStreaming: false };
+  return updated;
+}
+
+/**
  * Simulate pre-wired placeholder streaming: activeMsgId set before tokens arrive,
  * tokens accumulate in a buffer only (no per-token setMessages), then flush at end.
  */

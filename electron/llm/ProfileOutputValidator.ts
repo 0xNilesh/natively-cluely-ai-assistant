@@ -55,28 +55,33 @@ export interface ProfileValidationResult {
 
 // Answer types that speak AS the candidate (first person) when interviewer-directed.
 const PROFILE_ANSWER_TYPES: ReadonlySet<AnswerType> = new Set<AnswerType>([
-  'identity_answer', 'profile_fact_answer', 'project_answer', 'skills_answer',
-  'skill_experience_answer', 'experience_answer', 'jd_fit_answer',
+  'identity_answer', 'profile_fact_answer', 'project_answer', 'project_followup_answer',
+  'skills_answer', 'skill_experience_answer', 'experience_answer', 'jd_fit_answer',
   'behavioral_interview_answer', 'negotiation_answer',
 ]);
 
 const isProfileAnswerType = (t: AnswerType): boolean => PROFILE_ANSWER_TYPES.has(t);
 
 // "I am Natively" / "I'm an AI assistant" — the assistant identity leaking into a
-// candidate answer. Distinct from the candidate legitimately saying "I".
+// candidate answer. Distinct from the candidate legitimately saying "I" or stating
+// a real job title ("I'm an AI Engineer", "I'm an AI & Full Stack Engineer"): the
+// "an AI" clause requires it NOT be followed by an engineering/role word, so a job
+// title is not a false positive (Issue 2).
 const ASSISTANT_IDENTITY_RE =
-  /\bI(?:'m| am)\s+(?:Natively|an?\s+AI\b|an?\s+(?:AI\s+)?(?:assistant|language model|chatbot))\b/i;
+  /\bI(?:'m| am)\s+Natively\b|\bI(?:'m| am)\s+an?\s+(?:AI\s+)?(?:assistant|language model|chat\s?bot)\b|\bI(?:'m| am)\s+an\s+AI\b(?!\s*(?:and|engineer|developer|intern|specialist|enthusiast)\b)(?![\s]*[&/,])|\bas\s+an\s+AI(?:\s+(?:language\s+)?model)?,?\s+I\b/i;
 const NATIVELY_SELF_RE = /\b(?:I am|I'm|as)\s+Natively\b/i;
 
-// "I don't have access to your..." / "I don't know your name" — the false-refusal
-// failure when the profile is actually present.
+// "I don't have access to your..." / "I don't know your name" / "I can't share
+// that information" / "I don't have your resume/profile/JD loaded" — false-refusal
+// failures when the profile IS present (benchmark 2026-06-05 what-to-answer mode).
 const NO_ACCESS_RE =
-  /\bI\s+(?:do(?:n'?t| not)|cannot|can'?t)\s+(?:have\s+access\s+to|access)\b|\bI\s+do(?:n'?t| not)\s+(?:have|know)\s+(?:your|the user'?s|that)\b|\bno\s+access\s+to\s+(?:your|the user'?s|personal)\b/i;
+  /\bI\s+(?:do(?:n'?t| not)|cannot|can'?t)\s+(?:have\s+access\s+to|access)\b|\bI\s+do(?:n'?t| not)\s+(?:have|know)\s+(?:your|the user'?s|that)\b|\bno\s+access\s+to\s+(?:your|the user'?s|personal)\b|\bI\s+(?:cannot|can'?t)\s+share\s+(?:that|this|your|personal)\b|\bI\s+do(?:n'?t| not)\s+have\s+(?:the\s+)?(?:specific\s+)?(?:job\s+description|jd|resume|profile|past\s+experience)\b(?:\s+loaded)?|\bI\s+do(?:n'?t| not)\s+have\s+(?:specific\s+)?past\s+experience\s+loaded\b/i;
 
-// "I don't have personal experience" / "as an AI I haven't" — false no-experience
-// when the profile contains experience.
+// "I don't have personal experience" / "as an AI I haven't" / "I don't have a
+// story loaded" / "if that matches my background" — false no-experience phrasings
+// banned when the profile contains experience (Issue 6, spec ban-list).
 const NO_EXPERIENCE_RE =
-  /\bI\s+do(?:n'?t| not)\s+have\s+(?:personal\s+|any\s+)?(?:experience|projects?|a\s+resume|a\s+background)\b|\bI\s+have\s+no\s+personal\s+experience\b|\bas\s+an\s+AI[, ].{0,40}\b(?:experience|cannot|can'?t)\b/i;
+  /\bI\s+do(?:n'?t| not)\s+have\s+(?:personal\s+|any\s+|a\s+)?(?:experience|projects?|a\s+resume|a\s+background|story)\b|\bI\s+have\s+no\s+personal\s+experience\b|\bas\s+an\s+AI[, ].{0,40}\b(?:experience|cannot|can'?t)\b|\bif\s+that\s+matches\s+my\s+background\b|\bI\s+do(?:n'?t| not)\s+have\s+a\s+story\s+loaded\b/i;
 
 // Salary/comp figures + negotiation strategy language that must not appear outside
 // a negotiation answer.
@@ -91,9 +96,13 @@ function firstPersonPresent(answer: string): boolean {
 }
 
 function thirdPersonAboutUser(answer: string): boolean {
-  // "The user's name is", "their experience includes", "the candidate has" —
-  // describing the user in third person instead of speaking as them.
-  return /\b(the user'?s?|the candidate'?s?|their\s+(?:name|experience|background|projects?|skills?))\b/i.test(answer);
+  // WRONG-PERSON voice for a candidate answer: either THIRD person about the user
+  // ("the candidate's experience", "their projects") OR SECOND person ("your
+  // name is", "you are <name>", "your experience includes") — a what-to-answer
+  // candidate answer must say what the candidate says aloud, never address them.
+  return /\b(the user'?s?|the candidate'?s?|their\s+(?:name|experience|background|projects?|skills?))\b/i.test(answer)
+    || /\byour\s+(?:name\s+is|experience\s+(?:includes|is)|background\s+is|projects?\s+(?:include|are)|skills?\s+(?:include|are))\b/i.test(answer)
+    || /\byou\s+are\s+[A-Z][a-z]+/i.test(answer); // "You are Evin ..."
 }
 
 /**

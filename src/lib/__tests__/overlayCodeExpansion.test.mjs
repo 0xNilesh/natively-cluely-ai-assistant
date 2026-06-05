@@ -1,6 +1,10 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { shouldEagerExpandForCodeToken } from '../overlayCodeExpansion.mjs';
+import {
+  shouldEagerExpandForCodeToken,
+  shouldHoldEagerCodeExpansion,
+  CODE_EXPANSION_TRANSITION,
+} from '../overlayCodeExpansion.mjs';
 
 describe('overlayCodeExpansion', () => {
   test('eagerly expands for what-to-answer code fences before DOM visibility scan', () => {
@@ -29,5 +33,32 @@ describe('overlayCodeExpansion', () => {
   test('does not eagerly expand plain answer text', () => {
     assert.equal(shouldEagerExpandForCodeToken('what_to_answer', 'Use a sliding window.'), false);
     assert.equal(shouldEagerExpandForCodeToken('chat', 'Use a sliding window.'), false);
+  });
+
+  test('holds eager expansion until the code DOM row exists', () => {
+    assert.equal(
+      shouldHoldEagerCodeExpansion({
+        hasCodeElements: false,
+        hasVisibleCodeElement: false,
+        eagerExpansionHold: true,
+      }),
+      true,
+    );
+  });
+
+  test('releases eager expansion hold once code DOM rows exist', () => {
+    assert.equal(
+      shouldHoldEagerCodeExpansion({
+        hasCodeElements: true,
+        hasVisibleCodeElement: false,
+        eagerExpansionHold: true,
+      }),
+      false,
+    );
+  });
+
+  test('uses a fast polished transition for frequent coding expansions', () => {
+    assert.equal(CODE_EXPANSION_TRANSITION.duration <= 0.28, true);
+    assert.deepEqual(CODE_EXPANSION_TRANSITION.ease, [0.23, 1, 0.32, 1]);
   });
 });
