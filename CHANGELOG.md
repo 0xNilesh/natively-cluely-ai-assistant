@@ -1,5 +1,75 @@
     # Changelog
 
+    ## [2.7.0] - 2026-06-05
+
+    ### What's New
+
+    - **Profile Intelligence Router (v2)**: Advanced domain classification (Coding, System Design, Behavioral, Negotiation) propagating constraints directly to LLM streaming paths.
+    - **DeepSeek AI Support**: Native integration of DeepSeek's advanced reasoning models via custom cURL OpenAI-compatible API providers.
+    - **Two New Meeting UI Themes**: Beautiful Liquid Glass and Modern Dark themes to completely redefine the real-time overlay visual experience.
+    - **Answer-Type Constraints & Follow-Up Resolver**: Context-aware follow-up resolution with strict output formatting layout constraints (short, detailed, bulleted, code-only).
+    - **Eager Code UI Expansion**: Growth-holds CSS elements to eagerly size overlays before React code-block mounting to prevent layout shifts.
+    - **PI Latency Tracer (`PiLatencyTracer`)**: Telemetry to track reasoning, validation, and routing latencies to guarantee sub-500ms responsiveness.
+    - **Evidence Validator & Live Deadlines**: Cross-validates claims made in meetings and displays real-time countdowns for live assessment deadlines.
+    - **Single-Click In-App Updates**: Seamless update loops directly inside the desktop application.
+
+    ### Improvements & Fixes
+
+    - **Audio Stack & TCC Permission Hardening**: Hardened credentials management by eliminating racing set-provider IPCs and resolved macOS system audio process tapping/TCC permission gates to guarantee robust capture streams.
+    - **Production-Grade API Audit (server.js)**:
+      - Resolved ElevenLabs open -> session_started audio gap on failover/reconnect.
+      - Fixed mic-only billing bypass with active/recent system presence checks.
+      - Fixed stream-abort billing leaks by moving billing triggers to the stream `finally` block.
+      - Patched language regex prompt injection security vulnerablities on `/v1/chat/completions`.
+      - Implemented webhook processing retries with 3-attempt exponential backoff.
+      - Fixed fallback-seconds double counting on STT reconnect-after-failover.
+      - Integrated HTTP keep-alive connection pooling via undici agent.
+      - Resolved DNS lookup cache thrashing during key-rotation reconnect storms.
+      - Sanitized admin endpoint `provider-health` key leak.
+      - Added a 34-unit test suite (`unit-fixes.test.mjs`) to verify server logic.
+
+    ## [2.6.0] - 2026-05-15
+
+    ### What's New
+
+    - **Phone Link Integration**: Connect iOS or Android devices as remote mics or companion screens.
+    - **TinyPrompts™ Engine**: System prompts optimized for local SLMs (Ollama, Qwen 2.5:4B, Llama 3.2).
+    - **Codex CLI Integration**: Sandboxed code execution and terminal tasks via `gpt-5.3-codex`.
+    - **Auto-Calendar Sync**: Calendar connectors (Google Calendar, Outlook) for prep context.
+    - **Smart Task Sync**: Auto-extract action items and export to Jira, Linear, or Asana.
+    - **Speaker Identification**: Real-time speaker diarization tagging transcript names.
+
+    ### Improvements & Fixes
+
+    - **Advanced Stealth Features**: Activity Monitor evasion, process name disguising, and strict timeout management.
+    - **Scroll & Layout**: Scroll keybinds for mouse-free navigation and horizontal layout code line rendering fixes.
+    - **OpenAI Realtime GA**: Upgraded OpenAI realtime streaming STT connection to the new GA session schema.
+
+    ## [2.5.0] - 2026-04-25
+
+    ### What's New
+
+    - **Modes Manager**: Toggle between 7 tailored personas (General, Technical Interview, Looking for Work, Sales, Recruiting, Team Meet, and Lecture) with custom templates.
+    - **Custom Context & Notes**: Paste up to 8,000 characters of instructions, crib sheets, or credentials, auto-injected as XML blocks.
+    - **10-Minute Free Trial**: Free trial system with HWID+IP anti-abuse protections.
+    - **Permissions Onboarding Toaster**: macOS/Windows onboarding toaster for TCC permissions.
+
+    ### Improvements & Fixes
+
+    - **STT Connection Pools & Key Pools**: Round-robin pools (up to 6 keys for Deepgram and ElevenLabs), failover logic, and shadow-probe watchdogs.
+    - **Bluetooth/AirPods Conflict Resolution**: Autodetects macOS CoreAudio conflicts and switches to built-in mic.
+    - **Reliable Screenshot Capture**: Hardened multi-screenshot capture with `Cmd+Shift+Enter` single-trigger analysis.
+    - **Dodo Webhook Billing Hardening**: Refactored payment processing webhook endpoints, splitting them into `/webhooks/dodo/api` and `/webhooks/dodo/pro`.
+
+    ## [2.4.0] - 2026-04-10
+
+    ### What's New & Improvements
+
+    - **Permissions Check IPC**: IPC bridges for TCC and audio check.
+    - **Log Forwarding**: Added `open-log-file` and console logging forwarding to `~/Documents/natively_debug.log`.
+    - **Tavily Multi-Key Search Pool**: Tavily search key pool supporting up to 11 keys with round-robin rotation, automatic credit tracking, and exhaustion alerts.
+    - **Ad Campaigns Engine**: Cooldown logic and targeting for Pro upgrade campaigns.
+
     ## [2.0.7] - 2026-03-20
 
     ### What's New

@@ -104,13 +104,16 @@ Natively started as a pixel-perfect recreation of Cluely's interface — then ke
 While other tools act as simple API wrappers, Natively is a complete, native intelligence system designed specifically for high-stakes meetings and interviews.
 
 - **Native Audio Capture (<500ms):** Built with Rust and Zero-Copy ABI transfers, bypassing generic web-audio limitations for ultra-low latency.
+- **Local Whisper STT (On-Device):** 100% on-device speech-to-text using optimized ONNX models (Moonshine-tiny, Moonshine-base, Whisper-large-v3-turbo, distil-large-v3). Uses hardware acceleration (CoreML/Metal GPU on Apple Silicon, DirectML on Windows, quantized int8 on CPU) with zero cloud fees or data exposure.
 - **Dual-Channel Intelligence:** Distinct pipelines for system audio (what they say) and your microphone (what you dictate) ensuring perfect transcription without room noise.
 - **Battle-Tested Stealth Mode:** Completely undetectable. Hides from the dock, disables popups, and disguises the process during screen sharing.
+- **Modes Manager (7 Personas):** Toggle between 7 tailored personas (General, Technical Interview, Looking for Work, Sales, Recruiting, Team Meet, and Lecture) with custom system prompts and dynamic meeting-note templates.
+- **Custom Context & Notes:** A dedicated free-form notes area to paste instructions, crib sheets, or credentials (up to 8,000 characters), automatically injected into real-time LLM prompts.
 - **Rolling Context:** We don't just transcribe; we maintain a "memory window" of the conversation for smarter answers.
 - **Local RAG Memory:** We embed your meetings locally using SQLite vector search so you can ask, "What did John say about the API last week?"
-- **Custom Personas & Reference Docs:** Switch between tailored AI roles (Tech, Sales, HR) and inject specific PDFs to give the AI your exact context.
+- **Reference Files:** Deeply integrate PDFs, DOCX, and TXT files as real-time context.
 - **Rich Dashboard:** A full UI to manage, search, and export your history—not just a floating window.
-- **Fully Offline Capable:** Don't trust the cloud? Run Natively 100% offline using local Ollama models with limited anonymous telemetry.
+- **Fully Offline Capable:** Don't trust the cloud? Run Natively 100% offline using local Ollama models and local Whisper STT.
 
 ---
 
@@ -158,6 +161,7 @@ This demo shows **a complete live meeting scenario**:
 | **Local data / private**  | ✅ Yes                     | ❌ Cloud servers     | ✅ Yes     | ❌ Cloud servers | ❌ Cloud servers       |
 | **Any LLM (BYOK)**        | ✅ Yes                     | ❌ Vendor-locked     | ⚠️ Limited | ❌ Vendor-locked | ❌ Vendor-locked       |
 | **Local AI (Ollama)**     | ✅ Yes                     | ❌                   | ❌         | ❌               | ❌                     |
+| **Local Whisper (On-Device)**| ✅ Yes                   | ❌                   | ❌         | ❌               | ❌                     |
 | **Real-time <500ms**      | ✅ Yes                     | ⚠️ 5–90s lag         | ✅ Yes     | ✅ ~116ms        | ⚠️ Slowest             |
 | **Dual audio channels**   | ✅ System + Mic            | ❌ Single stream     | ❌         | ❌               | ❌                     |
 | **Local RAG memory**      | ✅ SQLite + sqlite-vec     | ❌                   | ❌         | ❌               | ❌                     |
@@ -167,6 +171,8 @@ This demo shows **a complete live meeting scenario**:
 | **Process Disguise**      | ✅ Terminal, Settings, etc | ❌                   | ❌         | ❌               | ❌                     |
 | **Resume & context**      | ✅ Pro                     | ❌                   | ❌         | ✅ Yes           | ✅ Yes                 |
 | **Custom Personas/Modes** | ✅ Pro                     | ✅ Yes               | ❌         | ❌               | ⚠️ Limited             |
+| **Custom Context & Notes**| ✅ Pro                     | ❌                   | ❌         | ❌               | ❌                     |
+| **Multi-Key API Pools**   | ✅ Yes                     | ❌                   | ❌         | ❌               | ❌                     |
 | **Profile Intel Router**  | ✅ Yes                     | ❌                   | ❌         | ❌               | ❌                     |
 | **Eager Code Expansion**  | ✅ Yes                     | ❌                   | ❌         | ❌               | ❌                     |
 | **Live Follow-Up Resolver**| ✅ Yes                     | ❌                   | ❌         | ❌               | ❌                     |
@@ -360,7 +366,14 @@ We've launched the official **$NAT token** on Printr! Holders who maintain a spe
 | :-------------------------------------------------- | :-----------: | :----------: |
 | **Bring Your Own Key (BYOK) Models**                |      ✅       |      ✅      |
 | **Local AI Support (Ollama)**                       |      ✅       |      ✅      |
+| **Local Whisper STT (On-Device)**                   |      ✅       |      ✅      |
 | **Real-Time Speech-to-Text (<500ms)**               |      ✅       |      ✅      |
+| **Multi-Key API Pools & Key Rotation**              |      ✅       |      ✅      |
+| **Profile Intelligence Router (v2)**                |      ✅       |      ✅      |
+| **Eager Code UI Expansion**                         |      ✅       |      ✅      |
+| **Live Follow-Up Resolver**                         |      ✅       |      ✅      |
+| **Real-Time Latency Tracing**                       |      ✅       |      ✅      |
+| **Two New Meeting UI Styles (Liquid Glass/Modern)** |      ✅       |      ✅      |
 | **Live Contextual Assistant**                       |      ✅       |      ✅      |
 | **Screenshot & Slide OCR Analysis**                 |      ✅       |      ✅      |
 | **Undetectable & Stealth Modes**                    |      ✅       |      ✅      |
@@ -369,7 +382,8 @@ We've launched the official **$NAT token** on Printr! Holders who maintain a spe
 | **Automated Company Research & Dossiers**           |      ❌       |      ✅      |
 | **Live Salary & Offer Negotiation Copilot**         |      ❌       |      ✅      |
 | **Custom Persona Modes (Sales, Tech, etc.)**        |      ❌       |      ✅      |
-| **Custom Real-Time Context & Reference Files**      |      ❌       |      ✅      |
+| **Custom Context & Notes**                          |      ❌       |      ✅      |
+| **Reference Files (PDF/DOCX/TXT upload)**           |      ❌       |      ✅      |
 | **Phone Link Companion App**                        |      ❌       |      ✅      |
 | **Auto-Calendar & Task Sync**                       |      ❌       |      ✅      |
 | **Speaker Diarization**                             |      ❌       |      ✅      |
