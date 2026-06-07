@@ -122,6 +122,7 @@ export {
     estimateTokens,
     truncateTranscriptToFit,
     parseOllamaSize,
-    getOpenAiMaxOutput
+    getOpenAiMaxOutput,
+    getOpenAiReasoningEffort
 } from "./modelCapabilities";
-export type { ModelCapabilities, ModelTier, PromptTier } from "./modelCapabilities";
+export type { ModelCapabilities, ModelTier, PromptTier, OpenAiReasoningEffort } from "./modelCapabilities";

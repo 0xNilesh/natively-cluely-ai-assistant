@@ -49,13 +49,25 @@ describe('getOpenAiMaxOutput (issue #298)', () => {
     });
   }
 
-  test('gpt-5.x and o-series reasoners keep the full requested budget', () => {
-    for (const model of ['gpt-5.4', 'gpt-5.5', 'o1-mini', 'o3-mini', 'o4-mini']) {
+  test('gpt-5.x and o-series keep the full requested budget at the current default', () => {
+    // REQUESTED (65536) is below both families' caps, so it passes through.
+    for (const model of ['gpt-5.4', 'gpt-5.5', 'gpt-5', 'o1-mini', 'o3-mini', 'o4-mini']) {
       assert.equal(
         getOpenAiMaxOutput(model, REQUESTED),
         REQUESTED,
         `${model} should not be capped below the requested ${REQUESTED}`
       );
+    }
+  });
+
+  test('gpt-5.x caps at 128000, o-series at 100000 if a larger budget is requested', () => {
+    // Guards against a future MAX_OUTPUT_TOKENS bump silently re-introducing the 400.
+    const HUGE = 200000;
+    for (const model of ['gpt-5', 'gpt-5.1', 'gpt-5.2', 'gpt-5.4', 'gpt-5.5', 'gpt-5-mini']) {
+      assert.equal(getOpenAiMaxOutput(model, HUGE), 128000, `${model} must cap at 128000`);
+    }
+    for (const model of ['o1', 'o1-mini', 'o3', 'o3-mini', 'o4-mini']) {
+      assert.equal(getOpenAiMaxOutput(model, HUGE), 100000, `${model} must cap at 100000`);
     }
   });
 
