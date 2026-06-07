@@ -176,6 +176,7 @@ import { getCodexCliModelDisplayName } from '../utils/modelUtils';
 import { getModifierSymbol, isMac } from '../utils/platformUtils';
 import { DynamicActionBar } from './dynamic-actions/DynamicActionBar';
 import GlassEffectLayer from './ui/GlassEffectLayer';
+import ResizeToggle from './ui/ResizeToggle';
 import RollingTranscript from './ui/RollingTranscript';
 import TopPill from './ui/TopPill';
 
@@ -1060,6 +1061,29 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // re-bind on every toggle.
   const isExpandedRef = useRef(true);
 
+  // ── Manual width override ─────────────────────────────────────────────────
+  // The shell width is normally owned by the auto-resize machinery
+  // (checkCodeVisibility scroll-scan + queueToken eager-expand). When the user
+  // clicks the manual resize toggle we pin the width and SUSPEND auto-resize so
+  // the two don't fight (e.g. user collapses while code is on-screen → scanner
+  // would instantly re-expand). The override is a ref because the streaming hot
+  // path (200–400 tok/s) reads it inside queueToken/checkCodeVisibility and
+  // must not trigger re-renders. The button's icon is driven separately by
+  // `isShellWide` (derived from the live width), not from this override.
+  //
+  // Cleared on: (a) session reset, (b) the first token of the NEXT answer
+  // stream — so a manual pin applies to THIS answer, and the next question gets
+  // fresh auto-behaviour. NOT cleared on scroll (that would spring it back open
+  // the moment the user nudges the wheel — the exact fight we're killing).
+  const manualWidthOverrideRef = useRef<number | null>(null);
+  // `isShellWide` drives the resize button's icon (Maximize2 ↔ Minimize2). It is
+  // derived from the live shellWidth motion value crossing the midpoint, so it
+  // self-reconciles for BOTH manual toggles and automatic code-expansion — the
+  // icon always reflects the real width no matter who drove it. The subscription
+  // flips this at most once per transition (low frequency), so it's render-safe
+  // even though the underlying motion value updates every frame.
+  const [isShellWide, setIsShellWide] = useState(false);
+
   useEffect(() => {
     // Load the persisted default model (not the runtime model)
     // Each new meeting starts with the default from settings
@@ -1454,6 +1478,32 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     [shellWidth, SHELL_WIDTH_EXPANDED],
   );
 
+  // Manual resize toggle. Reads the LIVE shell width (not codeExpandedRef) so it
+  // toggles correctly even mid-tween, pins the chosen width as a manual override
+  // (suspending auto-resize), and animates through the SAME startTransition path
+  // the auto-machinery uses — so manual and automatic expansion are visually
+  // identical and share the per-frame OS-resize IPC channel.
+  const handleManualResizeToggle = useCallback(() => {
+    const current = Math.round(shellWidth.get());
+    const target =
+      current >= SHELL_WIDTH_EXPANDED ? SHELL_WIDTH_COLLAPSED : SHELL_WIDTH_EXPANDED;
+    manualWidthOverrideRef.current = target;
+    startTransition(target);
+  }, [shellWidth, startTransition, SHELL_WIDTH_COLLAPSED, SHELL_WIDTH_EXPANDED]);
+
+  // Derive the resize-button icon state from the live shell width. Subscribing
+  // to the motion value (rather than tracking each startTransition caller)
+  // means the icon is correct for manual toggles AND automatic code-expansion
+  // with one source of truth. setState only fires when the boolean actually
+  // flips, so this is ≤1 render per transition despite per-frame width updates.
+  useEffect(() => {
+    const midpoint = (SHELL_WIDTH_COLLAPSED + SHELL_WIDTH_EXPANDED) / 2;
+    const sync = (w: number) => setIsShellWide((prev) => (prev === w >= midpoint ? prev : w >= midpoint));
+    sync(shellWidth.get());
+    const unsubscribe = shellWidth.on('change', sync);
+    return () => unsubscribe();
+  }, [shellWidth, SHELL_WIDTH_COLLAPSED, SHELL_WIDTH_EXPANDED]);
+
   // Scan [data-code-msg] elements and check if any intersect the scroll container
   // viewport. Called on every scroll event and after every messages update.
   // Uses a stability gate: the visibility must hold its new state for
@@ -1463,6 +1513,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // the 0.7s tween mid-flight and cause stutter.
   const STABILITY_MS = 120;
   const checkCodeVisibility = useCallback(() => {
+    // While the user has manually pinned a width, auto-resize is fully
+    // suspended — the scanner must not contradict the manual choice. Cleared on
+    // session reset and on the first token of the next stream (see queueToken).
+    if (manualWidthOverrideRef.current !== null) return;
+
     const container = scrollContainerRef.current;
 
     // Scroll container unmounted (session reset / messages cleared) — force
@@ -1710,6 +1765,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         animationControlsRef.current = null;
       }
       codeExpandedRef.current = false;
+      // Clear any manual width pin so the new meeting's auto-resize takes over.
+      // Forgetting this would silently disable code-expansion for the entire
+      // next meeting if the user had manually collapsed in the previous one.
+      manualWidthOverrideRef.current = null;
       if (stableVisibilityTimerRef.current) {
         clearTimeout(stableVisibilityTimerRef.current);
         stableVisibilityTimerRef.current = null;
@@ -1899,10 +1958,18 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       });
     }
 
+    // First token of a NEW stream (id not yet reserved) → relinquish any manual
+    // width pin so this answer gets fresh auto-resize behaviour. Done before the
+    // eager-expand check below so a new coding answer can still grow the shell.
+    if (streamingMsgIdRef.current === null && manualWidthOverrideRef.current !== null) {
+      manualWidthOverrideRef.current = null;
+    }
+
     const shouldUseReactCodeUi = shouldUseStreamingCodeUi(intent, token, streamingTextRef.current);
     if (shouldEagerExpandForCodeToken(intent, token, streamingTextRef.current)) {
       eagerCodeExpansionHoldRef.current = true;
-      if (!codeExpandedRef.current) {
+      // Respect a manual width pin: don't auto-grow if the user chose a width.
+      if (manualWidthOverrideRef.current === null && !codeExpandedRef.current) {
         startTransition(SHELL_WIDTH_EXPANDED);
       }
     }
@@ -4779,6 +4846,15 @@ Provide only the answer, nothing else.`;
               }}
             >
               {isGlassTheme && <GlassEffectLayer parentRef={shellRef} cornerRadius={24} />}
+
+              {/* Manual resize toggle — pinned to the shell's top-right corner.
+                  Inside the content rect (no transparent-window clipping) and
+                  marked no-drag so clicks toggle rather than move the window. */}
+              <ResizeToggle
+                expanded={isShellWide}
+                onToggle={handleManualResizeToggle}
+                appearance={appearance}
+              />
 
               {hasStatusPill && (
               <div className="relative no-drag flex flex-wrap items-center justify-center gap-1.5 px-4 pt-3 pb-1">

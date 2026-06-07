@@ -28,6 +28,7 @@ import {
   DEFAULT_VISION_FALLBACK_CONFIG,
   type VisionStreamProvider,
   type VisionHealthEntry,
+  type VisionFallbackConfig,
 } from "./llm/visionStreamFallback"
 import {
   runStreamingTextFallback,
@@ -76,6 +77,38 @@ const GEMINI_PRO_MODEL = "gemini-3.1-pro-preview"
 // stalls) without doubling quota on the fast common case. Env kill-switch;
 // default ON (set NATIVELY_VISION_HEDGE=0 to disable).
 const VISION_HEDGE_ENABLED = process.env.NATIVELY_VISION_HEDGE !== '0';
+// Text tail-latency hedging: the direct-Gemini TEXT path (a user on the Gemini
+// model, no Natively/Groq fronting it) used a SINGLE un-hedged
+// streamWithGeminiModel call, so a slow 3.5-flash first token (measured tail:
+// median 2.8s, up to 5.7s on a degraded day) stalled the live answer with no
+// recourse — the dominant cause of first-useful-token latency failures in the
+// 2026-06-06 release benchmark (79/94 fails were latency, p95 TTFT ~3.1s vs
+// flash-lite's rock-steady ~0.55s). When ON, the flash text provider hedges
+// with flash-lite exactly like the vision path: if 3.5-flash hasn't produced a
+// token within a short delay, flash-lite is launched in parallel and the first
+// usable token wins (loser aborted). Env kill-switch; default ON (set
+// NATIVELY_TEXT_HEDGE=0 to disable).
+const TEXT_HEDGE_ENABLED = process.env.NATIVELY_TEXT_HEDGE !== '0';
+// Hedge config for the direct-Gemini TEXT path. Unlike the conservative vision
+// hedge (min 2.5s — vision prefill is genuinely slow), text first-token is fast,
+// so the hedge fires AROUND flash's p50 (~1.1s): if flash is on its slow tail we
+// want flash-lite racing before the per-difficulty latency target (1.2s direct /
+// 1.8s medium) is blown, but not so early that we double quota on every healthy
+// request. ttftTimeout stays 6s so a genuinely dead flash still fails over.
+const GEMINI_TEXT_HEDGE_CONFIG: VisionFallbackConfig = {
+  ...DEFAULT_TEXT_FALLBACK_CONFIG,
+  ttftTimeoutMs: 6_000,
+  hedgeEnabled: TEXT_HEDGE_ENABLED,
+  // Cold (no EWMA yet): hedge at 700ms so even the first request has flash-lite
+  // (~0.55s TTFT) racing before the tightest 1200ms direct target. Once the EWMA
+  // warms, the delay self-tunes to ~p50 of the real flash TTFT (factor 0.7),
+  // clamped to [700,1500] so a healthy-fast flash isn't doubled and a slow flash
+  // is hedged well before the very_hard 3500ms target.
+  hedgeDelayDefaultMs: 700,
+  hedgeDelayEmaFactor: 0.7,
+  hedgeDelayMinMs: 700,
+  hedgeDelayMaxMs: 1_500,
+};
 const GROQ_MODEL = "llama-3.3-70b-versatile"
 const OPENAI_MODEL = "gpt-5.4"
 const CLAUDE_MODEL = "claude-sonnet-4-6"
@@ -3987,6 +4020,36 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       // `userContent` is not the case — userContent is dynamic — so the system
       // instruction channel is the cacheable surface for Gemini.
       if (this.isGeminiModel(this.currentModelId)) {
+        // TAIL-LATENCY HEDGE: when the selected model is 3.5-flash (the default
+        // interactive model) and hedging is enabled, race it against flash-lite
+        // through the shared text-fallback engine — if flash hasn't produced a
+        // first token within a short delay, flash-lite is launched in parallel
+        // and the first usable token wins (loser aborted). This collapses the
+        // slow flash TTFT tail (2026-06-06 release benchmark: 79/94 fails were
+        // latency, flash p95 ~3.1s vs flash-lite ~0.55s) without doubling quota
+        // on the fast common case. Only the bare flash model hedges; an
+        // explicitly-chosen flash-lite/Pro model streams directly (no partner).
+        const isFlash = this.currentModelId === GEMINI_FLASH_MODEL;
+        if (TEXT_HEDGE_ENABLED && isFlash && !imagePaths?.length) {
+          const flashProvider: TextStreamProvider = {
+            id: 'gemini_flash', name: 'Gemini Flash', isLocal: false, priority: 0,
+            ttftTimeoutMs: GEMINI_TEXT_HEDGE_CONFIG.ttftTimeoutMs,
+            open: (sig) => this.streamWithGeminiModel(userContent, GEMINI_FLASH_MODEL, imagePaths, finalSystemPrompt, sig, thinkingBudget),
+            hedgeWith: {
+              id: 'gemini_flash_lite', name: 'Gemini Flash-Lite',
+              open: (sig) => this.streamWithGeminiModel(userContent, GEMINI_FLASH_LITE_MODEL, imagePaths, finalSystemPrompt, sig, thinkingBudget),
+            },
+          };
+          const ordered = orderTextByHealth([flashProvider], this.textHealth, Date.now());
+          try {
+            yield* runStreamingTextFallback(ordered, this.textHealth, GEMINI_TEXT_HEDGE_CONFIG, {}, abortSignal);
+            return;
+          } catch (hedgeErr: any) {
+            // Hedge engine exhausted (both flash + flash-lite failed). Fall
+            // through to the direct single-call as a last-resort safety net.
+            console.warn('[LLMHelper] Gemini text hedge exhausted, falling back to direct stream:', hedgeErr?.message);
+          }
+        }
         yield* this.streamWithGeminiModel(userContent, this.currentModelId, imagePaths, finalSystemPrompt, abortSignal, thinkingBudget);
         return;
       }

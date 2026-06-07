@@ -35,20 +35,26 @@ export {
 export type { ConversationIntent, IntentResult } from "./IntentClassifier";
 export { planNextAssistantAction } from "./PlannerDecision";
 export type { PlannerDecision, PlannerDecisionKind, PlannerInput } from "./PlannerDecision";
-export { planAnswer, formatAnswerPlanForPrompt, isCodingAnswerType, shouldScaffold } from "./AnswerPlanner";
+export { planAnswer, formatAnswerPlanForPrompt, isCodingAnswerType, shouldScaffold, isStealthEvasionQuestion } from "./AnswerPlanner";
 export type { AnswerPlan, AnswerSource, AnswerType, ContextLayer, OutputPerspective, SpeakerPerspective } from "./AnswerPlanner";
-export { resolveFollowUp } from "./FollowUpResolver";
+export { resolveFollowUp, resolveFollowUpOrClarify, isBareFollowUp, buildContextFreeClarification } from "./FollowUpResolver";
+export { classifyProviderError, isClarificationStall } from "./providerErrorClassifier";
+export type { ProviderErrorKind, ProviderErrorClassification } from "./providerErrorClassifier";
+export { SessionMemory, isKindAllowedInMode } from "./SessionMemory";
+export type { MemoryMode, MemoryItemKind, MemoryItem, MemoryQuery, MemoryRecall } from "./SessionMemory";
+export { resolveSessionFollowup } from "./sessionFollowupResolver";
+export type { SessionFollowupInput, SessionFollowupResult } from "./sessionFollowupResolver";
 export {
   raceStreamWithDeadline, firstUsefulDeadlineMs,
   LIVE_FIRST_USEFUL_BUDGET_MS, LIVE_PROVIDER_FIRST_USEFUL_HARD_TIMEOUT_MS,
   LIVE_PROVIDER_FIRST_USEFUL_COMPLEX_TIMEOUT_MS, LIVE_TOTAL_HARD_TIMEOUT_MS,
   LIVE_INTER_TOKEN_STALL_MS, BENCHMARK_PER_QUESTION_HARD_TIMEOUT_MS,
 } from "./liveDeadlines";
-export type { FollowUpContext, ResolvedFollowUp } from "./FollowUpResolver";
+export type { FollowUpContext, ResolvedFollowUp, FollowUpSurface } from "./FollowUpResolver";
 export { renderCodingAnswerMarkdown, repairCodingAnswer, repairCodingMarkdown, validateAnswerStructure, validateCodingMarkdown, buildCodingScaffold } from "./AnswerValidator";
 export type { AnswerValidationResult, CodingAnswer } from "./AnswerValidator";
-export { validateProfileOutput, buildProfileRepairInstruction } from "./ProfileOutputValidator";
-export type { ProfileValidationResult, ProfileViolation, ProfileViolationCode, ProfileValidationInput } from "./ProfileOutputValidator";
+export { validateProfileOutput, buildProfileRepairInstruction, stripProfileTokensFromCoding, sanitizeCandidateAnswer, CANDIDATE_VOICE_ANSWER_TYPES } from "./ProfileOutputValidator";
+export type { ProfileValidationResult, ProfileViolation, ProfileViolationCode, ProfileValidationInput, CandidateSanitizeResult } from "./ProfileOutputValidator";
 export { validateProfileEvidence } from "./profileEvidenceValidator";
 export type { EvidenceValidationResult, EvidenceViolation, EvidenceViolationCode, EvidenceValidationInput } from "./profileEvidenceValidator";
 export { decideProfileIntelligence } from "./ProfileIntelligenceRouter";

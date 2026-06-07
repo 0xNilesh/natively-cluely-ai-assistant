@@ -15,7 +15,7 @@ import { SkillsManager } from './services/SkillsManager';
 
 import { TRIAL_SENTINEL_KEY } from './config/constants';
 import { AI_RESPONSE_LANGUAGES, RECOGNITION_LANGUAGES } from './config/languages';
-import { planAnswer, formatAnswerPlanForPrompt, isCodingAnswerType, validateAnswerStructure, validateProfileOutput, validateProfileEvidence, buildProfileRepairInstruction, raceStreamWithDeadline, firstUsefulDeadlineMs } from './llm';
+import { planAnswer, formatAnswerPlanForPrompt, isCodingAnswerType, validateAnswerStructure, validateProfileOutput, validateProfileEvidence, buildProfileRepairInstruction, raceStreamWithDeadline, firstUsefulDeadlineMs, isStealthEvasionQuestion, stripProfileTokensFromCoding, isBareFollowUp, buildContextFreeClarification, sanitizeCandidateAnswer, CANDIDATE_VOICE_ANSWER_TYPES } from './llm';
 import { buildLiveFallbackAnswer } from './llm/manualProfileIntelligence';
 import { isCodeVerificationEnabled } from './llm/codeVerification/verificationEnabled';
 import { CodingStreamGate } from './llm/codingStreamGate';
@@ -662,11 +662,54 @@ export function initializeIpcHandlers(appState: AppState): void {
         const isCodingChat = isCodingAnswerType(answerPlan.answerType);
         chatTrace.mark('answer_type_selected', { answerType: answerPlan.answerType, isCoding: isCodingChat });
 
+        // Context-free bare follow-up ("why?", "and?", "continue") typed in MANUAL
+        // mode has no prior turn to resolve against (manual chat is single-shot — no
+        // conversation history is threaded here). Emit a safe clarification
+        // deterministically instead of letting the LLM self-identify or dump the
+        // profile (release 2026-06-07c). A provided `context` string counts as prior
+        // context, so a follow-up with pasted context still flows normally.
+        //
+        // SAFETY ORDERING (code-review 2026-06-07c): this runs BEFORE the stealth/
+        // safety route, which is sound because `isBareFollowUp` only matches
+        // content-free single fragments ("why", "and", "continue", "explain") — a
+        // stealth/evasion ask is necessarily multi-word ("how do I stay undetected"),
+        // so it can never be classified bare and short-circuited here. The emitted
+        // clarification is a fixed safe string. If `isBareFollowUp` is ever broadened,
+        // re-verify it cannot swallow a stealth ask.
+        if (!context && isBareFollowUp(message)) {
+          const clarification = buildContextFreeClarification('manual');
+          if (_chatStreamsBySender.get(senderId)?.streamId !== myStreamId) return null;
+          event.sender.send('gemini-stream-token', clarification);
+          event.sender.send('gemini-stream-done', { finalText: clarification });
+          try { PhoneMirrorService.getInstance().publishToken(String(myStreamId), clarification); } catch (_) { /* noop */ }
+          try { PhoneMirrorService.getInstance().publishDone(String(myStreamId), clarification); } catch (_) { /* noop */ }
+          intelligenceManager.addAssistantMessage(clarification);
+          intelligenceManager.logUsage('chat', message, clarification);
+          chatTrace.markFirstUseful({ via: 'context_free_clarification' });
+          chatTrace.mark('response_completed', { chars: clarification.length, deterministic: true });
+          chatTrace.finish({ chars: clarification.length });
+          return null;
+        }
+
         // Manual Profile Intelligence preflight: simple profile facts must not fall
         // through to generic CHAT_MODE_PROMPT, where the assistant identity can win
         // over the loaded candidate identity. Structured resume/JD facts are ready
         // before embeddings/AOT, so answer these deterministically with no provider.
-        if (!imagePaths?.length && !isCodingChat && !isAssistantIdentityQuestion(message)) {
+        // SAFETY (code-review 2026-06-06b CRITICAL): the deterministic fast-path
+        // runs BEFORE the safety route, so a stealth/evasion ask that also trips an
+        // intro/skill pattern could get a candidate answer instead of the decline.
+        // Skip the fast-path entirely for a stealth/evasion question AND for any
+        // CONTRACT-ENFORCED type (safety/link/source/product-about) so those always
+        // flow through the contract-injected streamChat below.
+        const isStealthChat = isStealthEvasionQuestion(message);
+        const fastPathEligible = !imagePaths?.length && !isCodingChat
+          && !isAssistantIdentityQuestion(message)
+          && !isStealthChat
+          && answerPlan.answerType !== 'ethical_usage_answer'
+          && answerPlan.answerType !== 'project_link_answer'
+          && answerPlan.answerType !== 'source_code_evidence_answer'
+          && answerPlan.answerType !== 'project_about_answer';
+        if (fastPathEligible) {
           try {
             const orchestrator = llmHelper.getKnowledgeOrchestrator?.();
             const { route: fastPath, routeLog } = buildManualProfileBackendAnswer({
@@ -719,16 +762,36 @@ export function initializeIpcHandlers(appState: AppState): void {
           } catch { /* safe logging only */ }
         }
 
-        if (!context && autoContextSnapshot && !isCodingChat) {
+        // Answer types whose deterministic TEMPLATE carries non-negotiable
+        // behavior the model MUST follow — the safety decline (stealth/evasion),
+        // the no-invented-link rule, the no-hallucinated-source-code rule, and the
+        // grounded product-about rule. For these we inject the answer contract into
+        // the prompt (like coding) so the template reaches the model, and we drop
+        // the rolling 100s context (it would dilute the contract). Release 2026-06-06b.
+        const CONTRACT_ENFORCED_TYPES = new Set([
+          'ethical_usage_answer', 'project_link_answer',
+          'source_code_evidence_answer', 'project_about_answer',
+        ]);
+        const isContractEnforced = CONTRACT_ENFORCED_TYPES.has(answerPlan.answerType);
+        if (isCodingChat || isContractEnforced) {
+          context = formatAnswerPlanForPrompt(answerPlan, isCodingChat && isCodeVerificationEnabled());
+          console.log('[IPC] Answer-contract enforced; rolling context excluded', {
+            answerType: answerPlan.answerType,
+          });
+        } else if (!context && autoContextSnapshot) {
           context = autoContextSnapshot;
           console.log(
             `[IPC] Auto-injected 100s context for gemini-chat-stream (${context.length} chars)`,
           );
-        } else if (isCodingChat) {
-          context = formatAnswerPlanForPrompt(answerPlan, isCodeVerificationEnabled());
-          console.log('[IPC] Coding chat detected; excluding rolling resume/JD/transcript context and enforcing answer contract', {
-            answerType: answerPlan.answerType,
-          });
+        }
+        // Skill-rating asks ("python, out of 10?") are profile-REQUIRED (keep the
+        // rolling profile context above), but flash-lite sometimes refuses with "as
+        // an AI assistant I don't assign ratings". ADDITIVELY prepend the skill
+        // answer-contract (which forbids the refusal and demands a grounded number)
+        // WITHOUT dropping the profile grounding (release 2026-06-07).
+        if (answerPlan.answerType === 'skill_experience_answer') {
+          const skillContract = formatAnswerPlanForPrompt(answerPlan, false);
+          context = context ? `${skillContract}\n\n${context}` : skillContract;
         }
 
         // Use CHAT_MODE_PROMPT for general chat — bypasses the interview-copilot
@@ -749,14 +812,19 @@ export function initializeIpcHandlers(appState: AppState): void {
           // processQuestion, cache create, provider connect) lazily on the first
           // `for await` pull — so the gap between this mark and first_useful_token
           // below is exactly the pre-work + provider TTFT we're hunting.
-          chatTrace.mark('provider_request_started', { ignoreKnowledgeMode: isCodingChat ? true : Boolean(options?.ignoreKnowledgeMode) });
+          // A pure SAFETY answer (stealth/evasion decline) must not run the
+          // knowledge intercept at all — no profile, no intro, no candidate
+          // grounding belongs in a policy redirect (release 2026-06-06b).
+          const isSafetyAnswer = answerPlan.answerType === 'ethical_usage_answer';
+          const ignoreKnowledge = isCodingChat || isSafetyAnswer ? true : options?.ignoreKnowledgeMode;
+          chatTrace.mark('provider_request_started', { ignoreKnowledgeMode: Boolean(ignoreKnowledge) });
           const stream = llmHelper.streamChat(
             message,
             imagePaths,
             context,
             systemPromptOverride,
-            isCodingChat ? true : options?.ignoreKnowledgeMode,
-            isCodingChat, // skipModeInjection; coding chat must not pull active-mode resume/JD/reference context
+            ignoreKnowledge,
+            isCodingChat || isSafetyAnswer, // skipModeInjection; safety/coding must not pull active-mode resume/JD/reference context
             [],    // extraDataScopes
             myController.signal,
             // Coding gets a small reasoning budget (correctness); everything else
@@ -975,6 +1043,75 @@ export function initializeIpcHandlers(appState: AppState): void {
             }
           }
 
+          // Release 2026-06-07 (code-review hardening): ANY profile-FORBIDDEN answer
+          // (coding/DSA/technical-concept/system-design/debugging/sales/lecture/
+          // meeting) must NOT name Natively, the candidate, a loaded project/company,
+          // or reference the profile/JD/salary — flash-lite intermittently appends a
+          // stray mention. Detect deterministically and STRIP the offending prose
+          // sentence (code blocks preserved). Self-gated by the validator (only fires
+          // for forbidden types) → zero happy-path cost on profile answers. The user
+          // can opt in ("use my Natively project"). Runs for coding AND non-coding
+          // forbidden types (previously coding-only).
+          if (answerPlan.profileContextPolicy === 'forbidden') {
+            try {
+              const orchC = llmHelper.getKnowledgeOrchestrator?.();
+              const resumeC = (orchC as any)?.activeResume?.structured_data ?? null;
+              const profileTokens = resumeC ? {
+                firstName: (resumeC.identity?.name || resumeC.name || '').trim().split(/\s+/)[0] || undefined,
+                projects: (resumeC.projects || []).map((p: any) => (p?.name || '').split(/[–—-]/)[0].trim()).filter((s: string) => s.length >= 3),
+                companies: (resumeC.experience || []).map((e: any) => (e?.company || '').trim()).filter((s: string) => s.length >= 3),
+              } : undefined;
+              const profileExplicitlyInvited = /\b(use|using|with|in|from)\s+(my|your|the)\s+(natively|project|portfolio)\b|\bin natively\b|\b(my|your) natively project\b/i.test(message);
+              const codeLeak = validateProfileOutput({
+                answer: fullResponse, plan: answerPlan, profileAvailable: Boolean(resumeC),
+                candidateDirected: false, profileTokens, profileExplicitlyInvited,
+              }).violations.find(v => v.code === 'profile_token_in_coding_answer');
+              if (codeLeak) {
+                const tokens = [profileTokens?.firstName, ...(profileTokens?.projects || []), ...(profileTokens?.companies || [])].filter((t): t is string => !!t);
+                const stripped = stripProfileTokensFromCoding(fullResponse, tokens);
+                const reCheck = validateProfileOutput({ answer: stripped, plan: answerPlan, profileAvailable: Boolean(resumeC), candidateDirected: false, profileTokens, profileExplicitlyInvited });
+                const stillLeaks = reCheck.violations.some(v => v.code === 'profile_token_in_coding_answer');
+                if (!stillLeaks && stripped.trim().length >= 20) {
+                  fullResponse = stripped;
+                  finalText = stripped;
+                  console.warn('[ProfileIntelligence] stripped stray profile token from a profile-forbidden answer', { answerType: answerPlan.answerType });
+                }
+              }
+            } catch (codeLeakErr: any) {
+              console.warn('[ProfileIntelligence] forbidden-answer leak validation skipped:', codeLeakErr?.message);
+            }
+          }
+
+          // Release 2026-06-07c: FINAL candidate-answer sanitizer. A candidate-facing
+          // answer (identity/experience/project/skills/jd-fit/behavioral/negotiation)
+          // must NOT tail-append assistant-meta ("as an AI assistant", "I'm Natively",
+          // "I can't share", "I don't have your resume"). Flash-lite occasionally adds
+          // such a sentence to an otherwise-valid answer. Strip it deterministically;
+          // if stripping empties the answer, fall back to the deterministic profile
+          // backend so the user never gets a broken/empty answer.
+          if (CANDIDATE_VOICE_ANSWER_TYPES.has(answerPlan.answerType)) {
+            try {
+              const sani = sanitizeCandidateAnswer(fullResponse);
+              if (sani.repaired && !sani.needsFallback) {
+                fullResponse = sani.text;
+                finalText = sani.text;
+                console.warn('[ProfileIntelligence] sanitized assistant-meta tail from candidate answer', { answerType: answerPlan.answerType, markers: sani.removedMarkers });
+              } else if (sani.needsFallback) {
+                // The whole answer was assistant-meta. Build a deterministic
+                // profile-grounded replacement instead of shipping an empty/broken one.
+                const orchS = llmHelper.getKnowledgeOrchestrator?.();
+                const fb = buildManualProfileBackendAnswer({ question: message, orchestrator: orchS, source: 'manual_input' });
+                if (fb?.route?.answer && fb.route.answer.trim().length >= 15) {
+                  fullResponse = fb.route.answer;
+                  finalText = fb.route.answer;
+                  console.warn('[ProfileIntelligence] candidate answer was all assistant-meta; used deterministic fallback', { answerType: answerPlan.answerType });
+                }
+              }
+            } catch (saniErr: any) {
+              console.warn('[ProfileIntelligence] candidate sanitizer skipped:', saniErr?.message);
+            }
+          }
+
           // Final check: only send done if we are still the active stream
           if (_chatStreamsBySender.get(senderId)?.streamId === myStreamId) {
             // finalText is set ONLY when repair changed the streamed answer — the
@@ -1123,7 +1260,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle('download-update', async () => {
     try {
       console.log('[IPC] Download update requested');
-      appState.downloadUpdate();
+      await appState.downloadUpdate();
       return { success: true };
     } catch (err: any) {
       console.error('[IPC] download-update failed:', err);

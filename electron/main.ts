@@ -2,6 +2,7 @@ import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, systemPref
 import * as crypto from "crypto"
 import path from "path"
 import fs from "fs"
+import { SystemAudioHealthClassifier } from "./audio/systemAudioHealthClassifier.mjs"
 import { autoUpdater } from "electron-updater"
 if (!app.isPackaged) {
   require('dotenv').config();
@@ -466,6 +467,9 @@ export class AppState {
   private knowledgeOrchestrator: any = null
   private tray: Tray | null = null
   private updateAvailable: boolean = false
+  private updateDownloadState: 'idle' | 'available' | 'downloading' | 'downloaded' = 'idle'
+  private updateDownloadPromise: Promise<unknown> | null = null
+  private downloadedUpdateInfo: any = null
   private disguiseMode: 'terminal' | 'settings' | 'activity' | 'none' = 'none'
 
   // View management
@@ -1163,13 +1167,11 @@ export class AppState {
   }
 
   private setupAutoUpdater(): void {
-    // On signed builds we can swap+relaunch in place, so download in the
-    // background the moment an update is found and let it apply on quit if the
-    // user doesn't click "Restart". On builds that can't auto-install (dev, or
-    // an unsigned macOS build) we keep the manual flow: no silent download, no
-    // install-on-quit — the UI routes the user to the manual download instead.
+    // Keep downloads user-initiated so the renderer's "Update Now" CTA is the
+    // single source of truth. Signed/packaged builds can still apply a downloaded
+    // update on quit; unsigned macOS builds use the manual GitHub DMG flow.
     const autoInstall = canAutoInstall()
-    autoUpdater.autoDownload = autoInstall
+    autoUpdater.autoDownload = false
     autoUpdater.autoInstallOnAppQuit = autoInstall
     console.log(
       `[AutoUpdater] autoDownload=${autoUpdater.autoDownload} ` +
@@ -1189,6 +1191,8 @@ export class AppState {
     autoUpdater.on("update-available", async (info) => {
       console.log("[AutoUpdater] Update available:", info.version)
       this.updateAvailable = true
+      this.updateDownloadState = 'available'
+      this.downloadedUpdateInfo = null
 
       // Fetch structured release notes
       const releaseManager = ReleaseNotesManager.getInstance();
@@ -1203,11 +1207,16 @@ export class AppState {
 
     autoUpdater.on("update-not-available", (info) => {
       console.log("[AutoUpdater] Update not available:", info.version)
+      this.updateAvailable = false
+      this.updateDownloadState = 'idle'
+      this.downloadedUpdateInfo = null
       this.broadcast("update-not-available", info)
     })
 
     autoUpdater.on("error", (err) => {
       console.error("[AutoUpdater] Error:", err)
+      this.updateDownloadState = this.updateAvailable ? 'available' : 'idle'
+      this.updateDownloadPromise = null
       // Include more details in the error message for debugging
       const errorMessage = err.message || err.toString() || 'Unknown update error'
       this.broadcast("update-error", errorMessage)
@@ -1223,9 +1232,12 @@ export class AppState {
 
     autoUpdater.on("update-downloaded", (info) => {
       console.log("[AutoUpdater] Update downloaded:", info.version)
+      this.updateDownloadState = 'downloaded'
+      this.updateDownloadPromise = null
       // info.filePath is the public path of the staged update zip from Squirrel.Mac.
       // Use it over the private downloadedUpdateHelper.file API (see quitAndInstallUpdate).
-      this.broadcast("update-downloaded", { ...info, updateFile: (info as any).filePath })
+      this.downloadedUpdateInfo = { ...info, updateFile: (info as any).filePath }
+      this.broadcast("update-downloaded", this.downloadedUpdateInfo)
     })
 
     // Start checking for updates with a 10-second delay
@@ -1257,6 +1269,8 @@ export class AppState {
         if (this.isVersionNewer(currentVersion, latestVersion)) {
           console.log('[AutoUpdater] Manual Check: New version found!');
           this.updateAvailable = true;
+          this.updateDownloadState = 'available';
+          this.downloadedUpdateInfo = null;
 
           // Mock an info object compatible with electron-updater
           const info = {
@@ -1275,6 +1289,9 @@ export class AppState {
           });
         } else {
           console.log('[AutoUpdater] Manual Check: App is up to date.');
+          this.updateAvailable = false;
+          this.updateDownloadState = 'idle';
+          this.downloadedUpdateInfo = null;
           this.broadcast("update-not-available", { version: currentVersion });
         }
       }
@@ -1389,16 +1406,42 @@ export class AppState {
     }
   }
 
-  public downloadUpdate(): void {
+  public async downloadUpdate(): Promise<void> {
+    if (this.updateDownloadState === 'downloaded' && this.downloadedUpdateInfo) {
+      console.log('[AutoUpdater] Download already completed — re-broadcasting downloaded update')
+      this.broadcast('update-downloaded', this.downloadedUpdateInfo)
+      return
+    }
+
+    if (this.updateDownloadState === 'downloading') {
+      console.log('[AutoUpdater] Download already in progress — ignoring duplicate request')
+      await this.updateDownloadPromise
+      return
+    }
+
+    if (!this.updateAvailable) {
+      const message = 'No update is currently available to download.'
+      console.warn(`[AutoUpdater] ${message}`)
+      this.broadcast('update-error', message)
+      return
+    }
+
     console.log('[AutoUpdater] Starting download...')
+    this.updateDownloadState = 'downloading'
     try {
       // Errors during download are surfaced via autoUpdater.on("error") which
       // already broadcasts "update-error". Do not broadcast here to avoid duplicates.
-      autoUpdater.downloadUpdate().catch(err => {
+      this.updateDownloadPromise = autoUpdater.downloadUpdate().catch(err => {
         console.error('[AutoUpdater] downloadUpdate failed:', err)
+        this.updateDownloadState = this.updateAvailable ? 'available' : 'idle'
+        this.updateDownloadPromise = null
+        throw err
       })
+      await this.updateDownloadPromise
     } catch (err: any) {
       console.error('[AutoUpdater] downloadUpdate exception:', err)
+      this.updateDownloadState = this.updateAvailable ? 'available' : 'idle'
+      this.updateDownloadPromise = null
     }
   }
 
@@ -1781,8 +1824,30 @@ export class AppState {
     // and produced false-positive "0 chunks in 8s" banners during legitimate
     // SCK cold-start.
     const STUCK_WATCHDOG_MS = 12000;
+    const systemAudioHealth = new SystemAudioHealthClassifier({ watchdogMs: STUCK_WATCHDOG_MS });
+    const handleSystemAudioHealthDecision = (decision: any) => {
+      if (!decision || decision.type === 'none') return;
+      if (decision.type === 'log') {
+        const logger = decision.level === 'info' ? console.log : console.warn;
+        logger(`${prefix}${decision.message}`);
+        return;
+      }
+      if (decision.type === 'warn-user' && decision.reason === 'same-device-input-output') {
+        const msg = formatPermissionMessage('mac-same-device-input-output', { device: decision.device });
+        console.warn(`${prefix}SystemAudioCapture ${msg}`);
+        this.sendAudioCaptureFailed( {
+          channel: 'system',
+          message: msg,
+          attempt: 0,
+          maxAttempts: 3,
+          terminal: decision.terminal,
+          stuck: decision.stuck,
+        });
+      }
+    };
     let stuckTimer: NodeJS.Timeout | null = null;
     const armStuckWatchdog = () => {
+      handleSystemAudioHealthDecision(systemAudioHealth.handle({ kind: 'capture-started', nowMs: Date.now() }));
       if (stuckTimer) clearTimeout(stuckTimer);
       stuckTimer = setTimeout(() => {
         if (this.systemAudioCapture !== capture) return; // capture was replaced
@@ -1804,50 +1869,18 @@ export class AppState {
           ? this.detectSameInputOutputDevice()
           : null;
         if (sameDeviceName) {
-          const msg = formatPermissionMessage('mac-same-device-input-output', { device: sameDeviceName });
-          console.warn(`${prefix}SystemAudioCapture ${msg}`);
-          this.sendAudioCaptureFailed( {
-            channel: 'system',
-            message: msg,
-            attempt: 0,
-            maxAttempts: 3,
-            terminal: false,
-            stuck: true,
-          });
+          handleSystemAudioHealthDecision(systemAudioHealth.handle({
+            kind: 'same-device-route-detected',
+            nowMs: Date.now(),
+            device: sameDeviceName,
+          }));
           return;
         }
 
-        console.warn(`${prefix}SystemAudioCapture produced 0 chunks in ${STUCK_WATCHDOG_MS / 1000}s — likely silent capture (route mismatch or permission revoked).`);
-        this.sendAudioCaptureFailed( {
-          channel: 'system',
-          message: formatPermissionMessage('system-audio-stuck'),
-          attempt: 0,
-          maxAttempts: 3,
-          terminal: false,
-          stuck: true,
-        });
+        handleSystemAudioHealthDecision(systemAudioHealth.handle({ kind: 'watchdog-tick', nowMs: Date.now() }));
       }, STUCK_WATCHDOG_MS);
     };
 
-    // TCC zero-fill detector. Apple's CoreAudio Process Tap returns zero-filled
-    // buffers (instead of an OSStatus error) when the launched binary's
-    // Screen Recording / audio-capture grant doesn't apply — typically after a
-    // dev rebuild changes the bundle signature, or when the user revokes the
-    // grant mid-session. Symptom: the IO proc fires at the correct cadence and
-    // chunks flow normally, but every f32 sample is 0.0. Without a dedicated
-    // detector, the no-chunks watchdog above never fires and the user just sees
-    // an empty interviewer transcript with no idea why.
-    //
-    // Strategy: track the absolute peak of every chunk (cheap — 960 i16s per
-    // 20ms chunk). After we've seen ZEROFILL_OBSERVATION_MS of nothing but
-    // peak==0 chunks, broadcast a TCC-specific banner. Latch off the detector
-    // permanently as soon as we see a single non-zero peak so a quiet meeting
-    // doesn't trigger the warning later. The latency budget intentionally
-    // exceeds the no-chunks watchdog (8s) so the two banners don't race.
-    const ZEROFILL_OBSERVATION_MS = 12000;
-    let firstChunkAt = 0;
-    let zerofillLatched = false;       // true once a non-zero peak has been observed (detector off)
-    let zerofillTriggered = false;     // true once we've already broadcast — prevent repeats
     // Synchronous disarm closure exposed on the capture instance so endMeeting()
     // and abortStaleAudioInit() can cancel the stuck watchdog BEFORE stop()/destroy()
     // — without relying on the on('stop') event firing synchronously. Otherwise a
@@ -1855,28 +1888,14 @@ export class AppState {
     // banner up to 12s after the user already stopped.
     const disarmStuckWatchdog = () => {
       if (stuckTimer) { clearTimeout(stuckTimer); stuckTimer = null; }
+      handleSystemAudioHealthDecision(systemAudioHealth.handle({ kind: 'capture-stopped', nowMs: Date.now() }));
     };
     (capture as any).__disarmStuckWatchdog = disarmStuckWatchdog;
     capture.on('start', armStuckWatchdog);
     capture.on('stop', disarmStuckWatchdog);
-    // Inter-chunk gap tracking. Normal cadence is one 20ms chunk every 20ms
-    // (so ~50/sec). A gap >2s while the meeting is active and the capture is
-    // still wired indicates a transient route change (AirPods plug/unplug,
-    // HDMI attach, USB hot-plug). The 8s no-chunks watchdog above catches
-    // longer outages; this just logs the in-between case so anyone reading
-    // logs can correlate "transcript stuttered" with a route change instead
-    // of suspecting STT or network problems. Deliberately not promoted to a
-    // UI banner — that would spam during normal device juggling.
-    let lastChunkAt = 0;
     capture.on('data', (chunk: Buffer) => {
       const now = Date.now();
-      if (lastChunkAt > 0) {
-        const gap = now - lastChunkAt;
-        if (gap > 2000 && gap < 8000) {
-          console.warn(`${prefix}SystemAudio chunk gap ${gap}ms — likely transient route change. Resuming.`);
-        }
-      }
-      lastChunkAt = now;
+      handleSystemAudioHealthDecision(systemAudioHealth.handle({ kind: 'chunk', nowMs: now, chunk }));
       chunkCount++;
       if (chunkCount === 1 && stuckTimer) {
         clearTimeout(stuckTimer);
@@ -1893,47 +1912,6 @@ export class AppState {
         console.log(`${prefix}SystemAudio->STT: chunk #${chunkCount}, ${chunk.length}B, googleSTT=${this.googleSTT ? 'active' : 'NULL'}`);
       }
 
-      // TCC zero-fill check. macOS-specific: WASAPI loopback on Windows does
-      // not produce sustained zero-fill on permission revocation, so the
-      // detector has no diagnostic value off Darwin and the suggested fix
-      // (System Settings → Screen Recording) doesn't apply.
-      if (process.platform === 'darwin' && !zerofillLatched && !zerofillTriggered) {
-        if (firstChunkAt === 0) firstChunkAt = Date.now();
-        // B10: peak-to-peak (max - min) detection instead of abs-peak. Pre-fix
-        // used `Math.abs(sample) > 8` which false-latched on a muted-but-biased
-        // mic with sustained DC offset (hardware bias of ±10..±50 is common on
-        // certain USB and Bluetooth devices). A latched-true detector is
-        // permanently disabled, so the user got NO banner even when audio
-        // was actually dead. Peak-to-peak cancels out DC bias by construction:
-        // pure DC has range 0; quantization noise has range ~2-4; thermal mic
-        // noise has range ~20-100; quiet conversation has range >500. A
-        // threshold of 100 reliably detects real (or even noise-floor-live)
-        // mic activity while rejecting DC bias from a dead mic.
-        let minS = 32767;
-        let maxS = -32768;
-        const stride = Math.max(2, (chunk.length >> 5) & ~1); // even byte offset
-        for (let i = 0; i + 1 < chunk.length; i += stride) {
-          const s = chunk.readInt16LE(i);
-          if (s < minS) minS = s;
-          if (s > maxS) maxS = s;
-        }
-        const peakToPeak = maxS - minS;
-        if (peakToPeak > 100) {
-          // Real audio (or live noise floor) observed — disable the detector for the rest of the session.
-          zerofillLatched = true;
-        } else if (Date.now() - firstChunkAt >= ZEROFILL_OBSERVATION_MS) {
-          zerofillTriggered = true;
-          console.warn(`${prefix}SystemAudio chunks all zero-filled (peak-to-peak < 100) for ${ZEROFILL_OBSERVATION_MS / 1000}s — TCC denial suspected (Screen Recording grant may not apply to this binary).`);
-          this.sendAudioCaptureFailed( {
-            channel: 'system',
-            message: formatPermissionMessage('mac-screen-recording-revoked-rebuild'),
-            attempt: 0,
-            maxAttempts: 3,
-            terminal: false,
-            stuck: true,
-          });
-        }
-      }
 
       this.googleSTT?.write(chunk);
     });
@@ -2973,8 +2951,8 @@ export class AppState {
     // Keep the chain alive regardless of this run's outcome so a failure never
     // wedges all future reconfigures.
     this._sttReconfigureChain = run.then(
-      () => undefined,
-      () => undefined,
+      (): void => undefined,
+      (): void => undefined,
     );
     return run;
   }

@@ -108,14 +108,25 @@ const asArray = (value: unknown): unknown[] => Array.isArray(value) ? value.filt
 const clean = (value: unknown): string => typeof value === 'string' ? value.trim() : '';
 const firstNonEmpty = (...values: unknown[]): string => values.map(clean).find(Boolean) || '';
 
+// GENUINE assistant-meta questions — these legitimately address Natively (the
+// app), so the fast path bails to the LLM/assistant identity. Release 2026-06-06b:
+// narrowed so "who are you" / "what is your name" NO LONGER count as assistant-meta
+// when a candidate profile is loaded — in an interview-prep product those are the
+// candidate's identity questions and must be answered AS the candidate (the real
+// manual-chat log showed them leaking "I'm Natively, an AI assistant"). Only
+// explicit AI/bot/model/who-built-you/what-is-Natively asks remain assistant-meta.
+// Leading discourse fillers ("so", "wait", "ok", "hey", "um", "but") tolerated so
+// "so are you an AI" / "wait, are you a bot" still classify as assistant-meta
+// (code-review 2026-06-06b MEDIUM — the ^ anchors broke on prefixes).
+const FILLER = '(?:so|wait|ok(?:ay)?|um|hmm|hey|but|and|actually|just|like)?[\\s,]*';
 const ASSISTANT_IDENTITY_PATTERNS = [
-  /^(who|what)\s+(are|r)\s+(you|u)\b/,
-  /^are\s+you\s+(an?\s+)?(ai|assistant|bot|llm|model)\b/,
-  /^what\s+is\s+natively\b/,
-  /^who\s+(made|built|created|developed|trained)\s+(you|this|natively)\b/,
-  /^what\s+model\s+(are\s+you|do\s+you\s+use)\b/,
-  /^what\s+is\s+your\s+name\b/,
-  /^what\s+s\s+your\s+name\b/,
+  new RegExp(`^${FILLER}are\\s+you\\s+(an?\\s+)?(actually\\s+)?(ai|assistant|bot|llm|model|chatbot|language model)\\b`),
+  /\bare\s+you\s+(an?\s+)?(actually\s+)?(human|real|robot|machine|program)\b/,
+  new RegExp(`^${FILLER}what\\s+(is|s)\\s+natively\\b`),
+  /\bwhat\s+(is|s)\s+this\s+(app|tool|product|assistant)\b/,
+  new RegExp(`^${FILLER}who\\s+(made|built|created|developed|trained|designed)\\s+(you|this|natively|the app)\\b`),
+  /\bwhat\s+(ai\s+)?model\s+(are\s+you|do\s+you\s+(use|run))\b|\bwhich\s+(llm|model)\b/,
+  /\bare\s+you\s+(chatgpt|gpt|claude|gemini|natively)\b/,
 ];
 
 const NAME_PATTERNS = [
@@ -128,8 +139,11 @@ const NAME_PATTERNS = [
   // fast path in every mode so they can never reach the LLM and leak "I'm
   // Natively, an AI assistant" / a false refusal.
   /\bwhat\s+(is|s)\s+your\s+(full\s+)?name\b/,
+  /\bwhats\s+your\s+name\b/,
   /\bwhat\s+should\s+(i|we)\s+call\s+you\b/,
   /\bwho\s+are\s+you\b/,
+  /\bwho\s+u\s*r\b|\bwho\s+r\s+u\b/,                      // SMS spelling "who u r"
+  /\btell\s+me\s+who\s+you\s+are\b/,
   /\bstate\s+your\s+name\b/,
   /\bcan\s+you\s+(tell\s+me\s+)?your\s+name\b/,
 ];
@@ -156,7 +170,16 @@ const EXPERIENCE_PATTERNS = [
 const INTRO_PATTERNS = [
   /\btell\s+me\s+about\s+(yourself|your\s*self)\b/,
   /\b(give|tell)\s+(me\s+)?(a\s+)?(quick|brief|short)?\s*(introduction|intro|overview of yourself|rundown)\b/,
-  /\b(can\s+you\s+)?(quickly\s+)?introduce\s+yourself\b/,
+  // Typo / greeting / SMS-spelling tolerant intro (real manual-chat log 2026-06-06b:
+  // "introduce yourseld", "introduce urself", "hey man introduce yourself"). The
+  // verb "introduc(e)" followed by an optional self-pronoun token (yourself /
+  // yourselD / yoursef / urself / urslf) — greetings and trailing typos no longer
+  // drop it to the LLM (which leaked "I'm Natively").
+  // Self-pronoun REQUIRED (code-review 2026-06-06b HIGH): "introduce a bug" / "how
+  // would you introduce DI" must NOT fast-path to the candidate intro.
+  /\bintroduce\s+(yo?u?r?se?l?[fd]|u?r?se?l?[fd]|me to (?:you|the team))\b/,
+  /\b(quick|brief|short)\s+intro\b|\b(give|do)\s+(me\s+)?(a\s+|an\s+|your\s+)?intro\b|\bintro\s+(yourself|urself|please|pls|me)\b|^intro$/,
+  /\bstart\s+with\s+(an?\s+)?intro\b/,
   /\bdescribe\s+yourself\b/,
   /\bhow\s+(would|do)\s+you\s+describe\s+yourself\b/,
   /\bsummari[sz]e\s+who\s+you\s+are\b/,
@@ -588,12 +611,18 @@ export const tryBuildManualProfileFastPathAnswer = ({
   }
 
   // INTRO: a grounded first-person introduction built from structured facts.
-  // Only the interview/transcript (firstPerson) surface gets the deterministic
-  // intro — manual chat keeps the richer LLM intro. This guarantees the live
-  // copilot never refuses or leaks "I'm Natively" on "tell me about yourself".
-  // NOTE: does NOT gate on `qualified` — "tell me ABOUT yourself" trips the
-  // generic about-qualifier, but INTRO_PATTERNS is already precise.
-  if (firstPerson && hasAny(q, INTRO_PATTERNS)) {
+  // Release 2026-06-06b: this now fires in MANUAL mode too (not just WTA). The
+  // real manual-chat log showed plain "introduce yourself" / "introduce yourseld"
+  // reaching the LLM and answering "I'm Natively, an AI assistant" — wrong when a
+  // candidate profile is loaded. An intro ask is an INTERVIEW-style question
+  // ("introduce yourself", "tell me about yourself"), distinct from the
+  // assistant-meta "who are you / what is Natively" (those still bail above via
+  // isAssistantIdentityQuestion). With a profile loaded, the deterministic
+  // first-person candidate intro is always the right answer — it can never leak
+  // the assistant identity or refuse. NOTE: does NOT gate on `qualified` —
+  // "tell me ABOUT yourself" trips the generic about-qualifier, but INTRO_PATTERNS
+  // is already precise.
+  if (hasAny(q, INTRO_PATTERNS)) {
     const intro = formatIntro(profile);
     if (intro) return makeRoute(intro, 'identity_answer', ['stable_identity', 'resume']);
   }

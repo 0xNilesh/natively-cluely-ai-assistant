@@ -10,9 +10,9 @@ import {
     FollowUpQuestionsLLM, WhatToAnswerLLM,
     prepareTranscriptForWhatToAnswer, buildTemporalContext,
     AssistantResponse as LLMAssistantResponse, classifyIntent, planNextAssistantAction, PlannerDecision,
-    extractLatestQuestion, toCandidateFraming, planAnswer, validateAnswerStructure, isCodingAnswerType, resolveFollowUp,
+    extractLatestQuestion, toCandidateFraming, planAnswer, validateAnswerStructure, isCodingAnswerType, resolveFollowUp, resolveFollowUpOrClarify,
     buildContextRoute, summarizeContextRoute, shouldThrottleTrigger,
-    validateProfileOutput, buildProfileRepairInstruction,
+    validateProfileOutput, buildProfileRepairInstruction, sanitizeCandidateAnswer, CANDIDATE_VOICE_ANSWER_TYPES,
     raceStreamWithDeadline, firstUsefulDeadlineMs, LIVE_INTER_TOKEN_STALL_MS, LIVE_TOTAL_HARD_TIMEOUT_MS
 } from './llm';
 import { CodingStreamGate } from './llm/codingStreamGate';
@@ -728,12 +728,25 @@ export class IntelligenceEngine extends EventEmitter {
                     const latestQ = extractedQuestion.latestQuestion.trim().toLowerCase();
                     const priorInterviewer = [...transcriptTurns].reverse()
                         .find((t) => t.role === 'interviewer' && t.text.trim().toLowerCase() !== latestQ);
-                    const fr = resolveFollowUp({
+                    const fr = resolveFollowUpOrClarify({
                         latestQuestion: extractedQuestion.latestQuestion,
                         previousQuestion: priorInterviewer?.text,
                         lastEntity: extractedQuestion.followUpTarget || undefined,
+                        surface: 'what_to_answer',
+                        hasPriorContext: Boolean(priorInterviewer?.text) || Boolean(extractedQuestion.followUpTarget),
                     });
-                    if (fr && fr.confidence >= 0.7 && fr.resolvedQuestion) {
+                    // Context-free bare follow-up ("why?" with no prior turn): emit a
+                    // safe clarification deterministically — NEVER fall through to the
+                    // LLM (which can self-identify as "an AI assistant" or dump the
+                    // profile). No prior context exists, so there's nothing to answer.
+                    if (fr.isClarification && fr.clarificationText && !isSpeculative) {
+                        this.session.addAssistantMessage(fr.clarificationText);
+                        this.emit('suggested_answer', fr.clarificationText, extractedQuestion.latestQuestion || 'inferred', 0.9);
+                        this.setMode('idle');
+                        trace.mark('repair_used', { reason: 'context_free_clarification' });
+                        return fr.clarificationText;
+                    }
+                    if (fr && fr.confidence >= 0.7 && fr.resolvedQuestion && !fr.isClarification) {
                         extractedQuestion.latestQuestion = fr.resolvedQuestion;
                         if (fr.resolvedEntity) extractedQuestion.followUpTarget = fr.resolvedEntity;
                         trace.mark('repair_used', { reason: 'followup_resolved', resolved: fr.reason });
@@ -1190,6 +1203,22 @@ export class IntelligenceEngine extends EventEmitter {
                 }
             } catch (profileRepairErr: any) {
                 console.warn('[IntelligenceEngine] profile repair failed (non-fatal):', profileRepairErr?.message || profileRepairErr);
+            }
+
+            // Release 2026-06-07c: FINAL candidate-answer sanitizer on the WTA path —
+            // strip an assistant-meta tail ("as an AI assistant", "I'm Natively", "I
+            // can't share") from a candidate-voice answer. If stripping empties it, the
+            // non-answer-sentinel / live-fallback paths below handle the replacement.
+            if (CANDIDATE_VOICE_ANSWER_TYPES.has(answerPlan.answerType)) {
+                try {
+                    const sani = sanitizeCandidateAnswer(fullAnswer);
+                    if (sani.repaired && !sani.needsFallback) {
+                        fullAnswer = sani.text;
+                        trace.mark('repair_used', { reason: 'candidate_sanitizer', markers: sani.removedMarkers.length });
+                    }
+                } catch (saniErr: any) {
+                    console.warn('[IntelligenceEngine] candidate sanitizer skipped:', saniErr?.message);
+                }
             }
 
             if (IntelligenceEngine.isNonAnswerSentinel(fullAnswer)) {
