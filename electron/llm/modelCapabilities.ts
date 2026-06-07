@@ -171,6 +171,26 @@ export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
+// Per-model max output (completion) token ceiling for the OpenAI Chat Completions
+// API. OpenAI rejects max_completion_tokens above a model's documented limit with
+// a 400 "max_tokens is too large" error (see issue #298: gpt-4o caps output at
+// 16384, so the global 65536 default failed on the very first request). gpt-5.x
+// and the o-series reasoners accept very large output budgets; gpt-4.1 caps at
+// 32768; gpt-4o at 16384; gpt-4-turbo and gpt-3.5-turbo at 4096. Unknown OpenAI
+// ids fall back to a safe 16384.
+export function getOpenAiMaxOutput(modelId: string, requested: number): number {
+  const id = (modelId || '').toLowerCase();
+  let cap: number;
+  if (/\bgpt-5/.test(id) || /\bo[0-9]/.test(id)) cap = requested; // gpt-5.x / o-series — no tighter cap than requested
+  else if (id.startsWith('gpt-4.1')) cap = 32768;
+  else if (id.startsWith('gpt-4o')) cap = 16384;
+  else if (id.startsWith('gpt-4-turbo') || id.startsWith('gpt-4-1106') || id.startsWith('gpt-4-0125') || id.startsWith('gpt-4-vision')) cap = 4096;
+  else if (id.startsWith('gpt-3.5')) cap = 4096;
+  else if (id.startsWith('gpt-4')) cap = 8192; // bare gpt-4 / 32k variants cap at 8192
+  else cap = 16384; // unknown OpenAI-compatible id — conservative but usable default
+  return Math.min(requested, cap);
+}
+
 // Drop oldest turns until the joined transcript fits the token budget. Most recent turns are preserved.
 export function truncateTranscriptToFit(
   transcript: TranscriptTurn[],

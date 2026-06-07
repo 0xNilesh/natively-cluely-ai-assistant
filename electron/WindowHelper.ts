@@ -235,6 +235,13 @@ export class WindowHelper {
     });
   }
 
+  // NOTE: width-resize animation lives ENTIRELY in the renderer now (CSS-only,
+  // single compositor clock). The main process resizes the OS window exactly
+  // ONCE per transition via setOverlayDimensionsCentered — grown up front on
+  // expand, shrunk at the end on collapse — so there is no per-frame native
+  // animation timer to cancel anymore. See electron/utils/overlayWindowFirst.mjs
+  // and NativelyInterface.startTransition for the window-first contract.
+
   public createWindow(): void {
     if (this.launcherWindow !== null) return; // Already created
 

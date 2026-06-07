@@ -47,10 +47,12 @@ export default function ResizeToggle({ expanded, onToggle, appearance }: ResizeT
       title={expanded ? 'Collapse' : 'Expand'}
       className="no-drag absolute top-2 right-2 z-50 flex h-[26px] w-[26px] items-center justify-center overflow-hidden rounded-full overlay-text-interactive"
       style={appearance.iconStyle}
-      initial={false}
+      // Graceful entrance when the button first appears (content lands): fade +
+      // a slight scale-up settle, rather than popping in. reduce-motion: fade only.
+      initial={reduce ? { opacity: 0 } : { opacity: 0, scale: 0.8 }}
       animate={reduce ? { opacity: hovered ? 1 : 0.55 } : { opacity: hovered ? 1 : 0.55, scale: hovered ? 1.06 : 1 }}
       whileTap={reduce ? undefined : { scale: 0.92 }}
-      transition={{ duration: 0.18, ease: [0.23, 1, 0.32, 1] }}
+      transition={{ duration: 0.2, ease: [0.23, 1, 0.32, 1] }}
     >
       {/* Jelly-gloss sheen — render above the icon so light catches the arrowheads. */}
       <span className="pointer-events-none absolute inset-x-1 top-0.5 h-[45%] rounded-full bg-gradient-to-b from-white/20 to-white/0 blur-[0.5px]" />

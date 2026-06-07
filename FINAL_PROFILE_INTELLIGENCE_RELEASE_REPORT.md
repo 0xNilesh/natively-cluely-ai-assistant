@@ -1,3 +1,62 @@
+# Final Profile Intelligence Release Report — 2026-06-07c (follow-up stability hardening)
+
+> Latest round. Adds genuine long-session follow-up stability + provider resilience
+> on top of the 2026-06-07 multimode work (below). Detailed companion reports:
+> `FINAL_FOLLOWUP_STABILITY_RELEASE_REPORT.md`, `LONG_SESSION_MEMORY_TEST_REPORT.md`,
+> `PROVIDER_RESILIENCE_REPORT.md`, `benchmarks/profile-intelligence/final_release_eval_report.md`.
+
+## Executive summary
+
+| metric | result |
+|---|---|
+| Follow-up stability (resolution, 500 cases) | **100%** (immediate→60min, corrections, all buckets) |
+| Long-session scenarios (100 / 364 checks) | **100% / 100% / 0 context-leak checks** |
+| Context-free clarification accuracy | **100%** |
+| Cross-mode leak / stale-context misuse / salary leak | **0 / 0 / 0** |
+| Deterministic route (multimode 1000 / residual 50) | **1000/1000 / 50/50** |
+| llm + codeVerification unit tests | **1240 pass / 0 fail** |
+| Multimode-1000 live (clean rows) | _(this round's regression run — see final_release_eval_report.md)_ |
+
+## What this round fixed (the 4 remaining issues + the memory model)
+
+1. **Context-free bare follow-ups** ("why?"/"and?"/"continue") with no prior context
+   → safe mode-specific clarification, deterministically, in BOTH manual + WTA paths.
+   Never self-identifies, never dumps profile, never false-refuses.
+2. **Final candidate-answer sanitizer** — strips a trailing assistant-meta sentence
+   from candidate answers, with a deterministic fallback if emptied. Tightened after
+   code review to preserve NDA caveats / real "AI Researcher" titles / product
+   descriptions / "no ratings yet".
+3. **Provider resilience** — `classifyProviderError` taxonomy (429/403/503/timeout/
+   zero-token/stall) cleanly separates outages from defects; existing retry-circuit +
+   deterministic live-fallback prevent empties when a fallback exists.
+4. **Long-session memory model** — `SessionMemory` (time-aware decay, mode boundaries,
+   corrections, comp-gated-to-negotiation with value-level guard) +
+   `resolveSessionFollowup`, proven by a de-circularized, non-skippable 500+100 eval.
+
+## New modules (all in `electron/llm/`, pure + deterministic)
+
+`SessionMemory.ts`, `sessionFollowupResolver.ts`, `providerErrorClassifier.ts`,
+`FollowUpResolver.ts` (+ context-free clarification), `ProfileOutputValidator.ts`
+(+ `sanitizeCandidateAnswer`). Wired into `IntelligenceEngine.ts` (WTA) +
+`ipcHandlers.ts` (manual). New tests: `ContextFreeFollowup`, `CandidateSanitizer`,
+`ProviderErrorClassifier`, `SessionMemory`, `SessionFollowup` (2026_06_07c).
+
+## Senior reviews this round
+
+- **@test-engineer** found the eval was partly circular (entity seeded from the answer
+  key) and the recall assertion silently skipped on null — BOTH fixed (independent
+  extraction + non-skippable assertion), so the 100% is genuine. Added adversarial
+  competing-entity / stale-vs-fresh / double-correction / 37-turn cases.
+- **@code-reviewer** found 2 HIGH live candidate-sanitizer false-positives (over-
+  stripping NDA caveats / "AI Researcher" titles / product descriptions) + a latent
+  comp value-level gap + garbled substitution — ALL fixed with regression tests.
+
+## Premium submodule
+
+**No pointer update required** — all changes are in the main repo.
+
+---
+
 # Final Profile Intelligence Release Report — 2026-06-06
 
 Sequential, evidence-based fixes taking Natively's Profile Intelligence and the

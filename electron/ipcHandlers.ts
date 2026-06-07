@@ -314,6 +314,13 @@ export function initializeIpcHandlers(appState: AppState): void {
     },
   );
 
+  // (Removed) 'animate-overlay-width' — the overlay width animation is now
+  // CSS-only in the renderer (single compositor clock). The OS window is sized
+  // exactly once per transition via 'update-content-dimensions-centered'
+  // (grown up front on expand, shrunk at the end on collapse). The old
+  // per-frame native setInterval chase tore against the renderer's clock and
+  // has been deleted. See electron/utils/overlayWindowFirst.mjs.
+
   safeHandle('set-window-mode', async (event, mode: 'launcher' | 'overlay', inactive?: boolean) => {
     appState.getWindowHelper().setWindowMode(mode, inactive);
     return { success: true };

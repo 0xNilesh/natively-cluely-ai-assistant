@@ -20,7 +20,7 @@ import {
   TINY_ASSIST_PROMPT, TINY_BRAINSTORM_PROMPT, TINY_CLARIFY_PROMPT, TINY_CODE_HINT_PROMPT,
   TINY_PROMPTS_SET
 } from "./llm/tinyPrompts"
-import { getModelCapabilities, selectPromptTier, estimateTokens, truncateTranscriptToFit, type PromptTier, type ModelCapabilities } from "./llm/modelCapabilities"
+import { getModelCapabilities, selectPromptTier, estimateTokens, truncateTranscriptToFit, getOpenAiMaxOutput, type PromptTier, type ModelCapabilities } from "./llm/modelCapabilities"
 import { GeminiPromptCache } from "./llm/GeminiPromptCache"
 import {
   runStreamingVisionFallback,
@@ -2393,7 +2393,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       this.withRetry(() => this.openaiClient!.chat.completions.create({
         model,
         messages,
-        max_completion_tokens: model.toLowerCase().includes('claude') ? this.getClaudeMaxOutput(model) : MAX_OUTPUT_TOKENS,
+        max_completion_tokens: model.toLowerCase().includes('claude') ? this.getClaudeMaxOutput(model) : getOpenAiMaxOutput(model, MAX_OUTPUT_TOKENS),
         ...openaiReasoningParam(model), // minimal reasoning for gpt-5/o-series (fast TTFT)
         ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
       })),
@@ -4384,7 +4384,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       stream: true,
       temperature: INTERACTIVE_TEMPERATURE,
       seed: INTERACTIVE_SEED, // OpenAI honors seed for near-deterministic output
-      max_completion_tokens: model.toLowerCase().includes('claude') ? this.getClaudeMaxOutput(model) : MAX_OUTPUT_TOKENS,
+      max_completion_tokens: model.toLowerCase().includes('claude') ? this.getClaudeMaxOutput(model) : getOpenAiMaxOutput(model, MAX_OUTPUT_TOKENS),
       ...openaiReasoningParam(model), // minimal reasoning for gpt-5/o-series (fast TTFT)
       ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
     }, { signal: abortSignal });
@@ -4509,7 +4509,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       model,
       messages,
       stream: true,
-      max_completion_tokens: model.toLowerCase().includes('claude') ? this.getClaudeMaxOutput(model) : MAX_OUTPUT_TOKENS,
+      max_completion_tokens: model.toLowerCase().includes('claude') ? this.getClaudeMaxOutput(model) : getOpenAiMaxOutput(model, MAX_OUTPUT_TOKENS),
       ...openaiReasoningParam(model), // minimal reasoning for gpt-5/o-series (fast TTFT)
       ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
     }, { signal: abortSignal });

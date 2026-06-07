@@ -121,6 +121,7 @@ export {
     selectPromptTier,
     estimateTokens,
     truncateTranscriptToFit,
-    parseOllamaSize
+    parseOllamaSize,
+    getOpenAiMaxOutput
 } from "./modelCapabilities";
 export type { ModelCapabilities, ModelTier, PromptTier } from "./modelCapabilities";
