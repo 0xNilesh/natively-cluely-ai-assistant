@@ -1,6 +1,33 @@
+# Final Profile Intelligence Release Report — 2026-06-09 (MANUAL PATH POLISH, Round I)
+
+> **Newest round (2026-06-09, Round I)** — final cleanup after the Round H manual-send
+> regression fix. Added a dedicated `gap_analysis_answer` (honest gap + mitigation, not
+> a fit-summary, not a stall), hardened JD-fit / strongest-match, expanded the real
+> manual UI truth eval to **80 cases**, and ran full regression. Detail:
+> `FINAL_MANUAL_PATH_POLISH_REPORT.md`, `MANUAL_UI_TRUTH_TEST_REPORT.md`,
+> `REAL_MANUAL_PATH_REGRESSION_REPORT.md`, `ANSWER_QUALITY_FINAL_REPORT.md`,
+> `MANUAL_APP_RETEST_SCRIPT.md`.
+>
+> | gate | result |
+> |---|---|
+> | manual UI truth (80 cases, real ipcHandlers path) | **100%** scored · 0 assistant-leaks · 0 intro-collapse · 0 stalls · 0 coding/meeting leaks |
+> | gap answers | honest gap + mitigation (first-person), NOT a fit-summary, NOT a stall |
+> | WTA-100 | **100%** · identity/profile 19/19 · 0 leaks |
+> | follow-up 500 / long-session 100 / livememory / replay 50 | **100%** · 0 leaks |
+> | llm + codeVerification unit tests | **1578 pass / 0 fail / 10 skip** |
+> | deterministic route (1000 / 50) | **1000/1000 / 50/50** |
+> | multimode-1000 (manual + WTA), CLEAN rerun | **pass 100% · route 100% · safety 100% · clean=896 · 0 leaks of any kind (wrongVoice=0)** |
+> | answer-quality | _(clean run in progress — `ANSWER_QUALITY_FINAL_REPORT.md`)_ |
+>
+> Verdict: the real manual-send path is correct and verified end-to-end; the clean
+> multimode confirms 0 leaks / 0 regression (clean=896, pass 100%). Premium pointer: no
+> update.
+
+---
+
 # Final Profile Intelligence Release Report — 2026-06-07c (RELEASE HARDENING)
 
-> **Newest round** — final production hardening of the live SessionMemory rollout.
+> Prior round — final production hardening of the live SessionMemory rollout.
 > Detail: `FINAL_RELEASE_HARDENING_REPORT.md`, `SESSION_MEMORY_ROLLOUT_REPORT.md`,
 > `OBSERVABILITY_RELEASE_REPORT.md`, `PROVIDER_RESILIENCE_FINAL_REPORT.md`,
 > `ELECTRON_RUNTIME_TEST_REPORT.md`.

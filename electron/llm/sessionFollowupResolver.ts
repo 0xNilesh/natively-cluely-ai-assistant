@@ -70,6 +70,12 @@ function inferKind(input: SessionFollowupInput): MemoryItemKind | null {
   if (input.expectedKind) return input.expectedKind;
   const q = (input.latestQuestion || '').toLowerCase();
   const prev = input.previousAnswerType;
+  // A SKILL-proficiency probe ("how strong/good/proficient are you in/at that?",
+  // "rate that out of 10") is unambiguously about the skill on the table, even right
+  // after a project turn — so it must win over the project rules below. (Excludes the
+  // generic status follow-up "how is that going?", which is not a proficiency probe —
+  // code-review 2026-06-08.)
+  if (/\bhow (?:strong|good|proficient|skilled|comfortable|experienced) are you (?:in|at|with)\b|\brate (?:that|it|your)\b.*\b(?:out of|skill)|\bhow (?:is|are) (?:that|your) skill\b/.test(q)) return 'skill';
   // "who owns / who is responsible / who is taking / what is the action item" → a
   // meeting decision/owner.
   if (/\bwho (owns|is responsible|is taking|has|will (do|own|handle))\b|\bwho'?s (the )?owner\b|\baction items?\b|\bwho owns (that|it|the)\b/.test(q)) return 'decision';

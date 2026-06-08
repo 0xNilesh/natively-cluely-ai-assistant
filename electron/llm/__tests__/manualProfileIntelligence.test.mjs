@@ -51,10 +51,13 @@ describe('manual Profile Intelligence deterministic fast path', () => {
     assert.ok(result.excludedContextLayers.includes('assistant_identity'));
   });
 
-  test('MANUAL-PI-EXPERIENCE-001: second-person experience question means candidate experience', () => {
+  test('MANUAL-PI-EXPERIENCE-001: a "your experiences" question (asking the CANDIDATE) answers in FIRST person', () => {
+    // Manual regression fix 2026-06-08: "your experiences" addresses the candidate, so
+    // a profile-loaded manual answer is first-person candidate voice ("My experience…"),
+    // not "Your experience…". (A "my experiences" self-query stays second-person.)
     const result = fast('what are your experiences?');
     assert.ok(result);
-    assert.match(result.answer, /Your experience includes/i);
+    assert.match(result.answer, /My experience includes/i);
     assert.match(result.answer, /Acme Analytics/);
     assert.match(result.answer, /Data Analyst/);
     assert.match(result.answer, /Northstar Labs/);
@@ -62,10 +65,10 @@ describe('manual Profile Intelligence deterministic fast path', () => {
     assert.equal(result.providerUsed, false);
   });
 
-  test('MANUAL-PI-PROJECTS-001: second-person projects question means candidate projects', () => {
+  test('MANUAL-PI-PROJECTS-001: a "projects you have done" question answers in FIRST person', () => {
     const result = fast('what all projects have you done?');
     assert.ok(result);
-    assert.match(result.answer, /Your projects include/i);
+    assert.match(result.answer, /My projects include/i);
     assert.match(result.answer, /Revenue Forecasting/);
     assert.match(result.answer, /Churn Dashboard/);
     assert.doesNotMatch(result.answer, /Natively|AI assistant/i);

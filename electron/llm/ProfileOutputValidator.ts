@@ -365,8 +365,8 @@ export function stripProfileTokensFromCoding(answer: string, tokens: string[]): 
 export const CANDIDATE_VOICE_ANSWER_TYPES: ReadonlySet<AnswerType> = new Set<AnswerType>([
   'identity_answer', 'profile_fact_answer', 'experience_answer', 'project_answer',
   'project_followup_answer', 'project_about_answer', 'skills_answer',
-  'skill_experience_answer', 'jd_fit_answer', 'behavioral_interview_answer',
-  'negotiation_answer',
+  'skill_experience_answer', 'jd_fit_answer', 'gap_analysis_answer',
+  'behavioral_interview_answer', 'negotiation_answer',
 ]);
 
 // Assistant-meta / false-refusal markers that must never appear in a candidate answer.

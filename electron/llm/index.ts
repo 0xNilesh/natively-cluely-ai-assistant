@@ -36,6 +36,8 @@ export type { ConversationIntent, IntentResult } from "./IntentClassifier";
 export { planNextAssistantAction } from "./PlannerDecision";
 export type { PlannerDecision, PlannerDecisionKind, PlannerInput } from "./PlannerDecision";
 export { planAnswer, formatAnswerPlanForPrompt, isCodingAnswerType, shouldScaffold, isStealthEvasionQuestion } from "./AnswerPlanner";
+export { detectAnswerStyle, styleSuppressesScaffold } from "./answerStyle";
+export type { AnswerStyle, AnswerStyleResult } from "./answerStyle";
 export type { AnswerPlan, AnswerSource, AnswerType, ContextLayer, OutputPerspective, SpeakerPerspective } from "./AnswerPlanner";
 export { resolveFollowUp, resolveFollowUpOrClarify, isBareFollowUp, buildContextFreeClarification } from "./FollowUpResolver";
 export { classifyProviderError, isClarificationStall } from "./providerErrorClassifier";

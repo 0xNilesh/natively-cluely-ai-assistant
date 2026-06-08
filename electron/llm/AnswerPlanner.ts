@@ -1,6 +1,7 @@
 import type { IntentResult } from './IntentClassifier';
 import type { ExtractedQuestion } from './transcriptQuestionExtractor';
 import { CODING_CONTRACT, CODING_VERIFICATION_INSTRUCTION } from './codingContract';
+import { detectAnswerStyle, type AnswerStyle } from './answerStyle';
 
 export type AnswerType =
   | 'identity_answer'
@@ -10,6 +11,7 @@ export type AnswerType =
   | 'skill_experience_answer'
   | 'experience_answer'
   | 'jd_fit_answer'
+  | 'gap_analysis_answer'
   | 'behavioral_interview_answer'
   | 'project_followup_answer'
   | 'coding_question_answer'
@@ -115,6 +117,15 @@ export interface AnswerPlan {
   shouldShowImmediateScaffold: boolean;
   question: string;
   confidence: number;
+  /**
+   * Release 2026-06-08: the requested ANSWER STYLE/length detected from the question
+   * phrasing ("quickly", "in detail", "one line", "code only", "bullet points",
+   * "explain to a beginner"). Shapes FORM only — never routing, voice, grounding, or
+   * leak boundaries. 'default' when no explicit cue is present.
+   */
+  answerStyle: AnswerStyle;
+  /** Soft spoken-length target in seconds (0 = no explicit constraint). */
+  answerStyleTargetSeconds: number;
 }
 
 export interface PlanAnswerInput {
@@ -208,6 +219,25 @@ Why This Role:
 
 Speakable Final Answer:
 [Polished first-person answer the candidate can say.]`;
+
+// GAP / weakness-for-the-role. The answer must LEAD with an honest, specific gap, then
+// a concrete mitigation — NOT a fit-summary. First person. Grounds the gap against the
+// JD and the candidate's real profile; pivots to adjacent strength only AFTER the gap
+// is clearly stated. Never invents experience; never stalls. (Release 2026-06-09.)
+const GAP_ANALYSIS_TEMPLATE = `This is a GAP question, not a "why hire me" question. Lead with the honest gap.
+Use exactly these sections:
+
+The Honest Gap:
+[Name ONE specific, JD-relevant gap or area you're less experienced in. Be concrete (a tool, domain, or depth of experience the JD wants that your profile shows less of). Do NOT pretend you have no gaps. Do NOT turn this into a fit-summary.]
+
+Why It's Manageable:
+[Briefly, the adjacent/real experience that makes you confident you can close it fast — grounded in your actual profile, no invented experience.]
+
+How I'd Close It:
+[A specific, realistic mitigation/ramp plan.]
+
+Speakable Final Answer:
+[A confident-but-honest first-person answer the candidate can say out loud: gap first, then mitigation. Do not say "let me come back to that".]`;
 
 const NEGOTIATION_TEMPLATE = `Use exactly these sections:
 
@@ -685,6 +715,11 @@ const JD_FIT_PATTERNS = [
   /\bfit (this|the|that) (data analyst |[a-z ]+)?(role|job|position|jd|description)\b/i,
   /\b(tailor|match|align) (my |the )?(answer|resume|experience|skills?|background).*(jd|job|role|position)\b/i,
   /\b(gaps?|strengths?).*(this|the).*(jd|role|job|position|data analyst)\b/i,
+  // "what is your strongest match / best fit for the JD/role" — REQUIRES JD/role
+  // context so a bare "biggest strength" stays behavioral (not jd_fit).
+  /\b(strongest|best|biggest|top)\s+(match|fit|asset|selling point)\b.*\b(jd|role|job|position|description|this)\b/i,
+  /\b(strongest|best|biggest|top)\s+(match|fit|strength|asset)\s+for\s+(the|this)\s+(jd|role|job|position|data analyst|[a-z]+ (role|job|position))\b/i,
+  /\bstrongest\s+(match|fit|skill|area)\s+(for|to)\s+(the|this)\s+(jd|role|job|position)\b/i,
   // "Why should we hire you?" and its variants — the canonical fit/sell question
   // (live regression 2026-06-05). Profile + JD, NOT a generic meeting answer.
   /\bwhy should (we|i|they|you) (hire|pick|choose|select|consider|take|go with|bring (on|in))\b/i,
@@ -761,6 +796,27 @@ const JD_FIT_PATTERNS = [
   // description", "tailor it to the JD") — a role-fit answer grounded in the JD
   // (Issue 7). The salary negation is handled separately so this stays jd_fit.
   /\b(use|using|with|from|tailor (it|the answer) to|against) (the )?(jd|job description)\b/i,
+];
+
+// GAP / weakness-for-the-role asks (release 2026-06-09). These must produce an HONEST
+// GAP + MITIGATION answer in the candidate's first-person voice — NOT a fit-summary
+// ("why you're great") and NOT a stall. Distinct from a generic behavioral "biggest
+// weakness" (which isn't JD-anchored) and from jd_fit (which sells the match). Checked
+// BEFORE jd_fit so a gap ask doesn't get swallowed by the fit patterns above.
+const GAP_PATTERNS = [
+  /\b(what|which|any|where('?s| is)?|do you have a?)\s+(gaps?|weak(?:ness(?:es)?)?|shortcomings?|limitations?|missing|lacking)\b/i,
+  /\bwhat\s+gaps?\s+do\s+(you|i)\s+have\b/i,
+  /\bwhere\s+(are|r)\s+(you|u|i)\s+weak\b/i,
+  /\b(weakest|least (ready|prepared|qualified|strong|experienced))\b.*\b(jd|role|job|position|match|for (this|the))\b/i,
+  /\bwhat('?s| is)?\s+your\s+weakest\s+(match|area|point|skill)\b/i,
+  /\bwhat\s+(do|would|will|might|should)\s+(you|i)\s+(need|have)\s+to\s+(improve|learn|work on|develop|build|pick up|get better)\b/i,
+  /\bwhat\s+(would|do|will)\s+(you|i)\s+need\s+to\s+learn\b/i,
+  /\bwhat('?s| is)?\s+missing\s+(from|in)\s+(your|my)\s+(profile|resume|background|experience)\b/i,
+  /\bwhat\s+part\s+of\s+(this|the)\s+(jd|role|job|description)\s+.*\b(least|not)\s+(ready|prepared|strong|confident)\b/i,
+  /\bwhere\s+(do|would)\s+(you|i)\s+(fall short|struggle|need (work|improvement))\b/i,
+  /\bwhat\s+(are|r)\s+(you|i)\s+(missing|lacking)\s+for\s+(this|the)\b/i,
+  // "give me a (confident but honest) gap answer", "a gap answer", "answer about my gaps"
+  /\b(a|an|the|my|your)\s+(confident.{0,20})?gap\s+answer\b|\banswer\s+(about|on|for)\s+(my|your|the)\s+gaps?\b|\bgive me\s+.{0,30}\bgap\b/i,
 ];
 
 const SKILLS_PATTERNS = [
@@ -1221,6 +1277,8 @@ const templateFor = (answerType: AnswerType): string => {
       return PROJECT_FOLLOWUP_TEMPLATE;
     case 'jd_fit_answer':
       return JD_FIT_TEMPLATE;
+    case 'gap_analysis_answer':
+      return GAP_ANALYSIS_TEMPLATE;
     case 'negotiation_answer':
       return NEGOTIATION_TEMPLATE;
     case 'system_design_answer':
@@ -1269,6 +1327,7 @@ const requiredLayersFor = (answerType: AnswerType): ContextLayer[] => {
       // turn (to resolve "it"/"that") + custom context + persona style.
       return ['resume', 'prior_assistant_responses', 'custom_context', 'ai_persona'];
     case 'jd_fit_answer':
+    case 'gap_analysis_answer':
       return ['resume', 'jd', 'custom_context', 'ai_persona'];
     case 'coding_question_answer':
     case 'dsa_question_answer':
@@ -1337,6 +1396,7 @@ const forbiddenLayersFor = (answerType: AnswerType): ContextLayer[] => {
       // and not the JD (unrelated to "how was it built / what was your role").
       return ['negotiation', 'jd', 'reference_files'];
     case 'jd_fit_answer':
+    case 'gap_analysis_answer':
       return ['negotiation'];
     case 'negotiation_answer':
       return ['reference_files'];
@@ -1390,7 +1450,7 @@ export const isCodingAnswerType = (answerType: AnswerType): boolean =>
 const CANDIDATE_VOICE_TYPES: ReadonlySet<AnswerType> = new Set<AnswerType>([
   'identity_answer', 'profile_fact_answer', 'project_answer', 'project_followup_answer',
   'skills_answer', 'skill_experience_answer', 'experience_answer', 'jd_fit_answer',
-  'behavioral_interview_answer', 'negotiation_answer',
+  'gap_analysis_answer', 'behavioral_interview_answer', 'negotiation_answer',
 ]);
 
 // Phase 2: the profile-context policy per answer type. `forbidden` is the hard
@@ -1421,6 +1481,7 @@ export const profileContextPolicyFor = (answerType: AnswerType): ProfileContextP
     case 'skill_experience_answer':
     case 'experience_answer':
     case 'jd_fit_answer':
+    case 'gap_analysis_answer':
     case 'behavioral_interview_answer':
     case 'project_about_answer':
       // Product-about answers MUST be grounded in the loaded project metadata
@@ -1872,6 +1933,10 @@ export const planAnswer = (input: PlanAnswerInput): AnswerPlan => {
     answerType = 'dsa_question_answer';
   } else if (includesAny(text, CODING_PATTERNS) || input.intentResult?.intent === 'coding') {
     answerType = 'coding_question_answer';
+  } else if (includesAny(text, GAP_PATTERNS)) {
+    // Honest gap + mitigation for the role (checked BEFORE jd_fit so a gap ask isn't
+    // swallowed by the fit patterns). Resume+JD grounded, first-person candidate.
+    answerType = 'gap_analysis_answer';
   } else if (includesAny(text, JD_FIT_PATTERNS) || extractedType === 'jd_alignment') {
     answerType = 'jd_fit_answer';
   } else if (includesAny(text, BEHAVIORAL_PATTERNS) || extractedType === 'behavioral') {
@@ -1940,7 +2005,7 @@ export const planAnswer = (input: PlanAnswerInput): AnswerPlan => {
   // First-person-preferring INTERVIEW phrasing in manual mode: the question reads
   // as if an interviewer is asking the candidate directly ("introduce yourself",
   // "why should we hire you", "are you good at X", "tell me about your project").
-  const isManualInterviewPhrasing = /\b(introduce yourself|introduc\w*|tell me about your(self|\s)|why should (we|i|they) hire|are (you|u) (good|strong|skilled|experienced|comfortable|proficient)|what(?:'s| is)? your (experience|background|strength|weakness|project)|why (are|do) you|how (are|do) you (fit|think you (are|'?re) fit)|how (do|are) you.{0,20}\bfit\b|what did you (build|do|work)|walk me through your)\b/i.test(text)
+  const isManualInterviewPhrasing = /\b(introduce yourself|introduc\w*|tell me about your(self|\s)|why should (we|i|they) hire|are (you|u) (good|strong|skilled|experienced|comfortable|proficient)|what(?:'s| is)? your (experience|background|strength|weakness|project|weakest|strongest)|why (are|do) you|how (are|do) you (fit|think you (are|'?re) fit)|how (do|are) you.{0,20}\bfit\b|what did you (build|do|work)|walk me through your|what gaps? do you have|where are you (weak|least)|what (do|would) you need to (improve|learn)|what part of (this|the) (jd|role|job).{0,30}(ready|prepared)|what(?:'s| is)? missing from your)\b/i.test(text)
     && !isCoachingPhrasing
     && !/\bmy\b/i.test(text.replace(/\binterview my\b/gi, '')); // "what are MY skills" → keep 2nd-person list
 
@@ -1999,10 +2064,21 @@ export const planAnswer = (input: PlanAnswerInput): AnswerPlan => {
     maxInitialLatencyMs: latencyMs, // deprecated alias
     requiresLLM: !fastPathTypes.includes(answerType),
     canUseFastPath: fastPathTypes.includes(answerType),
-    shouldShowImmediateScaffold: shouldScaffold(answerType),
+    shouldShowImmediateScaffold: shouldScaffold(answerType) && !styleSuppressesScaffoldSafe(answerType, question),
     question,
     confidence: Math.max(input.intentResult?.confidence || input.extractedQuestion?.confidence || 0.7, 0),
+    answerStyle: detectAnswerStyle(question).style,
+    answerStyleTargetSeconds: detectAnswerStyle(question).targetSeconds,
   };
+};
+
+// Only let a style suppress the coding scaffold for CODING answer types (a "code only"
+// cue on a non-coding answer must not change anything). Keeps the scaffold for the
+// common case; suppresses it for an explicit "just the code" / "one line" coding ask.
+const styleSuppressesScaffoldSafe = (answerType: AnswerType, question: string): boolean => {
+  if (!isCodingAnswerType(answerType)) return false;
+  const s = detectAnswerStyle(question).style;
+  return s === 'code_only' || s === 'one_liner';
 };
 
 /**
@@ -2044,6 +2120,11 @@ export const formatAnswerPlanForPrompt = (plan: AnswerPlan, includeVerificationS
   const entityLine = plan.resolvedEntity
     ? `\nresolvedEntity: ${plan.resolvedEntity} (answer about THIS project; stay on it)`
     : '';
+  // Adaptive style directive (form only) — appended when the question requested a
+  // specific style/length. Never overrides VOICE/GROUNDING/leak boundaries.
+  const styleDirective = plan.answerStyle && plan.answerStyle !== 'default'
+    ? `\n\n${detectAnswerStyle(plan.question).directive}`
+    : '';
   return `<answer_contract>
 answerType: ${plan.answerType}
 source: ${plan.source}
@@ -2054,11 +2135,12 @@ profileContextPolicy: ${plan.profileContextPolicy}${entityLine}
 requiredContextLayers: ${plan.requiredContextLayers.join(', ') || 'none'}
 forbiddenContextLayers: ${plan.forbiddenContextLayers.join(', ') || 'none'}
 maxInitialLatencyMs: ${plan.maxInitialLatencyMs}
+answerStyle: ${plan.answerStyle}
 
 VOICE: ${voiceLine}
 GROUNDING: ${policyLine}
 
 STRICT RESPONSE TEMPLATE:
-${plan.responseTemplate}${verificationBlock}
+${plan.responseTemplate}${styleDirective}${verificationBlock}
 </answer_contract>`;
 };

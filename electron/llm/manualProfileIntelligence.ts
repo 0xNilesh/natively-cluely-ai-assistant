@@ -391,10 +391,50 @@ const formatSkillExperience = (profile: MaybeStructured<StructuredProfileFacts>,
   const found = findProfileSkill(profile, q);
   if (!found) return '';
   const { skill, projects } = found;
-  if (projects.length) {
-    return `Yes, I've worked with ${skill} — I used it in ${formatInlineList(projects, 2)}.`;
+  // GROUNDED "where" ONLY (code-review 2026-06-08 HIGH: never assert the skill was
+  // "central to what I built" at a role the resume doesn't link to the skill — that's
+  // a falsifiable hallucination). "where" is the projects that actually use the skill,
+  // OR an experience entry whose role/tech/description actually mentions the skill.
+  const groundedRole = (() => {
+    for (const e of profileExperience(profile)) {
+      const ex = e as Record<string, unknown>;
+      const hay = [firstNonEmpty(e.role, e.title, e.position), firstNonEmpty(e.company, e.organization, e.employer),
+        firstNonEmpty(ex.description, ex.summary),
+        ...asArray(e.bullets || e.highlights || e.responsibilities),
+        ...asArray(ex.technologies || ex.tech_stack || ex.skills)]
+        .map((x) => clean(x).toLowerCase()).join(' ');
+      if (hay.includes(skill.toLowerCase())) {
+        const role = firstNonEmpty(e.role, e.title, e.position);
+        const company = firstNonEmpty(e.company, e.organization, e.employer);
+        const article = /^[aeiou]/i.test(role.trim()) ? 'an' : 'a';
+        return role && company ? `my work as ${article} ${role} at ${company}` : (company ? `my role at ${company}` : '');
+      }
+    }
+    return '';
+  })();
+  const where = projects.length ? formatInlineList(projects, 2) : groundedRole;
+
+  const isWhere = /\bwhere\b/.test(q);
+  const isHow = /\bhow\s+(have|did|do)\b/.test(q);
+  const isHypothetical = /\bhow\s+would\b/.test(q);
+
+  if (isHypothetical) {
+    // "how would you use X" — a brief grounded-but-forward answer (profile optional).
+    return where
+      ? `I'd apply ${skill} the way I have in ${projects.length ? formatInlineList(projects, 1) : where} — building the core logic and validating it against real data.`
+      : `I'd use ${skill} for the core implementation and validate it against real data, the way I approach any tool in my stack.`;
   }
-  return `Yes, ${skill} is one of the skills I work with.`;
+  if (where) {
+    // Grounded use exists → concrete, but don't overclaim "central"; state it plainly.
+    if (isWhere) return `I've used ${skill} in ${where}.`;
+    if (isHow) return `I've used ${skill} hands-on in ${where} — building real features with it, not just studying it.`;
+    return `Yes — I've used ${skill} in ${where}.`;
+  }
+  // Skill is in the profile's skill LIST but no project/role grounds a concrete use
+  // case → honest, never the weak "X is one of the skills I work with" and never a
+  // fabricated role claim. Say it's part of the toolkit and a specific use isn't
+  // highlighted, so the candidate isn't caught overclaiming.
+  return `Yes, ${skill} is part of my toolkit, though a specific project using it isn't highlighted in my loaded profile.`;
 };
 
 const formatSkills = (profile: MaybeStructured<StructuredProfileFacts>): string => {
@@ -547,26 +587,40 @@ export const tryBuildManualProfileFastPathAnswer = ({
   jobDescription,
   source = 'manual_input',
 }: ManualProfileFastPathInput): ManualProfileRouteResult | null => {
-  const firstPerson = source === 'what_to_answer' || source === 'transcript';
   const qNorm = normalize(question);
-  // "What is your name?" / "Who are you?" are in ASSISTANT_IDENTITY_PATTERNS so a
-  // profile-less chat answers as the assistant. BUT when a candidate profile is
-  // loaded, these are interview identity asks that must be answered AS the
-  // candidate (deterministically), never sent to the LLM where it can leak "I'm
-  // Natively, an AI assistant" (benchmark 2026-06-05). So only bail to the
-  // assistant path for GENUINE assistant-meta questions (are-you-an-AI / what
-  // model / who made you / what is Natively) — NOT for a name/who-are-you ask
-  // when the profile is ready.
-  // In MANUAL chat the user is talking to the assistant, so "who are you?" /
-  // "what is your name?" legitimately address Natively (preserved — a user
-  // chatting with the app asking "who are you" wants to know about the assistant,
-  // not be told their own name). The fast path therefore still bails for these in
-  // manual mode. In INTERVIEW / what-to-answer / transcript mode (firstPerson),
-  // the SAME phrasings are the interviewer asking the CANDIDATE, so they must be
-  // answered as the candidate via the name fast path below and NEVER reach the
-  // LLM (where the benchmark caught "I'm Natively, an AI assistant"). firstPerson
-  // already skips this guard entirely, so no extra handling is needed there.
-  if (!firstPerson && isAssistantIdentityQuestion(question)) return null;
+  // ── CANDIDATE VOICE (release 2026-06-08 manual regression fix) ──────────────
+  // The manual-send path must answer candidate identity/profile questions in FIRST
+  // PERSON AS the candidate ("I'm Evin John, …" / "My name is …"), NOT in second
+  // person ("Your name is …") and NOT as the assistant ("I'm Natively, an AI
+  // assistant"). The prior code keyed first-person voice off `source` alone, so
+  // manual_input answered everything 2nd-person — the real bug the user hit.
+  //
+  // Voice is now CANDIDATE first-person whenever a candidate PROFILE is loaded and
+  // the question is NOT an explicit assistant-meta ask. WTA/transcript stay
+  // first-person as before. An assistant-meta question ("are you an AI?", "what is
+  // Natively?", "who made you?") always bails to the assistant path (returns null),
+  // in every mode, so those still answer about the app — never as the candidate.
+  if (isAssistantIdentityQuestion(question)) return null;
+  const profileLoaded = profileFactsReady(profile);
+  // Voice: FIRST PERSON ("My name is…", "I've used…") when WTA/transcript, OR when a
+  // profile is loaded AND the question addresses the candidate as "you" / is an intro
+  // ("who are you?", "what is YOUR name?", "introduce yourself", "why should we hire
+  // you?", "rate YOUR Python"). SECOND PERSON ("Your name is…") only when the user
+  // asks about THEMSELVES in first person ("what is MY name?", "what are MY skills?")
+  // — there the user wants to be told their own fact. This is the manual regression
+  // fix (release 2026-06-08): "who are you?" in profile mode → "My name is Evin John",
+  // never "Your name is…" or "I'm Natively".
+  const lc = qNorm;
+  // SELF-query (user asking about THEMSELVES → second-person "Your name is…"): a
+  // first-person "my"/"I" signal AND no second-person ADDRESS of the candidate. The
+  // `you` exclusion is scoped to genuine candidate-address ("your X", "are you",
+  // "have you", "did you", "yourself") so a stray "can you tell me my skills" still
+  // reads as a self-query (code-review 2026-06-08 MEDIUM: align with the planner).
+  const selfSignal = /\bmy\b|\bwho\s+am\s+i\b|\b(have|do)\s+i\b|\bi\s+have\b/.test(lc);
+  const candidateAddress = /\byour\b|\byourself\b|\b(are|have|did|do|were|can|could|would|will|should)\s+you\b|\babout\s+you\b/.test(lc);
+  const asksAboutSelf = selfSignal && !candidateAddress;
+  const firstPerson = source === 'what_to_answer' || source === 'transcript'
+    || (profileLoaded && !asksAboutSelf);
 
   const q = qNorm;
 

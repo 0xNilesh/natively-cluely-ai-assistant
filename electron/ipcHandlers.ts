@@ -670,7 +670,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         });
         const isCodingChat = isCodingAnswerType(answerPlan.answerType);
         chatTrace.mark('answer_type_selected', { answerType: answerPlan.answerType, isCoding: isCodingChat });
-        piTelemetry.emit('pi_answer_plan_created', { answerType: answerPlan.answerType, surface: 'manual', isCoding: isCodingChat, profilePolicy: answerPlan.profileContextPolicy });
+        piTelemetry.emit('pi_answer_plan_created', { answerType: answerPlan.answerType, surface: 'manual', isCoding: isCodingChat, profilePolicy: answerPlan.profileContextPolicy, answerStyle: answerPlan.answerStyle });
 
         // Context-free bare follow-up ("why?", "and?", "continue") typed in MANUAL
         // mode has no prior turn to resolve against (manual chat is single-shot — no
@@ -794,14 +794,27 @@ export function initializeIpcHandlers(appState: AppState): void {
             `[IPC] Auto-injected 100s context for gemini-chat-stream (${context.length} chars)`,
           );
         }
-        // Skill-rating asks ("python, out of 10?") are profile-REQUIRED (keep the
-        // rolling profile context above), but flash-lite sometimes refuses with "as
-        // an AI assistant I don't assign ratings". ADDITIVELY prepend the skill
-        // answer-contract (which forbids the refusal and demands a grounded number)
-        // WITHOUT dropping the profile grounding (release 2026-06-07).
-        if (answerPlan.answerType === 'skill_experience_answer') {
-          const skillContract = formatAnswerPlanForPrompt(answerPlan, false);
-          context = context ? `${skillContract}\n\n${context}` : skillContract;
+        // MANUAL REGRESSION FIX (release 2026-06-08): for ANY profile-required
+        // candidate answer type (jd_fit / skill / behavioral / project / experience /
+        // identity / negotiation), ADDITIVELY prepend the answer-contract — the
+        // answerType + the adaptive STYLE directive + the strict response template —
+        // WITHOUT dropping the rolling profile grounding. Without this the model
+        // received the profile facts as raw context with no instruction and collapsed
+        // EVERY non-fast-path question into the generic self-intro (the exact bug the
+        // user hit: "why should we hire you", "rate your Python", "JD fit", "what gap"
+        // all returned the same intro). The contract makes the model produce the RIGHT
+        // answer type AND honor the requested style (one-line / bullets / detailed).
+        const CANDIDATE_CONTRACT_TYPES = new Set([
+          'identity_answer', 'profile_fact_answer', 'experience_answer', 'project_answer',
+          'project_followup_answer', 'skills_answer', 'skill_experience_answer',
+          'jd_fit_answer', 'gap_analysis_answer', 'behavioral_interview_answer', 'negotiation_answer',
+        ]);
+        const wantsCandidateContract = CANDIDATE_CONTRACT_TYPES.has(answerPlan.answerType)
+          // a styled question ALWAYS gets the contract so the style reaches the model.
+          || (answerPlan.answerStyle && answerPlan.answerStyle !== 'default');
+        if (wantsCandidateContract && !isContractEnforced && !isCodingChat) {
+          const candidateContract = formatAnswerPlanForPrompt(answerPlan, false);
+          context = context ? `${candidateContract}\n\n${context}` : candidateContract;
         }
 
         // Use CHAT_MODE_PROMPT for general chat — bypasses the interview-copilot

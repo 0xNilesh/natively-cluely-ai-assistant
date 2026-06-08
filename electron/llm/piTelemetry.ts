@@ -50,7 +50,7 @@ type Sink = (rec: PiTelemetryRecord) => void;
 const ALLOWED_KEYS = new Set<string>([
   // routing / answer markers
   'event', 'answerType', 'mode', 'surface', 'routeSource', 'profilePolicy', 'isCoding',
-  'reason', 'via', 'resolved', 'questionType', 'detectedSpeaker', 'isFollowUp',
+  'reason', 'via', 'resolved', 'questionType', 'detectedSpeaker', 'isFollowUp', 'answerStyle',
   // session-memory markers (KIND/bucket only — never the value)
   'recalledKind', 'memoryKind', 'ageBucket', 'memItemCount', 'memNotes', 'memSize',
   'resolvedFollowup', 'isClarification', 'blockedByMode', 'compBlocked', 'correctionApplied',
