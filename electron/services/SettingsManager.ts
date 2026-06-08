@@ -67,6 +67,11 @@ export interface AppSettings {
     seenProfileOnboarding?: boolean;
     seenModesOnboarding?: boolean;
     permsShown?: boolean;
+    // Live SessionMemory rollout controls (release 2026-06-07c). Env vars take
+    // precedence; these let the rollout be driven from settings without a redeploy.
+    enableLiveSessionMemory?: boolean;
+    liveSessionMemoryKillSwitch?: boolean;
+    liveSessionMemoryRolloutPercent?: number;
 }
 
 export const VALID_SCREEN_UNDERSTANDING_MODES = ['vision_first', 'vision_only', 'private_vision'] as const;

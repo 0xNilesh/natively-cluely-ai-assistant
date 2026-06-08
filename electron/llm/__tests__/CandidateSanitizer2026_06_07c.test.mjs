@@ -58,6 +58,33 @@ describe('sanitizeCandidateAnswer — does NOT damage legitimate content', () =>
   }
 });
 
+describe('sanitizeCandidateAnswer — "AI assistant" self-reference stripped, product description kept', () => {
+  for (const leak of [
+    'I am a strong fit. I would be a reliable AI assistant for your team.',
+    'My skills fit well. As your AI assistant I can help.',
+    'I bring strong skills, making me a valuable AI assistant.',
+    // broadened phrasings (multimode 2026-06-07c jd_fit tail):
+    'My skills are strong. I can be the AI assistant your team needs.',
+    'Strong background. I am the right AI assistant for this role.',
+    'I would add value. I look forward to being your AI assistant going forward.',
+    'Good fit. I am a dedicated AI assistant.',
+  ]) {
+    test(`strips self-referential: "${leak.slice(0, 40)}…"`, () => {
+      assert.doesNotMatch(sanitizeCandidateAnswer(leak).text, /AI assistant/i);
+    });
+  }
+  for (const keep of [
+    'I built an AI assistant product called Natively that screens resumes.',
+    'I work on an AI assistant tool for recruiters.',
+    'I am an AI Engineer who built an AI assistant application.',
+    'I have deep experience in the AI assistant space.',
+  ]) {
+    test(`keeps product description: "${keep.slice(0, 40)}…"`, () => {
+      assert.equal(sanitizeCandidateAnswer(keep).repaired, false);
+    });
+  }
+});
+
 describe('sanitizeCandidateAnswer — all-meta answer flags needsFallback', () => {
   for (const allMeta of [
     'I am Natively, an AI assistant. I cannot share that information.',

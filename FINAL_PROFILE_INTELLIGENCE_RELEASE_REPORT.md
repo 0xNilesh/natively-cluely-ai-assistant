@@ -1,6 +1,59 @@
+# Final Profile Intelligence Release Report — 2026-06-07c (RELEASE HARDENING)
+
+> **Newest round** — final production hardening of the live SessionMemory rollout.
+> Detail: `FINAL_RELEASE_HARDENING_REPORT.md`, `SESSION_MEMORY_ROLLOUT_REPORT.md`,
+> `OBSERVABILITY_RELEASE_REPORT.md`, `PROVIDER_RESILIENCE_FINAL_REPORT.md`,
+> `ELECTRON_RUNTIME_TEST_REPORT.md`.
+>
+> | area | result |
+> |---|---|
+> | Gradual rollout | percent gate + deterministic FNV session bucketing + kill switch (re-read every call) |
+> | Observability | marker-only `piTelemetry` with an **allowlist** scrub (raw resume/JD/salary/transcript/answer/PII can never be recorded) |
+> | Provider resilience | `classifyProviderError` taxonomy + deterministic profile fallback on stream error (no empty when fallback exists; gated to profile-required, can't leak into coding) |
+> | Electron/CI | **fixed the OpenAIRealtimeGAProtocol CI hang** (clean exit); 0 new failures from this work; smoke 6/6 |
+> | Tests | **1497 llm pass / 0 fail** (3× stable); route 1000/1000 + 50/50; all 3 resolution benchmarks 100% |
+> | Senior reviews | @code-reviewer + @test-engineer → "ship behind the flag"; 2 HIGH telemetry-leak findings FIXED via allowlist |
+>
+> Verdict: **release-ready**; live SessionMemory ships **behind the default-OFF flag**
+> with deterministic rollout + kill switch. Keep OFF in prod → internal soak →
+> 5/25/50% beta with telemetry watch → default ON after clean telemetry. Premium
+> pointer: no update.
+
+---
+
+# Final Profile Intelligence Release Report — 2026-06-07c (LIVE session-memory integration)
+
+> Prior round — wires the validated long-session SessionMemory into the LIVE
+> IntelligenceEngine "What to answer?" path behind a default-OFF feature flag
+> (`NATIVELY_ENABLE_LIVE_SESSION_MEMORY`). Full detail:
+> `FINAL_LIVE_SESSION_MEMORY_INTEGRATION_REPORT.md`, `LIVE_WTA_SESSION_MEMORY_REPORT.md`,
+> `LIVE_MANUAL_SESSION_MEMORY_REPORT.md`.
+>
+> | metric | result |
+> |---|---|
+> | SessionMemory live-wired | **Yes** (WTA path; default-OFF flag; old path unchanged when off) |
+> | Live-session-memory benchmark (wired path) | **100% / 100%**, 0 leaks, resolve p95 1ms |
+> | Multimode-1000 (live flag ON) | **100%** pass, route 100%, safety 100%, 0 leaks |
+> | Electron-runtime smoke | 6/6 |
+> | llm + codeVerification tests | **1317 pass / 0 fail** |
+> | Senior reviews | @test-engineer found a CRITICAL ms→s unit bug + @code-reviewer a HIGH coding-boundary gap — BOTH FIXED + guard tests |
+>
+> THE CRITICAL CATCH: the engine fed millisecond timestamps into a seconds-based
+> half-life decay → long-range recall would have silently died after ~15 real seconds
+> (a 1-hour gap = 3.6M "seconds" → decayed to ~0). Fixed with `Math.floor(ts/1000)` +
+> a wide 7200s memory window + non-skippable guard tests. The HIGH: a coding question
+> inside a `technical-interview` session resolved under the interview boundary (which
+> allows project recall) because ModeTemplateType never maps to `coding` — fixed by
+> deriving the effective memory mode from the QUESTION's intent (`effectiveMemoryMode`).
+>
+> Verdict: **production-ready behind the default-OFF flag**; soak internally, then flip
+> on after a clean live soak. Premium pointer: no update.
+
+---
+
 # Final Profile Intelligence Release Report — 2026-06-07c (follow-up stability hardening)
 
-> Latest round. Adds genuine long-session follow-up stability + provider resilience
+> Prior round. Adds genuine long-session follow-up stability + provider resilience
 > on top of the 2026-06-07 multimode work (below). Detailed companion reports:
 > `FINAL_FOLLOWUP_STABILITY_RELEASE_REPORT.md`, `LONG_SESSION_MEMORY_TEST_REPORT.md`,
 > `PROVIDER_RESILIENCE_REPORT.md`, `benchmarks/profile-intelligence/final_release_eval_report.md`.

@@ -798,6 +798,10 @@ const SKILL_EXPERIENCE_PATTERNS = [
   // "how strong/good/proficient is your <skill>", "how many years of <skill> do you
   // have" — proficiency/experience probes about the USER (1000-q 2026-06-06b).
   /\bhow (strong|good|solid|proficient|deep|extensive) (is|are) (your|ur)\b/i,
+  // "how is your SQL/Python/React?" — a bare proficiency probe naming a skill/tech.
+  // Requires a recognized tech token so "how is your day/weekend" doesn't match
+  // (release 2026-06-07c: live stale-vs-fresh skill follow-up).
+  /\bhow (is|are|s) (your|ur) (python|sql|java(?:script)?|typescript|react|node(?:\.?js)?|c\+\+|go(?:lang)?|rust|aws|gcp|azure|docker|kubernetes|graphql|rest|fastapi|django|flask|spring|pandas|numpy|spark|hadoop|tableau|power\s?bi|excel|tensorflow|pytorch|backend|frontend|full[\s-]?stack|databases?|machine learning|sql skills|coding skills)\b/i,
   /\bhow many years (of|with)\b.{0,30}\b(do you have|experience|you got)\b/i,
   /\bhow (much|many years) (of )?experience\b/i,
   /\byour experience (with|in|using)\b/i,

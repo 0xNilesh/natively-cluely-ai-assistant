@@ -11,6 +11,8 @@ import {
     prepareTranscriptForWhatToAnswer, buildTemporalContext,
     AssistantResponse as LLMAssistantResponse, classifyIntent, planNextAssistantAction, PlannerDecision,
     extractLatestQuestion, toCandidateFraming, planAnswer, validateAnswerStructure, isCodingAnswerType, resolveFollowUp, resolveFollowUpOrClarify,
+    isLiveSessionMemoryEnabled, resolveLiveFollowup, toMemoryMode, toSurface, effectiveMemoryMode,
+    resolveLiveSessionMemoryConfig, piTelemetry, ageBucket,
     buildContextRoute, summarizeContextRoute, shouldThrottleTrigger,
     validateProfileOutput, buildProfileRepairInstruction, sanitizeCandidateAnswer, CANDIDATE_VOICE_ANSWER_TYPES,
     raceStreamWithDeadline, firstUsefulDeadlineMs, LIVE_INTER_TOKEN_STALL_MS, LIVE_TOTAL_HARD_TIMEOUT_MS
@@ -117,6 +119,13 @@ export interface IntelligenceModeEvents {
 export class IntelligenceEngine extends EventEmitter {
     // Mode state
     private activeMode: IntelligenceMode = 'idle';
+
+    // Live SessionMemory window (seconds): how far back to gather turns when building
+    // the per-turn memory for long-range follow-up recall. Wide (2h) so a project
+    // named at minute 1 is still present at minute 62 — distinct from the 180s ANSWER
+    // window. Capped by SessionTracker.maxContextItems (500). Half-life decay (in
+    // SessionMemory) still governs salience; this just ensures the entity is present.
+    private readonly LIVE_MEMORY_WINDOW_SECONDS = 7200;
 
     // Mode-specific LLMs
     private answerLLM: AnswerLLM | null = null;
@@ -728,18 +737,69 @@ export class IntelligenceEngine extends EventEmitter {
                     const latestQ = extractedQuestion.latestQuestion.trim().toLowerCase();
                     const priorInterviewer = [...transcriptTurns].reverse()
                         .find((t) => t.role === 'interviewer' && t.text.trim().toLowerCase() !== latestQ);
-                    const fr = resolveFollowUpOrClarify({
-                        latestQuestion: extractedQuestion.latestQuestion,
-                        previousQuestion: priorInterviewer?.text,
-                        lastEntity: extractedQuestion.followUpTarget || undefined,
-                        surface: 'what_to_answer',
-                        hasPriorContext: Boolean(priorInterviewer?.text) || Boolean(extractedQuestion.followUpTarget),
+
+                    // LIVE SESSION MEMORY (release 2026-06-07c, flag-gated): when
+                    // enabled, resolve the follow-up against the FULL session memory
+                    // (long-range entity recall, mode boundaries, corrections) instead
+                    // of just the single prior turn. Flag OFF → the proven
+                    // single-prior-turn path below runs unchanged.
+                    let fr: ReturnType<typeof resolveFollowUpOrClarify> & { recalledEntity?: string; recalledAgeSeconds?: number; resolvedVia?: string };
+                    // Resolve the rollout decision for THIS session (deterministic
+                    // per-session bucketing for the percentage gate; kill switch wins).
+                    const lsmConfig = resolveLiveSessionMemoryConfig(this.currentSessionId ?? undefined);
+                    piTelemetry.emit('wta_live_session_memory_enabled', {
+                        enabled: lsmConfig.enabled, reason: lsmConfig.reason,
+                        rolloutPercent: lsmConfig.rolloutPercent, bucket: lsmConfig.bucket,
+                        killSwitch: lsmConfig.killSwitch,
                     });
+                    if (lsmConfig.enabled) {
+                        const modeId = this.getActiveModeId();
+                        // CRITICAL (code-review 2026-06-07c): SessionMemory's half-life
+                        // decay is defined in SECONDS, but SessionTracker timestamps are
+                        // wall-clock MILLISECONDS — feeding ms would collapse a 1-hour
+                        // half-life to a ~15-SECOND window (everything decays to 0). And
+                        // the 180s answer window (`transcriptTurns`) drops the very
+                        // long-range entities this feature targets. So build the memory
+                        // turns from a WIDE window (the whole session, capped) and
+                        // convert ms → SECONDS here.
+                        const memWindowTurns = this.session.getContext(this.LIVE_MEMORY_WINDOW_SECONDS).map(item => ({
+                            role: item.role, text: item.text, t: Math.floor(item.timestamp / 1000),
+                        }));
+                        const latestTurnSec = Math.floor((transcriptTurns[transcriptTurns.length - 1]?.timestamp ?? Date.now()) / 1000);
+                        // The EFFECTIVE memory mode is derived from the QUESTION's intent,
+                        // not just the ambient ModesManager mode (code-review 2026-06-07c
+                        // HIGH): a coding/SQL/technical question inside a technical-
+                        // interview session must use the restrictive `coding` boundary so
+                        // the interview project is NOT recalled into a coding answer; a
+                        // comp question uses `negotiation`. ModeTemplateType can't express
+                        // these, so plan the question to get its answer type first.
+                        const intentType = planAnswer({
+                            question: extractedQuestion.latestQuestion,
+                            source: 'what_to_answer',
+                            speakerPerspective: 'interviewer',
+                        }).answerType;
+                        fr = resolveLiveFollowup({
+                            turns: memWindowTurns,
+                            latestQuestion: extractedQuestion.latestQuestion,
+                            now: latestTurnSec,
+                            mode: effectiveMemoryMode(modeId, intentType),
+                            surface: toSurface(modeId, true),
+                        }) as any;
+                    } else {
+                        fr = resolveFollowUpOrClarify({
+                            latestQuestion: extractedQuestion.latestQuestion,
+                            previousQuestion: priorInterviewer?.text,
+                            lastEntity: extractedQuestion.followUpTarget || undefined,
+                            surface: 'what_to_answer',
+                            hasPriorContext: Boolean(priorInterviewer?.text) || Boolean(extractedQuestion.followUpTarget),
+                        });
+                    }
                     // Context-free bare follow-up ("why?" with no prior turn): emit a
                     // safe clarification deterministically — NEVER fall through to the
                     // LLM (which can self-identify as "an AI assistant" or dump the
                     // profile). No prior context exists, so there's nothing to answer.
                     if (fr.isClarification && fr.clarificationText && !isSpeculative) {
+                        piTelemetry.emit('wta_context_free_clarification', { surface: 'what_to_answer', via: (fr as any).resolvedVia ?? 'clarification' });
                         this.session.addAssistantMessage(fr.clarificationText);
                         this.emit('suggested_answer', fr.clarificationText, extractedQuestion.latestQuestion || 'inferred', 0.9);
                         this.setMode('idle');
@@ -747,9 +807,17 @@ export class IntelligenceEngine extends EventEmitter {
                         return fr.clarificationText;
                     }
                     if (fr && fr.confidence >= 0.7 && fr.resolvedQuestion && !fr.isClarification) {
+                        const via = (fr as any).resolvedVia;
                         extractedQuestion.latestQuestion = fr.resolvedQuestion;
                         if (fr.resolvedEntity) extractedQuestion.followUpTarget = fr.resolvedEntity;
-                        trace.mark('repair_used', { reason: 'followup_resolved', resolved: fr.reason });
+                        trace.mark('repair_used', { reason: via === 'session_memory' ? 'session_memory_followup' : 'followup_resolved', resolved: fr.reason });
+                        // MARKER-ONLY: recalled KIND/age bucket, never the entity value.
+                        piTelemetry.emit('wta_live_followup_resolved', {
+                            via: via ?? 'prior_turn', answerType: fr.resolvedAnswerType,
+                            recalledKind: (fr as any).recalledEntity ? 'entity' : 'none',
+                            ageBucket: ageBucket((fr as any).recalledAgeSeconds),
+                            reason: fr.reason,
+                        });
                     }
                 } catch { /* keep extractor result */ }
             }
@@ -1892,6 +1960,18 @@ export class IntelligenceEngine extends EventEmitter {
             this.activeMode = mode;
             this.emit('mode_changed', mode);
         }
+    }
+
+    /**
+     * The ModesManager active-mode TYPE id ('general'/'sales'/'technical-interview'/…)
+     * for live session-memory routing. Read defensively (dynamic require avoids a
+     * load-time cycle); returns 'general' when unavailable. Never throws.
+     */
+    private getActiveModeId(): string {
+        try {
+            const { ModesManager } = require('./services/ModesManager') as typeof import('./services/ModesManager');
+            return ModesManager.getInstance().getActiveMode()?.templateType || 'general';
+        } catch { return 'general'; }
     }
 
     getActiveMode(): IntelligenceMode {

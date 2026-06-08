@@ -44,6 +44,14 @@ export { SessionMemory, isKindAllowedInMode } from "./SessionMemory";
 export type { MemoryMode, MemoryItemKind, MemoryItem, MemoryQuery, MemoryRecall } from "./SessionMemory";
 export { resolveSessionFollowup } from "./sessionFollowupResolver";
 export type { SessionFollowupInput, SessionFollowupResult } from "./sessionFollowupResolver";
+export { extractTranscriptEntities, isCorrectionTurn, isExplicitCrossModeInvite } from "./transcriptEntityExtractor";
+export type { ExtractedEntity } from "./transcriptEntityExtractor";
+export { isLiveSessionMemoryEnabled, liveSessionMemoryMaxItems, liveSessionMemoryDebug, __resetLiveSessionMemoryCache, resolveLiveSessionMemoryConfig, sessionBucket } from "./liveSessionMemoryConfig";
+export type { LiveSessionMemoryRolloutConfig } from "./liveSessionMemoryConfig";
+export { piTelemetry, scrubTelemetry, ageBucket } from "./piTelemetry";
+export type { PiTelemetryEvent, PiTelemetryRecord } from "./piTelemetry";
+export { resolveLiveFollowup, isContextFreeBareFollowup, toMemoryMode, toSurface, effectiveMemoryMode } from "./liveSessionMemory";
+export type { LiveTurn, LiveResolveInput } from "./liveSessionMemory";
 export {
   raceStreamWithDeadline, firstUsefulDeadlineMs,
   LIVE_FIRST_USEFUL_BUDGET_MS, LIVE_PROVIDER_FIRST_USEFUL_HARD_TIMEOUT_MS,
