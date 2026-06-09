@@ -1038,11 +1038,12 @@ export function initializeIpcHandlers(appState: AppState): void {
                   const repairInstruction = buildProfileRepairInstruction({ ok: false, violations: [critical] } as any);
                   const repairPrompt = `${repairInstruction}\n\nCandidate facts (ground every claim in these; second person to the user is fine, but NEVER say you are Natively or an AI, and NEVER claim the profile is missing):\n${facts}\n\nQuestion: ${message}\n\nRewrite the answer now.`;
                   let repaired = '';
-                  // Deadline-guarded (4s) so a stalled repair provider can't re-hang
-                  // the request after a streamed answer already showed (Issue 1).
+                  // Deadline-guarded (7s) so a stalled repair provider can't re-hang
+                  // the request after a streamed answer already showed (Issue 1). 7s
+                  // (was 4s) clears MiniMax's 4-6s first-token when it's the fallback.
                   await raceStreamWithDeadline({
                     stream: llmHelper.streamChat(repairPrompt, undefined, undefined, undefined, true, true) as AsyncGenerator<string>,
-                    firstUsefulDeadlineMs: 4000,
+                    firstUsefulDeadlineMs: 7000,
                     isUsefulYet: () => repaired.length >= 5,
                     shouldAbort: () => repaired.length > 1200,
                     onToken: (tok: string) => { repaired += tok; },
@@ -1176,11 +1177,12 @@ export function initializeIpcHandlers(appState: AppState): void {
                     question: message,
                     correct: async (repairPrompt: string) => {
                       // Background coding-correction (post-answer). Deadline-guarded
-                      // so a stalled provider can't leave a hung background task.
+                      // so a stalled provider can't leave a hung background task. 7s
+                      // (was 6s) clears MiniMax's 4-6s first-token when it's the fallback.
                       let fixed = '';
                       await raceStreamWithDeadline({
                         stream: llmHelper.streamChat(repairPrompt, undefined, undefined, undefined, true, true) as AsyncGenerator<string>,
-                        firstUsefulDeadlineMs: 6000,
+                        firstUsefulDeadlineMs: 7000,
                         isUsefulYet: () => fixed.length >= 5,
                         onToken: (tok: string) => { fixed += tok; },
                       });

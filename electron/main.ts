@@ -2,11 +2,39 @@ import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, systemPref
 import * as crypto from "crypto"
 import path from "path"
 import fs from "fs"
+import dns from "dns"
 import { SystemAudioHealthClassifier } from "./audio/systemAudioHealthClassifier.mjs"
 import { autoUpdater } from "electron-updater"
+
+// Override global dns.lookup to resolve macOS system resolver issues with api.natively.software
+const originalLookup = dns.lookup;
+dns.lookup = function(hostname: any, options: any, callback: any) {
+  if (typeof options === 'function') {
+    callback = options;
+    options = {};
+  }
+  if (hostname === 'api.natively.software') {
+    dns.resolve4(hostname, (err, addresses) => {
+      if (err || !addresses.length) {
+        originalLookup(hostname, options, callback);
+      } else {
+        const addr = addresses[0];
+        if (options && (options as any).all) {
+          callback(null, [{ address: addr, family: 4 }] as any);
+        } else {
+          callback(null, addr, 4);
+        }
+      }
+    });
+  } else {
+    originalLookup(hostname, options, callback);
+  }
+} as any;
+
 if (!app.isPackaged) {
   require('dotenv').config();
 }
+
 
 /**
  * Whether THIS build carries a real Developer ID signature.

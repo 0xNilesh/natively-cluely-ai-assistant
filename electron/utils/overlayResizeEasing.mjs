@@ -18,14 +18,59 @@
 // replaces the old spring (bounce: 0.16), whose overshoot was pushed verbatim
 // to setBounds and read as a cheap end-of-animation snap.
 
-/** Total resize duration in milliseconds. 280ms reads as immediate-but-smooth
- *  for ~180px of travel; long enough to feel deliberate, short enough that a
- *  frequent coding-expansion doesn't feel sluggish. */
-export const OVERLAY_RESIZE_DURATION_MS = 280;
+/** Total resize duration in milliseconds. 420ms for ~180px of glass travel:
+ *  long enough to read as a weighted physical object settling (280ms felt
+ *  thin/teleporty), short enough that frequent coding-expansion isn't sluggish. */
+export const OVERLAY_RESIZE_DURATION_MS = 420;
 
 /**
- * easeOutQuint — fast initial response, long gentle settle, zero overshoot.
- * f(0)=0, f(1)=1, monotonically increasing on [0,1].
+ * The iOS drawer / sheet curve (Ionic/Vaul `cubic-bezier(0.32, 0.72, 0, 1)`).
+ * Heavy front-loaded ease-out that decelerates into a dead stop with ZERO
+ * overshoot — reads as a weighted pane settling, not a spring bounce. Exposed
+ * as a 4-tuple so framer-motion can consume it directly as `ease`.
+ * @type {[number, number, number, number]}
+ */
+export const OVERLAY_RESIZE_EASE = [0.32, 0.72, 0, 1];
+
+/**
+ * Cubic-bezier evaluator for the drawer curve above. framer-motion handles the
+ * tween itself from OVERLAY_RESIZE_EASE; this is here so any pure consumer
+ * (tests, a main-process sampler) can compute eased progress identically.
+ * Solves the bezier for x(t)=progress via Newton/​bisection. f(0)=0, f(1)=1,
+ * monotonic, no overshoot.
+ * @param {number} t normalized time in [0,1]
+ * @returns {number} eased progress in [0,1]
+ */
+export function easeOverlayResize(t) {
+  if (t <= 0) return 0;
+  if (t >= 1) return 1;
+  const [x1, y1, x2, y2] = OVERLAY_RESIZE_EASE;
+  // Cubic bezier with P0=(0,0), P3=(1,1). Find the parameter u where x(u)=t,
+  // then return y(u). x(u) is monotonic for these control points, so bisection
+  // converges cleanly without derivatives.
+  const cx = 3 * x1;
+  const bx = 3 * (x2 - x1) - cx;
+  const ax = 1 - cx - bx;
+  const cy = 3 * y1;
+  const by = 3 * (y2 - y1) - cy;
+  const ay = 1 - cy - by;
+  const sampleX = (u) => ((ax * u + bx) * u + cx) * u;
+  const sampleY = (u) => ((ay * u + by) * u + cy) * u;
+  let lo = 0;
+  let hi = 1;
+  let u = t;
+  for (let i = 0; i < 24; i++) {
+    const x = sampleX(u) - t;
+    if (Math.abs(x) < 1e-5) break;
+    if (x > 0) hi = u;
+    else lo = u;
+    u = (lo + hi) / 2;
+  }
+  return sampleY(u);
+}
+
+/**
+ * easeOutQuint — retained for any legacy caller. Prefer easeOverlayResize.
  * @param {number} t normalized time in [0,1]
  * @returns {number} eased progress in [0,1]
  */
@@ -50,7 +95,7 @@ export function easeOutQuint(t) {
 export function widthAt(fromWidth, toWidth, elapsedMs, durationMs = OVERLAY_RESIZE_DURATION_MS) {
   if (durationMs <= 0) return toWidth;
   const t = elapsedMs <= 0 ? 0 : elapsedMs >= durationMs ? 1 : elapsedMs / durationMs;
-  return fromWidth + (toWidth - fromWidth) * easeOutQuint(t);
+  return fromWidth + (toWidth - fromWidth) * easeOverlayResize(t);
 }
 
 /**

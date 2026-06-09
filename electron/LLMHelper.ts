@@ -127,6 +127,14 @@ const CLAUDE_MAX_OUTPUT_TOKENS = 64000
 // connect that then prefills slowly. Override per-call for non-interactive use.
 const INTERACTIVE_CONNECT_TIMEOUT_MS = 4_000;
 
+// First-useful-token budget for the Natively gateway on the TEXT path. Larger than
+// the shared 2.5s text default because the gateway's server-side fallback chain can
+// land on MiniMax (first token 3.3-7.7s); a 2.5s cap aborts it before it speaks.
+// 8s == LIVE_TOTAL_HARD_TIMEOUT_MS (the outer live-deadline ceiling), so this inner
+// per-provider gate never fires before the single source-of-truth deadline. See the
+// natively text-provider registration for the full rationale.
+const NATIVELY_TEXT_TTFT_MS = 8_000;
+
 // ── Deterministic sampling for interview/coding answers (REPORT §22 D1) ──────
 // The text streaming methods previously used scattered temperatures (0.3/0.4/
 // 0.7/1.0) and no seed, so the same question produced structurally different
@@ -3939,8 +3947,18 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         const textProviders: TextStreamProvider[] = [];
         let prio = 0;
         // Primary: Natively (fast connect budget — TTFT race handles slow prefill).
+        // Per-provider TTFT override: the gateway's server-side chain falls back to
+        // MiniMax (a STRONG frontier fallback) when the Gemini chain is down, and
+        // MiniMax's first token lands at 3.3-7.7s. The shared text default of 2.5s
+        // (DEFAULT_TEXT_FALLBACK_CONFIG) would abort that gateway stream before
+        // MiniMax ever emits a token, defeating the fallback and failing over to the
+        // client-side Groq/Gemini providers that are typically ALSO down in that
+        // scenario. 8s (= LIVE_TOTAL_HARD_TIMEOUT_MS, the outer live ceiling) lets a
+        // slow-MiniMax gateway commit while still failing over fast on a genuinely
+        // dead gateway. Mirrors the vision path, which already sets FLASH_TTFT_MS here.
         textProviders.push({
           id: 'natively', name: 'Natively API', isLocal: false, priority: prio++,
+          ttftTimeoutMs: NATIVELY_TEXT_TTFT_MS,
           open: (sig) => this.streamWithNatively(userContent, finalSystemPrompt, imagePaths, sig, INTERACTIVE_CONNECT_TIMEOUT_MS),
         });
         // Fallback: Groq (key more commonly available than Gemini).

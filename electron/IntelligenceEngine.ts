@@ -1236,13 +1236,15 @@ export class IntelligenceEngine extends EventEmitter {
                             `${repairInstruction}\n\nCandidate facts (ground every claim in these, first person, never say you are Natively or an AI):\n${candidateProfile}\n\nQuestion: ${question || ''}\n\nRewrite the answer now as the candidate.`;
                         let repaired = '';
                         // Bounded single regeneration via the centralized deadline
-                        // driver (4s) so a stalled repair provider can't re-hang the
-                        // live answer after text already showed. Fire-and-forget
-                        // cleanup — no `await iterator.return()` anti-pattern.
+                        // driver (7s) so a stalled repair provider can't re-hang the
+                        // live answer after text already showed. 7s (was 4s) clears
+                        // MiniMax's 4-6s first-token so a fallback-served repair isn't
+                        // aborted to nothing. Fire-and-forget cleanup — no
+                        // `await iterator.return()` anti-pattern.
                         try {
                             await raceStreamWithDeadline({
                                 stream: this.llmHelper.streamChat(repairPrompt, undefined, undefined, undefined, true, true) as AsyncGenerator<string>,
-                                firstUsefulDeadlineMs: 4000,
+                                firstUsefulDeadlineMs: 7000,
                                 isUsefulYet: () => repaired.length >= 5,
                                 shouldAbort: () => repaired.length > 1200,
                                 onToken: (tok: string) => { repaired += tok; },
@@ -1415,11 +1417,12 @@ export class IntelligenceEngine extends EventEmitter {
                 correct: async (repairPrompt: string) => {
                     // Background coding-correction (post-answer, fire-and-forget) —
                     // deadline-guarded so a stalled provider can't leave a hung
-                    // background task / leaked request (Issue 1 consistency).
+                    // background task / leaked request (Issue 1 consistency). 7s (was
+                    // 6s) clears MiniMax's 4-6s first-token when it's the fallback.
                     let fixed = '';
                     await raceStreamWithDeadline({
                         stream: this.llmHelper.streamChat(repairPrompt, undefined, undefined, undefined, true, true) as AsyncGenerator<string>,
-                        firstUsefulDeadlineMs: 6000,
+                        firstUsefulDeadlineMs: 7000,
                         isUsefulYet: () => fixed.length >= 5,
                         onToken: (tok: string) => { fixed += tok; },
                     });

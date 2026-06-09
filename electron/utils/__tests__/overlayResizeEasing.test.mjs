@@ -2,10 +2,51 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   OVERLAY_RESIZE_DURATION_MS,
+  OVERLAY_RESIZE_EASE,
+  easeOverlayResize,
   easeOutQuint,
   widthAt,
   isResizeComplete,
 } from '../overlayResizeEasing.mjs';
+
+test('OVERLAY_RESIZE_EASE is the iOS drawer curve', () => {
+  assert.deepEqual(OVERLAY_RESIZE_EASE, [0.32, 0.72, 0, 1]);
+});
+
+test('OVERLAY_RESIZE_DURATION_MS is the tuned 420ms', () => {
+  assert.equal(OVERLAY_RESIZE_DURATION_MS, 420);
+});
+
+test('easeOverlayResize endpoints are exact', () => {
+  assert.equal(easeOverlayResize(0), 0);
+  assert.equal(easeOverlayResize(1), 1);
+});
+
+test('easeOverlayResize clamps out-of-range input', () => {
+  assert.equal(easeOverlayResize(-0.5), 0);
+  assert.equal(easeOverlayResize(1.5), 1);
+});
+
+test('easeOverlayResize is monotonic and never overshoots [0,1]', () => {
+  // Overshoot is forbidden: an eased value >1 would push the CSS panel past the
+  // fixed window edge. The drawer curve must stay strictly within [0,1].
+  let prev = -Infinity;
+  for (let i = 0; i <= 200; i++) {
+    const v = easeOverlayResize(i / 200);
+    assert.ok(v >= 0 && v <= 1, `value ${v} at t=${i / 200} escaped [0,1]`);
+    assert.ok(v >= prev - 1e-9, `not monotonic at t=${i / 200}: ${v} < ${prev}`);
+    prev = v;
+  }
+});
+
+test('easeOverlayResize is ease-OUT (past halfway by the midpoint, gentle tail)', () => {
+  // Drawer curve: decelerating, so >0.5 progress by t=0.5, but NOT as violently
+  // front-loaded as quint — it should land in a tasteful band, not teleport.
+  const mid = easeOverlayResize(0.5);
+  assert.ok(mid > 0.5 && mid < 0.97, `expected 0.5<mid<0.97, got ${mid}`);
+  // Late tail still moving but nearly done.
+  assert.ok(easeOverlayResize(0.9) > 0.97, `expected >0.97 at t=0.9, got ${easeOverlayResize(0.9)}`);
+});
 
 test('easeOutQuint endpoints are exact', () => {
   assert.equal(easeOutQuint(0), 0);

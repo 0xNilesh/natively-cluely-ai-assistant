@@ -483,6 +483,10 @@ interface ElectronAPI {
   setOverlayMousePassthrough: (enabled: boolean) => Promise<{ success: boolean }>;
   toggleOverlayMousePassthrough: () => Promise<{ success: boolean; enabled: boolean }>;
   getOverlayMousePassthrough: () => Promise<boolean>;
+  // Hover-gated click-through: true when the pointer is over the painted panel,
+  // false when over the fixed-width overlay's transparent margins (so clicks
+  // pass through to the app behind). Only affects interactive (non-stealth) mode.
+  setOverlayInteractiveRegion: (overContent: boolean) => Promise<{ success: boolean }>;
   onOverlayMousePassthroughChanged: (callback: (enabled: boolean) => void) => () => void;
 
   // Streaming listeners
@@ -1027,6 +1031,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('set-overlay-mouse-passthrough', enabled),
   toggleOverlayMousePassthrough: () => ipcRenderer.invoke('toggle-overlay-mouse-passthrough'),
   getOverlayMousePassthrough: () => ipcRenderer.invoke('get-overlay-mouse-passthrough'),
+  setOverlayInteractiveRegion: (overContent: boolean) =>
+    ipcRenderer.invoke('set-overlay-interactive-region', overContent),
   setOpenAtLogin: (open: boolean) => ipcRenderer.invoke('set-open-at-login', open),
   getOpenAtLogin: () => ipcRenderer.invoke('get-open-at-login'),
   setDisguise: (mode: 'terminal' | 'settings' | 'activity' | 'none') =>
