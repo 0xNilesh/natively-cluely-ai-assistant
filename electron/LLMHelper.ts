@@ -3,7 +3,7 @@ import Groq from "groq-sdk"
 import OpenAI from "openai"
 import Anthropic from "@anthropic-ai/sdk"
 import fs from "fs"
-import { createHash } from "crypto"
+import { createHash, randomUUID } from "crypto"
 import sharp from "sharp"
 import { ModelVersionManager, ModelFamily, TextModelFamily } from './services/ModelVersionManager'
 import {
@@ -60,6 +60,38 @@ import { CodexCliConfig, CodexCliService, DEFAULT_CODEX_CLI_CONFIG } from './ser
 const execAsync = promisify(exec);
 const NATIVELY_API_URL = (process.env.NATIVELY_API_URL || 'https://api.natively.software').replace(/\/+$/, '');
 
+function nowMs(): number {
+  try {
+    const p = (globalThis as any).performance;
+    if (p && typeof p.now === 'function') return p.now();
+  } catch { /* ignore */ }
+  return Date.now();
+}
+
+function makeRequestId(prefix = 'nat'): string {
+  try { return `${prefix}_${randomUUID()}`; }
+  catch { return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`; }
+}
+
+function summarizeFetchError(err: any): Record<string, unknown> {
+  return {
+    name: err?.name,
+    message: err?.message ?? String(err),
+    code: err?.code,
+    causeName: err?.cause?.name,
+    causeCode: err?.cause?.code,
+    causeMessage: err?.cause?.message,
+  };
+}
+
+function formatFetchError(err: any): string {
+  const s = summarizeFetchError(err);
+  return Object.entries(s)
+    .filter(([, v]) => v !== undefined && v !== null && v !== '')
+    .map(([k, v]) => `${k}=${String(v)}`)
+    .join(' ');
+}
+
 interface OllamaResponse {
   response: string
   done: boolean
@@ -115,6 +147,16 @@ const CLAUDE_MODEL = "claude-sonnet-4-6"
 const DEEPSEEK_MODEL = "deepseek-v4-flash"
 const DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 const DEEPSEEK_MAX_OUTPUT_TOKENS = 8192
+// LiteLLM fronts arbitrary upstream models with widely varying output ceilings.
+// Resolution order per request: (1) user manual override from Settings,
+// (2) per-model budget auto-discovered from the proxy's /model/info
+// (max_output_tokens, the standard LiteLLM model-registry value),
+// (3) this default. All clamped to MIN/MAX.
+const LITELLM_DEFAULT_MAX_OUTPUT_TOKENS = 8192
+const LITELLM_MAX_TOKENS_MIN = 256
+const LITELLM_MAX_TOKENS_MAX = 1048576 // 1M — Gemini-class ceilings exist behind proxies
+// /model/info budgets are cached this long; the proxy's model list rarely churns.
+const LITELLM_MODEL_INFO_TTL_MS = 5 * 60_000
 const MAX_OUTPUT_TOKENS = 65536
 const CLAUDE_MAX_OUTPUT_TOKENS = 64000
 
@@ -213,11 +255,25 @@ export class LLMHelper {
   // DeepSeek is OpenAI-compatible; reuse the OpenAI SDK with a custom baseURL.
   // Kept as a separate client so credentials/scope/telemetry stay provider-specific.
   private deepseekClient: OpenAI | null = null
+  // LiteLLM proxy is OpenAI-compatible (AI gateway fronting 100+ providers).
+  // Same pattern as DeepSeek: OpenAI SDK + custom baseURL, separate client so
+  // credentials/scope/telemetry stay provider-specific.
+  private litellmClient: OpenAI | null = null
   private apiKey: string | null = null
   private groqApiKey: string | null = null
   private openaiApiKey: string | null = null
   private claudeApiKey: string | null = null
   private deepseekApiKey: string | null = null
+  private litellmApiKey: string | null = null
+  private litellmBaseURL: string = "http://localhost:4000/v1"
+  // Manual output-ceiling override (Settings → LiteLLM Proxy dropdown).
+  // null = Auto: resolve per-model from the proxy's /model/info, falling back
+  // to LITELLM_DEFAULT_MAX_OUTPUT_TOKENS for unknown models.
+  private litellmMaxTokens: number | null = null
+  // Per-model output budgets discovered from /model/info (model id → max_output_tokens).
+  private litellmModelBudgets: Map<string, number> = new Map()
+  private litellmModelBudgetsFetchedAt: number = 0
+  private litellmModelBudgetsFetch: Promise<void> | null = null
   private useOllama: boolean = false
   private ollamaModel: string = ""
   private ollamaUrl: string = "http://127.0.0.1:11434"
@@ -449,6 +505,94 @@ export class LLMHelper {
     console.log("[LLMHelper] DeepSeek API Key updated.");
   }
 
+  /**
+   * Configure the LiteLLM proxy. baseURL is required (the proxy location);
+   * apiKey is the optional virtual/master key (`sk-...`). A keyless local
+   * proxy is supported by sending no Authorization header — represented here
+   * as a "dummy" SDK key (the OpenAI SDK requires a non-empty apiKey, but a
+   * keyless proxy ignores it). When auth is enabled on the proxy, the real
+   * key MUST be supplied or every request 401s. maxTokens is the optional
+   * MANUAL output-ceiling override (clamped); 0/undefined → Auto mode, which
+   * resolves each model's budget from the proxy's /model/info.
+   */
+  public setLitellmConfig(apiKey: string, baseURL: string, maxTokens?: number) {
+    const trimmedURL = (baseURL || '').trim();
+    if (!trimmedURL) {
+      this.litellmApiKey = null;
+      this.litellmClient = null;
+      this.litellmBaseURL = "http://localhost:4000/v1";
+      this.litellmMaxTokens = null;
+      this.litellmModelBudgets.clear();
+      this.litellmModelBudgetsFetchedAt = 0;
+      console.log("[LLMHelper] LiteLLM config cleared.");
+      return;
+    }
+    this.litellmApiKey = (apiKey || '').trim() || null;
+    this.litellmBaseURL = trimmedURL;
+    const n = Number(maxTokens);
+    this.litellmMaxTokens = (Number.isFinite(n) && n > 0)
+      ? Math.min(LITELLM_MAX_TOKENS_MAX, Math.max(LITELLM_MAX_TOKENS_MIN, Math.floor(n)))
+      : null; // Auto
+    // Config changed → budgets may belong to a different proxy. Refetch lazily.
+    this.litellmModelBudgets.clear();
+    this.litellmModelBudgetsFetchedAt = 0;
+    this.litellmClient = new OpenAI({ apiKey: this.litellmApiKey || "dummy", baseURL: trimmedURL });
+    console.log(`[LLMHelper] LiteLLM client initialized with base URL: ${trimmedURL}, max_tokens: ${this.litellmMaxTokens ?? 'auto'}`);
+  }
+
+  /**
+   * Refresh the per-model output-budget cache from the proxy's /model/info.
+   * LiteLLM's registry exposes max_output_tokens (and max_tokens as a legacy
+   * alias) per model. Failures are silent — Auto mode then falls back to the
+   * default budget, never blocking a chat request. Concurrent callers share
+   * one in-flight fetch.
+   */
+  private async refreshLitellmModelBudgets(): Promise<void> {
+    if (Date.now() - this.litellmModelBudgetsFetchedAt < LITELLM_MODEL_INFO_TTL_MS) return;
+    if (this.litellmModelBudgetsFetch) return this.litellmModelBudgetsFetch;
+
+    this.litellmModelBudgetsFetch = (async () => {
+      try {
+        // /model/info lives at the proxy ROOT (and also under /v1/) — strip a
+        // trailing /v1 so both base-URL styles users enter work.
+        const root = this.litellmBaseURL.replace(/\/+$/, '').replace(/\/v1$/, '');
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (this.litellmApiKey) headers['Authorization'] = `Bearer ${this.litellmApiKey}`;
+        const resp = await fetch(`${root}/model/info`, { method: 'GET', headers, signal: AbortSignal.timeout(5000) });
+        if (!resp.ok) return;
+        const data: any = await resp.json();
+        const fresh = new Map<string, number>();
+        for (const entry of (data?.data || [])) {
+          const name = entry?.model_name;
+          const budget = Number(entry?.model_info?.max_output_tokens ?? entry?.model_info?.max_tokens);
+          if (name && Number.isFinite(budget) && budget > 0) fresh.set(name, Math.floor(budget));
+        }
+        this.litellmModelBudgets = fresh;
+        console.log(`[LLMHelper] LiteLLM /model/info: cached output budgets for ${fresh.size} model(s)`);
+      } catch {
+        // Proxy may not expose /model/info (older versions, auth) — Auto falls
+        // back to the default budget; the user can always set a manual value.
+      } finally {
+        // Stamp on failure too (negative cache): without this, a proxy lacking
+        // /model/info would add a fetch attempt — up to 5s — to EVERY request.
+        this.litellmModelBudgetsFetchedAt = Date.now();
+        this.litellmModelBudgetsFetch = null;
+      }
+    })();
+    return this.litellmModelBudgetsFetch;
+  }
+
+  /**
+   * Effective max_tokens for a proxied model. Manual override wins; otherwise
+   * the /model/info budget for this model; otherwise the default. Clamped.
+   */
+  private async resolveLitellmMaxTokens(litellmModel: string): Promise<number> {
+    if (this.litellmMaxTokens !== null) return this.litellmMaxTokens; // manual override
+    await this.refreshLitellmModelBudgets();
+    const budget = this.litellmModelBudgets.get(litellmModel) ?? LITELLM_DEFAULT_MAX_OUTPUT_TOKENS;
+    return Math.min(LITELLM_MAX_TOKENS_MAX, Math.max(LITELLM_MAX_TOKENS_MIN, budget));
+  }
+
   public setNativelyKey(key: string | null): void {
     this.nativelyKey = key || null;
     console.log(`[LLMHelper] Natively key ${key ? 'set' : 'cleared'}`);
@@ -567,12 +711,14 @@ export class LLMHelper {
     this.openaiApiKey = null;
     this.claudeApiKey = null;
     this.deepseekApiKey = null;
+    this.litellmApiKey = null;
     this.nativelyKey = null;
     this.client = null;
     this.groqClient = null;
     this.openaiClient = null;
     this.claudeClient = null;
     this.deepseekClient = null;
+    this.litellmClient = null;
     // Destroy rate limiters
     if (this.rateLimiters) {
       Object.values(this.rateLimiters).forEach(rl => rl.destroy());
@@ -616,6 +762,10 @@ export class LLMHelper {
   private isDeepseekModel(modelId: string): boolean {
     if (!modelId) return false;
     return /^deepseek-v\d/.test(modelId.toLowerCase());
+  }
+
+  private isLiteLLMModel(modelId: string): boolean {
+    return !!modelId && modelId.startsWith("litellm/");
   }
 
   private getDeepseekMaxOutput(_modelId: string): number {
@@ -1907,6 +2057,11 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           return await this.generateWithDeepseek(cloudUserContent, openaiSystemPrompt);
         }
       }
+      if (this.isLiteLLMModel(this.currentModelId) && this.litellmClient) {
+        // LiteLLM fronts arbitrary providers; the proxy decides vision support,
+        // so pass images through when present and let the upstream model handle it.
+        return await this.generateWithLiteLLM(cloudUserContent, openaiSystemPrompt, cloudIsMultimodal ? cloudImagePaths : undefined);
+      }
       if (this.isGroqModel(this.currentModelId) && this.groqClient) {
         if (cloudIsMultimodal && cloudImagePaths) {
           return await this.generateWithGroqMultimodal(cloudUserContent, cloudImagePaths, openaiSystemPrompt);
@@ -2294,9 +2449,11 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     if (!nativelyKey) throw new Error('Natively API key not set');
 
     const endpointUrl = `${NATIVELY_API_URL}/v1/chat`;
+    const requestId = makeRequestId('nat_json');
+    const requestStartedAt = nowMs();
     // When the key is the trial sentinel, authenticate with the real trial token
     // instead — the server validates x-trial-token, not __trial__ as an API key.
-    const headers: any = { 'Content-Type': 'application/json' };
+    const headers: any = { 'Content-Type': 'application/json', 'X-Request-Id': requestId };
     if (nativelyKey === TRIAL_SENTINEL_KEY) {
       const { CredentialsManager } = require('./services/CredentialsManager');
       const trialToken = CredentialsManager.getInstance().getTrialToken();
@@ -2350,19 +2507,84 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
     // 8s hard cap: a `fetch failed` network error without this can stall the provider
     // waterfall for 25-30s before the OS-level TCP reset fires.
-    const response = await fetch(endpointUrl, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(8000),
-    });
-
-    if (!response.ok) {
-      const errData = await response.json().catch(() => ({}));
-      throw new Error(`Natively API error ${response.status}: ${errData.error || 'unknown'}`);
+    const timeoutMs = 8000;
+    let response: Response;
+    try {
+      response = await fetch(endpointUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (fetchErr: any) {
+      const durationMs = Math.round(nowMs() - requestStartedAt);
+      console.error('[NativelyAPI] JSON pre-response failure', {
+        requestId,
+        endpoint: endpointUrl,
+        method: 'POST',
+        stage: 'pre_response',
+        model: this.currentModelId,
+        provider: 'natively',
+        timeoutMs,
+        durationMs,
+        error: summarizeFetchError(fetchErr),
+      });
+      throw new Error(`Natively API request failed before response requestId=${requestId} endpoint=${endpointUrl} method=POST timeoutMs=${timeoutMs} durationMs=${durationMs} ${formatFetchError(fetchErr)}`);
     }
 
-    const data = await response.json();
+    const serverRequestId = response.headers.get('x-request-id');
+    if (!response.ok) {
+      const errText = await response.text().catch(() => '');
+      let errData: any = {};
+      try { errData = errText ? JSON.parse(errText) : {}; } catch { errData = {}; }
+      console.error('[NativelyAPI] JSON HTTP failure', {
+        requestId,
+        serverRequestId,
+        endpoint: endpointUrl,
+        method: 'POST',
+        stage: 'http_status',
+        status: response.status,
+        statusText: response.statusText,
+        model: this.currentModelId,
+        provider: 'natively',
+        timeoutMs,
+        durationMs: Math.round(nowMs() - requestStartedAt),
+        responseBody: errText.slice(0, 1000),
+      });
+      throw new Error(`Natively API HTTP ${response.status} requestId=${requestId} serverRequestId=${serverRequestId || 'n/a'} endpoint=${endpointUrl}: ${errData.error || errText.slice(0, 300) || 'unknown'}`);
+    }
+
+    let data: any;
+    try {
+      data = await response.json();
+    } catch (parseErr: any) {
+      console.error('[NativelyAPI] JSON parse failure', {
+        requestId,
+        serverRequestId,
+        endpoint: endpointUrl,
+        method: 'POST',
+        stage: 'after_response',
+        status: response.status,
+        model: this.currentModelId,
+        provider: 'natively',
+        durationMs: Math.round(nowMs() - requestStartedAt),
+        error: summarizeFetchError(parseErr),
+      });
+      throw new Error(`Natively API invalid JSON response requestId=${requestId} serverRequestId=${serverRequestId || 'n/a'} ${formatFetchError(parseErr)}`);
+    }
+    console.log('[NativelyAPI] JSON completed', {
+      requestId,
+      serverRequestId,
+      endpoint: endpointUrl,
+      method: 'POST',
+      status: response.status,
+      model: this.currentModelId,
+      provider: 'natively',
+      serverModel: data?.model,
+      timeoutMs,
+      durationMs: Math.round(nowMs() - requestStartedAt),
+      chars: typeof data?.content === 'string' ? data.content.length : 0,
+    });
     return data.content || '';
   }
 
@@ -2441,6 +2663,46 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       })),
       60000,
       `DeepSeek (${model})`
+    );
+
+    return response.choices[0]?.message?.content || "";
+  }
+
+  /**
+   * Non-streaming generation via a LiteLLM proxy (OpenAI-compatible).
+   * The proxy fronts arbitrary upstream models, so images are forwarded when
+   * present and the upstream decides whether it supports vision.
+   */
+  private async generateWithLiteLLM(userMessage: string, systemPrompt?: string, imagePaths?: string[]): Promise<string> {
+    if (this.isLocalOnlyMode) throw new Error("Cloud providers disabled in local-only mode");
+    if (!this.litellmClient) throw new Error("LiteLLM client not initialized");
+    this.assertOutboundScopes('litellm', userMessage, imagePaths);
+
+    await this.rateLimiters.litellm.acquire();
+
+    const litellmModel = this.currentModelId.replace('litellm/', '');
+    const messages: any[] = [];
+    if (systemPrompt) messages.push({ role: "system", content: systemPrompt });
+    if (imagePaths?.length) {
+      const content: any[] = [{ type: "text", text: userMessage }];
+      for (const p of imagePaths) {
+        const b64 = fs.readFileSync(p).toString("base64");
+        content.push({ type: "image_url", image_url: { url: `data:image/png;base64,${b64}` } });
+      }
+      messages.push({ role: "user", content });
+    } else {
+      messages.push({ role: "user", content: userMessage });
+    }
+
+    const maxTokens = await this.resolveLitellmMaxTokens(litellmModel);
+    const response = await this.withTimeout(
+      this.withRetry(() => this.litellmClient!.chat.completions.create({
+        model: litellmModel,
+        messages,
+        max_tokens: maxTokens,
+      })),
+      60000,
+      `LiteLLM (${litellmModel})`
     );
 
     return response.choices[0]?.message?.content || "";
@@ -3912,6 +4174,15 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       return;
     }
 
+    // LiteLLM (OpenAI-compatible proxy). The proxy decides vision support, so
+    // images are forwarded through when present.
+    if (this.isLiteLLMModel(this.currentModelId) && this.litellmClient) {
+      const litellmSystem = systemPromptOverride || OPENAI_SYSTEM_PROMPT;
+      const finalLitellmSystem = this.injectLanguageInstruction(litellmSystem);
+      yield* this.streamWithLiteLLM(userContent, finalLitellmSystem, (isMultimodal && imagePaths) ? imagePaths : undefined, abortSignal);
+      return;
+    }
+
     // Groq (Text + Multimodal)
     if (this.isGroqModel(this.currentModelId) && this.groqClient) {
       if (isMultimodal && imagePaths) {
@@ -4149,10 +4420,22 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       if (images.length) body.images = images;
     }
 
+    const endpointUrl = `${NATIVELY_API_URL}/v1/chat`;
+    const requestId = makeRequestId('nat_stream');
+    const streamStartedAt = nowMs();
+    let responseStartedAt = 0;
+    let firstTokenAt = 0;
+    let tokenCount = 0;
+    let charCount = 0;
+    let serverRequestId: string | null = null;
+    let responseStatus: number | null = null;
+    let providerModel: string | null = null;
+
     // When the key is the trial sentinel, authenticate with the real trial token.
     const streamHeaders: Record<string, string> = {
       'Content-Type': 'application/json',
       'Accept': 'text/event-stream',
+      'X-Request-Id': requestId,
     };
     if (nativelyKey === TRIAL_SENTINEL_KEY) {
       const { CredentialsManager } = require('./services/CredentialsManager');
@@ -4204,18 +4487,37 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       for (let attempt = 0; attempt < 3; attempt++) {
         if (streamController.signal.aborted) break;
         try {
-          response = await fetch(`${NATIVELY_API_URL}/v1/chat`, {
+          response = await fetch(endpointUrl, {
             method: 'POST',
             headers: streamHeaders,
             body: JSON.stringify(body),
             signal: streamController.signal,
           });
+          responseStartedAt = nowMs();
+          responseStatus = response.status;
+          serverRequestId = response.headers.get('x-request-id');
           lastErr = undefined;
           break;
         } catch (fetchErr: any) {
           lastErr = fetchErr;
-          if (!isDnsError(fetchErr) || attempt >= 2 || streamController.signal.aborted) throw fetchErr;
-          console.warn(`[streamWithNatively] DNS failure (${fetchErr.cause?.code ?? fetchErr.code}), retry ${attempt + 1}/2 in 500ms`);
+          if (!isDnsError(fetchErr) || attempt >= 2 || streamController.signal.aborted) {
+            const durationMs = Math.round(nowMs() - streamStartedAt);
+            console.error('[NativelyAPI] stream pre-response failure', {
+              requestId,
+              endpoint: endpointUrl,
+              method: 'POST',
+              stage: streamController.signal.aborted ? 'connect_timeout_or_abort' : 'pre_response',
+              model: this.currentModelId,
+              provider: 'natively',
+              connectTimeoutMs,
+              durationMs,
+              error: summarizeFetchError(fetchErr),
+              aborted: streamController.signal.aborted,
+              abortReason: (streamController.signal as any).reason?.message ?? (streamController.signal as any).reason,
+            });
+            throw new Error(`Natively API stream request failed before response requestId=${requestId} endpoint=${endpointUrl} method=POST timeoutMs=${connectTimeoutMs} durationMs=${durationMs} ${formatFetchError(fetchErr)}`);
+          }
+          console.warn(`[streamWithNatively] DNS failure req=${requestId} (${fetchErr.cause?.code ?? fetchErr.code}), retry ${attempt + 1}/2 in 500ms`);
           await new Promise<void>(r => setTimeout(r, 500));
         }
       }
@@ -4229,8 +4531,29 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
     if (!response.ok) {
       abortSignal?.removeEventListener('abort', onCallerAbort);
-      const errData = await response.json().catch(() => ({}) as Record<string, unknown>);
-      throw new Error(`Natively API ${response.status}: ${(errData as any).error || 'unknown'}`);
+      const errText = await response.text().catch(() => '');
+      let errData: any = {};
+      try { errData = errText ? JSON.parse(errText) : {}; } catch { errData = {}; }
+      console.error('[NativelyAPI] stream HTTP failure', {
+        requestId,
+        serverRequestId,
+        endpoint: endpointUrl,
+        method: 'POST',
+        stage: 'http_status',
+        status: response.status,
+        statusText: response.statusText,
+        model: this.currentModelId,
+        provider: 'natively',
+        connectTimeoutMs,
+        durationMs: Math.round(nowMs() - streamStartedAt),
+        responseBody: errText.slice(0, 1000),
+      });
+      throw new Error(`Natively API stream HTTP ${response.status} requestId=${requestId} serverRequestId=${serverRequestId || 'n/a'} endpoint=${endpointUrl}: ${errData.error || errText.slice(0, 300) || 'unknown'}`);
+    }
+
+    if (!response.body) {
+      abortSignal?.removeEventListener('abort', onCallerAbort);
+      throw new Error(`Natively API stream missing response body requestId=${requestId} serverRequestId=${serverRequestId || 'n/a'} endpoint=${endpointUrl}`);
     }
 
     // Parse the SSE response body incrementally.
@@ -4261,11 +4584,75 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           let chunk: any;
           try { chunk = JSON.parse(payload); } catch { continue; }
 
-          if (chunk.error) throw new Error(`Server error: ${chunk.error}`);
-          if (typeof chunk.delta === 'string' && chunk.delta) yield chunk.delta;
+          if (chunk.model && !providerModel) providerModel = String(chunk.model);
+          if (chunk.error) {
+            console.error('[NativelyAPI] stream server error event', {
+              requestId,
+              serverRequestId,
+              endpoint: endpointUrl,
+              method: 'POST',
+              stage: firstTokenAt ? 'during_stream' : 'before_first_token',
+              status: responseStatus,
+              model: this.currentModelId,
+              provider: 'natively',
+              serverModel: providerModel,
+              connectTimeoutMs,
+              tfftMs: firstTokenAt ? Math.round(firstTokenAt - streamStartedAt) : null,
+              durationMs: Math.round(nowMs() - streamStartedAt),
+              error: chunk.error,
+              message: chunk.message,
+            });
+            throw new Error(`Natively API stream server error requestId=${requestId} serverRequestId=${serverRequestId || 'n/a'} model=${providerModel || 'unknown'} error=${chunk.error}`);
+          }
+          if (typeof chunk.delta === 'string' && chunk.delta) {
+            if (!firstTokenAt) firstTokenAt = nowMs();
+            tokenCount++;
+            charCount += chunk.delta.length;
+            yield chunk.delta;
+          }
         }
       }
+    } catch (streamErr: any) {
+      console.error('[NativelyAPI] stream read failure', {
+        requestId,
+        serverRequestId,
+        endpoint: endpointUrl,
+        method: 'POST',
+        stage: firstTokenAt ? 'during_stream' : 'before_first_token',
+        status: responseStatus,
+        model: this.currentModelId,
+        provider: 'natively',
+        serverModel: providerModel,
+        connectTimeoutMs,
+        tfftMs: firstTokenAt ? Math.round(firstTokenAt - streamStartedAt) : null,
+        durationMs: Math.round(nowMs() - streamStartedAt),
+        tokens: tokenCount,
+        chars: charCount,
+        error: summarizeFetchError(streamErr),
+      });
+      throw new Error(`Natively API stream failed during read requestId=${requestId} serverRequestId=${serverRequestId || 'n/a'} stage=${firstTokenAt ? 'during_stream' : 'before_first_token'} model=${providerModel || 'unknown'} ${formatFetchError(streamErr)}`);
     } finally {
+      const totalMs = Math.max(1, nowMs() - streamStartedAt);
+      if (tokenCount > 0) {
+        console.log('[NativelyAPI] stream completed', {
+          requestId,
+          serverRequestId,
+          endpoint: endpointUrl,
+          method: 'POST',
+          status: responseStatus,
+          model: this.currentModelId,
+          provider: 'natively',
+          serverModel: providerModel,
+          fallbackUsed: false,
+          connectTimeoutMs,
+          responseHeaderMs: responseStartedAt ? Math.round(responseStartedAt - streamStartedAt) : null,
+          tfftMs: firstTokenAt ? Math.round(firstTokenAt - streamStartedAt) : null,
+          totalStreamMs: Math.round(totalMs),
+          tokens: tokenCount,
+          chars: charCount,
+          tokensPerSec: Number((tokenCount / (totalMs / 1000)).toFixed(2)),
+        });
+      }
       // Always release the connection AND drop the caller-abort listener so
       // we don't leak DOM event subscriptions on long-lived AbortSignals
       // (e.g., the IPC handler's per-stream controller is short-lived, but a
@@ -4483,6 +4870,52 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       temperature: INTERACTIVE_TEMPERATURE,
       seed: INTERACTIVE_SEED, // DeepSeek is OpenAI-compatible and honors seed
       max_tokens: this.getDeepseekMaxOutput(model),
+    }, { signal: abortSignal });
+
+    try {
+      for await (const chunk of stream) {
+        if (abortSignal?.aborted) return;
+        const content = chunk.choices[0]?.delta?.content;
+        if (content) yield content;
+      }
+    } finally {
+      if (abortSignal?.aborted && typeof (stream as any).abort === 'function') (stream as any).abort();
+    }
+  }
+
+  /**
+   * Stream a response from a LiteLLM proxy (OpenAI-compatible). Mirrors the
+   * DeepSeek streaming path: scope-gated, rate-limited, abort-aware. Images are
+   * forwarded when present and the upstream model decides vision support.
+   */
+  private async * streamWithLiteLLM(userMessage: string, systemPrompt?: string, imagePaths?: string[], abortSignal?: AbortSignal): AsyncGenerator<string, void, unknown> {
+    if (this.isLocalOnlyMode) throw new Error("Cloud providers disabled in local-only mode");
+    if (!this.litellmClient) throw new Error("LiteLLM client not initialized");
+    this.assertOutboundScopes('litellm', userMessage, imagePaths);
+
+    await this.rateLimiters.litellm.acquire();
+
+    const litellmModel = this.currentModelId.replace('litellm/', '');
+    const messages: any[] = [];
+    if (systemPrompt) messages.push({ role: "system", content: systemPrompt });
+    if (imagePaths?.length) {
+      const content: any[] = [{ type: "text", text: userMessage }];
+      for (const p of imagePaths) {
+        const b64 = fs.readFileSync(p).toString("base64");
+        content.push({ type: "image_url", image_url: { url: `data:image/png;base64,${b64}` } });
+      }
+      messages.push({ role: "user", content });
+    } else {
+      messages.push({ role: "user", content: userMessage });
+    }
+
+    const maxTokens = await this.resolveLitellmMaxTokens(litellmModel);
+    if (abortSignal?.aborted) return;
+    const stream = await this.litellmClient.chat.completions.create({
+      model: litellmModel,
+      messages,
+      stream: true,
+      max_tokens: maxTokens,
     }, { signal: abortSignal });
 
     try {
