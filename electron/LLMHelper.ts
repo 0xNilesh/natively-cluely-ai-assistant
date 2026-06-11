@@ -274,6 +274,9 @@ export class LLMHelper {
   private litellmModelBudgets: Map<string, number> = new Map()
   private litellmModelBudgetsFetchedAt: number = 0
   private litellmModelBudgetsFetch: Promise<void> | null = null
+  // Bumped on every config change; an in-flight /model/info fetch checks it on
+  // completion and discards its result if the config changed underneath it.
+  private litellmConfigGeneration: number = 0
   private useOllama: boolean = false
   private ollamaModel: string = ""
   private ollamaUrl: string = "http://127.0.0.1:11434"
@@ -522,8 +525,10 @@ export class LLMHelper {
       this.litellmClient = null;
       this.litellmBaseURL = "http://localhost:4000/v1";
       this.litellmMaxTokens = null;
+      this.litellmConfigGeneration++;
       this.litellmModelBudgets.clear();
       this.litellmModelBudgetsFetchedAt = 0;
+      this.litellmModelBudgetsFetch = null;
       console.log("[LLMHelper] LiteLLM config cleared.");
       return;
     }
@@ -534,8 +539,13 @@ export class LLMHelper {
       ? Math.min(LITELLM_MAX_TOKENS_MAX, Math.max(LITELLM_MAX_TOKENS_MIN, Math.floor(n)))
       : null; // Auto
     // Config changed → budgets may belong to a different proxy. Refetch lazily.
+    // Bumping the generation invalidates any IN-FLIGHT /model/info fetch too —
+    // without it, a fetch started against the old proxy could complete after
+    // this point and repopulate the cache with the old proxy's budgets.
+    this.litellmConfigGeneration++;
     this.litellmModelBudgets.clear();
     this.litellmModelBudgetsFetchedAt = 0;
+    this.litellmModelBudgetsFetch = null;
     this.litellmClient = new OpenAI({ apiKey: this.litellmApiKey || "dummy", baseURL: trimmedURL });
     console.log(`[LLMHelper] LiteLLM client initialized with base URL: ${trimmedURL}, max_tokens: ${this.litellmMaxTokens ?? 'auto'}`);
   }
@@ -551,6 +561,9 @@ export class LLMHelper {
     if (Date.now() - this.litellmModelBudgetsFetchedAt < LITELLM_MODEL_INFO_TTL_MS) return;
     if (this.litellmModelBudgetsFetch) return this.litellmModelBudgetsFetch;
 
+    // Snapshot the generation: if setLitellmConfig() runs while this fetch is
+    // in flight, the result belongs to the OLD proxy and must be discarded.
+    const generation = this.litellmConfigGeneration;
     this.litellmModelBudgetsFetch = (async () => {
       try {
         // /model/info lives at the proxy ROOT (and also under /v1/) — strip a
@@ -561,6 +574,7 @@ export class LLMHelper {
         const resp = await fetch(`${root}/model/info`, { method: 'GET', headers, signal: AbortSignal.timeout(5000) });
         if (!resp.ok) return;
         const data: any = await resp.json();
+        if (generation !== this.litellmConfigGeneration) return; // config changed mid-fetch — stale
         const fresh = new Map<string, number>();
         for (const entry of (data?.data || [])) {
           const name = entry?.model_name;
@@ -573,10 +587,14 @@ export class LLMHelper {
         // Proxy may not expose /model/info (older versions, auth) — Auto falls
         // back to the default budget; the user can always set a manual value.
       } finally {
-        // Stamp on failure too (negative cache): without this, a proxy lacking
-        // /model/info would add a fetch attempt — up to 5s — to EVERY request.
-        this.litellmModelBudgetsFetchedAt = Date.now();
-        this.litellmModelBudgetsFetch = null;
+        if (generation === this.litellmConfigGeneration) {
+          // Stamp on failure too (negative cache): without this, a proxy lacking
+          // /model/info would add a fetch attempt — up to 5s — to EVERY request.
+          this.litellmModelBudgetsFetchedAt = Date.now();
+          this.litellmModelBudgetsFetch = null;
+        }
+        // Stale generation: setLitellmConfig already reset the cache fields for
+        // the new proxy — leave them untouched so the next caller refetches.
       }
     })();
     return this.litellmModelBudgetsFetch;
@@ -2686,7 +2704,9 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     if (imagePaths?.length) {
       const content: any[] = [{ type: "text", text: userMessage }];
       for (const p of imagePaths) {
-        const b64 = fs.readFileSync(p).toString("base64");
+        // Async read — a sync read of a multi-MB screenshot would block the
+        // main-process event loop (IPC, window coordination) for its duration.
+        const b64 = (await fs.promises.readFile(p)).toString("base64");
         content.push({ type: "image_url", image_url: { url: `data:image/png;base64,${b64}` } });
       }
       messages.push({ role: "user", content });
@@ -4901,7 +4921,9 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     if (imagePaths?.length) {
       const content: any[] = [{ type: "text", text: userMessage }];
       for (const p of imagePaths) {
-        const b64 = fs.readFileSync(p).toString("base64");
+        // Async read — a sync read of a multi-MB screenshot would block the
+        // main-process event loop (IPC, window coordination) for its duration.
+        const b64 = (await fs.promises.readFile(p)).toString("base64");
         content.push({ type: "image_url", image_url: { url: `data:image/png;base64,${b64}` } });
       }
       messages.push({ role: "user", content });
