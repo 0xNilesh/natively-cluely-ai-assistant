@@ -24,6 +24,7 @@ import { beginTrace, commitTrace } from './intelligence/IntelligenceTrace';
 import { ProfileTreeService } from './intelligence/ProfileTreeService';
 import { isIntelligenceFlagEnabled } from './intelligence/intelligenceFlags';
 import { routeContext } from './intelligence/ContextRouter';
+import { SearchOrchestrator, type SearchCandidate } from './intelligence/SearchOrchestrator';
 import { CHAT_MODE_PROMPT } from './llm/prompts';
 import { isAssistantIdentityQuestion, profileFactsReady } from './llm/manualProfileIntelligence';
 import { buildManualProfileBackendAnswer } from './llm/profileAnswerBackend';
@@ -555,6 +556,15 @@ export function initializeIpcHandlers(appState: AppState): void {
   const { AnswerDiversityGuard } = require('./llm/answerPolish') as typeof import('./llm/answerPolish');
   const _manualDiversityGuard = new AnswerDiversityGuard(20);
 
+  // CONVERSATION MEMORY V2 (Phase 11 wiring, behind conversation_memory_v2_enabled).
+  // The manual chat path is SINGLE-SHOT — no conversation history is threaded to its
+  // IPC handler, so a bare follow-up ("make that shorter", "why?", "continue") with no
+  // pasted context falls to a generic clarification. This per-process store records each
+  // delivered manual answer per sender (= session) so a bare follow-up can resolve
+  // against the prior turn instead. Same-session only (no Hindsight). Bounded per session.
+  const { ConversationMemoryService } = require('./intelligence/ConversationMemoryService') as typeof import('./intelligence/ConversationMemoryService');
+  const _manualConversationMemory = new ConversationMemoryService();
+
   // Identity-probe routing lives in electron/llm/manualIdentityRouting.ts
   // (manual regression 2026-06-12): the old inline IDENTITY_PROBE_RE answered
   // "who are you?" / "what is your name?" / "introduce yourself" with the
@@ -591,6 +601,17 @@ export function initializeIpcHandlers(appState: AppState): void {
         }
         myController = new AbortController();
         _chatStreamsBySender.set(senderId, { streamId: myStreamId, controller: myController });
+
+        // Reap this sender's conversation memory when the renderer goes away, so the
+        // per-process store cannot grow unbounded across window reloads / churn and
+        // doesn't retain raw Q/A content after a window closes (security review
+        // 2026-06-13 MEDIUM). Registered once; `once` makes repeat-stream re-registration
+        // harmless (listener fires a single time on destroy).
+        try {
+          event.sender?.once?.('destroyed', () => {
+            try { _manualConversationMemory.clearSession(String(senderId)); } catch { /* noop */ }
+          });
+        } catch { /* noop */ }
 
         const intelligenceManager = appState.getIntelligenceManager();
 
@@ -793,6 +814,22 @@ export function initializeIpcHandlers(appState: AppState): void {
         // follow-up with transcript context now flows to the LLM (which can
         // resolve it against the rolling window). The clarification also speaks
         // the ACTIVE MODE's surface (lecture/sales) instead of always 'manual'.
+        // CONVERSATION MEMORY V2 (Phase 11): before emitting the generic clarification
+        // for a bare follow-up with no context, try to recover the prior turn from this
+        // session's conversation memory. If found, synthesize a compact context block so
+        // the follow-up flows to the LLM (which can resolve "make that shorter" / "why?"
+        // against the real prior Q/A) instead of a dead-end clarification. Flag OFF →
+        // skipped entirely (original clarification behavior preserved byte-for-byte).
+        if (!context && !autoContextSnapshot && isBareFollowUp(message)
+            && isIntelligenceFlagEnabled('conversationMemoryV2')) {
+          try {
+            const prior = _manualConversationMemory.resolveSameSession(String(senderId), message);
+            if (prior && prior.userMessage && prior.assistantAnswer) {
+              context = `PRIOR EXCHANGE IN THIS CONVERSATION:\nUser asked: ${prior.userMessage}\nYou answered: ${prior.assistantAnswer}\n\nThe user's new message is a follow-up to that. Resolve it against the prior exchange.`;
+              iTrace.noteContext({ source: 'conversation_history', trustLevel: 'medium', requested: true, retrieved: true, included: true, reason: 'same_session_followup' });
+            }
+          } catch { /* fall through to the clarification below */ }
+        }
         if (!context && !autoContextSnapshot && isBareFollowUp(message)) {
           let clarSurface: 'manual' | 'lecture' | 'sales' = 'manual';
           try {
@@ -1372,6 +1409,19 @@ export function initializeIpcHandlers(appState: AppState): void {
               intelligenceManager.addAssistantMessage(fullResponse);
               // Log Usage for streaming chat
               intelligenceManager.logUsage('chat', message, fullResponse);
+              // Conversation Memory V2 (Phase 11): record this turn so a later bare
+              // follow-up in this session can resolve against it. Cheap in-memory,
+              // bounded per session; recorded regardless of the flag (so enabling the
+              // flag mid-session still has history), but only CONSUMED when the flag is on.
+              try {
+                _manualConversationMemory.record({
+                  sessionId: String(senderId),
+                  userMessage: message,
+                  assistantAnswer: fullResponse,
+                  mode: manualActiveMode?.templateType,
+                  timestamp: Date.now(),
+                });
+              } catch { /* memory recording never affects the answer */ }
             }
 
             // VERIFIED CODE EXECUTION (background, strictly additive). For coding
@@ -1770,6 +1820,37 @@ export function initializeIpcHandlers(appState: AppState): void {
       }
     });
     return { success: true };
+  });
+
+  // INTELLIGENCE OS FEATURE FLAGS (Phase 14): get/set the experimental flags so they
+  // can be toggled from a dev/experimental settings panel without editing env vars.
+  // The flags read from SettingsManager already, so set() takes effect on the next
+  // answer. Production defaults stay conservative (all OFF) — this only surfaces an
+  // opt-in toggle. No flag here changes behavior unless its wiring is also exercised.
+  safeHandle('intelligence-flags:get', async () => {
+    try {
+      const { intelligenceFlagKeys, intelligenceFlagMeta, isIntelligenceFlagEnabled } = require('./intelligence/intelligenceFlags') as typeof import('./intelligence/intelligenceFlags');
+      return intelligenceFlagKeys().map((key) => {
+        const meta = intelligenceFlagMeta(key);
+        return { key, enabled: isIntelligenceFlagEnabled(key), setting: meta.setting, env: meta.env, default: meta.default };
+      });
+    } catch (e: any) {
+      console.warn('[IntelligenceFlags] get failed:', e?.message);
+      return [];
+    }
+  });
+
+  safeHandle('intelligence-flags:set', async (_, { key, value }: { key: string; value: boolean | null }) => {
+    try {
+      const { setIntelligenceFlag, isIntelligenceFlagEnabled, intelligenceFlagKeys } = require('./intelligence/intelligenceFlags') as typeof import('./intelligence/intelligenceFlags');
+      if (typeof key !== 'string' || !intelligenceFlagKeys().includes(key as any)) return { success: false, error: 'unknown_flag' };
+      if (value !== null && typeof value !== 'boolean') return { success: false, error: 'invalid_value' };
+      const ok = setIntelligenceFlag(key as any, value === null ? null : Boolean(value));
+      return { success: ok, enabled: isIntelligenceFlagEnabled(key as any) };
+    } catch (e: any) {
+      console.warn('[IntelligenceFlags] set failed:', e?.message);
+      return { success: false, error: 'set_failed' };
+    }
   });
 
   // Legacy alias for renderer builds that still call the old IPC name.
@@ -3858,6 +3939,145 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle('get-meeting-details', async (event, id) => {
     // Helper to fetch full details
     return DatabaseManager.getInstance().getMeetingDetails(id);
+  });
+
+  // GLOBAL MEETING SEARCH V2 (Phase 9 wiring, behind global_search_v2_enabled).
+  // REAL local-DB literal/lexical search over past meetings — replaces the fake
+  // "literal search" in Launcher.tsx that just re-ran the AI query. Builds search
+  // candidates from each meeting's title + summary + structured meetingMemory
+  // (Phase 8: topics/entities/decisions/questions), then ranks them with
+  // SearchOrchestrator.globalSearch (the spec's fusion formula). NO Hindsight (rule:
+  // local-first). Single-user desktop DB → all candidates share the one local user,
+  // so the isolation invariant (user/org filter before ranking) holds trivially.
+  // Returns [] when the flag is off so the renderer keeps its current behavior.
+  safeHandle('search:global-meetings', async (_event, { query, filters }: { query: string; filters?: any }) => {
+    try {
+      if (!isIntelligenceFlagEnabled('globalSearchV2')) return { enabled: false, results: [] };
+      // Explicit renderer→main input validation (security review 2026-06-13 LOW): reject
+      // non-string query / non-object filters rather than relying on coercion + catch.
+      if (typeof query !== 'string') return { enabled: true, results: [] };
+      if (filters !== undefined && (typeof filters !== 'object' || filters === null || Array.isArray(filters))) filters = {};
+      const q = (query || '').toLowerCase().trim();
+      if (!q) return { enabled: true, results: [] };
+      const terms = q.split(/\s+/).filter((t) => t.length > 1);
+      // Scan the SAME window the renderer's meetings array holds (50). The renderer
+      // opens a result by finding its meetingId in that array, so scanning a wider
+      // window than the renderer has loaded would return hits it can't open (they'd
+      // silently fall back to the AI query). Keep them aligned (test-engineer Phase 9).
+      const meetings = DatabaseManager.getInstance().getRecentMeetings(50);
+      const candidates: SearchCandidate[] = [];
+      for (const m of meetings) {
+        const ds: any = m.detailedSummary || {};
+        const mem: any = ds.meetingMemory || {};
+        // Lexical haystack: title + summary + overview + keyPoints + memory facts.
+        const haystackParts = [
+          m.title, m.summary, ds.overview,
+          ...(Array.isArray(ds.keyPoints) ? ds.keyPoints : []),
+          ...(Array.isArray(mem.topics) ? mem.topics : []),
+          ...(Array.isArray(mem.entities) ? mem.entities : []),
+          ...(Array.isArray(mem.decisions) ? mem.decisions : []),
+          ...(Array.isArray(mem.questionsAsked) ? mem.questionsAsked : []),
+          ...(Array.isArray(mem.skillsDiscussed) ? mem.skillsDiscussed : []),
+        ].filter(Boolean).map((s: any) => String(s));
+        const hay = haystackParts.join(' • ').toLowerCase();
+        if (!hay) continue;
+        let hits = 0;
+        for (const t of terms) if (hay.includes(t)) hits++;
+        if (hits === 0) continue;
+        const phraseBonus = hay.includes(q) ? 0.5 : 0;
+        const score = Math.min(1, hits / Math.max(1, terms.length) + phraseBonus);
+        // Best matching snippet for display.
+        const snippet = haystackParts.find((p) => p.toLowerCase().includes(terms[0])) || m.title || m.summary || '';
+        candidates.push({
+          meetingId: m.id,
+          title: m.title,
+          date: m.date ? Date.parse(m.date) || undefined : undefined,
+          snippet: snippet.slice(0, 240),
+          source: 'lexical',
+          score,
+          userId: 'local',
+          metadata: { company: String(mem.companiesDiscussed?.[0] ?? '') },
+        });
+      }
+      const results = new SearchOrchestrator().globalSearch(candidates, { userId: 'local' }, filters || {}, Date.now());
+      return { enabled: true, results };
+    } catch (e: any) {
+      console.warn('[GlobalSearchV2] search failed (non-fatal):', e?.message);
+      return { enabled: true, results: [] };
+    }
+  });
+
+  // IN-MEETING SEARCH V2 (Phase 10 wiring, behind in_meeting_search_v2_enabled).
+  // Fast LOCAL-FIRST lexical search over the CURRENT meeting's finalized transcript
+  // (SessionTracker.getFullTranscript via IntelligenceManager) — NO Hindsight, NO
+  // RAG/embeddings, no network (rule: in-meeting search is local-first and fast,
+  // <150ms). Returns timestamped, speaker-attributed, relevance-ranked snippets so
+  // the UI can jump to the transcript segment. Returns {enabled:false} when the flag
+  // is off so any caller is a pure no-op then.
+  safeHandle('search:in-meeting', async (_event, { query }: { query: string }) => {
+    try {
+      if (!isIntelligenceFlagEnabled('inMeetingSearchV2')) return { enabled: false, results: [] };
+      if (typeof query !== 'string') return { enabled: true, results: [] };
+      const transcript = appState.getIntelligenceManager().getCurrentMeetingTranscript();
+      const chunks = transcript.map((t) => ({ text: t.text, timestampMs: t.timestamp, speaker: t.speaker }));
+      const results = new SearchOrchestrator().inMeetingSearch(chunks, query || '');
+      return { enabled: true, results };
+    } catch (e: any) {
+      console.warn('[InMeetingSearchV2] search failed (non-fatal):', e?.message);
+      return { enabled: true, results: [] };
+    }
+  });
+
+  // LECTURE NOTES (Phase 12 wiring, behind lecture_intelligence_v2_enabled). Generates
+  // structured student notes (concepts/definitions/examples/important-points/flashcards/
+  // exam-questions/revision-checklist) from the CURRENT meeting transcript. Deterministic,
+  // no LLM, local. Returns {enabled:false} when off. The renderer can call this on demand
+  // (a lecture-notes panel is a separate UI feature).
+  safeHandle('lecture:generate-notes', async (_event, opts?: { title?: string; course?: string }) => {
+    try {
+      if (!isIntelligenceFlagEnabled('lectureIntelligenceV2')) return { enabled: false, notes: null };
+      const { LectureIntelligenceService } = require('./intelligence/LectureIntelligenceService') as typeof import('./intelligence/LectureIntelligenceService');
+      const transcript = appState.getIntelligenceManager().getCurrentMeetingTranscript();
+      const segments = transcript.map((t) => ({ speaker: t.speaker, text: t.text, timestamp: t.timestamp }));
+      const notes = new LectureIntelligenceService().generateNotes({
+        lectureId: `live-${Date.now()}`,
+        segments,
+        title: opts?.title,
+        course: opts?.course,
+      });
+      return { enabled: true, notes };
+    } catch (e: any) {
+      console.warn('[LectureIntelligenceV2] notes generation failed (non-fatal):', e?.message);
+      return { enabled: true, notes: null };
+    }
+  });
+
+  // DIAGRAM GENERATION (Phase 12 wiring, behind diagram_intelligence). Generates a
+  // validated Mermaid diagram from explanatory text (the query, or the recent transcript).
+  // SAFETY: text-derived diagrams are labeled `ai_reconstructed_diagram` (never "exact"),
+  // syntax-validated, with an ASCII fallback — the service never fabricates edges when it
+  // can't extract structure. Returns {enabled:false} when off.
+  safeHandle('diagram:generate', async (_event, { text }: { text?: string }) => {
+    try {
+      if (!isIntelligenceFlagEnabled('diagramIntelligence')) return { enabled: false, diagram: null };
+      if (text !== undefined && typeof text !== 'string') return { enabled: true, diagram: null };
+      const { DiagramIntelligenceService } = require('./intelligence/DiagramIntelligenceService') as typeof import('./intelligence/DiagramIntelligenceService');
+      // Use the supplied text, else fall back to the recent transcript window. CAP the
+      // input length: the sequence generator's SEND_RE has nested lazy quantifiers that
+      // backtrack ~quadratically, so a multi-MB single sentence would stall the main
+      // event loop (security review 2026-06-13 MEDIUM). 8000 chars is ample for any real
+      // diagram-worthy explanation.
+      let source = (text || '').trim().slice(0, 8000);
+      if (!source) {
+        const transcript = appState.getIntelligenceManager().getCurrentMeetingTranscript();
+        source = transcript.slice(-30).map((t) => t.text).join('. ').slice(0, 8000);
+      }
+      const diagram = new DiagramIntelligenceService().generate({ text: source, fromSourceVisual: false });
+      return { enabled: true, diagram };
+    } catch (e: any) {
+      console.warn('[DiagramIntelligence] generation failed (non-fatal):', e?.message);
+      return { enabled: true, diagram: null };
+    }
   });
 
   safeHandle('update-meeting-title', async (_, { id, title }: { id: string; title: string }) => {

@@ -6,6 +6,10 @@ import { TemporalContext } from "./TemporalContextBuilder";
 import { IntentResult } from "./IntentClassifier";
 import { ScreenContext } from "../services/screen/ScreenContextService";
 import { PromptAssembler, escapeUserContent, INJECTION_REDACTION_MESSAGE, TRUNCATION_SUFFIX } from "../services/context/PromptAssembler";
+import { isIntelligenceFlagEnabled } from "../intelligence/intelligenceFlags";
+import { fuseContext, toPromptContextContract } from "../intelligence/ContextFusionEngine";
+import { assemblePromptV2 } from "../intelligence/PromptAssemblerV2";
+import { beginTrace, commitTrace } from "../intelligence/IntelligenceTrace";
 import { DOM_CONTEXT_MAX_CHARS } from "../config/constants";
 import { checkAnswerForCodeBugs } from "./CodeSanityCheck";
 import { formatAnswerPlanForPrompt, isCodingAnswerType } from "./AnswerPlanner";
@@ -365,6 +369,42 @@ ANSWER SHAPE: ${intentResult.answerShape}
                 tokenBudget: Math.max(1000, assemblerBudget),
                 systemPrompt: finalPromptOverride,
             });
+
+            // CONTEXT FUSION + PROMPT ASSEMBLER V2 (Phase 7 wiring, SHADOW behind
+            // prompt_assembler_v2_enabled — fusion runs as part of the same V2 pipeline,
+            // gated by the one flag). The live prompt (`packet` above, from the benchmark-
+            // green V1 PromptAssembler with its XML/trust/sanitization/token-budget) is
+            // UNCHANGED — it's a `const` and is never reassigned here. When the flag is on
+            // we ALSO run the V2 pipeline over the SAME context blocks to produce the spec's
+            // CONTEXT INCLUSION REPORT (source tracing + trust tags + dropped-source reasons)
+            // and record it on a trace — proving the V2 path produces a sound, security-
+            // preserving assembly before it ever drives. ZERO effect on the real answer.
+            try {
+                if (isIntelligenceFlagEnabled('promptAssemblerV2')) {
+                    const fusionInputs = [
+                        finalPromptOverride ? { source: 'system_rules' as const, content: String(finalPromptOverride) } : null,
+                        pinnedModeInstructions ? { source: 'mode_instructions' as const, content: String(pinnedModeInstructions) } : null,
+                        effectiveCandidateProfile ? { source: 'profile_tree' as const, content: String(effectiveCandidateProfile) } : null,
+                        workingTranscript ? { source: 'live_transcript_current' as const, content: String(workingTranscript) } : null,
+                        temporalContext?.hasRecentResponses && temporalContext.previousResponses ? { source: 'conversation_history' as const, content: String(temporalContext.previousResponses) } : null,
+                        modeContextBlock ? { source: 'reference_files' as const, content: String(modeContextBlock) } : null,
+                        processedDomContext ? { source: 'browser_dom' as const, content: String(processedDomContext) } : null,
+                    ].filter(Boolean) as Array<{ source: any; content: string }>;
+                    const contract = toPromptContextContract(fuseContext(fusionInputs, { tokenBudget: Math.max(1000, assemblerBudget) }));
+                    const shadowQuery = answerPlan?.question || '';
+                    const v2 = assemblePromptV2({
+                        contract,
+                        answerContract: isCodingAnswerType(answerPlan?.answerType as AnswerType) ? 'coding_answer' : 'interview_detailed',
+                        query: shadowQuery,
+                    });
+                    const shadowTrace = beginTrace(shadowQuery);
+                    shadowTrace.setRouting({ source: 'what_to_answer', answerType: answerPlan?.answerType });
+                    for (const row of v2.inclusionReport) {
+                        shadowTrace.noteContext({ source: row.source, trustLevel: row.trust, requested: true, retrieved: row.included, included: row.included, reason: row.reason, tokenEstimate: row.tokenEstimate });
+                    }
+                    commitTrace(shadowTrace);
+                }
+            } catch { /* shadow V2 assembly is observe-only; never affects the real packet/answer */ }
 
             if (MEASURE) tPrompt = performance.now();
             if (MEASURE) tStreamStart = performance.now();

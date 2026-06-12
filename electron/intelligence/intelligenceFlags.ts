@@ -46,6 +46,7 @@ export type IntelligenceFlagKey =
   | 'meetingMemoryV2'              // Phase 10
   | 'globalSearchV2'               // Phase 11
   | 'inMeetingSearchV2'            // Phase 12
+  | 'conversationMemoryV2'         // Phase 13 (same-session follow-ups)
   | 'lectureIntelligenceV2'        // Phase 14
   | 'diagramIntelligence'          // Phase 15
   | 'hindsightMemory'              // Phase 16 — long-term memory provider on at all
@@ -81,6 +82,7 @@ const FLAGS: Record<IntelligenceFlagKey, FlagSpec> = {
   meetingMemoryV2: { env: 'NATIVELY_MEETING_MEMORY_V2', setting: 'meetingMemoryV2Enabled', default: false },
   globalSearchV2: { env: 'NATIVELY_GLOBAL_SEARCH_V2', setting: 'globalSearchV2Enabled', default: false },
   inMeetingSearchV2: { env: 'NATIVELY_IN_MEETING_SEARCH_V2', setting: 'inMeetingSearchV2Enabled', default: false },
+  conversationMemoryV2: { env: 'NATIVELY_CONVERSATION_MEMORY_V2', setting: 'conversationMemoryV2Enabled', default: false },
   lectureIntelligenceV2: { env: 'NATIVELY_LECTURE_INTELLIGENCE_V2', setting: 'lectureIntelligenceV2Enabled', default: false },
   diagramIntelligence: { env: 'NATIVELY_DIAGRAM_INTELLIGENCE', setting: 'diagramIntelligenceEnabled', default: false },
   hindsightMemory: { env: 'NATIVELY_HINDSIGHT_MEMORY', setting: 'hindsightMemoryEnabled', default: false },
@@ -163,6 +165,41 @@ export function intelligenceFlagSnapshot(): Record<IntelligenceFlagKey, boolean>
     out[key] = isIntelligenceFlagEnabled(key);
   }
   return out;
+}
+
+/** All flag keys (for a settings UI / diagnostics). */
+export function intelligenceFlagKeys(): IntelligenceFlagKey[] {
+  return Object.keys(FLAGS) as IntelligenceFlagKey[];
+}
+
+/** The SettingsManager key + env var name backing a flag (for a settings UI). */
+export function intelligenceFlagMeta(key: IntelligenceFlagKey): { setting: string; env: string; default: boolean } {
+  const f = FLAGS[key];
+  return { setting: f.setting, env: f.env, default: f.default };
+}
+
+/**
+ * Persist a flag's value via its SettingsManager key (the same key the flag reads).
+ * Used by the dev/experimental settings UI (Phase 14). Pass `null` to clear the
+ * override (revert to env/default). Defensive — never throws.
+ */
+export function setIntelligenceFlag(key: IntelligenceFlagKey, value: boolean | null): boolean {
+  try {
+    // OWN-property check (not `FLAGS[key]` truthiness): `FLAGS['__proto__']` /
+    // `['constructor']` resolve to Object.prototype members (truthy) with an undefined
+    // `.setting`, which would write `settings[undefined]`. Reject non-own keys so a
+    // future unvalidated caller can't reach SettingsManager.set with a bad key
+    // (security review 2026-06-13 — defense in depth; the IPC path already validates).
+    if (typeof key !== 'string' || !Object.prototype.hasOwnProperty.call(FLAGS, key)) return false;
+    const spec = FLAGS[key];
+    if (!spec || typeof spec.setting !== 'string') return false;
+    const { SettingsManager } = require('../services/SettingsManager');
+    if (value === null) SettingsManager.getInstance().set(spec.setting, undefined);
+    else SettingsManager.getInstance().set(spec.setting, value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

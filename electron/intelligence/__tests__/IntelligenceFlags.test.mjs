@@ -21,7 +21,7 @@ const ENV_KEYS = [
 const ALL_FLAG_KEYS = [
   'trace', 'durableMemoryWindow', 'intelligenceOsEnabled', 'profileTreeV2', 'contextRouterV2',
   'liveTranscriptBrain', 'promptAssemblerV2', 'answerDiversityGuard', 'meetingMemoryV2',
-  'globalSearchV2', 'inMeetingSearchV2', 'lectureIntelligenceV2', 'diagramIntelligence',
+  'globalSearchV2', 'inMeetingSearchV2', 'conversationMemoryV2', 'lectureIntelligenceV2', 'diagramIntelligence',
   'hindsightMemory', 'hindsightLiveRecall', 'hindsightPostMeetingRetain',
 ];
 

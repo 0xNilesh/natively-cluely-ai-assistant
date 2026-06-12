@@ -158,3 +158,184 @@ Result: ✅ test-engineer verdict: PASS all 6. Shadow is the right call (vs repl
 Rollback: `NATIVELY_LIVE_TRANSCRIPT_BRAIN` unset = off. Revert the shadow block.
 
 **Phase 6 verified by test-engineer agent. "Must Finish First" tier (Phases 0–6) COMPLETE.**
+
+---
+
+## Phase 7 — Wire ContextFusionEngine + PromptAssemblerV2 Gradually
+Status: **complete**
+Goal: Use the new fusion + V2 assembly without breaking prompt quality. The prompt said: gradual, small path, preserve security, do NOT replace all assembly.
+Approach: SHADOW. The live WTA prompt (`packet` from the benchmark-green V1 PromptAssembler at WhatToAnswerLLM.ts:354) is UNCHANGED (`const`, never reassigned). When flag on, run the SAME context blocks through fuseContext → toPromptContextContract → assemblePromptV2 to produce the spec's CONTEXT INCLUSION REPORT + trust tags, recorded on a trace. Zero effect on the real prompt/answer.
+Files changed: `electron/llm/WhatToAnswerLLM.ts` (~line 369) — imports + shadow V2 pipeline block behind `prompt_assembler_v2_enabled`.
+Feature flags touched: `prompt_assembler_v2_enabled` (env `NATIVELY_PROMPT_ASSEMBLER_V2`, default OFF). (Note: the spec's `context_fusion_v2_enabled` is folded into this one flag — fusion is part of the V2 pipeline; comment corrected after test-engineer caught the stale "BOTH flags" wording.)
+Tests added: `electron/intelligence/__tests__/V2ShadowAssemblyWiring.test.mjs` (12 tests, by test-engineer).
+Tests run: typecheck **0** · build clean · intelligence **359 pass / 0 fail / 9 todo** · LLM baseline **1656 pass / 0 fail / 10 skipped** · services **33 pass / 0 fail**.
+Manual verification: deferred to Phase 15.
+Result: ✅ test-engineer verdict: PASS all 5. Real packet const-immutable + untouched (verified); V2 genuinely preserves security end-to-end (injection neutralized+escaped, profile_tree ordered before untrusted, low-trust trimmed first, system/profile never dropped, report content-free); negligible latency (pure string ops, off token path); inclusion report meaningful over real WTA inputs.
+Rollback: `NATIVELY_PROMPT_ASSEMBLER_V2` unset = off. Revert the shadow block.
+Notes: Scaffolding-with-purpose — ships no user-visible behavior; de-risks an eventual V2 cutover by proving a sound, security-preserving assembly over live inputs. Shadow omits the `mode` fusion option (correct for candidate-voice WTA; revisit if extended to sales/lecture).
+
+**Phase 7 verified by test-engineer agent.**
+
+---
+
+## Phase 8 — Wire MeetingMemoryService Into Post-Meeting Pipeline
+Status: **complete**
+Goal: Make meeting memory real + persisted (not just in-memory).
+Files changed: `electron/MeetingPersistence.ts` (~line 346, after buildPostCallEnhancements) — import MeetingMemoryService + isIntelligenceFlagEnabled; behind `meeting_memory_v2_enabled`, call buildMeetingRecord(data.transcript) and write the structured memory into `summaryData.meetingMemory` (NEW key → flows into summary_json).
+Feature flags touched: `meeting_memory_v2_enabled` (env `NATIVELY_MEETING_MEMORY_V2`, default OFF). OFF = summaryData byte-for-byte unchanged.
+Tests added: `electron/intelligence/__tests__/MeetingMemoryWiringExtraction.test.mjs` (10 tests, by test-engineer).
+Tests run: typecheck **0** · build clean · meeting-specific (MeetingPersistenceRace + PostCall*) **15 pass / 0 fail** · intelligence **369 pass / 0 fail / 9 todo** · services **1299 pass / 41 fail (PRE-EXISTING, 0 meeting-related) / 30 skipped** (41 verified identical with+without the change by stashing).
+Manual verification: deferred to Phase 15.
+Result: ✅ test-engineer verdict: PASS all 5. Safe to persist: flag-OFF zero-change; flag-ON additive (new JSON key, NO DB migration), backward-compatible (readers JSON.parse and tolerate missing/extra keys), runs in the ALREADY-BACKGROUND processAndSaveMeeting worker (can't block live answers), non-fatal on error (double try/catch, save in a separate try block). Deterministic no-LLM extraction genuinely works (pricing question, pilot decision, redis skill, participants, bounded sourceQuality).
+**RACE INVESTIGATION (prompt asked):** the "double summary / chunk-not-found / embedding race" is NOT a real live bug — the RAG pipeline is already guarded by main.ts `_ragProcessingInFlight` Set + INSERT OR IGNORE; the summary path is idempotent via INSERT OR REPLACE; processAndSaveMeeting's two callers (stopMeeting / recoverUnprocessedMeetings@is_processed=0) don't overlap. Phase 8 adds no new write/query/async surface. Nothing to fix.
+Rollback: `NATIVELY_MEETING_MEMORY_V2` unset = off. Revert the meetingMemory block.
+Notes: meetingMemory persisted untyped (`as any`) — no compile-time contract on readers yet (the cost of a zero-migration additive key; add the optional typed field when a consumer reads it).
+
+**Phase 8 verified by test-engineer agent.**
+
+---
+
+## Phase 9 — Replace Fake Global Search With SearchOrchestrator
+Status: **complete**
+Goal: Make global meeting search real (the Launcher "literal search" was fake — re-ran the AI query).
+Files changed: `electron/ipcHandlers.ts` (NEW IPC `search:global-meetings` after get-meeting-details — builds SearchCandidate[] from local meetings' title+summary+overview+keyPoints+Phase-8 meetingMemory, ranks via SearchOrchestrator.globalSearch), `electron/preload.ts` (+searchGlobalMeetings), `src/types/electron.d.ts` (+type), `src/components/Launcher.tsx` (onLiteralSearch now async — real search when flag on, opens top result; falls back to AI query otherwise).
+Feature flags touched: `global_search_v2_enabled` (env `NATIVELY_GLOBAL_SEARCH_V2`, default OFF). OFF = IPC returns {enabled:false}, renderer fallback byte-identical to original.
+Tests added: `electron/intelligence/__tests__/GlobalSearchHandlerLogic.test.mjs` (8 tests, by test-engineer).
+Tests run: typecheck:electron **0** · renderer tsc **0** · build clean · intelligence **377 pass / 0 fail / 9 todo**.
+Manual verification: deferred to Phase 15.
+Result: ✅ test-engineer verdict: PASS all 5. REAL local search (not the fake AI passthrough); safe flag OFF (zero renderer change, IPC empty); safe flag ON (no crash on empty DB / old meetings / no match; correct fallback). NO Hindsight (local-first). Isolation invariant holds (single-user 'local' scope; foreign userId dropped). **CONCERN FIXED:** handler scanned 200 meetings but renderer holds 50 → top hit in #51-200 silently fell back → aligned both to 50 so a returned result is always openable.
+Rollback: `NATIVELY_GLOBAL_SEARCH_V2` unset = off. Revert the 4 file edits.
+Notes (honest v1 limitations, test-engineer-acknowledged-acceptable): opens the top hit directly rather than showing a result list with snippets (the data is there for a list — presentation choice); lexical search is naive (substring, no stemming/fuzzy/semantic — semantic recall is what the AI-query fallback is for).
+
+Post-commit: a React Doctor commit-hook flagged the staged Launcher.tsx. Investigated — the ~30 findings are PRE-EXISTING throughout the 1200-line file (lines 292/384/873/1050/…), ZERO at my changed lines (421-446); the hook flags the whole file when any line is staged. Did NOT mass-refactor pre-existing issues (out of scope, rule 3). DID fix the one genuine concern my code could introduce: made onLiteralSearch synchronous (prop is `(q)=>void`) with the async work in a voided IIFE, so no floating Promise is returned to the event-handler prop. Renderer tsc 0.
+
+**Phase 9 verified by test-engineer agent.**
+
+---
+
+## Phase 10 — Wire In-Meeting Search
+Status: **complete**
+Goal: Fast local-first in-meeting search over the current meeting transcript.
+Files changed: `electron/IntelligenceManager.ts` (+getCurrentMeetingTranscript accessor over session.getFullTranscript), `electron/ipcHandlers.ts` (NEW IPC `search:in-meeting` → SearchOrchestrator.inMeetingSearch over current transcript, behind in_meeting_search_v2_enabled), `electron/preload.ts` + `src/types/electron.d.ts` (+searchInMeeting), `electron/intelligence/SearchOrchestrator.ts` (scoring fix — see below).
+Feature flags touched: `in_meeting_search_v2_enabled` (env `NATIVELY_IN_MEETING_SEARCH_V2`, default OFF). OFF = IPC returns {enabled:false}.
+Tests added: `electron/intelligence/__tests__/InMeetingSearchHandlerLogic.test.mjs` (9 tests, by test-engineer).
+Tests run: typecheck:electron **0** · renderer tsc **0** · build clean · intelligence **386 pass / 0 fail / 9 todo**.
+Manual verification: deferred to Phase 15.
+Result: ✅ test-engineer verdict: PASS all 5. Real capability (deterministic local search, ~3.2ms median for 1000-turn meeting, jump-to-segment timestamps + speaker preserved); safe flag OFF (immediate no-op before session read); safe flag ON (no crash on empty/no-active-meeting; no Hindsight/RAG/network). Backend IPC fully wired+typed+tested; renderer search-box UI is a separate phase (reasonable boundary).
+**SCORING FIX (test-engineer caught):** inMeetingSearch score was `min(1, hits/terms + 0.5phrase)` — coverage clamped the phrase bonus to invisibility when all terms matched (phrase priority lost to the timestamp tiebreak). Fixed to `min(1, 0.7*coverage + 0.3phrase)` so a contiguous phrase always outranks a fully-covered scattered match. Improves both global + in-meeting ranking; all 32 search tests green (updated the b2 test that documented the old behavior).
+Rollback: `NATIVELY_IN_MEETING_SEARCH_V2` unset = off. Revert the IPC + accessor (scoring fix is a strict improvement, safe to keep).
+
+**Phase 10 verified by test-engineer agent.**
+
+---
+
+## Phase 11 — Wire ConversationMemoryService for Same-Session Follow-Ups
+Status: **complete**
+Goal: Make bare follow-ups work in the SINGLE-SHOT manual chat path (no history threaded → "make that shorter"/"why?" hit a dead-end clarification).
+Files changed: `electron/ipcHandlers.ts` (per-process `_manualConversationMemory`; record each delivered manual turn keyed by senderId; on a bare follow-up with no context, behind conversation_memory_v2_enabled, resolveSameSession → synthesize a "PRIOR EXCHANGE" context block so it flows to the LLM instead of the clarification), `electron/intelligence/intelligenceFlags.ts` (+conversationMemoryV2 flag key — was missing), `electron/intelligence/ConversationMemoryService.ts` (recency-fallback fix — see below), `__tests__/IntelligenceFlags.test.mjs` (ALL_FLAG_KEYS +1).
+Feature flags touched: `conversation_memory_v2_enabled` (env `NATIVELY_CONVERSATION_MEMORY_V2`, default OFF). OFF = recovery block skipped (flag is the last AND clause), original clarification fires byte-for-byte.
+Tests added: `electron/intelligence/__tests__/ConversationMemoryWiring.test.mjs` (14 tests, by test-engineer).
+Tests run: typecheck **0** · build clean · intelligence **401 pass / 0 fail / 9 todo** · LLM baseline **1656 pass / 0 fail** · flags **9/0**.
+Manual verification: deferred to Phase 15.
+Result: ✅ test-engineer verdict: PASS on all safety items (flag-OFF byte-identical; NO cross-session leak — keyed by senderId, proven; NO stealth-context resurfacing — gated by isBareFollowUp which excludes multi-word asks; can't crash — record+recovery both try/catch; bounded — MAX_TURNS_PER_SESSION=100). + 1 CONCERN FIXED.
+**CONCERN FIXED:** resolveSameSession's recency-fallback regex was too narrow (only that/it/this/continue/and) → common bare follow-ups (why?/how?/go on/expand/tell me more/…) returned null and still dead-ended. Widened to cover content-free continuation/clarification verbs (safe: bare follow-ups are content-free by construction + a <=6-word library guard + the handler's isBareFollowUp gate). Now they resolve to the most-recent turn. Updated the test that documented the old gap.
+Rollback: `NATIVELY_CONVERSATION_MEMORY_V2` unset = off. Revert the ipcHandlers blocks (the flag key + regex widening are safe to keep).
+Notes (honest): only the manual single-shot path needed this (WTA already has liveSessionMemory). Cross-session recall (recallCrossSession) intentionally NOT wired (that's Hindsight, Phase 13/16). Unbounded axis = distinct senderIds, but those are renderer webContents ids (few per app run, each capped at 100 turns) — no practical leak.
+
+**Phase 11 verified by test-engineer agent.**
+
+---
+
+## Phase 12 — Wire LectureIntelligenceService + DiagramIntelligenceService
+Status: **complete**
+Goal: Make lecture mode differentiated + real (notes/diagrams), not just a meeting mode.
+Files changed: `electron/ipcHandlers.ts` (2 NEW IPCs after search:in-meeting — `lecture:generate-notes` behind lecture_intelligence_v2_enabled → structured notes from current transcript; `diagram:generate` behind diagram_intelligence → validated Mermaid from query/transcript), `electron/preload.ts` + `src/types/electron.d.ts` (+generateLectureNotes, +generateDiagram).
+Feature flags touched: `lecture_intelligence_v2_enabled` (env `NATIVELY_LECTURE_INTELLIGENCE_V2`), `diagram_intelligence` (env `NATIVELY_DIAGRAM_INTELLIGENCE`), both default OFF. OFF = IPC returns {enabled:false}.
+Tests added: `electron/intelligence/__tests__/LectureDiagramHandlerLogic.test.mjs` (10 tests, by test-engineer).
+Tests run: typecheck:electron **0** · renderer tsc **0** · build clean · intelligence **411 pass / 0 fail / 9 todo** · lecture+diagram library **26/0**.
+Manual verification: deferred to Phase 15.
+Result: ✅ test-engineer verdict: PASS all 5. Real net-new capability (structured notes: concepts/definitions/important-points/flashcards/exam-questions/revision + validated Mermaid diagrams from live transcript). Safe flag OFF (zero-cost no-op before any work). Safe flag ON (can't crash, no LLM/network, NO interview/sales contamination). DIAGRAM SAFETY confirmed at source (DiagramIntelligenceService.ts:194): exact_source_diagram is gated SOLELY on fromSourceVisual, which the IPC hardcodes false → text-derived diagrams can ONLY be ai_reconstructed/conceptual/low_confidence, never "exact"; never fabricates edges (returns empty mermaid when no structure extracts). Backend IPCs fully wired+typed+tested; lecture/diagram panel UI is a separate phase.
+Rollback: unset the two env vars = off. Revert the 2 IPCs + preload/types.
+Notes (honest, test-engineer): the deterministic no-LLM extraction is a solid v1 STRUCTURAL FLOOR but coarse on messy real lecture audio (definition regex misses colloquial phrasing; concepts = capitalized-token frequency; exam Qs are template-filled). Correct tradeoff for zero-latency/offline/never-hallucinate; the service docstring already says a caller may pass richer LLM prose later. Quality ceiling, not a defect.
+
+**Phase 12 verified by test-engineer agent.**
+
+---
+
+## Phase 13 — Real Hindsight Setup + Post-Meeting Retain
+Status: **complete** (wiring + safe-disabled path; NOT end-to-end exercisable without installing the client + running a server — by design)
+Goal: Make Hindsight real + OPTIONAL; wire post-meeting retain FIRST (not recall).
+Files changed: `electron/MeetingPersistence.ts` (after saveMeeting, behind hindsight_post_meeting_retain_enabled: LongTermMemoryService.fromFlags(env config) → retainMeetingSummary if enabled), `.env.example` (+Hindsight vars, annotated which are read vs illustrative), `docs/HINDSIGHT_LOCAL_SETUP.md` (NEW — Postgres+pgvector, Docker, config, flag order, isolation, timeouts, fallback).
+Feature flags touched: `hindsight_post_meeting_retain_enabled` (env `NATIVELY_HINDSIGHT_POST_MEETING_RETAIN`) + the gating `hindsight_memory` (`NATIVELY_HINDSIGHT_MEMORY`), both default OFF.
+Tests added: `electron/intelligence/__tests__/HindsightRetainWiring.test.mjs` (11 tests, by test-engineer).
+Tests run: typecheck **0** · build clean · hindsight **16/0** · meeting-specific **15/0** · intelligence **422 pass / 0 fail / 9 todo**.
+Manual verification: deferred to Phase 15 (and requires a Hindsight server to exercise retain — out of scope here).
+Result: ✅ test-engineer verdict: PASS. The LOAD-BEARING safety chain is real + tested: `@vectorize-io/hindsight-client` is NOT installed → HindsightClientAdapter's lazy require fails → adapter.enabled=false → fromFlags returns Noop → ltm.enabled=false → retain NEVER fires, even with both flags ON + a baseUrl set. So "configured but client absent" works. retain is post-save + try/catch + background worker → cannot block live answers or break meeting save. Isolation by bank+tags (user/org/visibility:private, all_strict). Retain-before-recall sequencing correct. Doc accurate.
+**HONEST:** retain CANNOT be exercised end-to-end without `npm install @vectorize-io/hindsight-client` + a running Hindsight server (Postgres+pgvector+LLM key). This phase ships the WIRING + the safe-disabled path, not a working memory feature. The mock-provider test proves the wiring calls the right method/scope. Per rules, did NOT install the client or start a server. Recall NOT wired (correctly deferred — last to enable).
+Caveat fixed: annotated `.env.example` that NATIVELY_MEMORY_PROVIDER + HINDSIGHT_RETAIN_ASYNC are illustrative-only (not read).
+Rollback: `NATIVELY_HINDSIGHT_POST_MEETING_RETAIN` unset = off (default). Revert the retain block.
+
+**Phase 13 verified by test-engineer agent.**
+
+---
+
+## Phase 14 — Settings UI for Feature Flags
+Status: **complete** (backend contract: IPC + preload + types; React panel deferred per the prompt's "dev-only/debug command" allowance)
+Goal: Make flags toggleable without env editing.
+Files changed: `electron/intelligence/intelligenceFlags.ts` (+intelligenceFlagKeys, +intelligenceFlagMeta, +setIntelligenceFlag — persists via the SettingsManager key the flag already reads), `electron/ipcHandlers.ts` (+`intelligence-flags:get`/`intelligence-flags:set` IPCs, key-validated), `electron/preload.ts` + `src/types/electron.d.ts` (+getIntelligenceFlags/setIntelligenceFlag).
+Feature flags touched: all (this is the toggle surface). No defaults changed (all 17 stay OFF).
+Tests added: `electron/intelligence/__tests__/FlagSettingsRoundTrip.test.mjs` (13 tests, by test-engineer).
+Tests run: typecheck:electron **0** · renderer tsc **0** · build clean · intelligence **435 pass / 0 fail / 9 todo**.
+Manual verification: deferred to Phase 15.
+Result: ✅ test-engineer verdict: PASS all 5. Delivers "flags toggleable without env editing" — the chain reaches the live path (verified: set → SettingsManager → isIntelligenceFlagEnabled → the wired consumers from Phases 1-13; e.g. durableMemoryWindow → getDurableContext on the next answer). Safe (additive, defensive — setIntelligenceFlag never throws; IPCs validate the key + try/catch; all defaults conservative). SettingsManager round-trip sound (loadSettings preserves unknown keys; migrateLegacySettings only touches screenUnderstandingMode → no risk to flag persistence).
+Rollback: revert the IPCs + the 3 new flag exports. Backend-only, no UI to remove.
+Notes (LOW, by design): flag setting-keys aren't in the AppSettings TS type (works via runtime require() — keeps experimental keys out of the public type; no compile-time typo protection). React settings panel is a separate feature consuming this typed contract.
+
+**Phase 14 verified by test-engineer agent.**
+
+---
+
+## Phase 15 — End-to-End App Verification
+Status: **complete** (automated gates green; interactive GUI walk-through is the one remaining HUMAN step — can't run headless)
+Goal: Prove this is not just library-tested anymore.
+Files changed: `NATIVELY_INTELLIGENCE_OS_LIVE_VERIFICATION.md` (NEW).
+Tests run: FULL gate suite — typecheck:electron **0** · renderer tsc **0** · build clean · intelligence **435 pass / 0 fail / 9 todo** · LLM baseline **1656 pass / 0 fail / 10 skipped** · IntelligenceEngine services **33/0** · meeting pipeline **15/0**.
+Result: ✅ All automated gates green; zero regression to the 1656 baseline across all 14 wiring phases. Each phase independently test-engineer-verified (14 wiring test files). The verification doc has the manual GUI script (profile/app-identity/repetition/sales/lecture/diagram/WTA/long-memory/follow-up/search) with each case cross-referenced to its automated coverage, an honest live-vs-shadow-vs-disabled map, and the env-var launch command to enable the flags.
+**HONEST:** performed headless (no GUI), so the interactive "open app + type X" walk-through is provided for a human to run with flags enabled — but every case's logic is unit/integration-proven, so "not run in GUI" ≠ "unverified".
+Rollback: doc only.
+
+**Phase 15 complete.**
+
+---
+
+## Phase 16 — Commit-Ready Cleanup
+Status: **complete**
+Goal: Prepare the branch for review.
+Cleanup checks: ✅ `_external_research` NOT tracked (0 files) · ✅ no real API keys/secrets in the diff (only empty `.env.example` placeholders) · ✅ working tree clean.
+Files changed: `NATIVELY_INTELLIGENCE_OS_WIRING_FINAL_REPORT.md` (NEW).
+Result: ✅ Final report written: what's live, per-phase flag table, live-vs-shadow-vs-disabled map, files changed, tests, the 6 mid-flight fixes, non-negotiables honored, Hindsight status, rollback, known limitations, recommended next PRs.
+
+---
+
+# FINAL STATE — Live-Wiring (Phases 0–16) COMPLETE
+
+- **16 commits** on `feature/intelligence-os-live-wiring` (pushed to origin), one per phase.
+- **Diff:** 32 files, +6,798 / −19. 12 production files, 14 new wiring test suites.
+- **Gates:** typecheck:electron **0** · renderer tsc **0** · build clean.
+- **Tests:** intelligence **435/0** · LLM baseline **1656/0** (held through all 14 phases) · IntelligenceEngine **33/0** · meeting **15/0**.
+- **Every phase flag-gated (default OFF) + independently test-engineer-verified.** Merging changes no behavior until a flag is enabled.
+- **Real capability:** Phases 2,3,4,8,9,10,11,12. **Shadow/observe-only:** 1,5,6,7. **Wiring-only (needs external setup):** 13 (Hindsight). **Backend contract, UI deferred:** lecture/diagram/search panels, flag settings UI.
+- **Honest gaps:** Hindsight not exercisable without a server; deferred renderer panels; deterministic extraction is a coarse v1 floor; interactive GUI walk-through is the one remaining human step.
+
+---
+
+## Post-completion — PR + Security Review
+- **PR #313** opened against main (https://github.com/Natively-AI-assistant/natively-cluely-ai-assistant/pull/313).
+- **Security review** (code-reviewer) over the new attack surface (5 IPCs, persistence write, conversation memory, search, Hindsight retain): **APPROVE WITH SUGGESTIONS — 0 crit / 0 high / 2 med / 1 low.** All fixed in commit `ea84474`:
+  - MED: conversation-memory Map never pruned → clearSession on renderer 'destroyed'.
+  - MED: diagram:generate quadratic regex on uncapped text → 8000-char cap + SEND_RE {0,80} bound (8KB input: seconds→0.8ms).
+  - LOW: IPC handlers lacked explicit type guards → added typeof checks (query/text/filters/key/value).
+  - Robustness: setIntelligenceFlag own-property guard (FLAGS['__proto__'] was truthy).
+  - The flag-set prototype-pollution surface was ALREADY correctly defended (key validated + value coerced).
+  - +5 security regression tests. Final: typecheck 0, intelligence **440/0**, LLM baseline **1656/0**.
+- **17 commits total** on the branch, pushed.
