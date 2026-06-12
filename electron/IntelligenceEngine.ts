@@ -26,6 +26,7 @@ import { DynamicAction } from './services/dynamic-actions/DynamicAction';
 import { ScreenContext } from './services/screen/ScreenContextService';
 import { buildPreparedTranscriptContext as assemblePreparedTranscriptContext } from './utils/preparedTranscriptContext';
 import { PiLatencyTrace } from './services/telemetry/PiLatencyTracer';
+import { beginTrace, commitTrace } from './intelligence/IntelligenceTrace';
 
 // Mode types
 export type IntelligenceMode = 'idle' | 'assist' | 'what_to_say' | 'follow_up' | 'recap' | 'clarify' | 'manual' | 'follow_up_questions' | 'code_hint' | 'brainstorm';
@@ -583,6 +584,12 @@ export class IntelligenceEngine extends EventEmitter {
      */
     async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string }): Promise<string | null> {
         const now = Date.now();
+        // Intelligence OS observe-only trace (Phase 1). Zero-cost NO-OP unless
+        // intelligence_trace_enabled is on. Committed at the primary final-answer emit
+        // below; rare early-returns (provider-key error / clarification) are not traced
+        // yet (documented in the wiring status) — an uncommitted trace simply isn't
+        // recorded, no leak.
+        const wtaTrace = beginTrace(typeof question === 'string' ? question : '');
         const isSpeculative = options?.speculative === true;
         const skipCooldown = options?.skipCooldown === true;
 
@@ -1451,6 +1458,11 @@ export class IntelligenceEngine extends EventEmitter {
             });
 
             this.emit('suggested_answer', fullAnswer, question || 'What to Answer', confidence);
+            try {
+                wtaTrace.setRouting({ source: 'what_to_answer', answerType: answerPlan.answerType });
+                wtaTrace.noteContext({ source: 'live_transcript', trustLevel: 'low', requested: true, retrieved: true, included: true, reason: 'wta_window' });
+                commitTrace(wtaTrace);
+            } catch { /* trace never affects the answer */ }
 
             // VERIFIED CODE EXECUTION (background, strictly additive). For coding
             // answers, run the code against test cases AFTER it's shown — never

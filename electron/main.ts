@@ -5236,10 +5236,6 @@ export class AppState {
     this._applyDisguise(this.disguiseMode);
   }
 
-  public applyInitialDisguise(): void {
-    this._applyDisguise(this.disguiseMode);
-  }
-
   private _applyDisguise(mode: 'terminal' | 'settings' | 'activity' | 'none'): void {
     let appName = "Natively";
     let iconPath = "";
