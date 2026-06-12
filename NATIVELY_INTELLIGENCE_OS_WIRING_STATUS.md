@@ -326,3 +326,16 @@ Result: ✅ Final report written: what's live, per-phase flag table, live-vs-sha
 - **Every phase flag-gated (default OFF) + independently test-engineer-verified.** Merging changes no behavior until a flag is enabled.
 - **Real capability:** Phases 2,3,4,8,9,10,11,12. **Shadow/observe-only:** 1,5,6,7. **Wiring-only (needs external setup):** 13 (Hindsight). **Backend contract, UI deferred:** lecture/diagram/search panels, flag settings UI.
 - **Honest gaps:** Hindsight not exercisable without a server; deferred renderer panels; deterministic extraction is a coarse v1 floor; interactive GUI walk-through is the one remaining human step.
+
+---
+
+## Post-completion — PR + Security Review
+- **PR #313** opened against main (https://github.com/Natively-AI-assistant/natively-cluely-ai-assistant/pull/313).
+- **Security review** (code-reviewer) over the new attack surface (5 IPCs, persistence write, conversation memory, search, Hindsight retain): **APPROVE WITH SUGGESTIONS — 0 crit / 0 high / 2 med / 1 low.** All fixed in commit `ea84474`:
+  - MED: conversation-memory Map never pruned → clearSession on renderer 'destroyed'.
+  - MED: diagram:generate quadratic regex on uncapped text → 8000-char cap + SEND_RE {0,80} bound (8KB input: seconds→0.8ms).
+  - LOW: IPC handlers lacked explicit type guards → added typeof checks (query/text/filters/key/value).
+  - Robustness: setIntelligenceFlag own-property guard (FLAGS['__proto__'] was truthy).
+  - The flag-set prototype-pollution surface was ALREADY correctly defended (key validated + value coerced).
+  - +5 security regression tests. Final: typecheck 0, intelligence **440/0**, LLM baseline **1656/0**.
+- **17 commits total** on the branch, pushed.
