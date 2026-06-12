@@ -1811,6 +1811,36 @@ export function initializeIpcHandlers(appState: AppState): void {
     return { success: true };
   });
 
+  // INTELLIGENCE OS FEATURE FLAGS (Phase 14): get/set the experimental flags so they
+  // can be toggled from a dev/experimental settings panel without editing env vars.
+  // The flags read from SettingsManager already, so set() takes effect on the next
+  // answer. Production defaults stay conservative (all OFF) — this only surfaces an
+  // opt-in toggle. No flag here changes behavior unless its wiring is also exercised.
+  safeHandle('intelligence-flags:get', async () => {
+    try {
+      const { intelligenceFlagKeys, intelligenceFlagMeta, isIntelligenceFlagEnabled } = require('./intelligence/intelligenceFlags') as typeof import('./intelligence/intelligenceFlags');
+      return intelligenceFlagKeys().map((key) => {
+        const meta = intelligenceFlagMeta(key);
+        return { key, enabled: isIntelligenceFlagEnabled(key), setting: meta.setting, env: meta.env, default: meta.default };
+      });
+    } catch (e: any) {
+      console.warn('[IntelligenceFlags] get failed:', e?.message);
+      return [];
+    }
+  });
+
+  safeHandle('intelligence-flags:set', async (_, { key, value }: { key: string; value: boolean | null }) => {
+    try {
+      const { setIntelligenceFlag, isIntelligenceFlagEnabled, intelligenceFlagKeys } = require('./intelligence/intelligenceFlags') as typeof import('./intelligence/intelligenceFlags');
+      if (!intelligenceFlagKeys().includes(key as any)) return { success: false, error: 'unknown_flag' };
+      const ok = setIntelligenceFlag(key as any, value === null ? null : Boolean(value));
+      return { success: ok, enabled: isIntelligenceFlagEnabled(key as any) };
+    } catch (e: any) {
+      console.warn('[IntelligenceFlags] set failed:', e?.message);
+      return { success: false, error: 'set_failed' };
+    }
+  });
+
   // Legacy alias for renderer builds that still call the old IPC name.
   // Maps the deprecated technicalInterviewDirectVision channel onto the new
   // technicalInterviewVisionFirst getter/setter so old renderer builds keep working.

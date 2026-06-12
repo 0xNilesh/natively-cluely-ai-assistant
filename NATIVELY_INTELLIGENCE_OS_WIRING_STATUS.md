@@ -275,4 +275,20 @@ Result: ✅ test-engineer verdict: PASS. The LOAD-BEARING safety chain is real +
 Caveat fixed: annotated `.env.example` that NATIVELY_MEMORY_PROVIDER + HINDSIGHT_RETAIN_ASYNC are illustrative-only (not read).
 Rollback: `NATIVELY_HINDSIGHT_POST_MEETING_RETAIN` unset = off (default). Revert the retain block.
 
-**Phase 13 verified by test-engineer agent. Proceeding to Phase 14 (autopilot).**
+**Phase 13 verified by test-engineer agent.**
+
+---
+
+## Phase 14 — Settings UI for Feature Flags
+Status: **complete** (backend contract: IPC + preload + types; React panel deferred per the prompt's "dev-only/debug command" allowance)
+Goal: Make flags toggleable without env editing.
+Files changed: `electron/intelligence/intelligenceFlags.ts` (+intelligenceFlagKeys, +intelligenceFlagMeta, +setIntelligenceFlag — persists via the SettingsManager key the flag already reads), `electron/ipcHandlers.ts` (+`intelligence-flags:get`/`intelligence-flags:set` IPCs, key-validated), `electron/preload.ts` + `src/types/electron.d.ts` (+getIntelligenceFlags/setIntelligenceFlag).
+Feature flags touched: all (this is the toggle surface). No defaults changed (all 17 stay OFF).
+Tests added: `electron/intelligence/__tests__/FlagSettingsRoundTrip.test.mjs` (13 tests, by test-engineer).
+Tests run: typecheck:electron **0** · renderer tsc **0** · build clean · intelligence **435 pass / 0 fail / 9 todo**.
+Manual verification: deferred to Phase 15.
+Result: ✅ test-engineer verdict: PASS all 5. Delivers "flags toggleable without env editing" — the chain reaches the live path (verified: set → SettingsManager → isIntelligenceFlagEnabled → the wired consumers from Phases 1-13; e.g. durableMemoryWindow → getDurableContext on the next answer). Safe (additive, defensive — setIntelligenceFlag never throws; IPCs validate the key + try/catch; all defaults conservative). SettingsManager round-trip sound (loadSettings preserves unknown keys; migrateLegacySettings only touches screenUnderstandingMode → no risk to flag persistence).
+Rollback: revert the IPCs + the 3 new flag exports. Backend-only, no UI to remove.
+Notes (LOW, by design): flag setting-keys aren't in the AppSettings TS type (works via runtime require() — keeps experimental keys out of the public type; no compile-time typo protection). React settings panel is a separate feature consuming this typed contract.
+
+**Phase 14 verified by test-engineer agent. Proceeding to Phase 15 (autopilot).**

@@ -167,6 +167,35 @@ export function intelligenceFlagSnapshot(): Record<IntelligenceFlagKey, boolean>
   return out;
 }
 
+/** All flag keys (for a settings UI / diagnostics). */
+export function intelligenceFlagKeys(): IntelligenceFlagKey[] {
+  return Object.keys(FLAGS) as IntelligenceFlagKey[];
+}
+
+/** The SettingsManager key + env var name backing a flag (for a settings UI). */
+export function intelligenceFlagMeta(key: IntelligenceFlagKey): { setting: string; env: string; default: boolean } {
+  const f = FLAGS[key];
+  return { setting: f.setting, env: f.env, default: f.default };
+}
+
+/**
+ * Persist a flag's value via its SettingsManager key (the same key the flag reads).
+ * Used by the dev/experimental settings UI (Phase 14). Pass `null` to clear the
+ * override (revert to env/default). Defensive — never throws.
+ */
+export function setIntelligenceFlag(key: IntelligenceFlagKey, value: boolean | null): boolean {
+  try {
+    const spec = FLAGS[key];
+    if (!spec) return false;
+    const { SettingsManager } = require('../services/SettingsManager');
+    if (value === null) SettingsManager.getInstance().set(spec.setting, undefined);
+    else SettingsManager.getInstance().set(spec.setting, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Test-only no-op. Env is read fresh on every call, so there is no cache to clear —
  * a test can change `process.env.NATIVELY_*` and the next read reflects it
