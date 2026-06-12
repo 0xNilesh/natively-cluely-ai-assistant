@@ -304,4 +304,25 @@ Result: ✅ All automated gates green; zero regression to the 1656 baseline acro
 **HONEST:** performed headless (no GUI), so the interactive "open app + type X" walk-through is provided for a human to run with flags enabled — but every case's logic is unit/integration-proven, so "not run in GUI" ≠ "unverified".
 Rollback: doc only.
 
-**Phase 15 complete. Proceeding to Phase 16 (final report + cleanup).**
+**Phase 15 complete.**
+
+---
+
+## Phase 16 — Commit-Ready Cleanup
+Status: **complete**
+Goal: Prepare the branch for review.
+Cleanup checks: ✅ `_external_research` NOT tracked (0 files) · ✅ no real API keys/secrets in the diff (only empty `.env.example` placeholders) · ✅ working tree clean.
+Files changed: `NATIVELY_INTELLIGENCE_OS_WIRING_FINAL_REPORT.md` (NEW).
+Result: ✅ Final report written: what's live, per-phase flag table, live-vs-shadow-vs-disabled map, files changed, tests, the 6 mid-flight fixes, non-negotiables honored, Hindsight status, rollback, known limitations, recommended next PRs.
+
+---
+
+# FINAL STATE — Live-Wiring (Phases 0–16) COMPLETE
+
+- **16 commits** on `feature/intelligence-os-live-wiring` (pushed to origin), one per phase.
+- **Diff:** 32 files, +6,798 / −19. 12 production files, 14 new wiring test suites.
+- **Gates:** typecheck:electron **0** · renderer tsc **0** · build clean.
+- **Tests:** intelligence **435/0** · LLM baseline **1656/0** (held through all 14 phases) · IntelligenceEngine **33/0** · meeting **15/0**.
+- **Every phase flag-gated (default OFF) + independently test-engineer-verified.** Merging changes no behavior until a flag is enabled.
+- **Real capability:** Phases 2,3,4,8,9,10,11,12. **Shadow/observe-only:** 1,5,6,7. **Wiring-only (needs external setup):** 13 (Hindsight). **Backend contract, UI deferred:** lecture/diagram/search panels, flag settings UI.
+- **Honest gaps:** Hindsight not exercisable without a server; deferred renderer panels; deterministic extraction is a coarse v1 floor; interactive GUI walk-through is the one remaining human step.
