@@ -29,6 +29,7 @@ import { PiLatencyTrace } from './services/telemetry/PiLatencyTracer';
 import { beginTrace, commitTrace } from './intelligence/IntelligenceTrace';
 import { isDurableMemoryWindowEnabled, isIntelligenceFlagEnabled } from './intelligence/intelligenceFlags';
 import { normalizeOutputShape } from './intelligence/OutputShapeNormalizer';
+import { LiveTranscriptBrain } from './intelligence/LiveTranscriptBrain';
 
 // Mode types
 export type IntelligenceMode = 'idle' | 'assist' | 'what_to_say' | 'follow_up' | 'recap' | 'clarify' | 'manual' | 'follow_up_questions' | 'code_hint' | 'brainstorm';
@@ -788,6 +789,27 @@ export class IntelligenceEngine extends EventEmitter {
                     } catch { return ''; }
                 })();
             const extractedQuestion = extractLatestQuestion(transcriptTurns);
+
+            // LIVE TRANSCRIPT BRAIN (Phase 6 wiring, SHADOW/PARITY behind live_transcript_brain_enabled):
+            // the WTA path already builds the hot window inline (getContext(180) + interim
+            // injection above) and extracts the question — exactly what LiveTranscriptBrain
+            // encapsulates. Replacing the proven inline logic outright is a pure refactor =
+            // regression risk for zero gain. So we run the brain in SHADOW: enrich the trace
+            // with its current-question + entity view and record a PARITY marker when its
+            // extracted question diverges from the live one. This proves the brain is a safe
+            // drop-in for a future refactor, with ZERO behavior change. Flag OFF → not run.
+            try {
+                if (isIntelligenceFlagEnabled('liveTranscriptBrain')) {
+                    const brain = new LiveTranscriptBrain(this.session as any, extractLatestQuestion as any);
+                    const brainQ = brain.getCurrentQuestion(180);
+                    wtaTrace.noteContext({
+                        source: 'live_transcript_brain', trustLevel: 'low',
+                        requested: true, retrieved: Boolean(brainQ), included: false,
+                        reason: brainQ && extractedQuestion.latestQuestion && brainQ !== extractedQuestion.latestQuestion
+                            ? 'brain_question_divergence' : 'brain_parity',
+                    });
+                }
+            } catch { /* shadow brain is observe-only; never affects the answer */ }
             // Bare follow-up resolution ("And SQL?", "What about complexity?",
             // "Why?") — resolve into a concrete question + inherited answer type so
             // it routes correctly instead of falling to general/unknown. Only

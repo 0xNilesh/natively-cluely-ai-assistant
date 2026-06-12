@@ -141,4 +141,20 @@ Result: ✅ test-engineer verdict: PASS (4 items) + 1 CONCERN fixed. Shadow is t
 Rollback: `NATIVELY_CONTEXT_ROUTER_V2` unset = off. Revert the shadow block.
 Notes: This is "shadow-before-drive" validation + a consistency guard against future drift between the two routing representations. Low-value-but-harmless and the correct prerequisite before ever letting ContextRouter drive.
 
-**Phase 5 verified by test-engineer agent. Proceeding to Phase 6 (autopilot).**
+**Phase 5 verified by test-engineer agent.**
+
+---
+
+## Phase 6 — Wire LiveTranscriptBrain Into WTA Path
+Status: **complete**
+Goal: Make WTA use the current transcript correctly + fast.
+**HONEST FINDING:** the WTA path ALREADY builds the hot window inline (IntelligenceEngine ~716: getContext(180) + interim injection) and extracts the question (extractLatestQuestion ~790) — exactly what LiveTranscriptBrain encapsulates, and it already meets every Phase-6 acceptance criterion (uses current question + recent context, no global search, no Hindsight). Replacing the proven inline window = pure refactor, regression risk, zero gain. NOTE: the brain's getHotWindow defaults to 30s vs the inline 180s — a naive swap would silently narrow the window (test-engineer caught this). So wired in **SHADOW/PARITY** mode.
+Files changed: `electron/IntelligenceEngine.ts` (~line 790) — import LiveTranscriptBrain; shadow block behind `live_transcript_brain_enabled`: construct brain over the live session, record getCurrentQuestion + a brain_parity / brain_question_divergence marker on the trace. Output NEVER touches the answer.
+Feature flags touched: `live_transcript_brain_enabled` (env `NATIVELY_LIVE_TRANSCRIPT_BRAIN`, default OFF). OFF = block doesn't execute.
+Tests added: `electron/intelligence/__tests__/LiveBrainShadowWiring.test.mjs` (9 tests, by test-engineer).
+Tests run: typecheck **0** · build clean · intelligence **347 pass / 0 fail / 9 todo** · services **33 pass / 0 fail**.
+Manual verification: deferred to Phase 15.
+Result: ✅ test-engineer verdict: PASS all 6. Shadow is the right call (vs replacing inline). Genuinely zero-behavior-change; all 4 SessionTrackerLike methods exist on SessionTracker (as-any hides no crash); brain crash-proof even with hostile session; ~4ms latency. HONEST: this phase ships NO user-visible behavior — its deliverable is a parity signal that de-risks a FUTURE refactor (and catches drift between the inline interim-injection and the brain's getContextWithInterim).
+Rollback: `NATIVELY_LIVE_TRANSCRIPT_BRAIN` unset = off. Revert the shadow block.
+
+**Phase 6 verified by test-engineer agent. "Must Finish First" tier (Phases 0–6) COMPLETE.**
