@@ -249,6 +249,8 @@ export interface ElectronAPI {
   getMeetingDetails: (id: string) => Promise<any>
   searchGlobalMeetings: (query: string, filters?: any) => Promise<{ enabled: boolean; results: any[] }>
   searchInMeeting: (query: string) => Promise<{ enabled: boolean; results: any[] }>
+  generateLectureNotes: (opts?: { title?: string; course?: string }) => Promise<{ enabled: boolean; notes: any }>
+  generateDiagram: (text?: string) => Promise<{ enabled: boolean; diagram: any }>
   updateMeetingTitle: (id: string, title: string) => Promise<boolean>
   updateMeetingSummary: (id: string, updates: { overview?: string, actionItems?: string[], keyPoints?: string[], actionItemsTitle?: string, keyPointsTitle?: string }) => Promise<boolean>
   deleteMeeting: (id: string) => Promise<boolean>

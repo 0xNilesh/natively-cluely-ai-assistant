@@ -242,4 +242,20 @@ Result: ✅ test-engineer verdict: PASS on all safety items (flag-OFF byte-ident
 Rollback: `NATIVELY_CONVERSATION_MEMORY_V2` unset = off. Revert the ipcHandlers blocks (the flag key + regex widening are safe to keep).
 Notes (honest): only the manual single-shot path needed this (WTA already has liveSessionMemory). Cross-session recall (recallCrossSession) intentionally NOT wired (that's Hindsight, Phase 13/16). Unbounded axis = distinct senderIds, but those are renderer webContents ids (few per app run, each capped at 100 turns) — no practical leak.
 
-**Phase 11 verified by test-engineer agent. Proceeding to Phase 12 (autopilot).**
+**Phase 11 verified by test-engineer agent.**
+
+---
+
+## Phase 12 — Wire LectureIntelligenceService + DiagramIntelligenceService
+Status: **complete**
+Goal: Make lecture mode differentiated + real (notes/diagrams), not just a meeting mode.
+Files changed: `electron/ipcHandlers.ts` (2 NEW IPCs after search:in-meeting — `lecture:generate-notes` behind lecture_intelligence_v2_enabled → structured notes from current transcript; `diagram:generate` behind diagram_intelligence → validated Mermaid from query/transcript), `electron/preload.ts` + `src/types/electron.d.ts` (+generateLectureNotes, +generateDiagram).
+Feature flags touched: `lecture_intelligence_v2_enabled` (env `NATIVELY_LECTURE_INTELLIGENCE_V2`), `diagram_intelligence` (env `NATIVELY_DIAGRAM_INTELLIGENCE`), both default OFF. OFF = IPC returns {enabled:false}.
+Tests added: `electron/intelligence/__tests__/LectureDiagramHandlerLogic.test.mjs` (10 tests, by test-engineer).
+Tests run: typecheck:electron **0** · renderer tsc **0** · build clean · intelligence **411 pass / 0 fail / 9 todo** · lecture+diagram library **26/0**.
+Manual verification: deferred to Phase 15.
+Result: ✅ test-engineer verdict: PASS all 5. Real net-new capability (structured notes: concepts/definitions/important-points/flashcards/exam-questions/revision + validated Mermaid diagrams from live transcript). Safe flag OFF (zero-cost no-op before any work). Safe flag ON (can't crash, no LLM/network, NO interview/sales contamination). DIAGRAM SAFETY confirmed at source (DiagramIntelligenceService.ts:194): exact_source_diagram is gated SOLELY on fromSourceVisual, which the IPC hardcodes false → text-derived diagrams can ONLY be ai_reconstructed/conceptual/low_confidence, never "exact"; never fabricates edges (returns empty mermaid when no structure extracts). Backend IPCs fully wired+typed+tested; lecture/diagram panel UI is a separate phase.
+Rollback: unset the two env vars = off. Revert the 2 IPCs + preload/types.
+Notes (honest, test-engineer): the deterministic no-LLM extraction is a solid v1 STRUCTURAL FLOOR but coarse on messy real lecture audio (definition regex misses colloquial phrasing; concepts = capitalized-token frequency; exam Qs are template-filled). Correct tradeoff for zero-latency/offline/never-hallucinate; the service docstring already says a caller may pass richer LLM prose later. Quality ceiling, not a defect.
+
+**Phase 12 verified by test-engineer agent. Proceeding to Phase 13 (autopilot).**

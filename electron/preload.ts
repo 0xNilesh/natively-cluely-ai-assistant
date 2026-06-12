@@ -345,6 +345,8 @@ interface ElectronAPI {
   getMeetingDetails: (id: string) => Promise<any>;
   searchGlobalMeetings: (query: string, filters?: any) => Promise<{ enabled: boolean; results: any[] }>;
   searchInMeeting: (query: string) => Promise<{ enabled: boolean; results: any[] }>;
+  generateLectureNotes: (opts?: { title?: string; course?: string }) => Promise<{ enabled: boolean; notes: any }>;
+  generateDiagram: (text?: string) => Promise<{ enabled: boolean; diagram: any }>;
   updateMeetingTitle: (id: string, title: string) => Promise<boolean>;
   updateMeetingSummary: (
     id: string,
@@ -1430,6 +1432,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getMeetingDetails: (id: string) => ipcRenderer.invoke('get-meeting-details', id),
   searchGlobalMeetings: (query: string, filters?: any) => ipcRenderer.invoke('search:global-meetings', { query, filters }),
   searchInMeeting: (query: string) => ipcRenderer.invoke('search:in-meeting', { query }),
+  generateLectureNotes: (opts?: { title?: string; course?: string }) => ipcRenderer.invoke('lecture:generate-notes', opts),
+  generateDiagram: (text?: string) => ipcRenderer.invoke('diagram:generate', { text }),
   updateMeetingTitle: (id: string, title: string) =>
     ipcRenderer.invoke('update-meeting-title', { id, title }),
   updateMeetingSummary: (id: string, updates: any) =>

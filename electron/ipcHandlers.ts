@@ -3981,6 +3981,53 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
+  // LECTURE NOTES (Phase 12 wiring, behind lecture_intelligence_v2_enabled). Generates
+  // structured student notes (concepts/definitions/examples/important-points/flashcards/
+  // exam-questions/revision-checklist) from the CURRENT meeting transcript. Deterministic,
+  // no LLM, local. Returns {enabled:false} when off. The renderer can call this on demand
+  // (a lecture-notes panel is a separate UI feature).
+  safeHandle('lecture:generate-notes', async (_event, opts?: { title?: string; course?: string }) => {
+    try {
+      if (!isIntelligenceFlagEnabled('lectureIntelligenceV2')) return { enabled: false, notes: null };
+      const { LectureIntelligenceService } = require('./intelligence/LectureIntelligenceService') as typeof import('./intelligence/LectureIntelligenceService');
+      const transcript = appState.getIntelligenceManager().getCurrentMeetingTranscript();
+      const segments = transcript.map((t) => ({ speaker: t.speaker, text: t.text, timestamp: t.timestamp }));
+      const notes = new LectureIntelligenceService().generateNotes({
+        lectureId: `live-${Date.now()}`,
+        segments,
+        title: opts?.title,
+        course: opts?.course,
+      });
+      return { enabled: true, notes };
+    } catch (e: any) {
+      console.warn('[LectureIntelligenceV2] notes generation failed (non-fatal):', e?.message);
+      return { enabled: true, notes: null };
+    }
+  });
+
+  // DIAGRAM GENERATION (Phase 12 wiring, behind diagram_intelligence). Generates a
+  // validated Mermaid diagram from explanatory text (the query, or the recent transcript).
+  // SAFETY: text-derived diagrams are labeled `ai_reconstructed_diagram` (never "exact"),
+  // syntax-validated, with an ASCII fallback — the service never fabricates edges when it
+  // can't extract structure. Returns {enabled:false} when off.
+  safeHandle('diagram:generate', async (_event, { text }: { text?: string }) => {
+    try {
+      if (!isIntelligenceFlagEnabled('diagramIntelligence')) return { enabled: false, diagram: null };
+      const { DiagramIntelligenceService } = require('./intelligence/DiagramIntelligenceService') as typeof import('./intelligence/DiagramIntelligenceService');
+      // Use the supplied text, else fall back to the recent transcript window.
+      let source = (text || '').trim();
+      if (!source) {
+        const transcript = appState.getIntelligenceManager().getCurrentMeetingTranscript();
+        source = transcript.slice(-30).map((t) => t.text).join('. ');
+      }
+      const diagram = new DiagramIntelligenceService().generate({ text: source, fromSourceVisual: false });
+      return { enabled: true, diagram };
+    } catch (e: any) {
+      console.warn('[DiagramIntelligence] generation failed (non-fatal):', e?.message);
+      return { enabled: true, diagram: null };
+    }
+  });
+
   safeHandle('update-meeting-title', async (_, { id, title }: { id: string; title: string }) => {
     return DatabaseManager.getInstance().updateMeetingTitle(id, title);
   });
