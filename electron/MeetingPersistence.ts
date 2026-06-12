@@ -8,6 +8,7 @@ import { DatabaseManager, Meeting } from './db/DatabaseManager';
 import { GROQ_TITLE_PROMPT, GROQ_SUMMARY_JSON_PROMPT } from './llm';
 import { buildPostCallEnhancements } from './services/post-call/PostCallWorkflow';
 import { MeetingMemoryService } from './intelligence/MeetingMemoryService';
+import { LongTermMemoryService } from './intelligence/memory/LongTermMemoryService';
 import { isIntelligenceFlagEnabled } from './intelligence/intelligenceFlags';
 import { telemetryService } from './services/telemetry/TelemetryService';
 import type { ProviderDataScopePolicy } from './llm/ProviderRouter';
@@ -405,6 +406,37 @@ Return ONLY valid JSON (no markdown code blocks):
             };
 
             DatabaseManager.getInstance().saveMeeting(meetingData, data.startTime, data.durationMs);
+
+            // HINDSIGHT POST-MEETING RETAIN (Phase 13 wiring, behind
+            // hindsight_post_meeting_retain_enabled). After the meeting is persisted
+            // locally, ASYNC-retain its summary into long-term memory IF Hindsight is
+            // configured. LongTermMemoryService.fromFlags returns a NoopMemoryProvider
+            // unless hindsight_memory is ALSO on AND a baseUrl is configured AND the
+            // optional @vectorize-io/hindsight-client is installed — so with no server
+            // this is a guaranteed no-op (the app works fully without Hindsight). retain
+            // is async/queued (never blocks). Scope tags enforce per-user/org isolation.
+            // Runs in the already-background processAndSaveMeeting worker.
+            try {
+                if (isIntelligenceFlagEnabled('hindsightPostMeetingRetain')) {
+                    const ltm = LongTermMemoryService.fromFlags({
+                        hindsight: {
+                            baseUrl: process.env.HINDSIGHT_BASE_URL || '',
+                            apiKey: process.env.HINDSIGHT_API_KEY,
+                            timeoutMs: Number(process.env.HINDSIGHT_TIMEOUT_MS) || 800,
+                        },
+                    });
+                    if (ltm.enabled) {
+                        const summaryText = typeof summaryData?.overview === 'string'
+                            ? summaryData.overview
+                            : JSON.stringify(summaryData?.keyPoints ?? []);
+                        // Single-user desktop → 'local' scope; mode tag scopes by meeting mode.
+                        ltm.retainMeetingSummary(meetingId, summaryText, { userId: 'local', meetingId }, modeSnapshot?.templateType);
+                        console.log('[Hindsight] queued post-meeting summary retain', { meetingId, provider: ltm.providerName });
+                    }
+                }
+            } catch (hsErr) {
+                console.warn('[Hindsight] post-meeting retain skipped (non-fatal):', (hsErr as any)?.message);
+            }
 
             // Metadata was already snapshotted before session.reset() — nothing to clear here.
 

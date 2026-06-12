@@ -258,4 +258,21 @@ Result: ✅ test-engineer verdict: PASS all 5. Real net-new capability (structur
 Rollback: unset the two env vars = off. Revert the 2 IPCs + preload/types.
 Notes (honest, test-engineer): the deterministic no-LLM extraction is a solid v1 STRUCTURAL FLOOR but coarse on messy real lecture audio (definition regex misses colloquial phrasing; concepts = capitalized-token frequency; exam Qs are template-filled). Correct tradeoff for zero-latency/offline/never-hallucinate; the service docstring already says a caller may pass richer LLM prose later. Quality ceiling, not a defect.
 
-**Phase 12 verified by test-engineer agent. Proceeding to Phase 13 (autopilot).**
+**Phase 12 verified by test-engineer agent.**
+
+---
+
+## Phase 13 — Real Hindsight Setup + Post-Meeting Retain
+Status: **complete** (wiring + safe-disabled path; NOT end-to-end exercisable without installing the client + running a server — by design)
+Goal: Make Hindsight real + OPTIONAL; wire post-meeting retain FIRST (not recall).
+Files changed: `electron/MeetingPersistence.ts` (after saveMeeting, behind hindsight_post_meeting_retain_enabled: LongTermMemoryService.fromFlags(env config) → retainMeetingSummary if enabled), `.env.example` (+Hindsight vars, annotated which are read vs illustrative), `docs/HINDSIGHT_LOCAL_SETUP.md` (NEW — Postgres+pgvector, Docker, config, flag order, isolation, timeouts, fallback).
+Feature flags touched: `hindsight_post_meeting_retain_enabled` (env `NATIVELY_HINDSIGHT_POST_MEETING_RETAIN`) + the gating `hindsight_memory` (`NATIVELY_HINDSIGHT_MEMORY`), both default OFF.
+Tests added: `electron/intelligence/__tests__/HindsightRetainWiring.test.mjs` (11 tests, by test-engineer).
+Tests run: typecheck **0** · build clean · hindsight **16/0** · meeting-specific **15/0** · intelligence **422 pass / 0 fail / 9 todo**.
+Manual verification: deferred to Phase 15 (and requires a Hindsight server to exercise retain — out of scope here).
+Result: ✅ test-engineer verdict: PASS. The LOAD-BEARING safety chain is real + tested: `@vectorize-io/hindsight-client` is NOT installed → HindsightClientAdapter's lazy require fails → adapter.enabled=false → fromFlags returns Noop → ltm.enabled=false → retain NEVER fires, even with both flags ON + a baseUrl set. So "configured but client absent" works. retain is post-save + try/catch + background worker → cannot block live answers or break meeting save. Isolation by bank+tags (user/org/visibility:private, all_strict). Retain-before-recall sequencing correct. Doc accurate.
+**HONEST:** retain CANNOT be exercised end-to-end without `npm install @vectorize-io/hindsight-client` + a running Hindsight server (Postgres+pgvector+LLM key). This phase ships the WIRING + the safe-disabled path, not a working memory feature. The mock-provider test proves the wiring calls the right method/scope. Per rules, did NOT install the client or start a server. Recall NOT wired (correctly deferred — last to enable).
+Caveat fixed: annotated `.env.example` that NATIVELY_MEMORY_PROVIDER + HINDSIGHT_RETAIN_ASYNC are illustrative-only (not read).
+Rollback: `NATIVELY_HINDSIGHT_POST_MEETING_RETAIN` unset = off (default). Revert the retain block.
+
+**Phase 13 verified by test-engineer agent. Proceeding to Phase 14 (autopilot).**
