@@ -333,3 +333,6 @@ negotiation-routing-eval/
 benchmarks/
 .playwright-mcp/
 
+
+# External research clones (not vendored)
+_external_research/
