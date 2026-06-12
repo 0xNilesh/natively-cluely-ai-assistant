@@ -45,7 +45,7 @@ export interface LiveSessionMemoryRolloutConfig {
   enabled: boolean;
   /** Why (marker for telemetry — no raw content). */
   reason: 'kill_switch' | 'env_on' | 'env_off' | 'settings_on' | 'settings_off'
-    | 'internal_context' | 'rollout_in' | 'rollout_out' | 'default_off';
+    | 'internal_context' | 'rollout_in' | 'rollout_out' | 'default_off' | 'default_on';
   /** The rollout percent in effect (0–100), or null when not gating by percent. */
   rolloutPercent: number | null;
   /** The session's deterministic bucket (0–99) when percentage gating applies. */
@@ -173,8 +173,13 @@ export function resolveLiveSessionMemoryConfig(sessionId?: string): LiveSessionM
     return { ...base, enabled: inRollout, reason: inRollout ? 'rollout_in' : 'rollout_out', rolloutPercent: pct, bucket };
   }
 
-  // 6. Default OFF in production.
-  return { ...base, enabled: false, reason: 'default_off', rolloutPercent: null, bucket: null };
+  // 6. Default ON (PI v3, W6d). The live SessionMemory shipped behind a
+  // default-OFF flag (2026-06-07c) and has since been validated: 50-session/
+  // 132-check live replay 100% with 0 context leaks + 1240-test suite green.
+  // Long-range follow-up recall is now part of the core answer quality
+  // contract, so production defaults ON. EVERY override above still wins:
+  // kill switch → env → settings(false) → percentage rollout(0) all force OFF.
+  return { ...base, enabled: true, reason: 'default_on', rolloutPercent: null, bucket: null };
 }
 
 /**

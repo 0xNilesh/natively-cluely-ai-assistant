@@ -204,6 +204,15 @@ export class PromptAssembler {
         intentContext?: string;
         retrievedModeContext?: string;
         /**
+         * PI v3 (W2): the active mode's user-authored "Real-time prompt"
+         * (customContext), ALWAYS pinned when non-empty — unlike
+         * retrievedModeContext it is not retrieval-scored, so a custom mode's
+         * instructions reliably shape every answer. Already sensitivity-scoped
+         * by ModesManager.getActiveModePinnedInstructions(answerType). Gets the
+         * same injection escaping as the legacy modeContext path.
+         */
+        pinnedModeInstructions?: string;
+        /**
          * Candidate's own profile facts (resume projects/experience/skills/...)
          * already XML-formatted by KnowledgeOrchestrator.assemblePromptContext.
          * Trusted (it originates from the user's uploaded resume), so it sorts
@@ -288,6 +297,26 @@ export class PromptAssembler {
         // 6. MODE CONTEXT — custom instructions + reference files
         if (params.modeContext) {
             this.addModeContextBlocks(packet, params.modeContext);
+        }
+        // 5a. PINNED MODE INSTRUCTIONS (PI v3, W2) — the mode's "Real-time
+        //     prompt", always included when present. MODE_POLICY trust (mode
+        //     configuration, not conversation evidence) with the same injection
+        //     escaping as the legacy whole-mode path. Skipped if the legacy
+        //     modeContext path already emitted custom instructions (no dupes).
+        if (params.pinnedModeInstructions?.trim() && !params.modeContext?.customContext?.trim()) {
+            const pinned = params.pinnedModeInstructions.trim();
+            if (containsPromptInjection(pinned)) {
+                console.warn('[PromptAssembler] Pinned mode instructions contain prompt injection pattern — escaping');
+            }
+            this.addBlock(packet, {
+                type: 'active_mode_custom_instructions',
+                trustLevel: TrustLevel.MODE_POLICY,
+                source: params.modeId ? `mode:${params.modeId}` : 'mode',
+                tokenBudget: 300,
+                content: `<active_mode_custom_instructions format="json">
+${JSON.stringify({ content: this.escapePromptInjection(pinned) })}
+</active_mode_custom_instructions>`,
+            });
         }
         if (params.retrievedModeContext) {
             this.addBlock(packet, this.buildRetrievedModeContextBlock(params.retrievedModeContext));

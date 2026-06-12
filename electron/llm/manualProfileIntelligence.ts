@@ -242,6 +242,9 @@ const formatInlineList = (items: string[], max = 8): string => {
   const values = items.map(clean).filter(Boolean).slice(0, max);
   if (values.length === 0) return '';
   if (values.length === 1) return values[0];
+  // Two items read "X and Y" — the Oxford comma ("SQL, and Python") only
+  // belongs in 3+ item lists (real manual log 2026-06-12 grammar polish).
+  if (values.length === 2) return `${values[0]} and ${values[1]}`;
   return `${values.slice(0, -1).join(', ')}, and ${values[values.length - 1]}`;
 };
 
@@ -274,7 +277,12 @@ const profileSkills = (profile: MaybeStructured<StructuredProfileFacts>): SkillI
 // This is the safe fallback for "tell me about yourself" / "give me a quick
 // introduction" so an intro NEVER has to reach the LLM (where it was leaking
 // "I'm Natively" / refusing). Returns '' when the name is missing.
-const formatIntro = (profile: MaybeStructured<StructuredProfileFacts>): string => {
+//
+// VARIANT-AWARE (manual regression 2026-06-12): one fixed intro was reused for
+// intro/background/style questions across a whole session — users read it as a
+// canned bot. The QUESTION now selects among grounded variants (same facts,
+// different emphasis/ordering), deterministically (same question → same intro).
+const formatIntro = (profile: MaybeStructured<StructuredProfileFacts>, question?: string): string => {
   const name = profileName(profile);
   if (!name) return '';
   const exp = profileExperience(profile);
@@ -286,14 +294,43 @@ const formatIntro = (profile: MaybeStructured<StructuredProfileFacts>): string =
     .filter(Boolean).slice(0, 4);
   const projects = profileProjects(profile)
     .map((p) => firstNonEmpty(p.name, p.title)).filter(Boolean).slice(0, 1);
+  const prior = exp[1] ? firstNonEmpty(exp[1].role, exp[1].title, exp[1].position) : '';
 
-  const parts: string[] = [];
   const article = role && /^[aeiou]/i.test(role.trim()) ? 'an' : 'a';
-  if (role) parts.push(`I'm ${name}, ${article} ${role}${company ? ` at ${company}` : ''}.`);
-  else parts.push(`I'm ${name}.`);
-  if (skills.length) parts.push(`I work mainly with ${formatInlineList(skills, 4)}.`);
-  if (projects.length) parts.push(`One project I'm proud of is ${projects[0]}.`);
-  return parts.join(' ');
+  const lead = role ? `I'm ${name}, ${article} ${role}${company ? ` at ${company}` : ''}.` : `I'm ${name}.`;
+  const skillLine = skills.length ? `I work mainly with ${formatInlineList(skills, 4)}.` : '';
+  const projectLine = projects.length ? `One project I'm proud of is ${projects[0]}.` : '';
+
+  const q = normalize(question || '');
+  // BACKGROUND/JOURNEY phrasing → walk the experience arc.
+  if (/\b(background|journey|career|history|path|walk me through)\b/.test(q)) {
+    const arc = prior
+      ? `I started out as ${/^[aeiou]/i.test(prior) ? 'an' : 'a'} ${prior} and I'm now ${role ? `${article} ${role}` : 'working'}${company ? ` at ${company}` : ''}.`
+      : lead;
+    return [`I'm ${name}.`, arc, skillLine].filter(Boolean).join(' ');
+  }
+  // STYLE/DESCRIBE phrasing → lead with how they work, not the title.
+  if (/\b(describe yourself|how (would|do) you describe|who you are as|summari[sz]e who)\b/.test(q)) {
+    const styleLead = skills.length
+      ? `I'd describe myself as ${article} ${role || 'hands-on engineer'} who works mostly with ${formatInlineList(skills, 3)}.`
+      : lead;
+    return [`I'm ${name}.`, styleLead, projectLine].filter(Boolean).join(' ');
+  }
+  // QUICK/SHORT intro → one tight sentence.
+  if (/\b(quick|brief|short|one[- ]?lin)\b/.test(q)) {
+    return skills.length ? `${lead.replace(/\.$/, '')} working mainly with ${formatInlineList(skills, 3)}.` : lead;
+  }
+  // Default full intro — hash-vary the ORDERING across distinct phrasings so
+  // "introduce yourself" and "tell me about yourself" don't produce the exact
+  // same string in one session (deterministic: same question → same intro).
+  let h = 0;
+  for (let i = 0; i < q.length; i++) h = ((h << 5) - h + q.charCodeAt(i)) | 0;
+  const variants: string[][] = [
+    [lead, skillLine, projectLine],
+    [lead, projectLine, skillLine],
+    [lead, skills.length ? `Day to day I work with ${formatInlineList(skills, 4)}.` : '', projectLine],
+  ];
+  return variants[Math.abs(h) % variants.length].filter(Boolean).join(' ');
 };
 
 const formatExperience = (profile: MaybeStructured<StructuredProfileFacts>): string => {
@@ -353,13 +390,22 @@ const findProjectByName = (profile: MaybeStructured<StructuredProfileFacts>, q: 
   }
   return null;
 };
+// Joining "is" + a description that starts with a capitalized article produced
+// "My project Natively is A privacy-first..." (real manual log 2026-06-12).
+// Lowercase a leading article/pronoun when it follows the copula; also strip a
+// trailing period so the sentence doesn't double-stop.
+const afterCopula = (description: string): string => {
+  const d = description.trim().replace(/\.+$/, '');
+  return d.replace(/^(A|An|The|It|This|That)\b/, (m) => m.toLowerCase());
+};
+
 const formatSingleProject = (project: ProfileProject): string => {
   const name = firstNonEmpty(project.name, project.title);
   const description = firstNonEmpty(project.description, project.summary);
   const tech = formatInlineList(asArray(project.technologies || project.tech_stack || project.tools).map(clean).filter(Boolean), 6);
   if (!name) return '';
   const parts = [`Your project ${name}`];
-  if (description) parts.push(`is ${description}`);
+  if (description) parts.push(`is ${afterCopula(description)}`);
   const head = parts.join(' ');
   return `${head}.${tech ? ` It was built with ${tech}.` : ''}`;
 };
@@ -404,10 +450,13 @@ const formatSkillExperience = (profile: MaybeStructured<StructuredProfileFacts>,
         ...asArray(ex.technologies || ex.tech_stack || ex.skills)]
         .map((x) => clean(x).toLowerCase()).join(' ');
       if (hay.includes(skill.toLowerCase())) {
-        const role = firstNonEmpty(e.role, e.title, e.position);
         const company = firstNonEmpty(e.company, e.organization, e.employer);
-        const article = /^[aeiou]/i.test(role.trim()) ? 'an' : 'a';
-        return role && company ? `my work as ${article} ${role} at ${company}` : (company ? `my role at ${company}` : '');
+        const role = firstNonEmpty(e.role, e.title, e.position);
+        // Company-led phrasing (manual regression 2026-06-12): the full
+        // "my work as an <Role> at <Company>" string shares its stem with the
+        // intro answer, so several skill answers in one session read as the
+        // same canned intro. "my work at <Company>" is just as grounded.
+        return company ? `my work at ${company}` : (role ? `my ${role} role` : '');
       }
     }
     return '';
@@ -425,10 +474,22 @@ const formatSkillExperience = (profile: MaybeStructured<StructuredProfileFacts>,
       : `I'd use ${skill} for the core implementation and validate it against real data, the way I approach any tool in my stack.`;
   }
   if (where) {
-    // Grounded use exists → concrete, but don't overclaim "central"; state it plainly.
-    if (isWhere) return `I've used ${skill} in ${where}.`;
+    // Grounded use exists → concrete, but don't overclaim "central"; state it
+    // plainly. Phrasing is hash-varied by SKILL so two "where have you used X?"
+    // asks in one session don't share an identical stem (manual regression
+    // 2026-06-12: "fastapi"/"python" both answered with the same role line and
+    // read as a canned intro). Deterministic — same skill → same sentence.
+    let sh = 0;
+    for (let i = 0; i < skill.length; i++) sh = ((sh << 5) - sh + skill.charCodeAt(i)) | 0;
+    const v = Math.abs(sh) % 3;
+    if (isWhere) {
+      return v === 0 ? `I've used ${skill} in ${where}.`
+        : v === 1 ? `${skill.charAt(0).toUpperCase()}${skill.slice(1)} came up mainly in ${where}.`
+          : `Mostly in ${where} — that's where I've worked with ${skill} day to day.`;
+    }
     if (isHow) return `I've used ${skill} hands-on in ${where} — building real features with it, not just studying it.`;
-    return `Yes — I've used ${skill} in ${where}.`;
+    return v === 0 ? `Yes — I've used ${skill} in ${where}.`
+      : `Yes, ${skill} has been part of ${where}.`;
   }
   // Skill is in the profile's skill LIST but no project/role grounds a concrete use
   // case → honest, never the weak "X is one of the skills I work with" and never a
@@ -677,7 +738,7 @@ export const tryBuildManualProfileFastPathAnswer = ({
   // "tell me ABOUT yourself" trips the generic about-qualifier, but INTRO_PATTERNS
   // is already precise.
   if (hasAny(q, INTRO_PATTERNS)) {
-    const intro = formatIntro(profile);
+    const intro = formatIntro(profile, question);
     if (intro) return makeRoute(intro, 'identity_answer', ['stable_identity', 'resume']);
   }
 
@@ -790,7 +851,7 @@ export const buildLiveFallbackAnswer = ({
   }
 
   // 3. A grounded intro is a safe, on-topic answer for any "about me" route.
-  const intro = formatIntro(profile);
+  const intro = formatIntro(profile, question);
   if (intro) return intro;
 
   // 4. Last resort: an experience or skills line.
@@ -817,3 +878,72 @@ export const logManualProfileRoute = ({
   providerUsed: route?.providerUsed ?? false,
   promptContainsProfileContext: route?.promptContainsProfileContext,
 });
+
+// ── PI v3 (W6b): graceful retry — no more dead-end canned reply ─────────────
+//
+// "Could you repeat that? I want to make sure I address your question
+// properly." was a single fixed string returned from THREE failure sites
+// (empty stream, error catch, speculative empty). Users read it as a canned
+// non-answer — especially when the same sentence appears twice in a session.
+// buildGracefulRetry keeps the same safety contract (deterministic, no LLM, no
+// profile content, never fabricates) but:
+//   - references the detected TOPIC when one is safely extractable, so the
+//     retry reads as engaged ("…about the database design…") instead of deaf,
+//   - varies phrasing deterministically (hash of question; not random — same
+//     input → same output for testability),
+//   - never echoes a question longer than a few words (no transcript dumping).
+
+const RETRY_TEMPLATES: ReadonlyArray<(topic: string) => string> = [
+  (t) => t
+    ? `Could you say a bit more about ${t}? I want to make sure I answer the right thing.`
+    : 'Could you repeat that? I want to make sure I address your question properly.',
+  (t) => t
+    ? `I didn't fully catch the question about ${t} — could you rephrase it?`
+    : "I didn't fully catch that — could you rephrase the question?",
+  (t) => t
+    ? `Just to make sure I get this right — what specifically about ${t} would you like me to cover?`
+    : 'Just to make sure I get this right — could you ask that once more?',
+];
+
+// Topic = a short noun-ish tail of the question. Conservative: strip leading
+// question scaffolding, keep ≤5 words, drop if anything sensitive/odd remains.
+const TOPIC_STOP_RE = /\b(salary|compensation|pay|offer|equity)\b/i;
+const extractRetryTopic = (question: string): string => {
+  const q = (question || '').trim().replace(/\?+$/, '');
+  if (!q || q.length < 8 || q.length > 160) return '';
+  if (TOPIC_STOP_RE.test(q)) return ''; // never echo comp topics back
+  const stripped = q
+    .replace(/^(so|well|okay|ok|now|and|but|um|uh)[,\s]+/i, '')
+    .replace(/^(can|could|would|will|do|does|did|are|is|was|were|have|has|had)\s+you\s+/i, '')
+    .replace(/^(tell me|talk|walk me through|explain|describe)( (about|to me about|through))?\s*/i, '')
+    .replace(/^(what|how|why|when|where|who)('s| is| are| was| were| do| does| did| about)?\s*/i, '')
+    .trim();
+  if (!stripped) return '';
+  const words = stripped.split(/\s+/).slice(0, 5);
+  if (words.length < 1) return '';
+  const topic = words.join(' ').replace(/[.,;:!]+$/, '');
+  // Reject anything that isn't a clean short noun phrase (review 2026-06-12):
+  //  - pronouns ("you think we should…"),
+  //  - internal punctuation (a comma means we sliced mid-clause — "John, given
+  //    everything, what does" must never be echoed back),
+  //  - residual question scaffolding ("…what does", "who/when/why …"),
+  //  - a leading capitalized name-like token mid-question (don't echo people).
+  if (/\b(you|your|we|our|i|my)\b/i.test(topic)) return '';
+  if (/[,;:()]/.test(topic)) return '';
+  if (/\b(what|how|why|who|when|where|which|does|do|did|think|say|said)\b/i.test(topic)) return '';
+  if (/^[A-Z][a-z]+$/.test(words[0]) && !q.startsWith(words[0])) return '';
+  return topic.toLowerCase();
+};
+
+/**
+ * A deterministic, speakable retry line for when no answer could be produced.
+ * Same input → same output (template chosen by question hash, not random).
+ */
+export const buildGracefulRetry = (questionHint?: string | null): string => {
+  const q = (questionHint || '').trim();
+  const topic = extractRetryTopic(q);
+  let h = 0;
+  for (let i = 0; i < q.length; i++) h = ((h << 5) - h + q.charCodeAt(i)) | 0;
+  const template = RETRY_TEMPLATES[Math.abs(h) % RETRY_TEMPLATES.length];
+  return template(topic);
+};

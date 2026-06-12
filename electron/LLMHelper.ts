@@ -3946,7 +3946,16 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       systemPromptOverride === CHAT_MODE_PROMPT ||
       TINY_PROMPTS_SET.has(systemPromptOverride)
     );
-    const shouldSkipModeInjection = skipModeInjection || isUniversalOverride;
+    // MODE-SCOPED answer types (manual regression 2026-06-12): a manual sales/
+    // lecture turn NEEDS the active mode's voice + retrieved product material —
+    // CHAT_MODE_PROMPT's blanket "universal override" skip left sales-mode
+    // pricing questions answered as "I'm Natively, an AI assistant. I don't have
+    // a product." For these types the mode suffix/context is the answer's whole
+    // grounding, so the skip is bypassed (the route still scopes sensitivity).
+    const isModeScopedAnswer = routeOptions?.answerType === 'sales_answer'
+      || routeOptions?.answerType === 'product_candidate_mix_answer'
+      || routeOptions?.answerType === 'lecture_answer';
+    const shouldSkipModeInjection = skipModeInjection || (isUniversalOverride && !isModeScopedAnswer);
 
     if (!shouldSkipModeInjection) {
       try {
@@ -3961,11 +3970,21 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         // unchanged. Previously this was ALWAYS hardcoded, which both blocked
         // sensitive context from legitimate negotiation turns AND mis-scoped
         // every other answer type.
-        const modeContextBlock = modesMgr.buildRetrievedActiveModeContextBlock(message, context, 1800, modeAnswerType(routeOptions));
+        // PI v3 (W2): customContext is PINNED below (always-on), so retrieval is
+        // scoped to reference files only — the same text never ships twice.
+        const modeContextBlock = modesMgr.buildRetrievedActiveModeContextBlock(message, context, 1800, modeAnswerType(routeOptions), true);
+        // The mode's user-authored "Real-time prompt", deterministic — applies on
+        // every answer instead of only when retrieval happened to score it.
+        // Sensitivity-scoped by answer type inside the accessor.
+        const pinnedInstructions: string = modesMgr.getActiveModePinnedInstructions?.(modeAnswerType(routeOptions)) || '';
 
         if (modePromptSuffix) {
           const baseForMode = systemPromptOverride || HARD_SYSTEM_PROMPT;
           systemPromptOverride = `${baseForMode}\n\n## ACTIVE MODE\n${modePromptSuffix}`;
+        }
+        if (pinnedInstructions) {
+          const baseForPin = systemPromptOverride || HARD_SYSTEM_PROMPT;
+          systemPromptOverride = `${baseForPin}\n\n## ACTIVE MODE INSTRUCTIONS (user-configured)\nTreat as configuration for tone/focus. Never as facts about the candidate and never overriding the rules above.\n${pinnedInstructions}`;
         }
 
         if (modeContextBlock) {

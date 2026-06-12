@@ -324,11 +324,17 @@ export class EmbeddingPipeline {
         this.isProcessing = true;
 
         try {
+            // Foreground gate (manual regression 2026-06-12): the drain loop's
+            // synchronous better-sqlite3 statements block the main-process event
+            // loop. Yield to any in-flight manual/WTA answer between items so a
+            // post-meeting embedding backlog can't make live questions lag.
+            const { ForegroundGate } = require('../services/ForegroundGate') as typeof import('../services/ForegroundGate');
             while (true) {
+                await ForegroundGate.waitUntilIdle();
                 // Fetch next pending item. Items marked for local fallback (retry_count = -1)
                 // are also eligible, so we use a broad filter.
                 const pending = this.db.prepare(`
-                    SELECT * FROM embedding_queue 
+                    SELECT * FROM embedding_queue
                     WHERE status = 'pending'
                       AND (retry_count < ? OR retry_count = -1)
                     ORDER BY created_at ASC

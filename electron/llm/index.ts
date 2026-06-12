@@ -39,6 +39,8 @@ export { planAnswer, formatAnswerPlanForPrompt, isCodingAnswerType, shouldScaffo
 export { detectAnswerStyle, styleSuppressesScaffold } from "./answerStyle";
 export type { AnswerStyle, AnswerStyleResult } from "./answerStyle";
 export type { AnswerPlan, AnswerSource, AnswerType, ContextLayer, OutputPerspective, SpeakerPerspective } from "./AnswerPlanner";
+export { applyModeFallback, MODE_CONTEXT_PROFILES } from "./modeProfiles";
+export type { ActiveModeInfo, ModeContextProfile, ModeTemplateType } from "./modeProfiles";
 export { resolveFollowUp, resolveFollowUpOrClarify, isBareFollowUp, buildContextFreeClarification } from "./FollowUpResolver";
 export { classifyProviderError, isClarificationStall } from "./providerErrorClassifier";
 export type { ProviderErrorKind, ProviderErrorClassification } from "./providerErrorClassifier";

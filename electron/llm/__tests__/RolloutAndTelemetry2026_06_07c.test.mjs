@@ -24,11 +24,14 @@ let saved = {};
 beforeEach(() => { saved = {}; for (const k of ENV_KEYS) saved[k] = process.env[k]; for (const k of ENV_KEYS) delete process.env[k]; __resetLiveSessionMemoryCache(); });
 afterEach(() => { for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } __resetLiveSessionMemoryCache(); });
 
-describe('Rollout — production default OFF, internal ON', () => {
-  test('production (no env, no internal markers) → OFF', () => {
+describe('Rollout — production default ON (PI v3 W6d), overrides still win', () => {
+  // PI v3 (W6d): the default flipped ON after live-replay validation
+  // (50 sessions / 132 checks / 0 leaks). Kill switch + env + settings +
+  // percentage overrides all still force OFF (covered below).
+  test('production (no env, no internal markers) → ON by default', () => {
     const c = resolveLiveSessionMemoryConfig('session-1');
-    assert.equal(c.enabled, false);
-    assert.equal(c.reason, 'default_off');
+    assert.equal(c.enabled, true);
+    assert.equal(c.reason, 'default_on');
   });
   // Use NATIVELY_INTERNAL (a flag no other concurrent test file reads) to exercise the
   // internal-context tier — mutating NODE_ENV/BENCHMARK_MODEL here would race with

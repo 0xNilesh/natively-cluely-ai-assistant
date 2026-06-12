@@ -811,6 +811,10 @@ interface ElectronAPI {
     modeId: string,
   ) => Promise<{ success: boolean; cancelled?: boolean; file?: any; error?: string }>;
   modesDeleteReferenceFile: (id: string) => Promise<{ success: boolean; error?: string }>;
+  modesGetReferenceFileStatus: (
+    modeId: string,
+  ) => Promise<{ success: boolean; statuses?: Array<{ fileId: string; fileName: string; status: string; chunkCount: number }>; error?: string }>;
+  onModeFileIndexStatus: (callback: (data: { modeId: string; fileId?: string }) => void) => () => void;
   modesGetNoteSections: (modeId: string) => Promise<
     Array<{
       id: string;
@@ -2146,6 +2150,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   modesUploadReferenceFile: (modeId: string) =>
     ipcRenderer.invoke('modes:upload-reference-file', modeId),
   modesDeleteReferenceFile: (id: string) => ipcRenderer.invoke('modes:delete-reference-file', id),
+  modesGetReferenceFileStatus: (modeId: string) =>
+    ipcRenderer.invoke('modes:get-reference-file-status', modeId),
+  onModeFileIndexStatus: (callback: (data: { modeId: string; fileId?: string }) => void) => {
+    const subscription = (_: any, data: { modeId: string; fileId?: string }) => callback(data);
+    ipcRenderer.on('mode-file-index-status', subscription);
+    return () => {
+      ipcRenderer.removeListener('mode-file-index-status', subscription);
+    };
+  },
   modesGetNoteSections: (modeId: string) => ipcRenderer.invoke('modes:get-note-sections', modeId),
   modesAddNoteSection: (modeId: string, title: string, description: string) =>
     ipcRenderer.invoke('modes:add-note-section', modeId, title, description),

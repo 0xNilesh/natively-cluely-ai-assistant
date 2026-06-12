@@ -2,6 +2,7 @@ import type { IntentResult } from './IntentClassifier';
 import type { ExtractedQuestion } from './transcriptQuestionExtractor';
 import { CODING_CONTRACT, CODING_VERIFICATION_INSTRUCTION } from './codingContract';
 import { detectAnswerStyle, type AnswerStyle } from './answerStyle';
+import { applyModeFallback, type ActiveModeInfo } from './modeProfiles';
 
 export type AnswerType =
   | 'identity_answer'
@@ -137,6 +138,13 @@ export interface PlanAnswerInput {
   hasCandidateProfile?: boolean;
   hasJobDescription?: boolean;
   hasNegotiationContext?: boolean;
+  /**
+   * PI v3 (W1): the active ModesManager mode, used as a routing PRIOR on the
+   * classification FALLTHROUGH only (modeProfiles.applyModeFallback). Explicit
+   * answer-type signals always win; the mode never relaxes a forbidden layer.
+   * Optional — absent keeps the mode-blind behavior byte-for-byte.
+   */
+  activeMode?: ActiveModeInfo | null;
 }
 
 // Derives from the single canonical CODING_CONTRACT (codingContract.ts) so the
@@ -301,6 +309,21 @@ const DIRECT_SHORT_TEMPLATE = `Answer directly in 1-2 sentences. Do not include 
 // loaded experience; speak to the user about their own skill.
 const SKILL_RATING_TEMPLATE = `Answer in 1-2 sentences as the candidate. If asked to rate a skill (e.g. "out of 10"), GIVE a concrete number grounded in the loaded experience and add one phrase of justification. Never refuse, never say you are an AI or that you "cannot assign ratings". Do not mention the profile/context explicitly — just answer confidently.`;
 const GENERAL_TEMPLATE = `Answer naturally and directly. Use only relevant context. Keep it predictable and concise.`;
+
+// SALES voice (manual regression 2026-06-12): real sales-mode sessions answered
+// "why is your product expensive?" with "I'm Natively, an AI assistant. I don't
+// have a product or pricing model" — the model fell back to its system identity
+// because sales_answer had no template telling it WHO it is in this turn. The
+// seller speaks as the PRODUCT/TEAM REP, grounded in the active mode's product
+// material (custom context / reference files); the resume/JD stay forbidden.
+const SALES_TEMPLATE = `You are the SELLER'S spoken voice in a live sales/commercial conversation. The user is selling a product; the question comes from a customer or prospect.
+
+Rules:
+- Speak in FIRST PERSON as the product's representative ("our product", "we", "our pricing"). You are NOT an AI assistant in this answer and must NEVER say "I'm Natively", "as an AI", or "I don't have a product" — the user's product context defines the product.
+- Ground product claims in the provided mode/custom/reference context. If pricing or a specific fact isn't in the context, handle it like a real seller: acknowledge, reframe around value, and offer to follow up with specifics — never claim the product doesn't exist.
+- Handle objections (price, speed, competitors) with empathy + value reframe + one concrete differentiator from the context when available.
+- 2-5 sentences, confident, speakable, no headings or bullet markers unless asked.
+- Never pull the user's resume, JD, or salary data into a sales answer.`;
 
 // Release 2026-06-06b — safety route for stealth/undetectability/evasion asks.
 const ETHICAL_USAGE_TEMPLATE = `The user is asking how to make this tool hidden, undetectable, invisible to an interviewer, or how to evade detection / proctoring / screen-share / network monitoring.
@@ -998,6 +1021,13 @@ const EXPERIENCE_PATTERNS = [
 ];
 const BEHAVIORAL_PATTERNS = [
   /\btell me about a time\b|\bdescribe a situation\b|\bexample of when\b|\bconflict\b|\bfailure\b|\bchallenge\b/i,
+  // Past-experience war stories about a specific artifact — "tell me about a
+  // difficult BUG you solved", "the hardest issue you ever faced" (manual
+  // regression 2026-06-12, stress seq_056: the bare \bbug\b debugging pattern
+  // pulled these into the technical lane where the model answered as the
+  // assistant — "I don't have personal experiences").
+  /\b(tell me about|describe|share|walk me through)\b.{0,60}\b(bug|issue|error|incident|problem|outage)\b.{0,40}\b(you|you'?ve|u)\b.{0,30}\b(solved|fixed|faced|debugged|handled|dealt with|encountered|resolved|found)\b/i,
+  /\b(hardest|toughest|most difficult|trickiest|worst)\b.{0,30}\b(bug|error|issue|crash|incident|outage)\b.{0,40}\b(you|you'?ve|your career|you ever)\b/i,
   // Strength/weakness — classic behavioral self-reflection (benchmark 2026-06-05).
   /\b(your|my) (biggest |greatest |main )?(strength|weakness|strengths|weaknesses)\b/i,
   /\bwhat are you (good|bad) at\b/i,
@@ -1079,7 +1109,17 @@ const SALES_PATTERNS = [
   /\b(pricing|price|cost|expensive|cheaper|discount|quote|contract|close the deal|the deal\b|better deal|a deal on)\b/i,
   /\bcompare(?:d)?\s+(?:to|with|against)\s+(?:your\s+|the\s+|other\s+)?competitors?\b|\bvs\.?\s+(?:a\s+)?competitors?\b|\bcompetitors?\b/i,
   /\b(your|the) product\b.*\b(do|offer|cost|price|compare|better|why)\b/i,
-  /\bwhy (should|would) (i|we) (buy|choose|pick|go with)\b/i,
+  // "why should we buy/choose/pick X" is sales ONLY when X is a product/vendor.
+  // "why should we pick YOU (over other candidates)" is the canonical why-hire
+  // question and must fall through to JD_FIT (benchmark 2026-06-12
+  // wta_jdfit_030 false-refusal: sales_answer forbids the resume, so the model
+  // claimed nothing was loaded). "pick you guys" (the vendor) stays sales via
+  // the inner exception.
+  /\bwhy (should|would) (i|we) (buy|choose|pick|go with)\b(?!\s+(?:you|me)\b(?!\s+guys))/i,
+  // "why should a customer/prospect/buyer choose/buy …" — the seller rehearsing
+  // the value pitch (manual regression 2026-06-12 set 17). The subject being a
+  // CUSTOMER (not i/we) makes it unambiguous sales.
+  /\bwhy (should|would|will) (a |the |any )?(customer|prospect|client|buyer)s?\b.{0,30}\b(choose|buy|pick|go with|select|switch)\b/i,
   /\b(roi|return on investment|value proposition|use case)\b/i,
   // Objection-handling & deal/close/sell coaching (release 2026-06-07 multimode-1000):
   // "how do you handle this objection", "handle the objection that X", "how do we
@@ -1296,6 +1336,7 @@ const templateFor = (answerType: AnswerType): string => {
       return SKILL_RATING_TEMPLATE;
     case 'sales_answer':
     case 'product_candidate_mix_answer':
+      return SALES_TEMPLATE;
     case 'lecture_answer':
       return GENERAL_TEMPLATE;
     case 'ethical_usage_answer':
@@ -1891,7 +1932,16 @@ export const planAnswer = (input: PlanAnswerInput): AnswerPlan => {
              && !(/\b(explain|what(?:'s| is| are)?|describe|how does|tell me about)\b/i.test(text)
                   && !/\bdesign\b|\bscalable\b|\barchitect/i.test(text))) {
     answerType = 'system_design_answer';
-  } else if (includesAny(text, DEBUGGING_PATTERNS) && !includesAny(textNoTechStack, DSA_PATTERNS)) {
+  } else if (includesAny(text, DEBUGGING_PATTERNS) && !includesAny(textNoTechStack, DSA_PATTERNS)
+             // BEHAVIORAL-PAST-EXPERIENCE GUARD (manual regression 2026-06-12,
+             // stress seq_056): "tell me about a difficult BUG you solved" is a
+             // STAR story about the candidate's past, not a live debugging task —
+             // the bare \bbug\b pattern captured it into the technical lane
+             // (profile forbidden, neutral voice) where the model answered
+             // "I'm Natively, an AI assistant. I don't have personal
+             // experiences." A past-tense candidate frame defers to BEHAVIORAL.
+             && !/\b(tell me about|describe|share|give me an example of)\b.{0,60}\b(you|you'?ve|u)\b.{0,60}\b(solved|fixed|faced|debugged|handled|dealt with|encountered|resolved|found)\b/i.test(text)
+             && !/\b(hardest|toughest|most difficult|trickiest|worst)\b.{0,30}\b(bug|error|issue|crash)\b.{0,40}\b(you|you'?ve|your career|you ever)\b/i.test(text)) {
     answerType = 'debugging_question_answer';
   } else if (isHypotheticalTech(text) && !hasWriteCodeVerb) {
     // HYPOTHETICAL application — "how would you use GraphQL?", "how would you
@@ -1977,6 +2027,14 @@ export const planAnswer = (input: PlanAnswerInput): AnswerPlan => {
     // unknown (profileContextPolicy 'allowed', no forced profile).
     const fb = classifyUnmatchedFallback(text, input);
     answerType = fb;
+    // MODE PRIOR (PI v3, W1): nothing explicit matched AND the profile-aware
+    // fallback landed on a floor type (unknown/general). In a sales call that
+    // ambiguous turn is a sales question; in a lecture it's about the material.
+    // applyModeFallback rewrites ONLY unknown_answer/general_meeting_answer —
+    // a candidate-directed fallback (profile type from classifyUnmatchedFallback)
+    // or any explicitly-matched type above is never touched, so every leak
+    // invariant (coding/identity/negotiation routing) is preserved.
+    answerType = applyModeFallback(answerType, true, input.source, input.activeMode);
   }
 
   const speakerPerspective = input.speakerPerspective
@@ -2100,6 +2158,40 @@ export const shouldScaffold = (answerType: AnswerType): boolean =>
  * the model emits test cases; when false (kill-switch off), it's omitted so no
  * tokens are wasted on a spec nothing will run.
  */
+// Answer types whose templates carry visible section scaffolds (The Honest Gap /
+// Short Fit Summary / Direct Answer / STAR / …). Manual regression 2026-06-12:
+// these headings rendered in EVERY default answer, reading as robotic templates.
+// By default the structure is now INTERNAL (think through it, output speakable
+// prose); the headings render only when the user explicitly asks for structure.
+const SCAFFOLDED_PROFILE_TYPES: ReadonlySet<AnswerType> = new Set<AnswerType>([
+  'behavioral_interview_answer', 'project_answer', 'jd_fit_answer',
+  'gap_analysis_answer', 'negotiation_answer',
+]);
+
+// Styles that explicitly request visible structure — sections/bullets stay.
+const STRUCTURE_REQUESTING_STYLES: ReadonlySet<AnswerStyle> = new Set<AnswerStyle>([
+  'detailed', 'bullets', 'exam', 'notes',
+]);
+
+/** True when this plan should render as speakable prose (headings suppressed). */
+export const isSpeakableOnlyPlan = (plan: Pick<AnswerPlan, 'answerType' | 'answerStyle' | 'source' | 'question'>): boolean => {
+  if (!SCAFFOLDED_PROFILE_TYPES.has(plan.answerType)) return false;
+  // Live WTA answers are spoken aloud — ALWAYS speakable regardless of style.
+  if (plan.source === 'what_to_answer' || plan.source === 'transcript') return true;
+  if (STRUCTURE_REQUESTING_STYLES.has(plan.answerStyle)) return false;
+  // 'star' auto-detects from the IMPLICIT behavioral phrasing ("tell me about a
+  // time…") — that's not a request for visible sections. Only an EXPLICIT
+  // "use STAR" / "STAR format" keeps the labels (manual regression 2026-06-12).
+  if (plan.answerStyle === 'star' && /\bstar\b/i.test(plan.question || '')) return false;
+  return true;
+};
+
+const SPEAKABLE_RENDERING_DIRECTIVE =
+  `\n\nRENDERING (overrides the section labels above): the sections are your INTERNAL thinking structure only. ` +
+  `OUTPUT ONLY the final speakable answer as natural first-person prose (2-6 sentences, no section headings, no labels, no bullet markers). ` +
+  `Cover the same substance — lead with the direct answer, ground every claim, close naturally. ` +
+  `Never print "Speakable Final Answer", "Direct Answer", "The Honest Gap", "Short Fit Summary", or any other label.`;
+
 export const formatAnswerPlanForPrompt = (plan: AnswerPlan, includeVerificationSpec = false): string => {
   const verificationBlock = (includeVerificationSpec && isCodingAnswerType(plan.answerType))
     ? `\n\n${CODING_VERIFICATION_INSTRUCTION}`
@@ -2111,7 +2203,12 @@ export const formatAnswerPlanForPrompt = (plan: AnswerPlan, includeVerificationS
     ? 'Speak in the FIRST PERSON as the candidate ("I would…", "I built…").'
     : plan.voicePerspective === 'second_person_user'
       ? 'Address the user about themselves in the second person ("Your …").'
-      : 'Answer in a neutral, explanatory voice. Do not roleplay as the candidate.';
+      : (plan.answerType === 'sales_answer' || plan.answerType === 'product_candidate_mix_answer')
+        // Sales turns speak as the seller/product rep — the neutral-assistant
+        // voice line caused "I'm Natively… I don't have a product" in real
+        // sales sessions (manual regression 2026-06-12).
+        ? 'Speak in the FIRST PERSON as the product\'s seller/representative ("our product", "we"). Never identify as an AI assistant.'
+        : 'Answer in a neutral, explanatory voice. Do not roleplay as the candidate.';
   const policyLine = plan.profileContextPolicy === 'required'
     ? 'Ground every concrete claim in the provided profile facts. Never invent names, numbers, metrics, companies, or technologies that are not in those facts.'
     : plan.profileContextPolicy === 'forbidden'
@@ -2125,6 +2222,10 @@ export const formatAnswerPlanForPrompt = (plan: AnswerPlan, includeVerificationS
   const styleDirective = plan.answerStyle && plan.answerStyle !== 'default'
     ? `\n\n${detectAnswerStyle(plan.question).directive}`
     : '';
+  // Speakable-by-default (manual regression 2026-06-12): scaffolded profile
+  // templates become internal thinking structure; the rendered answer is
+  // natural prose unless the user explicitly asked for structure.
+  const renderingDirective = isSpeakableOnlyPlan(plan) ? SPEAKABLE_RENDERING_DIRECTIVE : '';
   return `<answer_contract>
 answerType: ${plan.answerType}
 source: ${plan.source}
@@ -2141,6 +2242,6 @@ VOICE: ${voiceLine}
 GROUNDING: ${policyLine}
 
 STRICT RESPONSE TEMPLATE:
-${plan.responseTemplate}${styleDirective}${verificationBlock}
+${plan.responseTemplate}${renderingDirective}${styleDirective}${verificationBlock}
 </answer_contract>`;
 };

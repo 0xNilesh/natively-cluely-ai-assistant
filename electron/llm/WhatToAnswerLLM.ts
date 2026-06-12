@@ -51,12 +51,15 @@ type ModesManagerType = {
     getInstance: () => {
         getActiveModeSystemPromptSuffix: () => string;
         buildActiveModeContextBlock: () => string;
-        buildRetrievedActiveModeContextBlock: (query: string, transcript?: string, tokenBudget?: number, answerType?: AnswerType) => string;
+        buildRetrievedActiveModeContextBlock: (query: string, transcript?: string, tokenBudget?: number, answerType?: AnswerType, excludeCustomContext?: boolean) => string;
         // Phase 4: optional async hybrid retrieval (FTS + vector). Backwards
         // compatible — older builds without this method still work via the
         // sync lexical fallback. `answerType` (Phase 3) scopes the mode's
         // customContext so sensitive chunks can't leak into the wrong answer.
-        buildRetrievedActiveModeContextBlockHybrid?: (query: string, transcript?: string, tokenBudget?: number, answerType?: AnswerType) => Promise<string>;
+        buildRetrievedActiveModeContextBlockHybrid?: (query: string, transcript?: string, tokenBudget?: number, answerType?: AnswerType, excludeCustomContext?: boolean) => Promise<string>;
+        // PI v3 (W2): the always-pinned "Real-time prompt". Optional for older
+        // module shapes (tests/stubs) — absence simply skips pinning.
+        getActiveModePinnedInstructions?: (answerType?: AnswerType) => string;
     };
 };
 
@@ -108,7 +111,14 @@ export class WhatToAnswerLLM {
         // undefined when knowledge mode is off or the question isn't about the
         // candidate, so non-profile turns are unaffected.
         candidateProfile?: string,
-        answerPlan?: AnswerPlan
+        answerPlan?: AnswerPlan,
+        // PI v3 (W5): a mode-context retrieval PROMISE kicked by the caller in
+        // parallel with intent classification + profile grounding, so retrieval
+        // overlaps the other pre-stream stages instead of adding to them. The
+        // same budget race + scope/route gates below still apply; when the
+        // route forbids reference_files the prefetched result is DISCARDED, so
+        // the leak surface is identical to fetching here.
+        preFetchedModeContext?: Promise<string>
     ): AsyncGenerator<string> {
         const MEASURE = process.env.MEASURE_LATENCY === 'true';
         let tStart = 0, tIntent = 0, tTemporal = 0, tMode = 0, tTrunc = 0, tPrompt = 0, tStream = 0;
@@ -206,14 +216,29 @@ ANSWER SHAPE: ${intentResult.answerShape}
                         referenceFilesAllowed = false;
                     }
                     if (referenceFilesAllowed) {
-                        if (typeof modesManager.buildRetrievedActiveModeContextBlockHybrid === 'function') {
+                        // PI v3 (W5): prefer the caller's PREFETCHED retrieval
+                        // (kicked in parallel with intent classification +
+                        // grounding) — by the time we get here it has usually
+                        // already settled, so this await is ~free. Same budget
+                        // race as the inline path so a cold embedder still can't
+                        // stall first-token. Falls through to inline retrieval
+                        // when no prefetch was supplied (manual path, tests).
+                        if (preFetchedModeContext) {
+                            const { value, timedOut } = await raceWithBudget(
+                                preFetchedModeContext, HYBRID_RETRIEVAL_BUDGET_MS, '',
+                            );
+                            modeContextBlock = value;
+                            if (timedOut) {
+                                console.warn(`[WhatToAnswerLLM] prefetched mode retrieval exceeded ${HYBRID_RETRIEVAL_BUDGET_MS}ms — using lexical fallback`);
+                            }
+                        } else if (typeof modesManager.buildRetrievedActiveModeContextBlockHybrid === 'function') {
                             // Cap the hybrid (embedding) retrieval so a cold/slow
                             // embedder can't stall first-token for up to 30s. On
                             // timeout we fall through to the synchronous lexical
                             // retriever below, which needs no embedding round-trip.
                             const { value, timedOut } = await raceWithBudget(
                                 modesManager.buildRetrievedActiveModeContextBlockHybrid(
-                                    cleanedTranscript, cleanedTranscript, 1800, answerPlan?.answerType,
+                                    cleanedTranscript, cleanedTranscript, 1800, answerPlan?.answerType, true,
                                 ),
                                 HYBRID_RETRIEVAL_BUDGET_MS,
                                 '',
@@ -224,16 +249,36 @@ ANSWER SHAPE: ${intentResult.answerShape}
                             }
                         }
                         if (!modeContextBlock) {
-                            modeContextBlock = modesManager.buildRetrievedActiveModeContextBlock(cleanedTranscript, cleanedTranscript, 1800, answerPlan?.answerType);
+                            // excludeCustomContext (PI v3 W2): the mode's
+                            // customContext is PINNED below — keep retrieval to
+                            // reference files only so the text never ships twice.
+                            modeContextBlock = modesManager.buildRetrievedActiveModeContextBlock(cleanedTranscript, cleanedTranscript, 1800, answerPlan?.answerType, true);
                         }
                     } else if (await this.llmHelper.canUseLocalFallback(false)) {
                         console.warn('[ScopeFallback] reference_files denied for cloud; routing to Ollama');
-                        modeContextBlock = modesManager.buildRetrievedActiveModeContextBlock(cleanedTranscript, cleanedTranscript, 1800, answerPlan?.answerType);
+                        modeContextBlock = modesManager.buildRetrievedActiveModeContextBlock(cleanedTranscript, cleanedTranscript, 1800, answerPlan?.answerType, true);
                     } else {
                         console.warn('[ScopeFallback] reference_files denied; Ollama unavailable, omitting from context');
                     }
                 } catch (_err: any) {
                     console.warn('[WhatToAnswerLLM] ModesManager unavailable:', _err?.message);
+                }
+            }
+
+            // ── PINNED MODE INSTRUCTIONS (PI v3, W2) ──────────────────────────
+            // The mode's user-authored "Real-time prompt" (customContext) must
+            // apply on EVERY answer, not only when retrieval happens to score it.
+            // Gated on the context route's custom_context layer (coding/identity
+            // answers still exclude it) and sensitivity-scoped inside
+            // getActiveModePinnedInstructions (salary/pricing notes can't leak
+            // into non-negotiation answers). Skill mode owns its prompt — skip.
+            let pinnedModeInstructions = '';
+            if (!activeSkill && (!answerPlan || isLayerAllowed(answerPlan, 'custom_context'))) {
+                try {
+                    const modesManager = this.getModesManager();
+                    pinnedModeInstructions = modesManager.getActiveModePinnedInstructions?.(answerPlan?.answerType) || '';
+                } catch (_err: any) {
+                    // ModesManager unavailable — already warned above.
                 }
             }
 
@@ -270,6 +315,7 @@ ANSWER SHAPE: ${intentResult.answerShape}
             const assemblerBudget = 2000
                 + estimateTokens(intentContext || '')
                 + estimateTokens(modeContextBlock)
+                + estimateTokens(pinnedModeInstructions)
                 + estimateTokens(effectiveCandidateProfile || '')
                 + estimateTokens(screenContext?.ocrText || '')
                 + domTokenEstimate
@@ -313,6 +359,7 @@ ANSWER SHAPE: ${intentResult.answerShape}
                 priorResponses: temporalContext?.hasRecentResponses ? temporalContext.previousResponses : undefined,
                 intentContext,
                 retrievedModeContext: modeContextBlock || undefined,
+                pinnedModeInstructions: pinnedModeInstructions || undefined,
                 candidateProfile: effectiveCandidateProfile || undefined,
                 tokenBudget: Math.max(1000, assemblerBudget),
                 systemPrompt: finalPromptOverride,
@@ -372,7 +419,11 @@ ANSWER SHAPE: ${intentResult.answerShape}
             }
 
             if (MEASURE) {
-                tStream = performance.now() - tStream;
+                // W5 fix: compute the stream DURATION into its own variable —
+                // the old code overwrote tStream (a timestamp) with a duration
+                // and then used it in `promptMs = tStream - tPrompt`, printing a
+                // huge negative Stage 5. All stage deltas are timestamp-pairs.
+                const streamMs = performance.now() - tStream;
                 const totalMs = performance.now() - tStart;
                 const intentMs = tIntent > 0 ? tTemporal - tIntent : 0;
                 const temporalMs = tTemporal > 0 ? tTrunc - tTemporal : 0;
@@ -394,7 +445,7 @@ ANSWER SHAPE: ${intentResult.answerShape}
                 console.log(`  Stage 3 (truncation):   ${truncMs.toFixed(1)}ms`);
                 console.log(`  Stage 4 (mode ctx):     ${modeMs.toFixed(1)}ms`);
                 console.log(`  Stage 5 (prompt build): ${promptMs.toFixed(1)}ms`);
-                console.log(`  Stage 6 (LLM stream):   ${tStream.toFixed(1)}ms total, ${tokenCount} tokens`);
+                console.log(`  Stage 6 (LLM stream):   ${streamMs.toFixed(1)}ms total, ${tokenCount} tokens`);
                 console.log(`    Per-token: avg=${avg.toFixed(1)}ms p50=${p50.toFixed(1)}ms p95=${p95.toFixed(1)}ms p99=${p99.toFixed(1)}ms`);
                 console.log(`  Total E2E:              ${totalMs.toFixed(1)}ms`);
             }
@@ -411,7 +462,9 @@ ANSWER SHAPE: ${intentResult.answerShape}
             if (isProviderFailure) {
                 yield "I couldn't reach the AI provider — this looks like an API key or rate-limit issue. Check your API keys / plan in Settings and try again.";
             } else {
-                yield "Could you repeat that? I want to make sure I address your question properly.";
+                // W6b: topic-aware graceful retry instead of the fixed canned line.
+                const { buildGracefulRetry } = require('./manualProfileIntelligence') as typeof import('./manualProfileIntelligence');
+                yield buildGracefulRetry(cleanedTranscript.split('\n').pop() || '');
             }
         }
     }

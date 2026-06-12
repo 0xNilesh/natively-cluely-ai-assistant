@@ -53,7 +53,7 @@ const STYLE_RULES: Array<{ style: AnswerStyle; re: RegExp; seconds: number; reas
   // approach-first (coding intuition before code)
   { style: 'approach_first', re: /\bexplain\s+(?:your|the)\s+approach\b|\bhow\s+would\s+you\s+approach\b|\b(?:intuition|approach|strategy)\s+first\b|\bwalk\s+me\s+through\s+(?:your|the)\s+(?:approach|thinking|logic)\b|\bbefore\s+(?:you\s+)?coding\b/i, seconds: 0, reason: 'approach_first' },
   // STAR (behavioral) — "tell me about a time" etc.
-  { style: 'star', re: /\btell\s+me\s+about\s+a\s+time\b|\bdescribe\s+a\s+(?:situation|time)\b|\bgive\s+(?:me\s+)?an?\s+example\s+of\s+a\s+time\b|\bwalk\s+me\s+through\s+a\s+(?:time|situation)\b|\busing\s+star\b/i, seconds: 60, reason: 'star' },
+  { style: 'star', re: /\btell\s+me\s+about\s+a\s+time\b|\bdescribe\s+a\s+(?:situation|time)\b|\bgive\s+(?:me\s+)?an?\s+example\s+of\s+a\s+time\b|\bwalk\s+me\s+through\s+a\s+(?:time|situation)\b|\b(?:using|use|in|with)\s+(?:the\s+)?star\b|\bstar\s+(?:format|method|structure)\b/i, seconds: 60, reason: 'star' },
   // detailed / long
   { style: 'detailed', re: /\bin\s+(?:full\s+)?detail\b|\bwalk\s+me\s+through\b|\bdeep[- ]?dive\b|\belaborate\b|\bgo\s+deep(?:er)?\b|\bin[- ]?depth\b|\bcomprehensive(?:ly)?\b|\bthoroughly\b|\bgive\s+me\s+(?:the\s+)?(?:full|complete|detailed)\b/i, seconds: 75, reason: 'detailed' },
   // short / quick / brief. "short" excludes "short-term" (a goals phrase, not a length cue).

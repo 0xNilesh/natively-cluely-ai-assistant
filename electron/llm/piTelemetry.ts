@@ -33,7 +33,10 @@ export type PiTelemetryEvent =
   | 'session_memory_stale_context_rejected'
   | 'provider_fallback_used'
   | 'provider_zero_token_empty'
-  | 'first_useful_token_recorded';
+  | 'first_useful_token_recorded'
+  // Manual regression 2026-06-12: final-boundary answer polish markers.
+  | 'pi_scaffold_compressed'
+  | 'pi_answer_repeated';
 
 export interface PiTelemetryRecord {
   event: PiTelemetryEvent;

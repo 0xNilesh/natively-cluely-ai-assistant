@@ -44,6 +44,7 @@
     "benchmark:wta:75": "cross-env NODE_NO_WARNINGS=1 node benchmarks/profile-intelligence/run_what_to_answer_benchmark.ts --questions=75",
     "benchmark:wta:100": "cross-env NODE_NO_WARNINGS=1 node benchmarks/profile-intelligence/run_what_to_answer_benchmark.ts --questions=100",
     "benchmark:manual-regression": "cross-env NODE_NO_WARNINGS=1 BENCHMARK_MODEL=gemini-3.1-flash-lite node benchmarks/profile-intelligence/run_manual_chat_regression.ts",
+    "benchmark:manual-sequential-stress": "cross-env NODE_NO_WARNINGS=1 BENCHMARK_MODEL=gemini-3.1-flash-lite node benchmarks/profile-intelligence/run_manual_sequential_stress_eval.ts",
     "benchmark:profile:1000:gemini31-flash-lite": "cross-env NODE_NO_WARNINGS=1 BENCHMARK_MODEL=gemini-3.1-flash-lite node benchmarks/profile-intelligence/run_profile_benchmark_1000.ts --concurrency=1",
     "benchmark:residual-failures": "cross-env NODE_NO_WARNINGS=1 BENCHMARK_MODEL=gemini-3.1-flash-lite node benchmarks/profile-intelligence/run_residual_failures.ts",
     "benchmark:multimode:1000": "cross-env NODE_NO_WARNINGS=1 BENCHMARK_MODEL=gemini-3.1-flash-lite node benchmarks/profile-intelligence/run_multimode_1000_eval.ts --concurrency=1",

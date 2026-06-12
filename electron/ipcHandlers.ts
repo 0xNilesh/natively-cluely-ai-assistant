@@ -544,14 +544,20 @@ export function initializeIpcHandlers(appState: AppState): void {
   let _chatStreamId = 0;
   // Keep IDs globally unique for phone/desktop message correlation; supersession is per sender.
   const _chatStreamsBySender = new Map<number, { streamId: number; controller: AbortController }>();
+  // Per-process diversity guard for manual chat (manual regression 2026-06-12):
+  // last-20 answer fingerprints; repeated answers across DIFFERENT questions are
+  // compressed to speakable prose. Survives across questions within the app run
+  // — exactly the long-session repetition window users hit.
+  const { AnswerDiversityGuard } = require('./llm/answerPolish') as typeof import('./llm/answerPolish');
+  const _manualDiversityGuard = new AnswerDiversityGuard(20);
 
-  // Matches narrow identity/meta probes only. Kept tight so coding/normal asks don't trip it.
-  // Prevents the small fast-mode model from over-firing the "I'm Natively" canned reply
-  // (which used to escape the prompt's hard rule for any ambiguous input).
-  const IDENTITY_PROBE_RE =
-    /^\s*(who\s+(are|r)\s+(you|u|this|natively)|what\s+(are|r)\s+(you|u)|are\s+you\s+(chatgpt|gpt[-\s]?\d?|claude|gemini|llama|an?\s+(ai|bot|llm|model|assistant))|what('?s|\s+is)\s+your\s+(name|model)|which\s+(ai|model|llm)\s+are\s+you|who\s+(made|built|created|developed|trained)\s+(you|this|natively)|what\s+model\s+(are\s+you|do\s+you\s+use)|introduce\s+yourself)\s*\??\s*$/i;
-  const CREATOR_PROBE_RE =
-    /^\s*(who\s+(made|built|created|developed|trained)\s+(you|this|natively))\s*\??\s*$/i;
+  // Identity-probe routing lives in electron/llm/manualIdentityRouting.ts
+  // (manual regression 2026-06-12): the old inline IDENTITY_PROBE_RE answered
+  // "who are you?" / "what is your name?" / "introduce yourself" with the
+  // canned assistant reply BEFORE the candidate-profile fast path could run —
+  // the real-app assistant-identity leak users hit. resolveIdentityProbe keeps
+  // assistant-meta probes canned but routes candidate-ambiguous probes to the
+  // profile fast path whenever a profile is loaded.
 
   safeHandle(
     'gemini-chat-stream',
@@ -563,6 +569,8 @@ export function initializeIpcHandlers(appState: AppState): void {
       options?: { skipSystemPrompt?: boolean; ignoreKnowledgeMode?: boolean },
     ) => {
       let myController: AbortController | null = null;
+      let _manualFgToken: string | null = null;
+      const { ForegroundGate } = require('./services/ForegroundGate') as typeof import('./services/ForegroundGate');
       try {
         console.log('[IPC] gemini-chat-stream started using LLMHelper.streamChat');
         const llmHelper = appState.processingHelper.getLLMHelper();
@@ -580,14 +588,23 @@ export function initializeIpcHandlers(appState: AppState): void {
 
         // Identity probe short-circuit — bypasses the LLM entirely so small models can't
         // reframe the canned reply or misfire it on coding asks (the original bug).
-        // Regex is `^...$` anchored, so non-probe questions cannot match.
+        // Manual regression 2026-06-12: routing now distinguishes assistant-meta
+        // probes (always canned) from candidate-ambiguous probes ("who are you?",
+        // "what is your name?", "introduce yourself") which — with a profile
+        // loaded — are interview-rehearsal questions about the CANDIDATE and must
+        // reach the deterministic profile fast path instead of leaking
+        // "I'm Natively, an AI assistant".
         if (!imagePaths?.length && typeof message === 'string') {
-          const identityHit = CREATOR_PROBE_RE.test(message)
-            ? 'I was developed by Evin John.'
-            : IDENTITY_PROBE_RE.test(message)
-              ? "I'm Natively, an AI assistant."
-              : null;
-          if (identityHit) {
+          const { resolveIdentityProbe } = require('./llm/manualIdentityRouting') as typeof import('./llm/manualIdentityRouting');
+          let probeProfileReady = false;
+          try {
+            const orchProbe = llmHelper.getKnowledgeOrchestrator?.();
+            probeProfileReady = profileFactsReady((orchProbe as any)?.activeResume?.structured_data ?? null);
+          } catch { /* no profile — assistant reply stands */ }
+          const probe = resolveIdentityProbe(message, probeProfileReady);
+          // candidate_fast_path → fall through; the fast-path block below owns it.
+          if (probe.kind === 'assistant_reply') {
+            const identityHit = probe.reply;
             intelligenceManager.addTranscript(
               { text: message, speaker: 'user', timestamp: Date.now(), final: true },
               true,
@@ -663,10 +680,26 @@ export function initializeIpcHandlers(appState: AppState): void {
         const chatTrace = new PiLatencyTrace({ source: 'manual' });
         chatTrace.mark('question_submitted');
 
+        // Foreground gate (manual regression 2026-06-12): pause background
+        // embedding/RAG drain loops while this answer is in flight so their
+        // synchronous DB work can't add event-loop stalls to the user's answer.
+        // Released in the handler's finally below.
+        _manualFgToken = ForegroundGate.begin('manual');
+
+        // Active mode as a routing PRIOR (PI v3, W1): an ambiguous manual
+        // question in a sales/lecture mode routes to that mode's answer type
+        // instead of unknown_answer. Read defensively — null keeps mode-blind.
+        let manualActiveMode: import('./llm/modeProfiles').ActiveModeInfo | null = null;
+        try {
+          const { ModesManager } = require('./services/ModesManager');
+          manualActiveMode = ModesManager.getInstance().getActiveModeInfo();
+        } catch { /* mode prior unavailable — planAnswer stays mode-blind */ }
+
         const answerPlan = planAnswer({
           question: message,
           source: 'manual_input',
           speakerPerspective: 'user',
+          activeMode: manualActiveMode,
         });
         const isCodingChat = isCodingAnswerType(answerPlan.answerType);
         chatTrace.mark('answer_type_selected', { answerType: answerPlan.answerType, isCoding: isCodingChat });
@@ -686,8 +719,22 @@ export function initializeIpcHandlers(appState: AppState): void {
         // so it can never be classified bare and short-circuited here. The emitted
         // clarification is a fixed safe string. If `isBareFollowUp` is ever broadened,
         // re-verify it cannot swallow a stealth ask.
-        if (!context && isBareFollowUp(message)) {
-          const clarification = buildContextFreeClarification('manual');
+        // Manual regression 2026-06-12: the gate previously checked only the
+        // explicit `context` param — the rolling transcript snapshot captured
+        // above was IGNORED, so "why?" / "explain" mid-lecture emitted a generic
+        // clarification despite plenty of conversation context existing. A bare
+        // follow-up with transcript context now flows to the LLM (which can
+        // resolve it against the rolling window). The clarification also speaks
+        // the ACTIVE MODE's surface (lecture/sales) instead of always 'manual'.
+        if (!context && !autoContextSnapshot && isBareFollowUp(message)) {
+          let clarSurface: 'manual' | 'lecture' | 'sales' = 'manual';
+          try {
+            const { ModesManager } = require('./services/ModesManager');
+            const tpl = ModesManager.getInstance().getActiveModeInfo()?.templateType;
+            if (tpl === 'lecture') clarSurface = 'lecture';
+            else if (tpl === 'sales') clarSurface = 'sales';
+          } catch { /* default manual */ }
+          const clarification = buildContextFreeClarification(clarSurface);
           if (_chatStreamsBySender.get(senderId)?.streamId !== myStreamId) return null;
           event.sender.send('gemini-stream-token', clarification);
           event.sender.send('gemini-stream-done', { finalText: clarification });
@@ -808,6 +855,12 @@ export function initializeIpcHandlers(appState: AppState): void {
           'identity_answer', 'profile_fact_answer', 'experience_answer', 'project_answer',
           'project_followup_answer', 'skills_answer', 'skill_experience_answer',
           'jd_fit_answer', 'gap_analysis_answer', 'behavioral_interview_answer', 'negotiation_answer',
+          // Manual regression 2026-06-12: sales/lecture answers ALSO need their
+          // contract — without it the model had no voice instruction and fell
+          // back to "I'm Natively, an AI assistant. I don't have a product."
+          // in real sales-mode sessions. The SALES_TEMPLATE carries the
+          // seller-voice rules; lecture gets the neutral template + mode prompt.
+          'sales_answer', 'product_candidate_mix_answer', 'lecture_answer',
         ]);
         const wantsCandidateContract = CANDIDATE_CONTRACT_TYPES.has(answerPlan.answerType)
           // a styled question ALWAYS gets the contract so the style reaches the model.
@@ -1131,10 +1184,79 @@ export function initializeIpcHandlers(appState: AppState): void {
                   fullResponse = fb.route.answer;
                   finalText = fb.route.answer;
                   console.warn('[ProfileIntelligence] candidate answer was all assistant-meta; used deterministic fallback', { answerType: answerPlan.answerType });
+                } else {
+                  // Manual regression 2026-06-12 (stress seq_056): the backend has
+                  // NO fast-path for behavioral/jd-fit asks, so an all-assistant-
+                  // meta answer ("I'm Natively, I don't have personal experiences")
+                  // shipped UNREPAIRED. buildLiveFallbackAnswer covers those
+                  // profile routes (grounded experience/intro line) — an honest
+                  // grounded line always beats an identity leak.
+                  try {
+                    const resumeS = (orchS as any)?.activeResume?.structured_data ?? null;
+                    const jdS = (orchS as any)?.activeJD?.structured_data ?? null;
+                    const lf = resumeS ? buildLiveFallbackAnswer({ question: message, answerType: answerPlan.answerType, profile: resumeS, jobDescription: jdS }) : null;
+                    if (lf && lf.trim().length >= 15) {
+                      fullResponse = lf;
+                      finalText = lf;
+                      console.warn('[ProfileIntelligence] assistant-meta answer replaced with grounded live fallback', { answerType: answerPlan.answerType });
+                    }
+                  } catch { /* keep sanitized-but-thin answer */ }
                 }
               }
             } catch (saniErr: any) {
               console.warn('[ProfileIntelligence] candidate sanitizer skipped:', saniErr?.message);
+            }
+          }
+
+          // ── FINAL ANSWER POLISH + DIVERSITY GUARD (manual regression 2026-06-12) ──
+          // 1. Artifact cleanup: orphan "*" bullet lines, dangling markers, blank-
+          //    line runs. Cheap regex, code blocks preserved.
+          // 2. Identity guard at the RENDER boundary: a candidate-voice answer that
+          //    still self-identifies as the assistant after the sanitizer is
+          //    replaced with the deterministic profile answer (covered above) — the
+          //    artifact cleanup never weakens that.
+          // 3. Diversity: same first-sentence / template / near-duplicate answers
+          //    across DIFFERENT questions are compressed to speakable prose so a
+          //    long session never reads as canned. Deterministic; no extra LLM call.
+          if (!isCodingChat) {
+            try {
+              const { cleanAnswerArtifacts, compressToSpeakable, SCAFFOLD_LABEL_RE } = require('./llm/answerPolish') as typeof import('./llm/answerPolish');
+              const cleaned = cleanAnswerArtifacts(fullResponse);
+              if (cleaned !== fullResponse && cleaned.length >= 10) {
+                fullResponse = cleaned;
+                finalText = cleaned;
+              }
+              // Visible scaffold in a DEFAULT-style answer (user didn't ask for
+              // structure): compress to the speakable form. detectAnswerStyle
+              // already ran inside planAnswer (answerStyle on the plan).
+              SCAFFOLD_LABEL_RE.lastIndex = 0;
+              const hasVisibleScaffold = SCAFFOLD_LABEL_RE.test(fullResponse);
+              const structureRequested = ['detailed', 'bullets', 'star', 'exam', 'notes'].includes(answerPlan.answerStyle as string);
+              if (hasVisibleScaffold && !structureRequested) {
+                const speakable = compressToSpeakable(fullResponse);
+                if (speakable.length >= 40) {
+                  fullResponse = speakable;
+                  finalText = speakable;
+                  piTelemetry.emit('pi_scaffold_compressed', { answerType: answerPlan.answerType });
+                }
+              }
+              // Diversity check vs the session's recent answers.
+              const verdict = _manualDiversityGuard.check(fullResponse, answerPlan.answerType, message);
+              if (verdict.repeated) {
+                piTelemetry.emit('pi_answer_repeated', { answerType: answerPlan.answerType, reason: verdict.reason });
+                const speakable = compressToSpeakable(fullResponse);
+                // Only swap when compression actually changes the shape — a
+                // repeated PROSE answer can't be improved deterministically
+                // without an LLM round-trip (the prompt-side anti-repetition
+                // context already biases against it).
+                if (speakable.length >= 40 && speakable !== fullResponse && !_manualDiversityGuard.check(speakable, answerPlan.answerType, message).repeated) {
+                  fullResponse = speakable;
+                  finalText = speakable;
+                }
+              }
+              _manualDiversityGuard.record(fullResponse, answerPlan.answerType, message);
+            } catch (polishErr: any) {
+              console.warn('[ProfileIntelligence] answer polish skipped:', polishErr?.message);
             }
           }
 
@@ -1259,6 +1381,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         console.error('[IPC] Error in gemini-chat-stream setup:', error);
         throw error;
       } finally {
+        if (_manualFgToken) ForegroundGate.end(_manualFgToken);
         if (myController) {
           const current = _chatStreamsBySender.get(event.sender.id);
           if (current?.controller === myController) {
@@ -5406,9 +5529,39 @@ export function initializeIpcHandlers(appState: AppState): void {
       } catch {
         /* non-fatal */
       }
+      // PI v3 (W3) — PREWARM on activation, fire-and-forget: index any
+      // not-yet-ready reference files (so the first question's retrieval is a
+      // pure index lookup) and warm the static prompt cache. Never blocks the
+      // mode switch.
+      if (activeMode) {
+        void (async () => {
+          try {
+            await ModesManager.getInstance().prewarmModeReferenceIndex(activeMode.id);
+            BrowserWindow.getAllWindows().forEach((win) => {
+              if (!win.isDestroyed()) win.webContents.send('mode-file-index-status', { modeId: activeMode.id });
+            });
+          } catch (warmErr: any) {
+            console.warn('[IPC] mode reference prewarm failed (non-fatal):', warmErr?.message);
+          }
+          try {
+            await appState.processingHelper?.getLLMHelper?.()?.prewarmPromptCache?.();
+          } catch { /* non-fatal */ }
+        })();
+      }
       return { success: true };
     } catch (e: any) {
       console.error('[IPC] modes:set-active error:', e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  // PI v3 (W3): per-file index status for the Modes Manager UI badges.
+  safeHandle('modes:get-reference-file-status', async (_, modeId: string) => {
+    try {
+      const { ModesManager } = require('./services/ModesManager');
+      return { success: true, statuses: ModesManager.getInstance().getReferenceFileIndexStatuses(modeId) };
+    } catch (e: any) {
+      console.error('[IPC] modes:get-reference-file-status error:', e);
       return { success: false, error: e.message };
     }
   });
@@ -5594,6 +5747,19 @@ export function initializeIpcHandlers(appState: AppState): void {
 
       const { ModesManager } = require('./services/ModesManager');
       const file = ModesManager.getInstance().addReferenceFile({ modeId, fileName, content });
+      // PI v3 (W3) — index at UPLOAD time (fire-and-forget): chunk + embed +
+      // persist vectors now so live retrieval never pays the embedding cost.
+      // Status events let the UI show pending → ready.
+      void (async () => {
+        try {
+          await ModesManager.getInstance().indexReferenceFile(file);
+        } catch (idxErr: any) {
+          console.warn('[IPC] reference-file indexing failed (lexical fallback remains):', idxErr?.message);
+        }
+        BrowserWindow.getAllWindows().forEach((win) => {
+          if (!win.isDestroyed()) win.webContents.send('mode-file-index-status', { modeId, fileId: file.id });
+        });
+      })();
       return { success: true, file };
     } catch (e: any) {
       console.error('[IPC] modes:upload-reference-file error:', e);
