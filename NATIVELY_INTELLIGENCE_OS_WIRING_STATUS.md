@@ -158,3 +158,20 @@ Result: ✅ test-engineer verdict: PASS all 6. Shadow is the right call (vs repl
 Rollback: `NATIVELY_LIVE_TRANSCRIPT_BRAIN` unset = off. Revert the shadow block.
 
 **Phase 6 verified by test-engineer agent. "Must Finish First" tier (Phases 0–6) COMPLETE.**
+
+---
+
+## Phase 7 — Wire ContextFusionEngine + PromptAssemblerV2 Gradually
+Status: **complete**
+Goal: Use the new fusion + V2 assembly without breaking prompt quality. The prompt said: gradual, small path, preserve security, do NOT replace all assembly.
+Approach: SHADOW. The live WTA prompt (`packet` from the benchmark-green V1 PromptAssembler at WhatToAnswerLLM.ts:354) is UNCHANGED (`const`, never reassigned). When flag on, run the SAME context blocks through fuseContext → toPromptContextContract → assemblePromptV2 to produce the spec's CONTEXT INCLUSION REPORT + trust tags, recorded on a trace. Zero effect on the real prompt/answer.
+Files changed: `electron/llm/WhatToAnswerLLM.ts` (~line 369) — imports + shadow V2 pipeline block behind `prompt_assembler_v2_enabled`.
+Feature flags touched: `prompt_assembler_v2_enabled` (env `NATIVELY_PROMPT_ASSEMBLER_V2`, default OFF). (Note: the spec's `context_fusion_v2_enabled` is folded into this one flag — fusion is part of the V2 pipeline; comment corrected after test-engineer caught the stale "BOTH flags" wording.)
+Tests added: `electron/intelligence/__tests__/V2ShadowAssemblyWiring.test.mjs` (12 tests, by test-engineer).
+Tests run: typecheck **0** · build clean · intelligence **359 pass / 0 fail / 9 todo** · LLM baseline **1656 pass / 0 fail / 10 skipped** · services **33 pass / 0 fail**.
+Manual verification: deferred to Phase 15.
+Result: ✅ test-engineer verdict: PASS all 5. Real packet const-immutable + untouched (verified); V2 genuinely preserves security end-to-end (injection neutralized+escaped, profile_tree ordered before untrusted, low-trust trimmed first, system/profile never dropped, report content-free); negligible latency (pure string ops, off token path); inclusion report meaningful over real WTA inputs.
+Rollback: `NATIVELY_PROMPT_ASSEMBLER_V2` unset = off. Revert the shadow block.
+Notes: Scaffolding-with-purpose — ships no user-visible behavior; de-risks an eventual V2 cutover by proving a sound, security-preserving assembly over live inputs. Shadow omits the `mode` fusion option (correct for candidate-voice WTA; revisit if extended to sales/lecture).
+
+**Phase 7 verified by test-engineer agent. Proceeding to Phase 8 (autopilot).**
