@@ -107,4 +107,21 @@ Result: ✅ test-engineer verdict: PASS all 5 — genuine gap-closer (not redund
 Rollback: `NATIVELY_PROFILE_TREE_V2` unset = off (default). Revert the `_perspectiveExpectsCandidate` block.
 Notes: This is a DEFENSE-IN-DEPTH net, not a rewrite of identity routing (rule 2 honored — deterministic identity routing untouched).
 
-**Phase 3 verified by test-engineer agent. Proceeding to Phase 4 (autopilot).**
+**Phase 3 verified by test-engineer agent.**
+
+---
+
+## Phase 4 — Wire OutputShapeNormalizer / Answer Diversity Guard Live
+Status: **complete**
+Goal: Apply answer-shape cleanup (empty bullets, scaffold labels) where it's missing.
+**HONEST FINDING:** the MANUAL path already polishes live (ipcHandlers ~1255: cleanAnswerArtifacts + AnswerDiversityGuard + compressToSpeakable) → wiring there = redundant. The GAP: the WTA path (`runWhatShouldISay`) applies NO polish — empty "*" bullets and scaffold labels in default-style WTA answers reach the UI uncleaned. Phase 4 closed THAT.
+Files changed: `electron/IntelligenceEngine.ts` (~line 1472, before addAssistantMessage/emit) — import normalizeOutputShape + isIntelligenceFlagEnabled; compute `finalWtaAnswer` via normalizeOutputShape behind `answer_diversity_guard_enabled`; thread it through addAssistantMessage/pushUsage/emit (single source, NO double-add).
+Feature flags touched: `answer_diversity_guard_enabled` (env `NATIVELY_ANSWER_DIVERSITY_GUARD`, default OFF). OFF = finalWtaAnswer === fullAnswer byte-for-byte.
+Tests added: `electron/intelligence/__tests__/WtaOutputShapeWiring.test.mjs` (11 tests, by test-engineer).
+Tests run: typecheck **0** · build clean · intelligence **324 pass / 0 fail / 9 todo** · services **33 pass / 0 fail**.
+Manual verification: deferred to Phase 15.
+Result: ✅ test-engineer verdict: PASS all 5 — genuine gap-closer, no-op when OFF, safe when ON. Verified: NO duplicate addAssistantMessage (single call, confirmed by grep+test log); renderer REPLACES streamed text with normalized final via finalizeStreamingByIntent (traced into streamingTokenQueue.mjs/overlayMessagePersistence.mjs) — no garble; coding answers skipped; clean prose is a no-op; sub-10-char shrinks rejected.
+Rollback: `NATIVELY_ANSWER_DIVERSITY_GUARD` unset = off. Revert the finalWtaAnswer block.
+Notes: Streaming caveat handled — streamed tokens are pre-normalized, final emit replaces in place (the existing validate→repair pattern). Early-return WTA paths (provider-key error / clarification) aren't normalized but are deterministic canned text with no artifacts.
+
+**Phase 4 verified by test-engineer agent. Proceeding to Phase 5 (autopilot).**

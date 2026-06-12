@@ -27,7 +27,8 @@ import { ScreenContext } from './services/screen/ScreenContextService';
 import { buildPreparedTranscriptContext as assemblePreparedTranscriptContext } from './utils/preparedTranscriptContext';
 import { PiLatencyTrace } from './services/telemetry/PiLatencyTracer';
 import { beginTrace, commitTrace } from './intelligence/IntelligenceTrace';
-import { isDurableMemoryWindowEnabled } from './intelligence/intelligenceFlags';
+import { isDurableMemoryWindowEnabled, isIntelligenceFlagEnabled } from './intelligence/intelligenceFlags';
+import { normalizeOutputShape } from './intelligence/OutputShapeNormalizer';
 
 // Mode types
 export type IntelligenceMode = 'idle' | 'assist' | 'what_to_say' | 'follow_up' | 'recap' | 'clarify' | 'manual' | 'follow_up_questions' | 'code_hint' | 'brainstorm';
@@ -1459,19 +1460,37 @@ export class IntelligenceEngine extends EventEmitter {
                     this.emit('suggested_answer_token', fullAnswer, question || 'inferred', confidence);
                 }
             }
-            this.session.addAssistantMessage(fullAnswer);
+            // OUTPUT SHAPE NORMALIZER (Phase 4 wiring, behind answer_diversity_guard_enabled):
+            // the WTA path applies NO answer polish today (unlike the manual path), so empty
+            // "*" bullets and visible scaffold labels in a default-style answer reach the UI
+            // uncleaned. normalizeOutputShape strips those (code blocks preserved; coding
+            // answers skipped). Computed BEFORE addAssistantMessage/pushUsage so session
+            // history and the final emit all use the same normalized text (no double-add).
+            // The renderer's onIntelligenceSuggestedAnswer finalizes with the final `answer`,
+            // so the normalized final cleanly replaces the streamed text. Flag OFF →
+            // finalWtaAnswer === fullAnswer (current behavior, byte-for-byte).
+            let finalWtaAnswer = fullAnswer;
+            try {
+                if (isIntelligenceFlagEnabled('answerDiversityGuard')) {
+                    const shaped = normalizeOutputShape({ answer: fullAnswer, answerStyle: answerPlan.answerStyle as string, isCoding });
+                    if (shaped.changed && shaped.text.trim().length >= 10) finalWtaAnswer = shaped.text;
+                }
+            } catch { /* normalizer never blocks the answer */ }
+
+            this.session.addAssistantMessage(finalWtaAnswer);
 
             this.session.pushUsage({
                 type: 'assist',
                 timestamp: Date.now(),
                 question: question || 'What to Answer',
-                answer: fullAnswer
+                answer: finalWtaAnswer
             });
 
-            this.emit('suggested_answer', fullAnswer, question || 'What to Answer', confidence);
+            this.emit('suggested_answer', finalWtaAnswer, question || 'What to Answer', confidence);
             try {
                 wtaTrace.setRouting({ source: 'what_to_answer', answerType: answerPlan.answerType });
                 wtaTrace.noteContext({ source: 'live_transcript', trustLevel: 'low', requested: true, retrieved: true, included: true, reason: 'wta_window' });
+                if (finalWtaAnswer !== fullAnswer) wtaTrace.noteFallback('output_shape_normalized');
                 commitTrace(wtaTrace);
             } catch { /* trace never affects the answer */ }
 
