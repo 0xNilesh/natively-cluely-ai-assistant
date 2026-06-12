@@ -124,4 +124,21 @@ Result: ✅ test-engineer verdict: PASS all 5 — genuine gap-closer, no-op when
 Rollback: `NATIVELY_ANSWER_DIVERSITY_GUARD` unset = off. Revert the finalWtaAnswer block.
 Notes: Streaming caveat handled — streamed tokens are pre-normalized, final emit replaces in place (the existing validate→repair pattern). Early-return WTA paths (provider-key error / clarification) aren't normalized but are deterministic canned text with no artifacts.
 
-**Phase 4 verified by test-engineer agent. Proceeding to Phase 5 (autopilot).**
+**Phase 4 verified by test-engineer agent.**
+
+---
+
+## Phase 5 — Wire ContextRouter Into Manual Answer Path
+Status: **complete**
+Goal: Make live routing explicit / prevent profile/RAG/mode confusion.
+**HONEST FINDING:** the manual path ALREADY routes correctly via answerPlan (requiredContextLayers/forbiddenContextLayers/profileContextPolicy + CONTRACT/CANDIDATE_CONTRACT sets) — sales gets no profile, lecture no interview framing, identity no heavy RAG. ContextRouter is a COMPOSITION of the same deciders (planAnswer + decideProfileIntelligence) that already drive live. Having it DRIVE = regression risk, zero gain. So wired in **SHADOW/OBSERVE-ONLY** mode: compute the decision, record on the trace, emit a divergence telemetry marker — never gate the answer.
+Files changed: `electron/ipcHandlers.ts` (~line 734) — import routeContext; shadow block behind `context_router_v2_enabled`; routerDecision read ONLY for telemetry + trace (verified by test-engineer: never touches context/streamChat/control flow).
+Feature flags touched: `context_router_v2_enabled` (env `NATIVELY_CONTEXT_ROUTER_V2`, default OFF). OFF = block doesn't execute.
+Tests added: `electron/intelligence/__tests__/ContextRouterShadowWiring.test.mjs` (14 tests, by test-engineer).
+Tests run: typecheck **0** · build clean · intelligence **338 pass / 0 fail / 9 todo** · LLM baseline **1656 pass / 0 fail** · services **33 pass / 0 fail**.
+Manual verification: deferred to Phase 15.
+Result: ✅ test-engineer verdict: PASS (4 items) + 1 CONCERN fixed. Shadow is the right call (vs driving); genuinely zero-behavior-change; routeDecision never reaches the answer; negligible latency (pure, once-per-answer, off token path). **CONCERN FIXED:** the divergence proxy measured policy intent but ignored profile availability (false-fired on profile questions with no resume loaded) → AND'd `profileAvailable` into the proxy so the marker now fires only on a GENUINE disagreement when a profile exists.
+Rollback: `NATIVELY_CONTEXT_ROUTER_V2` unset = off. Revert the shadow block.
+Notes: This is "shadow-before-drive" validation + a consistency guard against future drift between the two routing representations. Low-value-but-harmless and the correct prerequisite before ever letting ContextRouter drive.
+
+**Phase 5 verified by test-engineer agent. Proceeding to Phase 6 (autopilot).**

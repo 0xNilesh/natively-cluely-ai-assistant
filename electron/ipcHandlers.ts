@@ -23,6 +23,7 @@ import { PiLatencyTrace } from './services/telemetry/PiLatencyTracer';
 import { beginTrace, commitTrace } from './intelligence/IntelligenceTrace';
 import { ProfileTreeService } from './intelligence/ProfileTreeService';
 import { isIntelligenceFlagEnabled } from './intelligence/intelligenceFlags';
+import { routeContext } from './intelligence/ContextRouter';
 import { CHAT_MODE_PROMPT } from './llm/prompts';
 import { isAssistantIdentityQuestion, profileFactsReady } from './llm/manualProfileIntelligence';
 import { buildManualProfileBackendAnswer } from './llm/profileAnswerBackend';
@@ -730,6 +731,46 @@ export function initializeIpcHandlers(appState: AppState): void {
           mode: manualActiveMode?.templateType,
           answerType: answerPlan.answerType,
         });
+
+        // CONTEXT ROUTER V2 (Phase 5 wiring, SHADOW MODE behind context_router_v2_enabled):
+        // the manual path already routes context via answerPlan.requiredContextLayers /
+        // forbiddenContextLayers + the CONTRACT/CANDIDATE_CONTRACT sets below — a hardened,
+        // benchmark-green path. Rather than have ContextRouter DRIVE that (risking a
+        // regression for no behavioral gain), we run it in SHADOW: compute its decision,
+        // record it on the trace, and emit a telemetry marker when it DISAGREES with the
+        // live profile-policy routing. This validates the router against the proven path
+        // with ZERO behavior change — the prerequisite before ever letting it drive.
+        // Flag OFF → not computed at all.
+        try {
+          if (isIntelligenceFlagEnabled('contextRouterV2')) {
+            const orchRouter = llmHelper.getKnowledgeOrchestrator?.();
+            const routerProfileAvailable = profileFactsReady((orchRouter as any)?.activeResume?.structured_data ?? null);
+            const routerDecision = routeContext({
+              userQuery: message,
+              source: 'manual_input',
+              mode: manualActiveMode?.templateType,
+              profileAvailable: routerProfileAvailable,
+              jdAvailable: Boolean((orchRouter as any)?.activeJD?.structured_data),
+            }, iTrace);
+            // Live routing's view of whether profile grounds this answer. The router
+            // gates useProfileTree on profile AVAILABILITY, so AND availability into the
+            // proxy too (test-engineer Phase 5 CONCERN): otherwise a profile-type question
+            // asked before a resume is loaded reads as a false divergence (the live path
+            // also can't ground without a profile). Now the marker fires only on a GENUINE
+            // routing disagreement when a profile actually exists.
+            const liveWantsProfile = routerProfileAvailable && (
+              answerPlan.profileContextPolicy === 'required'
+              || answerPlan.requiredContextLayers.some((l) => l === 'stable_identity' || l === 'resume' || l === 'jd')
+            );
+            if (routerDecision.useProfileTree !== liveWantsProfile) {
+              piTelemetry.emit('pi_context_policy_applied', {
+                answerType: answerPlan.answerType,
+                via: 'context_router_shadow_divergence',
+                profilePolicy: answerPlan.profileContextPolicy,
+              });
+            }
+          }
+        } catch { /* shadow routing is observe-only; never affects the answer */ }
 
         // Context-free bare follow-up ("why?", "and?", "continue") typed in MANUAL
         // mode has no prior turn to resolve against (manual chat is single-shot — no
