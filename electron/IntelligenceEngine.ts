@@ -26,6 +26,10 @@ import { DynamicAction } from './services/dynamic-actions/DynamicAction';
 import { ScreenContext } from './services/screen/ScreenContextService';
 import { buildPreparedTranscriptContext as assemblePreparedTranscriptContext } from './utils/preparedTranscriptContext';
 import { PiLatencyTrace } from './services/telemetry/PiLatencyTracer';
+import { beginTrace, commitTrace } from './intelligence/IntelligenceTrace';
+import { isDurableMemoryWindowEnabled, isIntelligenceFlagEnabled } from './intelligence/intelligenceFlags';
+import { normalizeOutputShape } from './intelligence/OutputShapeNormalizer';
+import { LiveTranscriptBrain } from './intelligence/LiveTranscriptBrain';
 
 // Mode types
 export type IntelligenceMode = 'idle' | 'assist' | 'what_to_say' | 'follow_up' | 'recap' | 'clarify' | 'manual' | 'follow_up_questions' | 'code_hint' | 'brainstorm';
@@ -583,6 +587,12 @@ export class IntelligenceEngine extends EventEmitter {
      */
     async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string }): Promise<string | null> {
         const now = Date.now();
+        // Intelligence OS observe-only trace (Phase 1). Zero-cost NO-OP unless
+        // intelligence_trace_enabled is on. Committed at the primary final-answer emit
+        // below; rare early-returns (provider-key error / clarification) are not traced
+        // yet (documented in the wiring status) — an uncommitted trace simply isn't
+        // recorded, no leak.
+        const wtaTrace = beginTrace(typeof question === 'string' ? question : '');
         const isSpeculative = options?.speculative === true;
         const skipCooldown = options?.skipCooldown === true;
 
@@ -779,6 +789,27 @@ export class IntelligenceEngine extends EventEmitter {
                     } catch { return ''; }
                 })();
             const extractedQuestion = extractLatestQuestion(transcriptTurns);
+
+            // LIVE TRANSCRIPT BRAIN (Phase 6 wiring, SHADOW/PARITY behind live_transcript_brain_enabled):
+            // the WTA path already builds the hot window inline (getContext(180) + interim
+            // injection above) and extracts the question — exactly what LiveTranscriptBrain
+            // encapsulates. Replacing the proven inline logic outright is a pure refactor =
+            // regression risk for zero gain. So we run the brain in SHADOW: enrich the trace
+            // with its current-question + entity view and record a PARITY marker when its
+            // extracted question diverges from the live one. This proves the brain is a safe
+            // drop-in for a future refactor, with ZERO behavior change. Flag OFF → not run.
+            try {
+                if (isIntelligenceFlagEnabled('liveTranscriptBrain')) {
+                    const brain = new LiveTranscriptBrain(this.session as any, extractLatestQuestion as any);
+                    const brainQ = brain.getCurrentQuestion(180);
+                    wtaTrace.noteContext({
+                        source: 'live_transcript_brain', trustLevel: 'low',
+                        requested: true, retrieved: Boolean(brainQ), included: false,
+                        reason: brainQ && extractedQuestion.latestQuestion && brainQ !== extractedQuestion.latestQuestion
+                            ? 'brain_question_divergence' : 'brain_parity',
+                    });
+                }
+            } catch { /* shadow brain is observe-only; never affects the answer */ }
             // Bare follow-up resolution ("And SQL?", "What about complexity?",
             // "Why?") — resolve into a concrete question + inherited answer type so
             // it routes correctly instead of falling to general/unknown. Only
@@ -816,7 +847,17 @@ export class IntelligenceEngine extends EventEmitter {
                         // long-range entities this feature targets. So build the memory
                         // turns from a WIDE window (the whole session, capped) and
                         // convert ms → SECONDS here.
-                        const memWindowTurns = this.session.getContext(this.LIVE_MEMORY_WINDOW_SECONDS).map(item => ({
+                        // DURABLE WINDOW FIX (Phase 2 wiring, behind durableMemoryWindow flag):
+                        // getContext() reads `contextItems`, which SessionTracker evicts to
+                        // ~120s on every segment, so the intended 2h window silently saw at
+                        // most the last 2 minutes (a project named at minute 1 was gone by
+                        // minute 3). getDurableContext() reads the persisted `fullTranscript`
+                        // (survives eviction) so long-range recall actually works. Flag OFF
+                        // keeps the original getContext path byte-for-byte.
+                        const memWindowSource = isDurableMemoryWindowEnabled()
+                            ? this.session.getDurableContext(this.LIVE_MEMORY_WINDOW_SECONDS)
+                            : this.session.getContext(this.LIVE_MEMORY_WINDOW_SECONDS);
+                        const memWindowTurns = memWindowSource.map(item => ({
                             role: item.role, text: item.text, t: Math.floor(item.timestamp / 1000),
                         }));
                         const latestTurnSec = Math.floor((transcriptTurns[transcriptTurns.length - 1]?.timestamp ?? Date.now()) / 1000);
@@ -1441,16 +1482,39 @@ export class IntelligenceEngine extends EventEmitter {
                     this.emit('suggested_answer_token', fullAnswer, question || 'inferred', confidence);
                 }
             }
-            this.session.addAssistantMessage(fullAnswer);
+            // OUTPUT SHAPE NORMALIZER (Phase 4 wiring, behind answer_diversity_guard_enabled):
+            // the WTA path applies NO answer polish today (unlike the manual path), so empty
+            // "*" bullets and visible scaffold labels in a default-style answer reach the UI
+            // uncleaned. normalizeOutputShape strips those (code blocks preserved; coding
+            // answers skipped). Computed BEFORE addAssistantMessage/pushUsage so session
+            // history and the final emit all use the same normalized text (no double-add).
+            // The renderer's onIntelligenceSuggestedAnswer finalizes with the final `answer`,
+            // so the normalized final cleanly replaces the streamed text. Flag OFF →
+            // finalWtaAnswer === fullAnswer (current behavior, byte-for-byte).
+            let finalWtaAnswer = fullAnswer;
+            try {
+                if (isIntelligenceFlagEnabled('answerDiversityGuard')) {
+                    const shaped = normalizeOutputShape({ answer: fullAnswer, answerStyle: answerPlan.answerStyle as string, isCoding });
+                    if (shaped.changed && shaped.text.trim().length >= 10) finalWtaAnswer = shaped.text;
+                }
+            } catch { /* normalizer never blocks the answer */ }
+
+            this.session.addAssistantMessage(finalWtaAnswer);
 
             this.session.pushUsage({
                 type: 'assist',
                 timestamp: Date.now(),
                 question: question || 'What to Answer',
-                answer: fullAnswer
+                answer: finalWtaAnswer
             });
 
-            this.emit('suggested_answer', fullAnswer, question || 'What to Answer', confidence);
+            this.emit('suggested_answer', finalWtaAnswer, question || 'What to Answer', confidence);
+            try {
+                wtaTrace.setRouting({ source: 'what_to_answer', answerType: answerPlan.answerType });
+                wtaTrace.noteContext({ source: 'live_transcript', trustLevel: 'low', requested: true, retrieved: true, included: true, reason: 'wta_window' });
+                if (finalWtaAnswer !== fullAnswer) wtaTrace.noteFallback('output_shape_normalized');
+                commitTrace(wtaTrace);
+            } catch { /* trace never affects the answer */ }
 
             // VERIFIED CODE EXECUTION (background, strictly additive). For coding
             // answers, run the code against test cases AFTER it's shown — never

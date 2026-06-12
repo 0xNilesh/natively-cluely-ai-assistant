@@ -20,6 +20,10 @@ import { buildLiveFallbackAnswer } from './llm/manualProfileIntelligence';
 import { isCodeVerificationEnabled } from './llm/codeVerification/verificationEnabled';
 import { CodingStreamGate } from './llm/codingStreamGate';
 import { PiLatencyTrace } from './services/telemetry/PiLatencyTracer';
+import { beginTrace, commitTrace } from './intelligence/IntelligenceTrace';
+import { ProfileTreeService } from './intelligence/ProfileTreeService';
+import { isIntelligenceFlagEnabled } from './intelligence/intelligenceFlags';
+import { routeContext } from './intelligence/ContextRouter';
 import { CHAT_MODE_PROMPT } from './llm/prompts';
 import { isAssistantIdentityQuestion, profileFactsReady } from './llm/manualProfileIntelligence';
 import { buildManualProfileBackendAnswer } from './llm/profileAnswerBackend';
@@ -570,6 +574,10 @@ export function initializeIpcHandlers(appState: AppState): void {
     ) => {
       let myController: AbortController | null = null;
       let _manualFgToken: string | null = null;
+      // Intelligence OS observe-only trace (Phase 1). Hoisted so the catch can record
+      // an error + commit. Assigned to the real trace right after planAnswer; until
+      // then it's the shared zero-cost NO-OP, so this is free when the flag is off.
+      let iTrace = beginTrace('');
       const { ForegroundGate } = require('./services/ForegroundGate') as typeof import('./services/ForegroundGate');
       try {
         console.log('[IPC] gemini-chat-stream started using LLMHelper.streamChat');
@@ -637,6 +645,15 @@ export function initializeIpcHandlers(appState: AppState): void {
             }
             intelligenceManager.addAssistantMessage(identityHit);
             intelligenceManager.logUsage('chat', message, identityHit);
+            // Observe-only trace for the app-identity canned reply (common path). The
+            // hoisted iTrace is still the NOOP here (real trace is created post-planAnswer),
+            // so begin a dedicated one. Zero-cost when the flag is off.
+            try {
+              const probeTrace = beginTrace(message);
+              probeTrace.setRouting({ source: 'manual_input', answerType: 'unknown_answer', deterministicFastPathUsed: true, profileFactsReady: probeProfileReady });
+              probeTrace.noteFallback('assistant_identity_reply');
+              commitTrace(probeTrace);
+            } catch { /* trace never affects the answer */ }
             return null;
           }
         }
@@ -680,6 +697,11 @@ export function initializeIpcHandlers(appState: AppState): void {
         const chatTrace = new PiLatencyTrace({ source: 'manual' });
         chatTrace.mark('question_submitted');
 
+        // Intelligence OS — observe-only per-answer trace (Phase 1 wiring). Returns a
+        // zero-cost NO-OP when intelligence_trace_enabled is off (default), so this
+        // never affects answer behavior or latency. Committed at every exit point.
+        iTrace = beginTrace(typeof message === 'string' ? message : '');
+
         // Foreground gate (manual regression 2026-06-12): pause background
         // embedding/RAG drain loops while this answer is in flight so their
         // synchronous DB work can't add event-loop stalls to the user's answer.
@@ -704,6 +726,51 @@ export function initializeIpcHandlers(appState: AppState): void {
         const isCodingChat = isCodingAnswerType(answerPlan.answerType);
         chatTrace.mark('answer_type_selected', { answerType: answerPlan.answerType, isCoding: isCodingChat });
         piTelemetry.emit('pi_answer_plan_created', { answerType: answerPlan.answerType, surface: 'manual', isCoding: isCodingChat, profilePolicy: answerPlan.profileContextPolicy, answerStyle: answerPlan.answerStyle });
+        iTrace.setRouting({
+          source: 'manual_input',
+          mode: manualActiveMode?.templateType,
+          answerType: answerPlan.answerType,
+        });
+
+        // CONTEXT ROUTER V2 (Phase 5 wiring, SHADOW MODE behind context_router_v2_enabled):
+        // the manual path already routes context via answerPlan.requiredContextLayers /
+        // forbiddenContextLayers + the CONTRACT/CANDIDATE_CONTRACT sets below — a hardened,
+        // benchmark-green path. Rather than have ContextRouter DRIVE that (risking a
+        // regression for no behavioral gain), we run it in SHADOW: compute its decision,
+        // record it on the trace, and emit a telemetry marker when it DISAGREES with the
+        // live profile-policy routing. This validates the router against the proven path
+        // with ZERO behavior change — the prerequisite before ever letting it drive.
+        // Flag OFF → not computed at all.
+        try {
+          if (isIntelligenceFlagEnabled('contextRouterV2')) {
+            const orchRouter = llmHelper.getKnowledgeOrchestrator?.();
+            const routerProfileAvailable = profileFactsReady((orchRouter as any)?.activeResume?.structured_data ?? null);
+            const routerDecision = routeContext({
+              userQuery: message,
+              source: 'manual_input',
+              mode: manualActiveMode?.templateType,
+              profileAvailable: routerProfileAvailable,
+              jdAvailable: Boolean((orchRouter as any)?.activeJD?.structured_data),
+            }, iTrace);
+            // Live routing's view of whether profile grounds this answer. The router
+            // gates useProfileTree on profile AVAILABILITY, so AND availability into the
+            // proxy too (test-engineer Phase 5 CONCERN): otherwise a profile-type question
+            // asked before a resume is loaded reads as a false divergence (the live path
+            // also can't ground without a profile). Now the marker fires only on a GENUINE
+            // routing disagreement when a profile actually exists.
+            const liveWantsProfile = routerProfileAvailable && (
+              answerPlan.profileContextPolicy === 'required'
+              || answerPlan.requiredContextLayers.some((l) => l === 'stable_identity' || l === 'resume' || l === 'jd')
+            );
+            if (routerDecision.useProfileTree !== liveWantsProfile) {
+              piTelemetry.emit('pi_context_policy_applied', {
+                answerType: answerPlan.answerType,
+                via: 'context_router_shadow_divergence',
+                profilePolicy: answerPlan.profileContextPolicy,
+              });
+            }
+          }
+        } catch { /* shadow routing is observe-only; never affects the answer */ }
 
         // Context-free bare follow-up ("why?", "and?", "continue") typed in MANUAL
         // mode has no prior turn to resolve against (manual chat is single-shot — no
@@ -745,6 +812,8 @@ export function initializeIpcHandlers(appState: AppState): void {
           chatTrace.markFirstUseful({ via: 'context_free_clarification' });
           chatTrace.mark('response_completed', { chars: clarification.length, deterministic: true });
           chatTrace.finish({ chars: clarification.length });
+          iTrace.setRouting({ answerType: 'follow_up_answer', deterministicFastPathUsed: true }).noteFallback('context_free_clarification');
+          commitTrace(iTrace);
           return null;
         }
 
@@ -788,6 +857,14 @@ export function initializeIpcHandlers(appState: AppState): void {
               chatTrace.markFirstUseful({ via: 'profile_fast_path' });
               chatTrace.mark('response_completed', { chars: fastPath.answer.length, deterministic: true });
               chatTrace.finish({ chars: fastPath.answer.length });
+              iTrace.setRouting({
+                answerType: fastPath.answerType,
+                deterministicFastPathUsed: true,
+                profileFactsReady: routeLog.profileFactsReady,
+                promptContainsProfileContext: true,
+              });
+              iTrace.noteContext({ source: 'profile_tree', trustLevel: 'high', requested: true, retrieved: true, included: true, reason: 'manual_fast_path' });
+              commitTrace(iTrace);
               return null;
             }
           } catch (profileRouteError: any) {
@@ -1166,7 +1243,20 @@ export function initializeIpcHandlers(appState: AppState): void {
           // such a sentence to an otherwise-valid answer. Strip it deterministically;
           // if stripping empties the answer, fall back to the deterministic profile
           // backend so the user never gets a broken/empty answer.
-          if (CANDIDATE_VOICE_ANSWER_TYPES.has(answerPlan.answerType)) {
+          // ProfileTree V2 perspective guard (Phase 3 wiring, behind profile_tree_v2_enabled):
+          // the existing sanitizer triggers on ANSWER TYPE. But a candidate-identity ask in
+          // an interview/looking-for-work mode that gets MISCLASSIFIED to a non-candidate
+          // answerType (e.g. general_meeting_answer) would skip the assistant-meta strip and
+          // could leak "I'm Natively". The mode-based guard is independent of answerType, so
+          // it widens the trigger to catch that gap. Flag OFF → original answerType-only trigger.
+          let _perspectiveExpectsCandidate = false;
+          try {
+            if (isIntelligenceFlagEnabled('profileTreeV2')) {
+              const guard = ProfileTreeService.getCandidatePerspectiveGuard(manualActiveMode?.templateType, message);
+              _perspectiveExpectsCandidate = guard.assistantIdentityWouldLeak;
+            }
+          } catch { /* guard never blocks the answer */ }
+          if (CANDIDATE_VOICE_ANSWER_TYPES.has(answerPlan.answerType) || _perspectiveExpectsCandidate) {
             try {
               const sani = sanitizeCandidateAnswer(fullResponse);
               if (sani.repaired && !sani.needsFallback) {
@@ -1269,6 +1359,8 @@ export function initializeIpcHandlers(appState: AppState): void {
             event.sender.send('gemini-stream-done', finalText ? { finalText } : undefined);
             chatTrace.mark('response_completed', { chars: fullResponse.length, repaired: Boolean(finalText) });
             chatTrace.finish({ chars: fullResponse.length });
+            iTrace.setProvider({ provider: 'llm', model: undefined });
+            commitTrace(iTrace);
             try {
               PhoneMirrorService.getInstance().publishDone(String(myStreamId), fullResponse);
             } catch (_) {
@@ -1379,6 +1471,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         return null; // Return null as data is sent via events
       } catch (error: any) {
         console.error('[IPC] Error in gemini-chat-stream setup:', error);
+        try { iTrace.noteError(error?.name || 'handler_error'); commitTrace(iTrace); } catch { /* trace must never mask the real error */ }
         throw error;
       } finally {
         if (_manualFgToken) ForegroundGate.end(_manualFgToken);
