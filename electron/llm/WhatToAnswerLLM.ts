@@ -121,9 +121,10 @@ export class WhatToAnswerLLM {
         preFetchedModeContext?: Promise<string>
     ): AsyncGenerator<string> {
         const MEASURE = process.env.MEASURE_LATENCY === 'true';
-        let tStart = 0, tIntent = 0, tTemporal = 0, tMode = 0, tTrunc = 0, tPrompt = 0, tStream = 0;
+        let tStart = 0, tIntent = 0, tTemporal = 0, tMode = 0, tTrunc = 0, tPrompt = 0, tStreamStart = 0;
         const interTokenLatencies: number[] = [];
         let tPrevToken = 0;
+        let tFirstToken = 0;
 
         try {
             if (MEASURE) tStart = performance.now();
@@ -366,7 +367,7 @@ ANSWER SHAPE: ${intentResult.answerShape}
             });
 
             if (MEASURE) tPrompt = performance.now();
-            if (MEASURE) tStream = performance.now();
+            if (MEASURE) tStreamStart = performance.now();
 
             // Stream with per-token latency tracking
             let tokenCount = 0;
@@ -392,6 +393,7 @@ ANSWER SHAPE: ${intentResult.answerShape}
             for await (const token of this.llmHelper.streamChat(packet.userMessage, imagePaths, undefined, finalPromptOverride, true, true, packetScopes, undefined, wtaThinkingBudget)) {
                 if (MEASURE) {
                     const now = performance.now();
+                    if (!tFirstToken) tFirstToken = now;
                     if (tPrevToken > 0) interTokenLatencies.push(now - tPrevToken);
                     tPrevToken = now;
                 }
@@ -419,17 +421,20 @@ ANSWER SHAPE: ${intentResult.answerShape}
             }
 
             if (MEASURE) {
-                // W5 fix: compute the stream DURATION into its own variable —
-                // the old code overwrote tStream (a timestamp) with a duration
-                // and then used it in `promptMs = tStream - tPrompt`, printing a
-                // huge negative Stage 5. All stage deltas are timestamp-pairs.
-                const streamMs = performance.now() - tStream;
-                const totalMs = performance.now() - tStart;
-                const intentMs = tIntent > 0 ? tTemporal - tIntent : 0;
-                const temporalMs = tTemporal > 0 ? tTrunc - tTemporal : 0;
-                const truncMs = tTrunc > 0 ? tMode - tTrunc : 0;
-                const modeMs = tMode > 0 ? tPrompt - tMode : 0;
-                const promptMs = tPrompt > 0 ? tStream - tPrompt : 0;
+                // Stage timings — all deltas are timestamp-pairs (the old code
+                // overwrote tStream with a duration then subtracted a timestamp,
+                // printing a huge negative Stage 5). tStreamStart/tFirstToken add
+                // TFFT + tokens/sec to the breakdown.
+                const tEnd = performance.now();
+                const totalMs = tEnd - tStart;
+                const intentMs = tIntent > 0 && tTemporal > 0 ? tTemporal - tIntent : 0;
+                const temporalMs = tTemporal > 0 && tTrunc > 0 ? tTrunc - tTemporal : 0;
+                const truncMs = tTrunc > 0 && tMode > 0 ? tMode - tTrunc : 0;
+                const modeMs = tMode > 0 && tPrompt > 0 ? tPrompt - tMode : 0;
+                const promptMs = tPrompt > 0 && tStreamStart > 0 ? tStreamStart - tPrompt : 0;
+                const streamMs = tStreamStart > 0 ? tEnd - tStreamStart : 0;
+                const tfftMs = tFirstToken > 0 && tStreamStart > 0 ? tFirstToken - tStreamStart : null;
+                const tokensPerSec = streamMs > 0 ? tokenCount / (streamMs / 1000) : 0;
 
                 const sorted = [...interTokenLatencies].sort((a, b) => a - b);
                 const p50 = sorted[Math.floor(sorted.length * 0.5)] || 0;
@@ -445,7 +450,7 @@ ANSWER SHAPE: ${intentResult.answerShape}
                 console.log(`  Stage 3 (truncation):   ${truncMs.toFixed(1)}ms`);
                 console.log(`  Stage 4 (mode ctx):     ${modeMs.toFixed(1)}ms`);
                 console.log(`  Stage 5 (prompt build): ${promptMs.toFixed(1)}ms`);
-                console.log(`  Stage 6 (LLM stream):   ${streamMs.toFixed(1)}ms total, ${tokenCount} tokens`);
+                console.log(`  Stage 6 (LLM stream):   ${streamMs.toFixed(1)}ms total, ${tokenCount} tokens, TFFT=${tfftMs === null ? 'n/a' : tfftMs.toFixed(1) + 'ms'}, tokens/sec=${tokensPerSec.toFixed(2)}`);
                 console.log(`    Per-token: avg=${avg.toFixed(1)}ms p50=${p50.toFixed(1)}ms p95=${p95.toFixed(1)}ms p99=${p99.toFixed(1)}ms`);
                 console.log(`  Total E2E:              ${totalMs.toFixed(1)}ms`);
             }
