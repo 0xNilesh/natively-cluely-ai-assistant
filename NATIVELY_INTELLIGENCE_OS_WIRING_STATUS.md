@@ -74,4 +74,20 @@ Result: ✅ test-engineer agent verdict: SAFE TO SHIP with flag OFF. Observe-onl
 Rollback: `NATIVELY_INTELLIGENCE_TRACE` unset = already off (default). To remove entirely: revert the ipcHandlers.ts + IntelligenceEngine.ts trace edits.
 Notes (honest gaps, observability-only, NOT safety): a few rare WTA early-returns (cooldown throttle, legacy answerLLM path, streamAborted, sentinel-decline, graceful-retry) don't commit a trace even when ON — an uncommitted trace is GC'd, no leak. The common manual paths (fast-path, clarification, normal stream, app-identity, errors) and the primary WTA path ARE traced.
 
-**Phase 1 verified by test-engineer agent. Proceeding to Phase 2 (autopilot).**
+**Phase 1 verified by test-engineer agent.**
+
+---
+
+## Phase 2 — Wire the Durable Memory Bug Fix Live
+Status: **complete**
+Goal: Fix the verified live-memory bug — `runWhatShouldISay` read the long-range follow-up window from `getContext(7200)` (capped to ~120s by contextItems eviction); route it to `getDurableContext(7200)` (durable fullTranscript) behind `durableMemoryWindow`.
+Files changed: `electron/IntelligenceEngine.ts` (~line 826) — import `isDurableMemoryWindowEnabled`; flag-gated ternary selecting the memory source. (SessionTracker.getDurableContext already existed/tested from the library build.)
+Feature flags touched: `durableMemoryWindow` (env `NATIVELY_DURABLE_MEMORY_WINDOW`, default OFF). OFF = original getContext path byte-for-byte.
+Tests added: `electron/intelligence/__tests__/DurableMemoryWiring.test.mjs` (9 tests, by test-engineer) — drives the REAL SessionTracker: proves getContext(7200) loses a minute-1 entity after eviction (the bug) while getDurableContext(7200) retains it (the fix); shape contract; flag flips source.
+Tests run: typecheck **0** · build clean · intelligence **246 pass / 0 fail / 9 todo** · IntelligenceEngine services **33 pass / 0 fail** · `benchmark:livememory` ran offline **100 scenarios 100% / p95 1ms**.
+Manual verification: deferred to Phase 15 live run ("client is Mark, topic Redis scaling" → after 2 min ask "what was the client and topic?" with flag ON → recalls Mark + Redis scaling).
+Result: ✅ test-engineer verdict: PASS all 5 items. Fix correct (targets the right method), flag-OFF is a true no-op (double-gated behind lsmConfig.enabled too), no downstream regression. Edge cases checked: assistant turns already present in OFF path (no new role); growth bounded (fullTranscript compaction + SessionMemory 200-item cap); durable === getContext when nothing evicted.
+Rollback: `NATIVELY_DURABLE_MEMORY_WINDOW` unset = off (default). Revert the ternary to restore the single getContext call.
+Notes (honest): `benchmark:livememory` does NOT touch SessionTracker, so it does NOT cover this source-swap — the real proof is DurableMemoryWiring.test.mjs. To actually USE this fix in production, flip the flag ON (recommended after a live soak).
+
+**Phase 2 verified by test-engineer agent. Proceeding to Phase 3 (autopilot).**

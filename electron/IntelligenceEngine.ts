@@ -27,6 +27,7 @@ import { ScreenContext } from './services/screen/ScreenContextService';
 import { buildPreparedTranscriptContext as assemblePreparedTranscriptContext } from './utils/preparedTranscriptContext';
 import { PiLatencyTrace } from './services/telemetry/PiLatencyTracer';
 import { beginTrace, commitTrace } from './intelligence/IntelligenceTrace';
+import { isDurableMemoryWindowEnabled } from './intelligence/intelligenceFlags';
 
 // Mode types
 export type IntelligenceMode = 'idle' | 'assist' | 'what_to_say' | 'follow_up' | 'recap' | 'clarify' | 'manual' | 'follow_up_questions' | 'code_hint' | 'brainstorm';
@@ -823,7 +824,17 @@ export class IntelligenceEngine extends EventEmitter {
                         // long-range entities this feature targets. So build the memory
                         // turns from a WIDE window (the whole session, capped) and
                         // convert ms → SECONDS here.
-                        const memWindowTurns = this.session.getContext(this.LIVE_MEMORY_WINDOW_SECONDS).map(item => ({
+                        // DURABLE WINDOW FIX (Phase 2 wiring, behind durableMemoryWindow flag):
+                        // getContext() reads `contextItems`, which SessionTracker evicts to
+                        // ~120s on every segment, so the intended 2h window silently saw at
+                        // most the last 2 minutes (a project named at minute 1 was gone by
+                        // minute 3). getDurableContext() reads the persisted `fullTranscript`
+                        // (survives eviction) so long-range recall actually works. Flag OFF
+                        // keeps the original getContext path byte-for-byte.
+                        const memWindowSource = isDurableMemoryWindowEnabled()
+                            ? this.session.getDurableContext(this.LIVE_MEMORY_WINDOW_SECONDS)
+                            : this.session.getContext(this.LIVE_MEMORY_WINDOW_SECONDS);
+                        const memWindowTurns = memWindowSource.map(item => ({
                             role: item.role, text: item.text, t: Math.floor(item.timestamp / 1000),
                         }));
                         const latestTurnSec = Math.floor((transcriptTurns[transcriptTurns.length - 1]?.timestamp ?? Date.now()) / 1000);
