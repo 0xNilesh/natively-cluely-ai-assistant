@@ -21,6 +21,8 @@ import { isCodeVerificationEnabled } from './llm/codeVerification/verificationEn
 import { CodingStreamGate } from './llm/codingStreamGate';
 import { PiLatencyTrace } from './services/telemetry/PiLatencyTracer';
 import { beginTrace, commitTrace } from './intelligence/IntelligenceTrace';
+import { ProfileTreeService } from './intelligence/ProfileTreeService';
+import { isIntelligenceFlagEnabled } from './intelligence/intelligenceFlags';
 import { CHAT_MODE_PROMPT } from './llm/prompts';
 import { isAssistantIdentityQuestion, profileFactsReady } from './llm/manualProfileIntelligence';
 import { buildManualProfileBackendAnswer } from './llm/profileAnswerBackend';
@@ -1200,7 +1202,20 @@ export function initializeIpcHandlers(appState: AppState): void {
           // such a sentence to an otherwise-valid answer. Strip it deterministically;
           // if stripping empties the answer, fall back to the deterministic profile
           // backend so the user never gets a broken/empty answer.
-          if (CANDIDATE_VOICE_ANSWER_TYPES.has(answerPlan.answerType)) {
+          // ProfileTree V2 perspective guard (Phase 3 wiring, behind profile_tree_v2_enabled):
+          // the existing sanitizer triggers on ANSWER TYPE. But a candidate-identity ask in
+          // an interview/looking-for-work mode that gets MISCLASSIFIED to a non-candidate
+          // answerType (e.g. general_meeting_answer) would skip the assistant-meta strip and
+          // could leak "I'm Natively". The mode-based guard is independent of answerType, so
+          // it widens the trigger to catch that gap. Flag OFF → original answerType-only trigger.
+          let _perspectiveExpectsCandidate = false;
+          try {
+            if (isIntelligenceFlagEnabled('profileTreeV2')) {
+              const guard = ProfileTreeService.getCandidatePerspectiveGuard(manualActiveMode?.templateType, message);
+              _perspectiveExpectsCandidate = guard.assistantIdentityWouldLeak;
+            }
+          } catch { /* guard never blocks the answer */ }
+          if (CANDIDATE_VOICE_ANSWER_TYPES.has(answerPlan.answerType) || _perspectiveExpectsCandidate) {
             try {
               const sani = sanitizeCandidateAnswer(fullResponse);
               if (sani.repaired && !sani.needsFallback) {

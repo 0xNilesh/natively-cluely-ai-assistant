@@ -90,4 +90,21 @@ Result: ✅ test-engineer verdict: PASS all 5 items. Fix correct (targets the ri
 Rollback: `NATIVELY_DURABLE_MEMORY_WINDOW` unset = off (default). Revert the ternary to restore the single getContext call.
 Notes (honest): `benchmark:livememory` does NOT touch SessionTracker, so it does NOT cover this source-swap — the real proof is DurableMemoryWiring.test.mjs. To actually USE this fix in production, flip the flag ON (recommended after a live soak).
 
-**Phase 2 verified by test-engineer agent. Proceeding to Phase 3 (autopilot).**
+**Phase 2 verified by test-engineer agent.**
+
+---
+
+## Phase 3 — Wire ProfileTreeService Into Live Manual/Profile Questions
+Status: **complete**
+Goal: Strengthen the no-assistant-identity guard for misclassified candidate-identity asks.
+**HONEST FINDING:** the manual path ALREADY has a robust 3-layer identity guard (identity-probe short-circuit @602, deterministic profile fast-path `buildManualProfileBackendAnswer` @798, post-stream candidate sanitizer @1203) — all using the same `tryBuildManualProfileFastPathAnswer` that ProfileTreeService wraps. So re-wiring ProfileTreeService's identity ANSWERS would be REDUNDANT (the "I'm Natively" bug was already fixed in prior work; Phase-2 baseline tests confirm). The real GAP: the layer-3 sanitizer triggers on `CANDIDATE_VOICE_ANSWER_TYPES.has(answerType)` — so a candidate-identity ask MISCLASSIFIED to a non-candidate answerType (e.g. general_meeting_answer) skips the assistant-meta strip and could leak "I'm Natively".
+Files changed: `electron/ipcHandlers.ts` (~line 1203) — import ProfileTreeService + isIntelligenceFlagEnabled; compute mode-based `ProfileTreeService.getCandidatePerspectiveGuard(mode, query)` behind `profile_tree_v2_enabled` to WIDEN the existing sanitizer trigger (independent of answerType).
+Feature flags touched: `profile_tree_v2_enabled` (env `NATIVELY_PROFILE_TREE_V2`, default OFF). OFF = `|| false` = byte-identical original trigger.
+Tests added: `electron/intelligence/__tests__/PerspectiveGuardWiring.test.mjs` (67 tests, by test-engineer).
+Tests run: typecheck **0** · build clean · intelligence **313 pass / 0 fail / 9 todo** · LLM baseline **1656 pass / 0 fail** · services **33 pass / 0 fail**.
+Manual verification: deferred to Phase 15.
+Result: ✅ test-engineer verdict: PASS all 5 — genuine gap-closer (not redundant), no-op when OFF, safe when ON (never over-strips: app questions are exempted by the guard, sales mode never widens, the sanitizer is a verified no-op on clean answers).
+Rollback: `NATIVELY_PROFILE_TREE_V2` unset = off (default). Revert the `_perspectiveExpectsCandidate` block.
+Notes: This is a DEFENSE-IN-DEPTH net, not a rewrite of identity routing (rule 2 honored — deterministic identity routing untouched).
+
+**Phase 3 verified by test-engineer agent. Proceeding to Phase 4 (autopilot).**
