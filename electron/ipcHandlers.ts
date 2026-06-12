@@ -24,6 +24,7 @@ import { beginTrace, commitTrace } from './intelligence/IntelligenceTrace';
 import { ProfileTreeService } from './intelligence/ProfileTreeService';
 import { isIntelligenceFlagEnabled } from './intelligence/intelligenceFlags';
 import { routeContext } from './intelligence/ContextRouter';
+import { SearchOrchestrator, type SearchCandidate } from './intelligence/SearchOrchestrator';
 import { CHAT_MODE_PROMPT } from './llm/prompts';
 import { isAssistantIdentityQuestion, profileFactsReady } from './llm/manualProfileIntelligence';
 import { buildManualProfileBackendAnswer } from './llm/profileAnswerBackend';
@@ -3858,6 +3859,68 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle('get-meeting-details', async (event, id) => {
     // Helper to fetch full details
     return DatabaseManager.getInstance().getMeetingDetails(id);
+  });
+
+  // GLOBAL MEETING SEARCH V2 (Phase 9 wiring, behind global_search_v2_enabled).
+  // REAL local-DB literal/lexical search over past meetings — replaces the fake
+  // "literal search" in Launcher.tsx that just re-ran the AI query. Builds search
+  // candidates from each meeting's title + summary + structured meetingMemory
+  // (Phase 8: topics/entities/decisions/questions), then ranks them with
+  // SearchOrchestrator.globalSearch (the spec's fusion formula). NO Hindsight (rule:
+  // local-first). Single-user desktop DB → all candidates share the one local user,
+  // so the isolation invariant (user/org filter before ranking) holds trivially.
+  // Returns [] when the flag is off so the renderer keeps its current behavior.
+  safeHandle('search:global-meetings', async (_event, { query, filters }: { query: string; filters?: any }) => {
+    try {
+      if (!isIntelligenceFlagEnabled('globalSearchV2')) return { enabled: false, results: [] };
+      const q = (query || '').toLowerCase().trim();
+      if (!q) return { enabled: true, results: [] };
+      const terms = q.split(/\s+/).filter((t) => t.length > 1);
+      // Scan the SAME window the renderer's meetings array holds (50). The renderer
+      // opens a result by finding its meetingId in that array, so scanning a wider
+      // window than the renderer has loaded would return hits it can't open (they'd
+      // silently fall back to the AI query). Keep them aligned (test-engineer Phase 9).
+      const meetings = DatabaseManager.getInstance().getRecentMeetings(50);
+      const candidates: SearchCandidate[] = [];
+      for (const m of meetings) {
+        const ds: any = m.detailedSummary || {};
+        const mem: any = ds.meetingMemory || {};
+        // Lexical haystack: title + summary + overview + keyPoints + memory facts.
+        const haystackParts = [
+          m.title, m.summary, ds.overview,
+          ...(Array.isArray(ds.keyPoints) ? ds.keyPoints : []),
+          ...(Array.isArray(mem.topics) ? mem.topics : []),
+          ...(Array.isArray(mem.entities) ? mem.entities : []),
+          ...(Array.isArray(mem.decisions) ? mem.decisions : []),
+          ...(Array.isArray(mem.questionsAsked) ? mem.questionsAsked : []),
+          ...(Array.isArray(mem.skillsDiscussed) ? mem.skillsDiscussed : []),
+        ].filter(Boolean).map((s: any) => String(s));
+        const hay = haystackParts.join(' • ').toLowerCase();
+        if (!hay) continue;
+        let hits = 0;
+        for (const t of terms) if (hay.includes(t)) hits++;
+        if (hits === 0) continue;
+        const phraseBonus = hay.includes(q) ? 0.5 : 0;
+        const score = Math.min(1, hits / Math.max(1, terms.length) + phraseBonus);
+        // Best matching snippet for display.
+        const snippet = haystackParts.find((p) => p.toLowerCase().includes(terms[0])) || m.title || m.summary || '';
+        candidates.push({
+          meetingId: m.id,
+          title: m.title,
+          date: m.date ? Date.parse(m.date) || undefined : undefined,
+          snippet: snippet.slice(0, 240),
+          source: 'lexical',
+          score,
+          userId: 'local',
+          metadata: { company: String(mem.companiesDiscussed?.[0] ?? '') },
+        });
+      }
+      const results = new SearchOrchestrator().globalSearch(candidates, { userId: 'local' }, filters || {}, Date.now());
+      return { enabled: true, results };
+    } catch (e: any) {
+      console.warn('[GlobalSearchV2] search failed (non-fatal):', e?.message);
+      return { enabled: true, results: [] };
+    }
   });
 
   safeHandle('update-meeting-title', async (_, { id, title }: { id: string; title: string }) => {

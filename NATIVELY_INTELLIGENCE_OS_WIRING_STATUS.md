@@ -191,4 +191,20 @@ Result: ✅ test-engineer verdict: PASS all 5. Safe to persist: flag-OFF zero-ch
 Rollback: `NATIVELY_MEETING_MEMORY_V2` unset = off. Revert the meetingMemory block.
 Notes: meetingMemory persisted untyped (`as any`) — no compile-time contract on readers yet (the cost of a zero-migration additive key; add the optional typed field when a consumer reads it).
 
-**Phase 8 verified by test-engineer agent. Proceeding to Phase 9 (autopilot).**
+**Phase 8 verified by test-engineer agent.**
+
+---
+
+## Phase 9 — Replace Fake Global Search With SearchOrchestrator
+Status: **complete**
+Goal: Make global meeting search real (the Launcher "literal search" was fake — re-ran the AI query).
+Files changed: `electron/ipcHandlers.ts` (NEW IPC `search:global-meetings` after get-meeting-details — builds SearchCandidate[] from local meetings' title+summary+overview+keyPoints+Phase-8 meetingMemory, ranks via SearchOrchestrator.globalSearch), `electron/preload.ts` (+searchGlobalMeetings), `src/types/electron.d.ts` (+type), `src/components/Launcher.tsx` (onLiteralSearch now async — real search when flag on, opens top result; falls back to AI query otherwise).
+Feature flags touched: `global_search_v2_enabled` (env `NATIVELY_GLOBAL_SEARCH_V2`, default OFF). OFF = IPC returns {enabled:false}, renderer fallback byte-identical to original.
+Tests added: `electron/intelligence/__tests__/GlobalSearchHandlerLogic.test.mjs` (8 tests, by test-engineer).
+Tests run: typecheck:electron **0** · renderer tsc **0** · build clean · intelligence **377 pass / 0 fail / 9 todo**.
+Manual verification: deferred to Phase 15.
+Result: ✅ test-engineer verdict: PASS all 5. REAL local search (not the fake AI passthrough); safe flag OFF (zero renderer change, IPC empty); safe flag ON (no crash on empty DB / old meetings / no match; correct fallback). NO Hindsight (local-first). Isolation invariant holds (single-user 'local' scope; foreign userId dropped). **CONCERN FIXED:** handler scanned 200 meetings but renderer holds 50 → top hit in #51-200 silently fell back → aligned both to 50 so a returned result is always openable.
+Rollback: `NATIVELY_GLOBAL_SEARCH_V2` unset = off. Revert the 4 file edits.
+Notes (honest v1 limitations, test-engineer-acknowledged-acceptable): opens the top hit directly rather than showing a result list with snippets (the data is there for a list — presentation choice); lexical search is naive (substring, no stemming/fuzzy/semantic — semantic recall is what the AI-query fallback is for).
+
+**Phase 9 verified by test-engineer agent. Proceeding to Phase 10 (autopilot).**
