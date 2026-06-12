@@ -7,6 +7,8 @@ import { LLMHelper } from './LLMHelper';
 import { DatabaseManager, Meeting } from './db/DatabaseManager';
 import { GROQ_TITLE_PROMPT, GROQ_SUMMARY_JSON_PROMPT } from './llm';
 import { buildPostCallEnhancements } from './services/post-call/PostCallWorkflow';
+import { MeetingMemoryService } from './intelligence/MeetingMemoryService';
+import { isIntelligenceFlagEnabled } from './intelligence/intelligenceFlags';
 import { telemetryService } from './services/telemetry/TelemetryService';
 import type { ProviderDataScopePolicy } from './llm/ProviderRouter';
 const crypto = require('crypto');
@@ -344,6 +346,41 @@ Return ONLY valid JSON (no markdown code blocks):
                     summaryData,
                 }),
             };
+
+            // MEETING MEMORY V2 (Phase 8 wiring, behind meeting_memory_v2_enabled):
+            // extract first-class structured memory (entities/topics/decisions/questions/
+            // action-items/skills/companies) and PERSIST it into summary_json under a
+            // `meetingMemory` key. This runs in the ALREADY-BACKGROUND processAndSaveMeeting
+            // worker (fired fire-and-forget from stopMeeting), so it can never block live
+            // answering (non-negotiable rule). It's a NEW key in summary_json — no DB
+            // migration, fully backward-compatible (old meetings just lack it; readers
+            // handle absence). Deterministic, no LLM, no extra provider call. Flag OFF →
+            // summaryData is byte-for-byte unchanged.
+            try {
+                if (isIntelligenceFlagEnabled('meetingMemoryV2')) {
+                    const record = new MeetingMemoryService().buildMeetingRecord({
+                        meetingId,
+                        segments: data.transcript,
+                        mode: modeSnapshot?.templateType,
+                        startedAt: data.startTime,
+                        endedAt: data.startTime + data.durationMs,
+                    });
+                    (summaryData as any).meetingMemory = {
+                        topics: record.topics,
+                        questionsAsked: record.questionsAsked,
+                        decisions: record.decisions,
+                        actionItems: record.actionItems,
+                        entities: record.entities,
+                        skillsDiscussed: record.skillsDiscussed,
+                        companiesDiscussed: record.companiesDiscussed,
+                        participants: record.participants,
+                        sourceQuality: record.sourceQuality,
+                        schemaVersion: 1,
+                    };
+                }
+            } catch (memErr) {
+                console.warn('[MeetingMemoryV2] extraction skipped (non-fatal):', (memErr as any)?.message);
+            }
         } catch (e) {
             console.error("Error generating meeting metadata", e);
         }

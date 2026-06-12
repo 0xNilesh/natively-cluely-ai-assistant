@@ -174,4 +174,21 @@ Result: ✅ test-engineer verdict: PASS all 5. Real packet const-immutable + unt
 Rollback: `NATIVELY_PROMPT_ASSEMBLER_V2` unset = off. Revert the shadow block.
 Notes: Scaffolding-with-purpose — ships no user-visible behavior; de-risks an eventual V2 cutover by proving a sound, security-preserving assembly over live inputs. Shadow omits the `mode` fusion option (correct for candidate-voice WTA; revisit if extended to sales/lecture).
 
-**Phase 7 verified by test-engineer agent. Proceeding to Phase 8 (autopilot).**
+**Phase 7 verified by test-engineer agent.**
+
+---
+
+## Phase 8 — Wire MeetingMemoryService Into Post-Meeting Pipeline
+Status: **complete**
+Goal: Make meeting memory real + persisted (not just in-memory).
+Files changed: `electron/MeetingPersistence.ts` (~line 346, after buildPostCallEnhancements) — import MeetingMemoryService + isIntelligenceFlagEnabled; behind `meeting_memory_v2_enabled`, call buildMeetingRecord(data.transcript) and write the structured memory into `summaryData.meetingMemory` (NEW key → flows into summary_json).
+Feature flags touched: `meeting_memory_v2_enabled` (env `NATIVELY_MEETING_MEMORY_V2`, default OFF). OFF = summaryData byte-for-byte unchanged.
+Tests added: `electron/intelligence/__tests__/MeetingMemoryWiringExtraction.test.mjs` (10 tests, by test-engineer).
+Tests run: typecheck **0** · build clean · meeting-specific (MeetingPersistenceRace + PostCall*) **15 pass / 0 fail** · intelligence **369 pass / 0 fail / 9 todo** · services **1299 pass / 41 fail (PRE-EXISTING, 0 meeting-related) / 30 skipped** (41 verified identical with+without the change by stashing).
+Manual verification: deferred to Phase 15.
+Result: ✅ test-engineer verdict: PASS all 5. Safe to persist: flag-OFF zero-change; flag-ON additive (new JSON key, NO DB migration), backward-compatible (readers JSON.parse and tolerate missing/extra keys), runs in the ALREADY-BACKGROUND processAndSaveMeeting worker (can't block live answers), non-fatal on error (double try/catch, save in a separate try block). Deterministic no-LLM extraction genuinely works (pricing question, pilot decision, redis skill, participants, bounded sourceQuality).
+**RACE INVESTIGATION (prompt asked):** the "double summary / chunk-not-found / embedding race" is NOT a real live bug — the RAG pipeline is already guarded by main.ts `_ragProcessingInFlight` Set + INSERT OR IGNORE; the summary path is idempotent via INSERT OR REPLACE; processAndSaveMeeting's two callers (stopMeeting / recoverUnprocessedMeetings@is_processed=0) don't overlap. Phase 8 adds no new write/query/async surface. Nothing to fix.
+Rollback: `NATIVELY_MEETING_MEMORY_V2` unset = off. Revert the meetingMemory block.
+Notes: meetingMemory persisted untyped (`as any`) — no compile-time contract on readers yet (the cost of a zero-migration additive key; add the optional typed field when a consumer reads it).
+
+**Phase 8 verified by test-engineer agent. Proceeding to Phase 9 (autopilot).**
