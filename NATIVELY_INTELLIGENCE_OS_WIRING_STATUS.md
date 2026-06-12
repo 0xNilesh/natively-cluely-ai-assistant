@@ -225,4 +225,21 @@ Result: ✅ test-engineer verdict: PASS all 5. Real capability (deterministic lo
 **SCORING FIX (test-engineer caught):** inMeetingSearch score was `min(1, hits/terms + 0.5phrase)` — coverage clamped the phrase bonus to invisibility when all terms matched (phrase priority lost to the timestamp tiebreak). Fixed to `min(1, 0.7*coverage + 0.3phrase)` so a contiguous phrase always outranks a fully-covered scattered match. Improves both global + in-meeting ranking; all 32 search tests green (updated the b2 test that documented the old behavior).
 Rollback: `NATIVELY_IN_MEETING_SEARCH_V2` unset = off. Revert the IPC + accessor (scoring fix is a strict improvement, safe to keep).
 
-**Phase 10 verified by test-engineer agent. Proceeding to Phase 11 (autopilot).**
+**Phase 10 verified by test-engineer agent.**
+
+---
+
+## Phase 11 — Wire ConversationMemoryService for Same-Session Follow-Ups
+Status: **complete**
+Goal: Make bare follow-ups work in the SINGLE-SHOT manual chat path (no history threaded → "make that shorter"/"why?" hit a dead-end clarification).
+Files changed: `electron/ipcHandlers.ts` (per-process `_manualConversationMemory`; record each delivered manual turn keyed by senderId; on a bare follow-up with no context, behind conversation_memory_v2_enabled, resolveSameSession → synthesize a "PRIOR EXCHANGE" context block so it flows to the LLM instead of the clarification), `electron/intelligence/intelligenceFlags.ts` (+conversationMemoryV2 flag key — was missing), `electron/intelligence/ConversationMemoryService.ts` (recency-fallback fix — see below), `__tests__/IntelligenceFlags.test.mjs` (ALL_FLAG_KEYS +1).
+Feature flags touched: `conversation_memory_v2_enabled` (env `NATIVELY_CONVERSATION_MEMORY_V2`, default OFF). OFF = recovery block skipped (flag is the last AND clause), original clarification fires byte-for-byte.
+Tests added: `electron/intelligence/__tests__/ConversationMemoryWiring.test.mjs` (14 tests, by test-engineer).
+Tests run: typecheck **0** · build clean · intelligence **401 pass / 0 fail / 9 todo** · LLM baseline **1656 pass / 0 fail** · flags **9/0**.
+Manual verification: deferred to Phase 15.
+Result: ✅ test-engineer verdict: PASS on all safety items (flag-OFF byte-identical; NO cross-session leak — keyed by senderId, proven; NO stealth-context resurfacing — gated by isBareFollowUp which excludes multi-word asks; can't crash — record+recovery both try/catch; bounded — MAX_TURNS_PER_SESSION=100). + 1 CONCERN FIXED.
+**CONCERN FIXED:** resolveSameSession's recency-fallback regex was too narrow (only that/it/this/continue/and) → common bare follow-ups (why?/how?/go on/expand/tell me more/…) returned null and still dead-ended. Widened to cover content-free continuation/clarification verbs (safe: bare follow-ups are content-free by construction + a <=6-word library guard + the handler's isBareFollowUp gate). Now they resolve to the most-recent turn. Updated the test that documented the old gap.
+Rollback: `NATIVELY_CONVERSATION_MEMORY_V2` unset = off. Revert the ipcHandlers blocks (the flag key + regex widening are safe to keep).
+Notes (honest): only the manual single-shot path needed this (WTA already has liveSessionMemory). Cross-session recall (recallCrossSession) intentionally NOT wired (that's Hindsight, Phase 13/16). Unbounded axis = distinct senderIds, but those are renderer webContents ids (few per app run, each capped at 100 turns) — no practical leak.
+
+**Phase 11 verified by test-engineer agent. Proceeding to Phase 12 (autopilot).**

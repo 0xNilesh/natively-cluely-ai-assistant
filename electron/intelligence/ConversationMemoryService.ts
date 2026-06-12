@@ -125,8 +125,17 @@ export class ConversationMemoryService {
         for (const term of terms) if (hay.includes(term)) score += 1;
         if (score > bestScore) { bestScore = score; best = t; }
       }
-      // Bare follow-up with no overlap ("and that?") → most recent turn.
-      if (!best && /\b(that|it|this|those|and|also|what about|continue|previous|earlier|last)\b/i.test(followUp)) {
+      // Bare follow-up with no token overlap → most recent turn. Bare follow-ups are
+      // content-free BY CONSTRUCTION (callers gate on isBareFollowUp), so when there's
+      // no topical overlap the right resolution is simply "the last thing we discussed".
+      // The fragment set covers demonstratives ("that/it/this") AND the common
+      // continuation/clarification verbs ("why/how/go on/expand/more/elaborate/…") that
+      // carry no topic — previously these returned null and dead-ended (test-engineer
+      // Phase 11). Kept self-safe with a short-length guard so a stray long string can't
+      // trip it even if a caller forgets the isBareFollowUp gate.
+      const fu = (followUp || '').trim();
+      const RECENCY_FALLBACK_RE = /\b(that|it|this|those|and|also|what about|continue|carry on|keep going|go on|previous|earlier|last|why|how|so|then|more|expand|elaborate|deeper|detail|tell me more|go deeper|explain)\b/i;
+      if (!best && fu.split(/\s+/).length <= 6 && RECENCY_FALLBACK_RE.test(fu)) {
         return arr[arr.length - 1];
       }
       return best;

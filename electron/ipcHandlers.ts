@@ -556,6 +556,15 @@ export function initializeIpcHandlers(appState: AppState): void {
   const { AnswerDiversityGuard } = require('./llm/answerPolish') as typeof import('./llm/answerPolish');
   const _manualDiversityGuard = new AnswerDiversityGuard(20);
 
+  // CONVERSATION MEMORY V2 (Phase 11 wiring, behind conversation_memory_v2_enabled).
+  // The manual chat path is SINGLE-SHOT — no conversation history is threaded to its
+  // IPC handler, so a bare follow-up ("make that shorter", "why?", "continue") with no
+  // pasted context falls to a generic clarification. This per-process store records each
+  // delivered manual answer per sender (= session) so a bare follow-up can resolve
+  // against the prior turn instead. Same-session only (no Hindsight). Bounded per session.
+  const { ConversationMemoryService } = require('./intelligence/ConversationMemoryService') as typeof import('./intelligence/ConversationMemoryService');
+  const _manualConversationMemory = new ConversationMemoryService();
+
   // Identity-probe routing lives in electron/llm/manualIdentityRouting.ts
   // (manual regression 2026-06-12): the old inline IDENTITY_PROBE_RE answered
   // "who are you?" / "what is your name?" / "introduce yourself" with the
@@ -794,6 +803,22 @@ export function initializeIpcHandlers(appState: AppState): void {
         // follow-up with transcript context now flows to the LLM (which can
         // resolve it against the rolling window). The clarification also speaks
         // the ACTIVE MODE's surface (lecture/sales) instead of always 'manual'.
+        // CONVERSATION MEMORY V2 (Phase 11): before emitting the generic clarification
+        // for a bare follow-up with no context, try to recover the prior turn from this
+        // session's conversation memory. If found, synthesize a compact context block so
+        // the follow-up flows to the LLM (which can resolve "make that shorter" / "why?"
+        // against the real prior Q/A) instead of a dead-end clarification. Flag OFF →
+        // skipped entirely (original clarification behavior preserved byte-for-byte).
+        if (!context && !autoContextSnapshot && isBareFollowUp(message)
+            && isIntelligenceFlagEnabled('conversationMemoryV2')) {
+          try {
+            const prior = _manualConversationMemory.resolveSameSession(String(senderId), message);
+            if (prior && prior.userMessage && prior.assistantAnswer) {
+              context = `PRIOR EXCHANGE IN THIS CONVERSATION:\nUser asked: ${prior.userMessage}\nYou answered: ${prior.assistantAnswer}\n\nThe user's new message is a follow-up to that. Resolve it against the prior exchange.`;
+              iTrace.noteContext({ source: 'conversation_history', trustLevel: 'medium', requested: true, retrieved: true, included: true, reason: 'same_session_followup' });
+            }
+          } catch { /* fall through to the clarification below */ }
+        }
         if (!context && !autoContextSnapshot && isBareFollowUp(message)) {
           let clarSurface: 'manual' | 'lecture' | 'sales' = 'manual';
           try {
@@ -1373,6 +1398,19 @@ export function initializeIpcHandlers(appState: AppState): void {
               intelligenceManager.addAssistantMessage(fullResponse);
               // Log Usage for streaming chat
               intelligenceManager.logUsage('chat', message, fullResponse);
+              // Conversation Memory V2 (Phase 11): record this turn so a later bare
+              // follow-up in this session can resolve against it. Cheap in-memory,
+              // bounded per session; recorded regardless of the flag (so enabling the
+              // flag mid-session still has history), but only CONSUMED when the flag is on.
+              try {
+                _manualConversationMemory.record({
+                  sessionId: String(senderId),
+                  userMessage: message,
+                  assistantAnswer: fullResponse,
+                  mode: manualActiveMode?.templateType,
+                  timestamp: Date.now(),
+                });
+              } catch { /* memory recording never affects the answer */ }
             }
 
             // VERIFIED CODE EXECUTION (background, strictly additive). For coding
