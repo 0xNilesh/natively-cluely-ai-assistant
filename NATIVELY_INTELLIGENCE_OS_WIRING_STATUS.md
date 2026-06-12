@@ -207,4 +207,6 @@ Result: ✅ test-engineer verdict: PASS all 5. REAL local search (not the fake A
 Rollback: `NATIVELY_GLOBAL_SEARCH_V2` unset = off. Revert the 4 file edits.
 Notes (honest v1 limitations, test-engineer-acknowledged-acceptable): opens the top hit directly rather than showing a result list with snippets (the data is there for a list — presentation choice); lexical search is naive (substring, no stemming/fuzzy/semantic — semantic recall is what the AI-query fallback is for).
 
+Post-commit: a React Doctor commit-hook flagged the staged Launcher.tsx. Investigated — the ~30 findings are PRE-EXISTING throughout the 1200-line file (lines 292/384/873/1050/…), ZERO at my changed lines (421-446); the hook flags the whole file when any line is staged. Did NOT mass-refactor pre-existing issues (out of scope, rule 3). DID fix the one genuine concern my code could introduce: made onLiteralSearch synchronous (prop is `(q)=>void`) with the async work in a voided IIFE, so no floating Promise is returned to the event-handler prop. Renderer tsc 0.
+
 **Phase 9 verified by test-engineer agent. Proceeding to Phase 10 (autopilot).**
