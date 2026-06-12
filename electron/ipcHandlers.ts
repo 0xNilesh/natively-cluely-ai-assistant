@@ -602,6 +602,17 @@ export function initializeIpcHandlers(appState: AppState): void {
         myController = new AbortController();
         _chatStreamsBySender.set(senderId, { streamId: myStreamId, controller: myController });
 
+        // Reap this sender's conversation memory when the renderer goes away, so the
+        // per-process store cannot grow unbounded across window reloads / churn and
+        // doesn't retain raw Q/A content after a window closes (security review
+        // 2026-06-13 MEDIUM). Registered once; `once` makes repeat-stream re-registration
+        // harmless (listener fires a single time on destroy).
+        try {
+          event.sender?.once?.('destroyed', () => {
+            try { _manualConversationMemory.clearSession(String(senderId)); } catch { /* noop */ }
+          });
+        } catch { /* noop */ }
+
         const intelligenceManager = appState.getIntelligenceManager();
 
         // Identity probe short-circuit — bypasses the LLM entirely so small models can't
@@ -1832,7 +1843,8 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle('intelligence-flags:set', async (_, { key, value }: { key: string; value: boolean | null }) => {
     try {
       const { setIntelligenceFlag, isIntelligenceFlagEnabled, intelligenceFlagKeys } = require('./intelligence/intelligenceFlags') as typeof import('./intelligence/intelligenceFlags');
-      if (!intelligenceFlagKeys().includes(key as any)) return { success: false, error: 'unknown_flag' };
+      if (typeof key !== 'string' || !intelligenceFlagKeys().includes(key as any)) return { success: false, error: 'unknown_flag' };
+      if (value !== null && typeof value !== 'boolean') return { success: false, error: 'invalid_value' };
       const ok = setIntelligenceFlag(key as any, value === null ? null : Boolean(value));
       return { success: ok, enabled: isIntelligenceFlagEnabled(key as any) };
     } catch (e: any) {
@@ -3941,6 +3953,10 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle('search:global-meetings', async (_event, { query, filters }: { query: string; filters?: any }) => {
     try {
       if (!isIntelligenceFlagEnabled('globalSearchV2')) return { enabled: false, results: [] };
+      // Explicit renderer→main input validation (security review 2026-06-13 LOW): reject
+      // non-string query / non-object filters rather than relying on coercion + catch.
+      if (typeof query !== 'string') return { enabled: true, results: [] };
+      if (filters !== undefined && (typeof filters !== 'object' || filters === null || Array.isArray(filters))) filters = {};
       const q = (query || '').toLowerCase().trim();
       if (!q) return { enabled: true, results: [] };
       const terms = q.split(/\s+/).filter((t) => t.length > 1);
@@ -4001,6 +4017,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle('search:in-meeting', async (_event, { query }: { query: string }) => {
     try {
       if (!isIntelligenceFlagEnabled('inMeetingSearchV2')) return { enabled: false, results: [] };
+      if (typeof query !== 'string') return { enabled: true, results: [] };
       const transcript = appState.getIntelligenceManager().getCurrentMeetingTranscript();
       const chunks = transcript.map((t) => ({ text: t.text, timestampMs: t.timestamp, speaker: t.speaker }));
       const results = new SearchOrchestrator().inMeetingSearch(chunks, query || '');
@@ -4043,12 +4060,17 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle('diagram:generate', async (_event, { text }: { text?: string }) => {
     try {
       if (!isIntelligenceFlagEnabled('diagramIntelligence')) return { enabled: false, diagram: null };
+      if (text !== undefined && typeof text !== 'string') return { enabled: true, diagram: null };
       const { DiagramIntelligenceService } = require('./intelligence/DiagramIntelligenceService') as typeof import('./intelligence/DiagramIntelligenceService');
-      // Use the supplied text, else fall back to the recent transcript window.
-      let source = (text || '').trim();
+      // Use the supplied text, else fall back to the recent transcript window. CAP the
+      // input length: the sequence generator's SEND_RE has nested lazy quantifiers that
+      // backtrack ~quadratically, so a multi-MB single sentence would stall the main
+      // event loop (security review 2026-06-13 MEDIUM). 8000 chars is ample for any real
+      // diagram-worthy explanation.
+      let source = (text || '').trim().slice(0, 8000);
       if (!source) {
         const transcript = appState.getIntelligenceManager().getCurrentMeetingTranscript();
-        source = transcript.slice(-30).map((t) => t.text).join('. ');
+        source = transcript.slice(-30).map((t) => t.text).join('. ').slice(0, 8000);
       }
       const diagram = new DiagramIntelligenceService().generate({ text: source, fromSourceVisual: false });
       return { enabled: true, diagram };

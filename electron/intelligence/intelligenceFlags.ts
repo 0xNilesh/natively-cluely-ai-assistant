@@ -185,8 +185,14 @@ export function intelligenceFlagMeta(key: IntelligenceFlagKey): { setting: strin
  */
 export function setIntelligenceFlag(key: IntelligenceFlagKey, value: boolean | null): boolean {
   try {
+    // OWN-property check (not `FLAGS[key]` truthiness): `FLAGS['__proto__']` /
+    // `['constructor']` resolve to Object.prototype members (truthy) with an undefined
+    // `.setting`, which would write `settings[undefined]`. Reject non-own keys so a
+    // future unvalidated caller can't reach SettingsManager.set with a bad key
+    // (security review 2026-06-13 — defense in depth; the IPC path already validates).
+    if (typeof key !== 'string' || !Object.prototype.hasOwnProperty.call(FLAGS, key)) return false;
     const spec = FLAGS[key];
-    if (!spec) return false;
+    if (!spec || typeof spec.setting !== 'string') return false;
     const { SettingsManager } = require('../services/SettingsManager');
     if (value === null) SettingsManager.getInstance().set(spec.setting, undefined);
     else SettingsManager.getInstance().set(spec.setting, value);

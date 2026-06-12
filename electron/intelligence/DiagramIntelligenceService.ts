@@ -95,7 +95,10 @@ export class DiagramSpecGenerator {
     const t = clean(text);
     const steps: Array<{ from: string; to: string; msg: string }> = [];
     // Pattern: "<Actor> sends/replies (with) <MSG> to <Actor>" and the canonical SYN/ACK form.
-    const SEND_RE = /\b(client|server|sender|receiver|host|node|browser|user|[A-Z][a-z]+)\b[^.]*?\b(sends?|replies?|responds?|returns?|requests?|acknowledg\w+|with)\b[^.]*?\b([A-Z][A-Z-]{1,}|[a-z]{3,})\b[^.]*?\b(to|back to)\b\s+\b(client|server|sender|receiver|host|node|browser|user|[A-Z][a-z]+)\b/gi;
+    // The inter-token gaps are bounded ({0,80}, not unbounded *?) so a long single
+    // "sentence" (no period) can't drive quadratic backtracking (security review
+    // 2026-06-13). A real "A sends X to B" clause fits well within 80 chars per gap.
+    const SEND_RE = /\b(client|server|sender|receiver|host|node|browser|user|[A-Z][a-z]+)\b[^.]{0,80}?\b(sends?|replies?|responds?|returns?|requests?|acknowledg\w+|with)\b[^.]{0,80}?\b([A-Z][A-Z-]{1,}|[a-z]{3,})\b[^.]{0,80}?\b(to|back to)\b\s+\b(client|server|sender|receiver|host|node|browser|user|[A-Z][a-z]+)\b/gi;
     let m: RegExpExecArray | null;
     SEND_RE.lastIndex = 0;
     while ((m = SEND_RE.exec(t)) !== null) {
