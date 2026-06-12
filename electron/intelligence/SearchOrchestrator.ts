@@ -208,9 +208,14 @@ export class SearchOrchestrator {
         let hits = 0;
         for (const t of terms) if (lower.includes(t)) hits++;
         if (hits === 0) continue;
-        // Phrase bonus: the full query appears contiguously.
-        const phraseBonus = lower.includes(q) ? 0.5 : 0;
-        const score = Math.min(1, hits / terms.length + phraseBonus);
+        // Score = term coverage (capped at 0.7) + a contiguous-phrase bonus (0.3).
+        // Capping coverage below 1.0 keeps the phrase bonus VISIBLE even when every
+        // term already matches — otherwise a full-coverage scattered match and a true
+        // phrase match both clamp to 1.0 and phrase priority is lost to the timestamp
+        // tiebreaker (test-engineer Phase 10). An exact contiguous phrase → 1.0.
+        const coverage = (hits / terms.length) * 0.7;
+        const phraseBonus = lower.includes(q) ? 0.3 : 0;
+        const score = Math.min(1, coverage + phraseBonus);
         out.push({ snippet: text, timestampMs: chunk.timestampMs, speaker: chunk.speaker, score: Math.round(score * 1000) / 1000 });
       }
       return out.sort((a, b) => b.score - a.score || (a.timestampMs ?? 0) - (b.timestampMs ?? 0));

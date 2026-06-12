@@ -209,4 +209,20 @@ Notes (honest v1 limitations, test-engineer-acknowledged-acceptable): opens the 
 
 Post-commit: a React Doctor commit-hook flagged the staged Launcher.tsx. Investigated — the ~30 findings are PRE-EXISTING throughout the 1200-line file (lines 292/384/873/1050/…), ZERO at my changed lines (421-446); the hook flags the whole file when any line is staged. Did NOT mass-refactor pre-existing issues (out of scope, rule 3). DID fix the one genuine concern my code could introduce: made onLiteralSearch synchronous (prop is `(q)=>void`) with the async work in a voided IIFE, so no floating Promise is returned to the event-handler prop. Renderer tsc 0.
 
-**Phase 9 verified by test-engineer agent. Proceeding to Phase 10 (autopilot).**
+**Phase 9 verified by test-engineer agent.**
+
+---
+
+## Phase 10 — Wire In-Meeting Search
+Status: **complete**
+Goal: Fast local-first in-meeting search over the current meeting transcript.
+Files changed: `electron/IntelligenceManager.ts` (+getCurrentMeetingTranscript accessor over session.getFullTranscript), `electron/ipcHandlers.ts` (NEW IPC `search:in-meeting` → SearchOrchestrator.inMeetingSearch over current transcript, behind in_meeting_search_v2_enabled), `electron/preload.ts` + `src/types/electron.d.ts` (+searchInMeeting), `electron/intelligence/SearchOrchestrator.ts` (scoring fix — see below).
+Feature flags touched: `in_meeting_search_v2_enabled` (env `NATIVELY_IN_MEETING_SEARCH_V2`, default OFF). OFF = IPC returns {enabled:false}.
+Tests added: `electron/intelligence/__tests__/InMeetingSearchHandlerLogic.test.mjs` (9 tests, by test-engineer).
+Tests run: typecheck:electron **0** · renderer tsc **0** · build clean · intelligence **386 pass / 0 fail / 9 todo**.
+Manual verification: deferred to Phase 15.
+Result: ✅ test-engineer verdict: PASS all 5. Real capability (deterministic local search, ~3.2ms median for 1000-turn meeting, jump-to-segment timestamps + speaker preserved); safe flag OFF (immediate no-op before session read); safe flag ON (no crash on empty/no-active-meeting; no Hindsight/RAG/network). Backend IPC fully wired+typed+tested; renderer search-box UI is a separate phase (reasonable boundary).
+**SCORING FIX (test-engineer caught):** inMeetingSearch score was `min(1, hits/terms + 0.5phrase)` — coverage clamped the phrase bonus to invisibility when all terms matched (phrase priority lost to the timestamp tiebreak). Fixed to `min(1, 0.7*coverage + 0.3phrase)` so a contiguous phrase always outranks a fully-covered scattered match. Improves both global + in-meeting ranking; all 32 search tests green (updated the b2 test that documented the old behavior).
+Rollback: `NATIVELY_IN_MEETING_SEARCH_V2` unset = off. Revert the IPC + accessor (scoring fix is a strict improvement, safe to keep).
+
+**Phase 10 verified by test-engineer agent. Proceeding to Phase 11 (autopilot).**

@@ -125,6 +125,11 @@ export class IntelligenceManager extends EventEmitter {
         return this.session.getLastInterviewerTurn();
     }
 
+    /** Current meeting's full finalized transcript (for in-meeting search, Phase 10). */
+    getCurrentMeetingTranscript(): Array<{ speaker: string; text: string; timestamp: number }> {
+        return this.session.getFullTranscript().map(s => ({ speaker: s.speaker, text: s.text, timestamp: s.timestamp }));
+    }
+
     logUsage(type: string, question: string, answer: string): void {
         this.session.logUsage(type, question, answer);
     }

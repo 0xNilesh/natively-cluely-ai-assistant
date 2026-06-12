@@ -344,6 +344,7 @@ interface ElectronAPI {
   >;
   getMeetingDetails: (id: string) => Promise<any>;
   searchGlobalMeetings: (query: string, filters?: any) => Promise<{ enabled: boolean; results: any[] }>;
+  searchInMeeting: (query: string) => Promise<{ enabled: boolean; results: any[] }>;
   updateMeetingTitle: (id: string, title: string) => Promise<boolean>;
   updateMeetingSummary: (
     id: string,
@@ -1428,6 +1429,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getRecentMeetings: () => ipcRenderer.invoke('get-recent-meetings'),
   getMeetingDetails: (id: string) => ipcRenderer.invoke('get-meeting-details', id),
   searchGlobalMeetings: (query: string, filters?: any) => ipcRenderer.invoke('search:global-meetings', { query, filters }),
+  searchInMeeting: (query: string) => ipcRenderer.invoke('search:in-meeting', { query }),
   updateMeetingTitle: (id: string, title: string) =>
     ipcRenderer.invoke('update-meeting-title', { id, title }),
   updateMeetingSummary: (id: string, updates: any) =>

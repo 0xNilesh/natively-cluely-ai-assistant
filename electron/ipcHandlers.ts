@@ -3923,6 +3923,26 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
+  // IN-MEETING SEARCH V2 (Phase 10 wiring, behind in_meeting_search_v2_enabled).
+  // Fast LOCAL-FIRST lexical search over the CURRENT meeting's finalized transcript
+  // (SessionTracker.getFullTranscript via IntelligenceManager) — NO Hindsight, NO
+  // RAG/embeddings, no network (rule: in-meeting search is local-first and fast,
+  // <150ms). Returns timestamped, speaker-attributed, relevance-ranked snippets so
+  // the UI can jump to the transcript segment. Returns {enabled:false} when the flag
+  // is off so any caller is a pure no-op then.
+  safeHandle('search:in-meeting', async (_event, { query }: { query: string }) => {
+    try {
+      if (!isIntelligenceFlagEnabled('inMeetingSearchV2')) return { enabled: false, results: [] };
+      const transcript = appState.getIntelligenceManager().getCurrentMeetingTranscript();
+      const chunks = transcript.map((t) => ({ text: t.text, timestampMs: t.timestamp, speaker: t.speaker }));
+      const results = new SearchOrchestrator().inMeetingSearch(chunks, query || '');
+      return { enabled: true, results };
+    } catch (e: any) {
+      console.warn('[InMeetingSearchV2] search failed (non-fatal):', e?.message);
+      return { enabled: true, results: [] };
+    }
+  });
+
   safeHandle('update-meeting-title', async (_, { id, title }: { id: string; title: string }) => {
     return DatabaseManager.getInstance().updateMeetingTitle(id, title);
   });
