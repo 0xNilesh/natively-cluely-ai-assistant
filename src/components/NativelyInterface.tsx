@@ -5,6 +5,8 @@ import {
   Code,
   Copy,
   Check,
+  FileText,
+  GitBranch,
   HelpCircle,
   Image,
   Lightbulb,
@@ -13,6 +15,7 @@ import {
   Pencil,
   PointerOff,
   RefreshCw,
+  Search,
   SlidersHorizontal,
   X,
   Zap,
@@ -881,6 +884,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 
   // Active mode name (shown as a badge near the Modes button)
   const [activeModeLabel, setActiveModeLabel] = useState<string | null>(null);
+  // Which Intelligence OS feature flags are on — drives whether the optional
+  // lecture-notes / diagram / in-meeting-search quick actions render. Loaded once;
+  // default-OFF users see no extra buttons (matches the shipped default).
+  const [intelFlags, setIntelFlags] = useState<Record<string, boolean>>({});
+  const [intelBusy, setIntelBusy] = useState<null | 'lecture' | 'diagram' | 'search'>(null);
   const [llmProviderLabel, setLlmProviderLabel] = useState<string>('unknown');
   const [llmPrivacyLabel, setLlmPrivacyLabel] = useState<string | null>(null);
   const [screenContextStatus, setScreenContextStatus] = useState<
@@ -909,6 +917,26 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       },
     );
     return () => unsub?.();
+  }, []);
+
+  // Load the Intelligence OS feature flags so the optional quick actions can gate on
+  // them. Refreshed when the window regains focus (the user may have just toggled them
+  // in Settings → Intelligence). Never throws; defaults to all-off.
+  useEffect(() => {
+    let mounted = true;
+    const loadFlags = async () => {
+      try {
+        const rows = await window.electronAPI?.getIntelligenceFlags?.();
+        if (!mounted || !Array.isArray(rows)) return;
+        const map: Record<string, boolean> = {};
+        for (const r of rows) map[r.key] = Boolean(r.enabled);
+        setIntelFlags(map);
+      } catch { /* default all-off */ }
+    };
+    loadFlags();
+    const onFocus = () => loadFlags();
+    window.addEventListener('focus', onFocus);
+    return () => { mounted = false; window.removeEventListener('focus', onFocus); };
   }, []);
 
   useEffect(() => {
@@ -3199,6 +3227,69 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       endOverlayAction('clarify');
       setIsProcessing(false);
     }
+  };
+
+  // ── Intelligence OS features (flag-gated, request/response, not streaming) ──────
+  // These call the lecture / diagram / in-meeting-search IPCs against the CURRENT
+  // meeting transcript and post the result as a system message. They only render when
+  // their flag is on (see the quick-action bar), so default users never see them. Each
+  // handles { enabled:false } (flag off) and an empty result (no transcript) cleanly.
+  const postIntelResult = (text: string, isCode = false) => {
+    setIsExpanded(true);
+    setMessages((prev) => [...prev, { id: genMessageId(), role: 'system', text, isCode }]);
+  };
+
+  const handleLectureNotes = async () => {
+    if (intelBusy) return;
+    setIntelBusy('lecture');
+    analytics.trackCommandExecuted('lecture_notes');
+    try {
+      const res = await window.electronAPI.generateLectureNotes?.();
+      if (res?.enabled === false) { postIntelResult('Lecture notes are off — enable them in Settings → Intelligence.'); return; }
+      const notes = (res as any)?.notes;
+      if (!notes) { postIntelResult('No lecture notes yet — start a lecture so there is a transcript to summarize.'); return; }
+      postIntelResult(typeof notes === 'string' ? notes : JSON.stringify(notes, null, 2));
+    } catch (err) {
+      postIntelResult(`Lecture notes failed: ${err}`);
+    } finally { setIntelBusy(null); }
+  };
+
+  const handleDiagram = async () => {
+    if (intelBusy) return;
+    setIntelBusy('diagram');
+    analytics.trackCommandExecuted('diagram');
+    try {
+      const res = await window.electronAPI.generateDiagram?.();
+      if (res?.enabled === false) { postIntelResult('Diagrams are off — enable them in Settings → Intelligence.'); return; }
+      const diagram = (res as any)?.diagram;
+      const code = typeof diagram === 'string' ? diagram : diagram?.mermaid || diagram?.code || (diagram ? JSON.stringify(diagram, null, 2) : '');
+      if (!code) { postIntelResult('No diagram yet — start a lecture/meeting so there is content to diagram.'); return; }
+      // Render as a fenced mermaid block so the answer panel shows it as code.
+      postIntelResult('```mermaid\n' + code + '\n```', true);
+    } catch (err) {
+      postIntelResult(`Diagram failed: ${err}`);
+    } finally { setIntelBusy(null); }
+  };
+
+  const handleInMeetingSearch = async () => {
+    if (intelBusy) return;
+    const query = window.prompt('Search the current meeting for:');
+    if (!query || !query.trim()) return;
+    setIntelBusy('search');
+    analytics.trackCommandExecuted('in_meeting_search');
+    try {
+      const res = await window.electronAPI.searchInMeeting?.(query.trim());
+      if (res?.enabled === false) { postIntelResult('In-meeting search is off — enable it in Settings → Intelligence.'); return; }
+      const results = Array.isArray((res as any)?.results) ? (res as any).results : [];
+      if (results.length === 0) { postIntelResult(`No matches for "${query.trim()}" in this meeting.`); return; }
+      const lines = results.slice(0, 8).map((r: any) => {
+        const ts = r?.timestamp != null ? `[${new Date(r.timestamp).toLocaleTimeString()}] ` : '';
+        return `• ${ts}${String(r?.text ?? r?.snippet ?? '').slice(0, 200)}`;
+      });
+      postIntelResult(`Matches for "${query.trim()}":\n${lines.join('\n')}`);
+    } catch (err) {
+      postIntelResult(`Search failed: ${err}`);
+    } finally { setIntelBusy(null); }
   };
 
   const handleCodeHint = async () => {
@@ -5550,6 +5641,38 @@ Provide only the answer, nothing else.`;
                 >
                   <HelpCircle className="w-3 h-3 opacity-70" /> Follow Up Question
                 </button>
+                {/* Intelligence OS features — only render when their flag is enabled in
+                    Settings → Intelligence, so default users see no extra chips. */}
+                {intelFlags.lectureIntelligenceV2 && (
+                  <button
+                    onClick={handleLectureNotes}
+                    disabled={intelBusy !== null}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 disabled:opacity-50 ${quickActionClass}`}
+                    style={appearance.chipStyle}
+                  >
+                    <FileText className="w-3 h-3 opacity-70" /> Lecture notes
+                  </button>
+                )}
+                {intelFlags.diagramIntelligence && (
+                  <button
+                    onClick={handleDiagram}
+                    disabled={intelBusy !== null}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 disabled:opacity-50 ${quickActionClass}`}
+                    style={appearance.chipStyle}
+                  >
+                    <GitBranch className="w-3 h-3 opacity-70" /> Diagram
+                  </button>
+                )}
+                {intelFlags.inMeetingSearchV2 && (
+                  <button
+                    onClick={handleInMeetingSearch}
+                    disabled={intelBusy !== null}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 disabled:opacity-50 ${quickActionClass}`}
+                    style={appearance.chipStyle}
+                  >
+                    <Search className="w-3 h-3 opacity-70" /> Search meeting
+                  </button>
+                )}
                 <button
                   onClick={handleAnswerNow}
                   className={`flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium transition-all active:scale-95 duration-200 interaction-base interaction-press min-w-[74px] whitespace-nowrap shrink-0 ${
