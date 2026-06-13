@@ -47,6 +47,40 @@ subsequent boots are fast (HF-cached).
 - **Docker** (if you have it): `docker run -it --pull always -p 8888:8888 -p 9999:9999 -e HINDSIGHT_API_LLM_API_KEY=$GEMINI_API_KEY -e HINDSIGHT_API_LLM_PROVIDER=gemini -v hindsight-data:/home/hindsight/.pg0 ghcr.io/vectorize-io/hindsight:latest`
 - **Hindsight Cloud** (hosted): sign up at `https://ui.hindsight.vectorize.io/signup`, use its base URL + an API key (set `HINDSIGHT_API_KEY`). Note: memory data then lives on their servers (privacy consideration for a local-first app).
 
+## LLM provider chain + retry/fallback (recommended over single-model)
+
+Hindsight's LLM (used for fact extraction on retain + synthesis on reflect) can follow Natively's
+**provider priority chain with automatic retry/fallback**, so a memory op always resolves even when
+the primary model/provider fails. Use the launcher instead of calling the Python script directly:
+
+```bash
+bash scripts/hindsight-start.sh
+```
+
+It (1) loads provider keys from `.env`, (2) generates a `litellm.Router` config via
+`scripts/hindsight-llm-config.mjs`, exports it as `HINDSIGHT_API_LLM_LITELLMROUTER_CONFIG`, and
+(3) starts the server. Hindsight forwards that JSON **verbatim** to `litellm.Router`, which rotates
+through the chain on failure and retries transient errors (5xx / 429 / timeout).
+
+**Priority (key-gated — an entry is included only when its provider key is in `.env`):**
+`Gemini → OpenAI → Claude → DeepSeek → Groq → Ollama`. Within Gemini:
+`gemini-3.5-flash → gemini-3.1-flash-lite → gemini-3.1-pro-preview`. Model names **mirror**
+`electron/services/ModelVersionManager.ts` so Hindsight stays in lockstep with the app. Every model
+string is env-overridable (`HINDSIGHT_LLM_GEMINI_PRIMARY`, `HINDSIGHT_LLM_OPENAI`,
+`HINDSIGHT_LLM_CLAUDE`, …); retries/timeout via `HINDSIGHT_LLM_NUM_RETRIES` / `HINDSIGHT_LLM_TIMEOUT`.
+Enable the local Ollama fallback with `HINDSIGHT_LLM_ENABLE_OLLAMA=1`.
+
+**Retry/backoff + context-size** (set as defaults by the dev server): per-op guards
+`HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES=3`, `_INITIAL_BACKOFF=1`, `_MAX_BACKOFF=15`, `_TIMEOUT=45`
+(+ reflect variants); and `HINDSIGHT_API_CONSOLIDATION_MAX_TOKENS=2048` so a small-context (4096-cap)
+fallback model doesn't truncate the structured consolidation JSON. The local embedding model
+(`bge-small-en-v1.5`, 512-token chunks) is unaffected by the LLM chain.
+
+> **Natively API as the first LLM is intentionally NOT in the chain yet.** Its `/v1/chat/completions`
+> picks the model server-side, so it can't be a per-model litellm fallback target. A future special
+> server endpoint (Hindsight → Gemini-3.1-flash-lite only) will add it; until then the chain starts
+> at Gemini.
+
 ## Health check
 
 ```bash
