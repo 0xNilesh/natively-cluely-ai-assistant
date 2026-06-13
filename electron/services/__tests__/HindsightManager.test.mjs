@@ -59,11 +59,19 @@ describe('HindsightManager.healthCheck + isAvailable', () => {
     assert.equal(HindsightManager.getInstance().isAvailable(), false);
   });
 
-  test('start() never throws when unconfigured', async () => {
+  test('start() never throws when unconfigured (no spawn)', async () => {
     await assert.doesNotReject(() => HindsightManager.getInstance().start());
   });
 
-  test('stop() never throws (no app-managed server this pass)', async () => {
+  test('start() with a baseUrl but memory flag OFF does not spawn (stays Noop)', async () => {
+    process.env.HINDSIGHT_BASE_URL = 'http://127.0.0.1:59999'; // unreachable
+    delete process.env.NATIVELY_HINDSIGHT_MEMORY; // flag off
+    // Must return quickly without spawning anything; isAvailable stays false.
+    await assert.doesNotReject(() => HindsightManager.getInstance().start());
+    assert.equal(HindsightManager.getInstance().isAvailable(), false);
+  });
+
+  test('stop() never throws when nothing is app-managed', async () => {
     await assert.doesNotReject(() => HindsightManager.getInstance().stop());
   });
 
