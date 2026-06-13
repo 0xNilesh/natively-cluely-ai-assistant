@@ -31,7 +31,7 @@
 {
   "key": "natively_sk_…",            // OR "trial_token": "natively_trial_…" (never both)
   "region_hint": "us",                // from forceSttRelayRegion, or omitted
-  "latency_probes": { "us": 42 },     // optional, omitted when none
+  "latency_probes": { "us": 42, "asia": 180 }, // optional; see "Latency probes" below
   "app_version": "2.7.0",
   "platform": "mac",                  // mac | windows | linux
   "language": "en-US",
@@ -44,6 +44,21 @@
 ```
 
 Timeout: **4000ms** default via `AbortController`. On **any** failure (non-2xx, timeout, network, malformed body, missing `session_token` or `relay_ws_url`, **402 quota**) → resolver returns `null` and the caller uses the legacy direct-Railway path. A 402 is logged with a discriminable reason but is **not** surfaced here — the WS path re-surfaces `transcription_quota_exceeded` to the user exactly as today.
+
+#### Latency probes (`relaySession.ts` → `getRelayLatencyProbes()`)
+
+The client measures each relay's HTTPS `/healthz` round-trip and passes the results as
+`latency_probes` so the control plane can pick the lowest-latency healthy relay (docs/01 §8) instead
+of falling back to coarse geo routing. Design constraints — it must **never** add latency to
+session-create:
+
+- `getRelayLatencyProbes()` returns whatever is **cached** (TTL 5 min); it returns `null` on the very
+  first call and kicks off a **fire-and-forget** background measurement whose result lands in the cache
+  for the *next* session-create. The connect path never awaits a probe.
+- Each probe has a **1500ms** timeout; a failing/slow relay is simply omitted (the server then geo-routes).
+- The server honors probes only when `STT_RELAY_ALLOW_CLIENT_LATENCY_PROBES` is on; otherwise it ignores
+  the field. Health URLs are derived from the relay hostnames via `deriveHealthUrl(wss→https/healthz)`.
+- Covered by `electron/audio/__tests__/RelayLatencyProbes.test.mjs` (5 tests).
 
 ### 2.2 Session-create response (200) handling — docs/03 §2.3
 

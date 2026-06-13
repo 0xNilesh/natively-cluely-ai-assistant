@@ -336,3 +336,7 @@ benchmarks/
 
 # External research clones (not vendored)
 _external_research/
+
+# Filled-in credentials intake (never commit real values)
+docs/CREDENTIALS-INTAKE.local.md
+CREDENTIALS-INTAKE.local.md

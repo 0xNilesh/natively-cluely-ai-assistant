@@ -315,6 +315,92 @@ export function clearAllCachedSessions(): void {
     _sessionCache.clear();
 }
 
+// ── Client-side relay latency probes (best-effort, OFF the connect path) ──────
+//
+// The control plane honors `latency_probes` only when
+// STT_RELAY_ALLOW_CLIENT_LATENCY_PROBES is on; when present it picks the lowest
+// healthy relay (docs/01 §8). We measure each relay's HTTPS /healthz round-trip
+// once and CACHE it for PROBE_TTL_MS so we never add latency to session-create:
+// resolveRelaySession reads whatever is cached (possibly nothing on the very
+// first call) and a background refresh runs fire-and-forget. A probe failure
+// just omits that region (the server then falls back to geo routing).
+//
+// Health URL derivation mirrors the relay (wss://host/path → https://host/healthz).
+
+/** Known relay health endpoints. Derived from the production relay hostnames; the
+ *  control plane remains authoritative for routing — these are only hints. */
+const RELAY_HEALTH_URLS: Record<'us' | 'asia', string> = {
+    us: 'https://us-relay.natively.software/healthz',
+    asia: 'https://asia-relay.natively.software/healthz',
+};
+
+const PROBE_TTL_MS = 5 * 60_000;       // re-measure at most every 5 min
+const PROBE_TIMEOUT_MS = 1500;         // a slow probe is worse than no probe
+let _probeCache: { at: number; probes: Record<string, number> } | null = null;
+let _probeInFlight: Promise<void> | null = null;
+
+/** Convert a relay wss:// URL to its https /healthz URL (exported for tests). */
+export function deriveHealthUrl(wsUrl: string): string | null {
+    try {
+        const u = new URL(wsUrl);
+        const scheme = u.protocol === 'wss:' ? 'https:' : 'http:';
+        return `${scheme}//${u.host}/healthz`;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Returns cached relay latencies if fresh, else null. NEVER blocks: if the cache
+ * is stale/empty it kicks off a background refresh and returns whatever it has
+ * (null on the first ever call). Safe to call on every session-create.
+ */
+export function getRelayLatencyProbes(
+    fetchImpl?: typeof fetch,
+    now: () => number = Date.now,
+): Record<string, number> | null {
+    const fresh = _probeCache && now() - _probeCache.at < PROBE_TTL_MS;
+    if (!fresh && !_probeInFlight) {
+        // Fire-and-forget refresh; the result lands in the cache for NEXT time.
+        _probeInFlight = refreshRelayLatencyProbes(fetchImpl, now).then(() => {}, () => {}).finally(() => { _probeInFlight = null; });
+    }
+    return _probeCache && Object.keys(_probeCache.probes).length > 0 ? _probeCache.probes : null;
+}
+
+/** Measures each relay's /healthz round-trip and updates the probe cache. */
+export async function refreshRelayLatencyProbes(
+    fetchImpl?: typeof fetch,
+    now: () => number = Date.now,
+): Promise<Record<string, number>> {
+    const f = fetchImpl ?? (globalThis.fetch as typeof fetch | undefined);
+    const probes: Record<string, number> = {};
+    if (typeof f !== 'function') return probes;
+
+    await Promise.all((Object.keys(RELAY_HEALTH_URLS) as Array<'us' | 'asia'>).map(async (region) => {
+        const url = RELAY_HEALTH_URLS[region];
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+        const start = now();
+        try {
+            const res = await f(url, { method: 'GET', signal: controller.signal });
+            if (res.ok) probes[region] = Math.round(now() - start);
+        } catch {
+            // omit this region — server falls back to geo routing
+        } finally {
+            clearTimeout(timer);
+        }
+    }));
+
+    _probeCache = { at: now(), probes };
+    return probes;
+}
+
+/** Test helper: reset the probe cache. */
+export function clearRelayLatencyProbes(): void {
+    _probeCache = null;
+    _probeInFlight = null;
+}
+
 // ── Small coercion helpers ──────────────────────────────────────────────────
 
 function asStr(v: unknown): string | null {

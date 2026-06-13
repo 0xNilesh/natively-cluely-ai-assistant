@@ -9,6 +9,7 @@ import {
     getCachedSession,
     setCachedSession,
     clearCachedSession,
+    getRelayLatencyProbes,
     type RelaySessionConfig,
     type ResolveRelaySessionOpts,
 } from './relaySession';
@@ -836,6 +837,10 @@ export class NativelyProSTT extends EventEmitter {
             platform: this.platform,
             controlPlaneBaseUrl: this.controlPlaneBaseUrl,
             regionHint: flags.getForceRegion(),
+            // Best-effort relay round-trip hints (cached, never blocks — null on the
+            // first call before the background probe lands). The server honors them
+            // only when STT_RELAY_ALLOW_CLIENT_LATENCY_PROBES is on, else ignores.
+            latencyProbes: getRelayLatencyProbes() ?? undefined,
         });
 
         if (config) {

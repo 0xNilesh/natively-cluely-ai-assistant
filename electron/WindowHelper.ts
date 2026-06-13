@@ -310,7 +310,10 @@ export class WindowHelper {
         : {}),
       transparent: isMac,
       hasShadow: true,
-      backgroundColor: isMac ? '#00000000' : '#000000',
+      // The launcher starts with the black logo splash. Use a black native
+      // background too so macOS doesn't show a grey/white transparent-window
+      // flash before the renderer paints.
+      backgroundColor: '#000000',
       focusable: true,
       resizable: true,
       movable: true,

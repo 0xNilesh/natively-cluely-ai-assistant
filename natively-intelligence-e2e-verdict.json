@@ -1,0 +1,109 @@
+{
+  "report": "NATIVELY_INTELLIGENCE_OS_E2E_VERIFICATION_REPORT.md",
+  "date": "2026-06-13",
+  "branch": "fix/whisper-external-data-download",
+  "final_verdict": "PARTIALLY_WIRED",
+  "release_recommendation": "READY_BEHIND_FLAGS_ONLY",
+  "note_on_premise": "The old 'zero live files import intelligence; flags do nothing' status is STALE — wiring (PRs #311/#312/#313 + 5 Hindsight commits) is merged. 5 non-test files import the library; flags resolve through env->settings->default; several modules have verified behavioral forks. But every behavior-changing flag is default OFF with NO renderer UI to enable it, so the shipped default build is effectively inert.",
+  "gates": {
+    "typecheck_electron": "PASS (0 errors)",
+    "build_electron": "PASS (clean)",
+    "intelligence_tests": "PASS (442 pass / 0 fail / 9 todo)",
+    "intelligence_engine_services": "PASS (33 pass / 0 fail, with --test-force-exit)",
+    "flags_default_state": "17 OFF / 0 ON (verified vs compiled module)"
+  },
+  "e2e_100q": {
+    "pass": 99,
+    "fail": 1,
+    "pass_rate": 0.99,
+    "reproduced_by_lead": true,
+    "single_failure": {
+      "id": "A09",
+      "question": "How many years of experience do you have?",
+      "answer": "You have roughly 0.4 years of experience.",
+      "reason": "second_person_about_user_not_candidate_voice (real product bug; number correctly grounded, perspective wrong)"
+    },
+    "category_pass": {
+      "A_profile_identity": "14/15",
+      "B_jd_fit": "10/10",
+      "C_wta": "15/15 (decision layer only; LLM generation NOT executable headless)",
+      "D_followup": "10/10 (service; cross-session=NOOP no Hindsight)",
+      "E_meeting_memory": "10/10 (service)",
+      "F_global_search": "10/10 (service)",
+      "G_in_meeting_search": "8/8 (service)",
+      "H_mode_boundaries": "8/8 (live-logic)",
+      "I_lecture": "8/8 (service, no UI)",
+      "J_diagram": "4/4 (service, no UI)",
+      "K_privacy": "2/2 (service)"
+    },
+    "honest_gaps": [
+      "WTA LLM generation degrades to a clarification stall under the node:sqlite harness shim (needs sqlite-vec/vec0). The existing benchmark:wta hides this; this suite catches it.",
+      "Hindsight live recall = NOOP (no server on :8888). Safe-fallback contract verified; live recall not.",
+      "E/F/G/I/J/K verified at compiled-service level from dist-electron, not via a live renderer (several have no renderer caller).",
+      "No GUI in environment — representative prompts driven through the same real harness path the app uses."
+    ]
+  },
+  "module_status": {
+    "LIVE_flag_gated": ["ProfileTreeService", "OutputShapeNormalizer", "MeetingMemoryService", "ConversationMemoryService", "SessionTracker.getDurableContext", "SearchOrchestrator.globalSearch"],
+    "PARTIALLY_LIVE_noop_default": ["LongTermMemoryService", "HindsightClientAdapter"],
+    "SHADOW_ONLY_telemetry": ["LiveTranscriptBrain", "ContextRouter.routeContext", "ContextFusionEngine", "PromptAssemblerV2", "IntelligenceTrace"],
+    "NOT_WIRED_no_ui_caller": ["LectureIntelligenceService", "DiagramIntelligenceService", "SearchOrchestrator.inMeetingSearch"],
+    "DEAD_CODE": ["IntelligenceMetrics"]
+  },
+  "flags_total": 17,
+  "flags_default_off": 17,
+  "flags_with_renderer_ui_toggle": 0,
+  "code_review": {
+    "blockers": 0,
+    "high": [
+      "H1: OutputShapeNormalizer.compressToSpeakable destroys fenced code/Mermaid (flag-gated off; fix-before-enable). Empirically reproduced by lead.",
+      "H2: uncommitted LLMHelper.ts removes tail-latency hedging (NOT Hindsight; verified 0 hindsight refs) — always-on, reverses documented benchmark fix; split into separate release."
+    ],
+    "medium": [
+      "M1: IntelligenceMetrics dead code (0 non-test importers, lead-confirmed)",
+      "M2: 5 preload IPCs with 0 src callers (lecture/diagram/in-meeting-search/flag-get/flag-set) — no UI to toggle flags",
+      "M3: Hindsight recall race timer not cleared on win path",
+      "M4: uncommitted always-on startup splash (unrelated)"
+    ],
+    "flag_off_safety": "PASS for committed wiring (byte-for-byte preserved); only the uncommitted H2 breaks it"
+  },
+  "privacy": {
+    "verdict": "PASS (single-user desktop)",
+    "query_hashed": true,
+    "raw_content_logged": false,
+    "cross_user_leak": false,
+    "hardcoded_user_facts": false,
+    "caveat": "Hindsight scope hardcoded userId:'local'; isolation for memory candidates relies on server-side tag builder, not orchestrator filter."
+  },
+  "hindsight": {
+    "status": "MOCK_NOOP_BY_DEFAULT",
+    "local_first": true,
+    "can_block_or_crash_live_answer": false,
+    "live_recall_provable_here": false
+  },
+  "fully_wired_thresholds": {
+    "overall_pass_rate_ge_90": true,
+    "profile_identity_100": false,
+    "privacy_isolation_100": true,
+    "no_blocker_findings": true,
+    "no_build_typecheck_fail": true,
+    "flags_affect_live_paths": true,
+    "live_manual_key_flows_pass": true,
+    "search_not_fake_passthrough": true,
+    "hindsight_honestly_documented": true,
+    "met_all": false
+  },
+  "blockers": [
+    "(if committed) H2 LLMHelper latency rewrite — un-gated, reverses benchmark fix",
+    "(enable-gate) do not enable answerDiversityGuard until compressToSpeakable is fence-safe (H1)"
+  ],
+  "next_fixes": [
+    "H1 fence-safe compressToSpeakable",
+    "A09 first-person experience-count answer",
+    "H2 split LLMHelper rewrite behind kill-switch + benchmark",
+    "Settings UI to toggle flags + configure Hindsight",
+    "Wire or delete orphaned lecture/diagram/in-meeting-search IPCs",
+    "Delete or wire IntelligenceMetrics",
+    "Make WTA generation E2E-able under Electron ABI; fix benchmark:wta stall-as-pass"
+  ]
+}

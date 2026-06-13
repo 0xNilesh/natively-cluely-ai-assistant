@@ -251,7 +251,7 @@ session (which has `billed_seconds=0`) cannot launder a long mic stream.
 | **F3** heartbeat bypass | the overlap query requires `o.billed_seconds > 0` — a `<30s` free system session never qualifies as cover (§5.1, test 5b). |
 | **F5** bill-only-at-close crash loss | `stt_flush_usage` checkpoints every 30–60s with incremental delta application; `stt_reconcile_abandoned` finalizes a relay-killed session from its last checkpoint. Loss window ≤ one flush interval (≤60s) instead of ≤4h. |
 | **F6** silent/non-idempotent/unversioned writes | every RPC is in this migration; flushes idempotent on `(session_id, seq)` + the journal `UNIQUE`; finalize idempotent on `status`; trial 600s cap in-RPC; the live `increment_transcription_minutes` is re-exported here (it had no migration file). The relay's `usageStore.js` retries + alerts (never silent). |
-| **F7** quota TOCTOU | the **lease** is a control-plane concern (`stt_reserve_session`, Phase 7). This migration owns the post-reservation truth: `billed_seconds` is the authoritative applied amount, and the reaper reconciles any session the watchdog let overrun. |
+| **F7** quota TOCTOU | **RESOLVED** by the atomic quota lease in `migrations/004_stt_quota_lease.sql` (`stt_reserve_session`) — see §11 below. This migration (003) still owns the post-reservation truth: `billed_seconds` is the authoritative applied amount, and the reaper reconciles any session the watchdog let overrun. |
 
 ---
 
@@ -369,3 +369,135 @@ cd services/stt-relay && node --test tests/*.test.mjs # 58 (47 existing + 11 usa
 
 The reference model (`migrations/__tests__/billingReferenceModel.mjs`) mirrors the SQL exactly and is
 the executable spec the logic tests assert against; a live-DB integration test is the manual §10.2 step.
+
+---
+
+## 11. F7 RESOLVED — the atomic quota lease (`migrations/004_stt_quota_lease.sql`)
+
+**Status:** Implemented. `migrations/004_stt_quota_lease.sql` + control-plane wiring in
+`server.js` (the `/v1/stt/session` handler) + logic + control-plane tests. Lifts the docs/13 §12
+"STOP — F7 gate" 25% rollout cap (see docs/13).
+
+### 11.1 The problem (TOCTOU)
+
+`POST /v1/stt/session` mints a token carrying `quota_remaining_seconds` as a **snapshot** read from a
+≤30s-stale auth cache. The per-session relay watchdog bounds **each** session to that snapshot but not
+the **aggregate**: N concurrent sessions on one credential each receive the full snapshot and can each
+spend it. A key with 60s left can open 4 simultaneous sessions = 240s billed. Migration 003 deliberately
+deferred this (its header: *"the lease is a control-plane concern, `stt_reserve_session`, NOT in this
+migration"*). Migration 004 is that missing half.
+
+### 11.2 The lease (shared per-identity counter)
+
+`stt_quota_reservations` is an append-only ledger of **held seconds** per identity:
+
+```
+session_id text PK · identity_kind (api_key|trial) · user_id|trial_id ·
+reserved_seconds int · status (held|released) · created_at · released_at · expires_at
+```
+
+At session-create the control plane calls **`stt_reserve_session(...)`**, which, in ONE transaction
+**serialized per identity**:
+
+```
+available := limit_seconds − already_used_seconds − currently_held_seconds
+grant     := LEAST(requested_seconds, GREATEST(available, 0))
+```
+
+- `already_used_seconds` is read **FRESH** from the authoritative counter
+  (`api_keys.transcription_minutes_used*60` paid / `free_trials.stt_seconds_used` trial) — **not** the
+  stale token snapshot (that staleness IS F7).
+- `currently_held_seconds` = `SUM(reserved_seconds)` of this identity's still-`held`, non-expired rows.
+- If `available <= 0` → `{granted:false, reason:'quota_exhausted', …}` and **no** row is inserted; the
+  control plane returns the same `402 transcription_quota_exceeded` it uses for the snapshot pre-check.
+- Else it INSERTs a `held` reservation for `grant` seconds and returns `{granted:true, granted_seconds}`.
+  The token's `quota_remaining_seconds` (and the response `quota_remaining`) is set to **`grant`**, so the
+  relay watchdog cuts at the **leased** budget. Two concurrent reserves on one identity therefore SHARE
+  the budget: the first leases it, the second sees it already held and is granted only the remainder.
+
+**Idempotency:** a re-reserve of the same `session_id` (a retried session-create) returns the existing
+row unchanged (`idempotent:true`) — never double-counts.
+
+### 11.3 Atomicity mechanism — `pg_advisory_xact_lock`, not `FOR UPDATE`
+
+`stt_reserve_session` takes **`pg_advisory_xact_lock(hashtext(identity_key))`** as its first act, keyed on
+the **identity** (`stt_lease:api_key:<uuid>` / `stt_lease:trial:<uuid>`). A row-level `SELECT … FOR UPDATE`
+**cannot** close this race: the very first concurrent reserve has **no rows yet** to lock (the rows don't
+exist — that's the TOCTOU), so `FOR UPDATE` can't serialize two brand-new INSERTs for the same identity.
+The transaction-scoped advisory lock serializes the whole *read-aggregate-then-insert* per identity
+end-to-end, is auto-released at COMMIT/ROLLBACK (no leak on error), and lets reserves for **different**
+identities run fully parallel. This is the standard Postgres pattern for serializing an INSERT that depends
+on an aggregate over not-yet-existing rows.
+
+### 11.4 Release — the trigger (reserve → release → finalize flow)
+
+```
+session-create ── stt_reserve_session ──► reservation 'held' (grant seconds)
+                                              │
+relay streams, watchdog cuts at the lease    │
+                                              ▼
+relay close ── stt_finalize_session (003) ── stt_sessions.status → 'finalized'
+   │  (or reaper: stt_reconcile_abandoned → status → 'abandoned')
+   │  (or degraded directUpsert(finalize) → status → 'finalized')
+   ▼
+TRIGGER stt_release_reservation_trg (AFTER UPDATE OF status, on transition into a terminal status)
+   └─► stt_release_reservation(session_id)  →  reservation 'released'  (frees the HELD amount)
+```
+
+**Choice: a TRIGGER on `stt_sessions`, NOT a `CREATE OR REPLACE` of 003's `stt_finalize_session` /
+`stt_reconcile_abandoned`.** Rationale: (a) **lower risk** — redefining the two large 003 functions just
+to append one release call would mean reproducing their full pairing/delta/journaling bodies, a copy that
+can silently drift; the trigger touches neither. (b) **single chokepoint** — both the normal close and the
+reaper (and the degraded `directUpsert(finalize)`) drive `stt_sessions.status` to a terminal value; one
+trigger on that column covers all three paths. (c) **no relay code change** — the relay already calls
+`stt_finalize_session(p_session_id := row.session_id)` (`usageStore.callFinalize`), so the matching
+`reservation.session_id` is always present for the trigger to release.
+
+The trigger fires only on a **transition into** `finalized`/`abandoned` (`OLD.status IS DISTINCT FROM
+NEW.status`), and `stt_release_reservation` is itself idempotent (only a still-`held` row transitions), so
+a repeated finalize / late normal-close-after-reaper is a safe no-op. The release frees the **hold only**;
+the actual billing (billed_seconds → counter) is migration 003's job — the lease never bills, so there is
+no double-counting.
+
+### 11.5 Backstops against a dead reservation blocking quota
+
+Two independent mechanisms ensure an abandoned reservation can't permanently consume quota:
+
+1. **TTL** — each reservation carries `expires_at = created_at + (max_session + 600s grace)`.
+   `stt_reserve_session` opportunistically reclaims this identity's expired `held` rows at the top of every
+   reserve, and the `currently_held` sum counts only **non-expired** rows — so an abandoned reservation
+   stops blocking on its own at the TTL.
+2. **Reaper** — the migration-003 reaper finalizes abandoned sessions (status → `abandoned`) → the §11.4
+   trigger fires → the reservation is released. Independent of the TTL.
+
+### 11.6 Graceful degradation (server-before-migration-004 is safe)
+
+The control plane (`new env STT_QUOTA_LEASE_ENABLED`, default **true**) leases only **relay** sessions
+(`target !== 'railway'`; the railway path bills the old way). On **any** RPC error (function missing →
+server deployed before migration 004, or Supabase down) it:
+
+- logs **loud-once** (`⚠️ quota lease RPC unavailable — DEGRADED to snapshot quota … Apply migration 004`),
+- emits a structured **`[STTEvent] quota_lease_degraded`** event with a degrade **counter**, and
+- **falls back to the snapshot** `quota_remaining_seconds` (the exact pre-004 behavior).
+
+Session-create **never hard-fails** because the lease RPC is unavailable. Verified live: against a Supabase
+**without** migration 004, a lease-enabled server returns **HTTP 200** with the snapshot budget and the
+`quota_lease_degraded` event — so the server can deploy before the migration, and the migration can be
+applied later to activate the lease with **zero** server change. Setting `STT_QUOTA_LEASE_ENABLED=0`
+disables the lease entirely (pure snapshot path, the RPC is never called).
+
+### 11.7 Tests
+
+```
+node --test migrations/__tests__/stt_quota_lease_logic.test.mjs   # 10 lease invariants
+node --test tests/stt-quota-lease.test.mjs                        # 20 (source + migration + integration)
+```
+
+`migrations/__tests__/quotaLeaseReferenceModel.mjs` mirrors the SQL exactly (the executable spec). The
+logic invariants prove: two concurrent reserves on a 60s limit → first 60 / second 0; partial 40-of-60 then
+the remaining 20; release frees the budget; idempotent re-reserve doesn't double-count; an expired hold is
+reclaimed; finalize/abandon releases (trigger) and bills the real amount; the trial 600s cap; and **the F7
+core invariant — `used + held` never exceeds the limit — fuzzed across 300 random reserve/release/bill
+sequences for both identity kinds**. The control-plane test proves the handler calls `stt_reserve_session`
+with the correct args, uses `granted_seconds` in the token, returns 402 on `granted:false`, and degrades to
+the snapshot (with the `quota_lease_degraded` event) when the RPC is unavailable.

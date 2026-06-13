@@ -34,7 +34,6 @@ import { analytics } from "./lib/analytics/analytics.service"
 import { ErrorBoundary } from "./components/ErrorBoundary"
 import ModesSettings from "./components/settings/ModesSettings"
 import { ProfileIntelligenceSettings } from "./components/ProfileIntelligenceSettings"
-import logoAsset from "./assets/logo.png"
 
 const queryClient = new QueryClient()
 
@@ -92,20 +91,7 @@ const App: React.FC = () => {
   }, [isLauncherWindow, isOverlayWindow, isDefault]);
 
   // State
-  // One-shot first-run startup sequence. Once the user dismisses it (or any
-  // future code flips the flag), it never appears again on subsequent launches.
-  const [showStartup, setShowStartup] = useState<boolean | null>(() => {
-    try {
-      const val = localStorage.getItem('natively_seen_startup_v1');
-      if (val === 'true') return false;
-      if (val === 'false') return true;
-      return null;
-    } catch {
-      return null;
-    }
-  });
-  const shouldShowLaunchBranding = isLauncherWindow || isDefault;
-  const [showLaunchBranding, setShowLaunchBranding] = useState(shouldShowLaunchBranding);
+  const [showStartup, setShowStartup] = useState(true);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState<string>('general');
   const [isModesOpen, setIsModesOpen] = useState(false);
@@ -177,7 +163,7 @@ const App: React.FC = () => {
   } | null>(null);
   const [showTrialExpiredModal, setShowTrialExpiredModal] = useState(false);
 
-  const isAppReady = !isSettingsWindow && !isOverlayWindow && !isModelSelectorWindow && !showStartup && !showLaunchBranding && !isSettingsOpen && isLauncherMainView && !isProfileOpen;
+  const isAppReady = !isSettingsWindow && !isOverlayWindow && !isModelSelectorWindow && !showStartup && !isSettingsOpen && isLauncherMainView && !isProfileOpen;
   const { activeAd, dismissAd } = useAdCampaigns(
     planDetails,
     hasProfile,
@@ -191,12 +177,6 @@ const App: React.FC = () => {
 
 
   useEffect(() => {
-    if (!shouldShowLaunchBranding) return;
-    const timer = window.setTimeout(() => setShowLaunchBranding(false), 1150);
-    return () => window.clearTimeout(timer);
-  }, [shouldShowLaunchBranding]);
-
-  useEffect(() => {
     // Track app opens for global gating
     trackAppOpen();
 
@@ -204,35 +184,16 @@ const App: React.FC = () => {
     localStorage.removeItem('useLegacyAudioBackend');
 
     const fallbackLocal = () => {
-      try {
-        const localSeen = localStorage.getItem('natively_seen_startup_v1') === 'true';
-        setShowStartup(!localSeen);
-      } catch {
-        setShowStartup(true);
-      }
+      // The classic launch animation is intentionally shown on every launcher
+      // startup, matching the older app behavior from 93ee4a21.
     };
 
     if (window.electronAPI?.onboardingGetFlags) {
       window.electronAPI.onboardingGetFlags()
         .then((flags) => {
           if (flags) {
-            // 1. seenStartup
-            if (flags.seenStartup) {
-              setShowStartup(false);
-              try { localStorage.setItem('natively_seen_startup_v1', 'true'); } catch {}
-            } else {
-              try {
-                const localSeen = localStorage.getItem('natively_seen_startup_v1') === 'true';
-                if (localSeen) {
-                  setShowStartup(false);
-                  window.electronAPI?.onboardingSetFlag?.('seenStartup', true).catch(() => {});
-                } else {
-                  setShowStartup(true);
-                }
-              } catch {
-                setShowStartup(true);
-              }
-            }
+            // 1. seenStartup intentionally no longer suppresses the classic
+            // black-logo launch animation; the old app played it every launch.
 
             // 2. seenModesOnboarding
             if (flags.seenModesOnboarding) {
@@ -685,38 +646,29 @@ const App: React.FC = () => {
 
   // --- LAUNCHER WINDOW (Default) ---
   // Renders if window=launcher OR no param
-  if (showStartup === null) {
-    return (
-      <div className="h-full w-full bg-[#000000]" />
-    );
-  }
-
   return (
     <ErrorBoundary context="Launcher">
-    <div className="h-full min-h-0 w-full relative bg-[#000000]">
+    <div className="h-full min-h-0 w-full relative bg-transparent">
       <AnimatePresence>
         {showStartup ? (
           <motion.div
             key="startup"
-            initial={{ opacity: 1 }}
-            exit={{ opacity: 0, scale: 1.1, pointerEvents: "none", transition: { duration: 0.6, ease: "easeInOut" } }}
+            className="h-full w-full"
+            initial={{ opacity: 0, scale: 1.01 }}
+            animate={{ opacity: 1, scale: 1, transition: { duration: 0.5, ease: [0.23, 1, 0.32, 1] } }}
+            exit={{ opacity: 0, scale: 1.04, pointerEvents: "none", transition: { duration: 0.55, ease: [0.4, 0, 0.2, 1] } }}
           >
-            <StartupSequence onComplete={() => {
-              try { localStorage.setItem('natively_seen_startup_v1', 'true'); } catch {}
-              window.electronAPI?.onboardingSetFlag?.('seenStartup', true).catch(() => {});
-              setShowStartup(false);
-            }} />
+            <StartupSequence onComplete={() => setShowStartup(false)} />
           </motion.div>
         ) : (
           <motion.div
             key="main"
             className="h-full w-full"
-            initial={{ opacity: 0, scale: 0.98, y: 15 }} // "Linear" style entry: slightly down and scaled down
-            animate={{ opacity: 1, scale: 1, y: 0 }}      // Slide up and snap to place
+            initial={{ opacity: 0, scale: 0.99, y: 8 }} // "Linear" style entry: slightly down and scaled down
+            animate={{ opacity: 1, scale: 1, y: 0 }}    // Slide up and snap to place
             transition={{
-              duration: 0.8,
+              duration: 0.6,
               ease: [0.19, 1, 0.22, 1], // Expo-out: snappy start, smooth landing
-              delay: 0.1
             }}
           >
             <QueryClientProvider client={queryClient}>

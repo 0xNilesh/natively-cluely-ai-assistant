@@ -5496,12 +5496,43 @@ async function initializeApp() {
     const { telemetryService } = require('./services/telemetry/TelemetryService');
     const userDataPath = app.getPath('userData');
     const telemetryEnabledSetting = SettingsManager.getInstance().get('telemetryEnabled');
+
+    // Remote sinks are built from env (set at app launch / packaged build). Each
+    // is added ONLY when its credential is present, so unset = silently local-only.
+    // A stable, NON-PII install id (random, persisted in settings) lets PostHog
+    // dedupe sessions without ever shipping a key/email.
+    const release = (typeof app.getVersion === 'function' ? app.getVersion() : undefined) || process.env.APP_VERSION || 'unknown';
+    const environment = process.env.NODE_ENV === 'development' ? 'development' : 'production';
+    let distinctId: string | undefined;
+    try {
+      const sm = SettingsManager.getInstance() as unknown as { get: (k: string) => unknown; set: (k: string, v: unknown) => void };
+      distinctId = sm.get('telemetryInstallId') as string | undefined;
+      if (!distinctId) {
+        distinctId = `nd_${Array.from({ length: 16 }, () => Math.floor(Math.random() * 16).toString(16)).join('')}`;
+        sm.set('telemetryInstallId', distinctId);
+      }
+    } catch { /* settings unavailable — distinctId stays undefined */ }
+
+    const sinks: Array<Record<string, unknown>> = [{ name: 'local-jsonl', enabled: true }];
+    if (process.env.POSTHOG_API_KEY) {
+      sinks.push({ name: 'posthog', enabled: true, apiKey: process.env.POSTHOG_API_KEY, endpoint: process.env.POSTHOG_HOST || 'https://app.posthog.com', distinctId });
+    }
+    if (process.env.SENTRY_DSN) {
+      sinks.push({ name: 'sentry', enabled: true, dsn: process.env.SENTRY_DSN, release, environment });
+    }
+    if (process.env.AXIOM_TOKEN && process.env.AXIOM_DATASET) {
+      sinks.push({ name: 'axiom', enabled: true, apiKey: process.env.AXIOM_TOKEN, dataset: process.env.AXIOM_DATASET });
+    }
+
     telemetryService.configure({
       userDataPath,
       enabled: telemetryEnabledSetting !== false, // default true
       localEnabled: true,
+      sinks,
     });
-    telemetryService.track({ name: 'app_start', properties: { platform: process.platform } });
+    const remote = sinks.filter(s => s.name !== 'local-jsonl').map(s => s.name);
+    console.log(`[Telemetry] sinks: local-jsonl${remote.length ? ' + ' + remote.join(' + ') : ' (remote unconfigured)'} release=${release}`);
+    telemetryService.track({ name: 'app_start', properties: { platform: process.platform, release } });
   } catch (err) {
     console.warn('[Init] TelemetryService configure threw (non-fatal):', err);
   }
