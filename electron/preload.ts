@@ -349,6 +349,9 @@ interface ElectronAPI {
   generateDiagram: (text?: string) => Promise<{ enabled: boolean; diagram: any }>;
   getIntelligenceFlags: () => Promise<Array<{ key: string; enabled: boolean; setting: string; env: string; default: boolean }>>;
   setIntelligenceFlag: (key: string, value: boolean | null) => Promise<{ success: boolean; enabled?: boolean; error?: string }>;
+  getHindsightConfig: () => Promise<{ baseUrl: string; hasApiKey: boolean; autoStart: boolean; serverCommand: string; llmProvider: string; available: boolean }>;
+  setHindsightConfig: (cfg: { baseUrl?: string; apiKey?: string; autoStart?: boolean; serverCommand?: string; llmProvider?: string }) => Promise<{ success: boolean; healthy?: boolean; error?: string }>;
+  testHindsightConnection: () => Promise<{ healthy: boolean; error?: string }>;
   updateMeetingTitle: (id: string, title: string) => Promise<boolean>;
   updateMeetingSummary: (
     id: string,
@@ -1438,6 +1441,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   generateDiagram: (text?: string) => ipcRenderer.invoke('diagram:generate', { text }),
   getIntelligenceFlags: () => ipcRenderer.invoke('intelligence-flags:get'),
   setIntelligenceFlag: (key: string, value: boolean | null) => ipcRenderer.invoke('intelligence-flags:set', { key, value }),
+  getHindsightConfig: () => ipcRenderer.invoke('hindsight-config:get'),
+  setHindsightConfig: (cfg: { baseUrl?: string; apiKey?: string; autoStart?: boolean; serverCommand?: string; llmProvider?: string }) => ipcRenderer.invoke('hindsight-config:set', cfg),
+  testHindsightConnection: () => ipcRenderer.invoke('hindsight-config:test'),
   updateMeetingTitle: (id: string, title: string) =>
     ipcRenderer.invoke('update-meeting-title', { id, title }),
   updateMeetingSummary: (id: string, updates: any) =>

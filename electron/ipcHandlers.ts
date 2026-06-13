@@ -1921,6 +1921,59 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
+  // HINDSIGHT SERVER CONFIG (Cloud OR local long-term-memory server). The flags IPC above
+  // covers the boolean feature flags; this handles the string config (baseUrl/apiKey/…) +
+  // a live health probe so the settings UI can show a "Connected" chip. The raw apiKey is
+  // NEVER returned to the renderer — only `hasApiKey: boolean` (credential privacy posture).
+  safeHandle('hindsight-config:get', async () => {
+    try {
+      const sm = SettingsManager.getInstance();
+      const { HindsightManager } = require('./services/HindsightManager') as typeof import('./services/HindsightManager');
+      const available = HindsightManager.getInstance().isAvailable();
+      return {
+        baseUrl: String(sm.get('hindsightBaseUrl') || ''),
+        hasApiKey: Boolean(sm.get('hindsightApiKey')),
+        autoStart: sm.get('hindsightAutoStart') !== false, // default on
+        serverCommand: String(sm.get('hindsightServerCommand') || ''),
+        llmProvider: String(sm.get('hindsightLlmProvider') || ''),
+        available,
+      };
+    } catch (e: any) {
+      console.warn('[HindsightConfig] get failed:', e?.message);
+      return { baseUrl: '', hasApiKey: false, autoStart: true, serverCommand: '', llmProvider: '', available: false };
+    }
+  });
+
+  safeHandle('hindsight-config:set', async (_, cfg: { baseUrl?: string; apiKey?: string; autoStart?: boolean; serverCommand?: string; llmProvider?: string }) => {
+    try {
+      const sm = SettingsManager.getInstance();
+      if (typeof cfg?.baseUrl === 'string') sm.set('hindsightBaseUrl', cfg.baseUrl.trim());
+      // Blank apiKey on resave = KEEP the stored one (don't wipe a saved key with an empty
+      // field — the documented blank-key-on-resave gotcha). Only write a non-empty value.
+      if (typeof cfg?.apiKey === 'string' && cfg.apiKey.trim()) sm.set('hindsightApiKey', cfg.apiKey.trim());
+      if (typeof cfg?.autoStart === 'boolean') sm.set('hindsightAutoStart', cfg.autoStart);
+      if (typeof cfg?.serverCommand === 'string') sm.set('hindsightServerCommand', cfg.serverCommand.trim());
+      if (typeof cfg?.llmProvider === 'string') sm.set('hindsightLlmProvider', cfg.llmProvider.trim());
+      // Re-probe so the caller gets fresh availability.
+      const { HindsightManager } = require('./services/HindsightManager') as typeof import('./services/HindsightManager');
+      const healthy = await HindsightManager.getInstance().healthCheck();
+      return { success: true, healthy };
+    } catch (e: any) {
+      console.warn('[HindsightConfig] set failed:', e?.message);
+      return { success: false, error: 'set_failed' };
+    }
+  });
+
+  safeHandle('hindsight-config:test', async () => {
+    try {
+      const { HindsightManager } = require('./services/HindsightManager') as typeof import('./services/HindsightManager');
+      const healthy = await HindsightManager.getInstance().healthCheck();
+      return { healthy };
+    } catch (e: any) {
+      return { healthy: false, error: e?.message };
+    }
+  });
+
   // Legacy alias for renderer builds that still call the old IPC name.
   // Maps the deprecated technicalInterviewDirectVision channel onto the new
   // technicalInterviewVisionFirst getter/setter so old renderer builds keep working.
