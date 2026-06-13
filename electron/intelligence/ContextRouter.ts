@@ -84,6 +84,22 @@ export interface ContextRouterDecision {
 // territory (Hindsight + MeetingMemory + GlobalSearch when they exist).
 const RECALL_RE = /\b(last (time|meeting|call|session)|previous(ly)?|earlier|before|recurring|history|past (meetings?|calls?)|we (discuss|talked|spoke)|did (we|they|i) (discuss|talk|cover|say)|summari[sz]e (all|our|the) (meetings?|calls?)|what did .* (say|ask) (about|last)|came up (in|before)|prior (call|meeting|interview))\b/i;
 
+/**
+ * Is this question backward-looking — i.e. asking about PRIOR meetings/conversations
+ * ("what did we discuss last time", "did we cover X before", "previous call")? Used to
+ * gate long-term-memory (Hindsight) recall so it ONLY fires for genuinely backward asks
+ * and adds zero latency to normal/coding/identity questions. Independent of any flag, so
+ * the live-recall path can use it without depending on contextRouterV2. Never throws.
+ */
+export function isBackwardLookingQuery(query: string): boolean {
+  try {
+    RECALL_RE.lastIndex = 0;
+    return typeof query === 'string' && RECALL_RE.test(query);
+  } catch {
+    return false;
+  }
+}
+
 // In-meeting "search current meeting for X" — local-first, not long-term memory.
 const IN_MEETING_SEARCH_RE = /\b(search (this|the current|current) (meeting|call|transcript)|find (where|when) .* (mention|said|asked)|in this (meeting|call|transcript))\b/i;
 

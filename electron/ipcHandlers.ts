@@ -23,7 +23,7 @@ import { PiLatencyTrace } from './services/telemetry/PiLatencyTracer';
 import { beginTrace, commitTrace } from './intelligence/IntelligenceTrace';
 import { ProfileTreeService } from './intelligence/ProfileTreeService';
 import { isIntelligenceFlagEnabled } from './intelligence/intelligenceFlags';
-import { routeContext } from './intelligence/ContextRouter';
+import { routeContext, isBackwardLookingQuery } from './intelligence/ContextRouter';
 import { SearchOrchestrator, type SearchCandidate } from './intelligence/SearchOrchestrator';
 import { CHAT_MODE_PROMPT } from './llm/prompts';
 import { isAssistantIdentityQuestion, profileFactsReady } from './llm/manualProfileIntelligence';
@@ -992,6 +992,46 @@ export function initializeIpcHandlers(appState: AppState): void {
         if (wantsCandidateContract && !isContractEnforced && !isCodingChat) {
           const candidateContract = formatAnswerPlanForPrompt(answerPlan, false);
           context = context ? `${candidateContract}\n\n${context}` : candidateContract;
+        }
+
+        // HINDSIGHT LIVE RECALL (the deferred last step, behind hindsight_live_recall_enabled).
+        // Surface cross-meeting long-term memory INTO the live answer — but ONLY for
+        // genuinely BACKWARD-LOOKING questions ("what did we discuss last time about X?",
+        // "did we cover the pricing objection before?"). isBackwardLookingQuery gates this,
+        // so a normal/coding/identity/sales question NEVER calls recall → ZERO added latency
+        // on the vast majority of answers. Hard 800ms timeout (AbortController+Promise.race
+        // in the adapter): on timeout/empty/error it returns [] and the answer proceeds
+        // WITHOUT memory — never blocks, never throws. Skipped for coding/safety answers.
+        if (!isCodingChat && !isContractEnforced
+            && isIntelligenceFlagEnabled('hindsightLiveRecall')
+            && isIntelligenceFlagEnabled('hindsightMemory')
+            && process.env.HINDSIGHT_BASE_URL
+            && typeof message === 'string'
+            && isBackwardLookingQuery(message)) {
+          try {
+            const { LongTermMemoryService } = require('./intelligence/memory/LongTermMemoryService') as typeof import('./intelligence/memory/LongTermMemoryService');
+            const ltm = LongTermMemoryService.fromFlags({
+              hindsight: {
+                baseUrl: process.env.HINDSIGHT_BASE_URL,
+                apiKey: process.env.HINDSIGHT_API_KEY,
+                timeoutMs: 800,
+              },
+            });
+            if (ltm.enabled) {
+              const t0 = Date.now();
+              const memories = await ltm.recallRelevantMemory(message, { userId: 'local' }, { timeoutMs: 800, maxResults: 5 });
+              const recallMs = Date.now() - t0;
+              const facts = memories.map((m) => m?.text?.trim()).filter(Boolean) as string[];
+              if (facts.length > 0) {
+                const memBlock = `RELEVANT LONG-TERM MEMORY (from prior meetings — may be incomplete):\n${facts.map((f) => `- ${f}`).join('\n')}\nUse these only if they help answer the question; ignore if irrelevant.`;
+                context = context ? `${memBlock}\n\n${context}` : memBlock;
+              }
+              console.log('[HindsightLiveRecall]', { ms: recallMs, facts: facts.length, injected: facts.length > 0 });
+              iTrace.noteContext({ source: 'hindsight_recall', trustLevel: 'medium', requested: true, retrieved: facts.length > 0, included: facts.length > 0, reason: 'live_backward_recall' });
+            }
+          } catch (recallErr: any) {
+            console.warn('[HindsightLiveRecall] skipped (non-fatal):', recallErr?.message);
+          }
         }
 
         // Use CHAT_MODE_PROMPT for general chat — bypasses the interview-copilot
