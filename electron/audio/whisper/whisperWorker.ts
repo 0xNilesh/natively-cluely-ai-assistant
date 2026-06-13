@@ -205,8 +205,19 @@ parentPort.on('message', async (msg: any) => {
       // 0 when unknown / lookup failed → the aggregator falls back to observed
       // file totals. The constructor sanitizes any non-finite/negative value.
       const aggregator = new WhisperProgressAggregator(Number(msg.expectedBytes));
+      // External-data format: forwarded only when the catalog declares it (for
+      // checkpoints whose config.json omits it, e.g. Whisper Large v3 Turbo).
+      // When undefined, transformers falls back to the model's own config —
+      // preserving prior behaviour for every self-declaring model. Without this
+      // the sibling `*.onnx_data` weight file is never fetched and ORT aborts:
+      // "filesystem error: in file_size: ... encoder_model.onnx_data".
+      const useExternalDataFormat: boolean | Record<string, boolean> | undefined =
+        msg.useExternalDataFormat;
       pipe = await pipeline('automatic-speech-recognition', msg.modelId, {
         dtype,
+        ...(useExternalDataFormat !== undefined
+          ? { use_external_data_format: useExternalDataFormat }
+          : {}),
         progress_callback: (data: any) => {
           const { pct } = aggregator.update(data);
           if (pct === null) return;

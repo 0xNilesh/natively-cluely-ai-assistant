@@ -86,7 +86,7 @@ function dtypeSizeFactor(dtype: string | Record<string, string>): number {
 export function buildWorkerInitMessage(modelId: string): WorkerInitMessage {
     // Late require — modelManager imports electron, which isn't available
     // when this module is first loaded in some contexts (test harnesses).
-    const { getModelsDir, getModelSizeBytes } = require('./modelManager');
+    const { getModelsDir, getModelSizeBytes, getModelExternalDataFormat } = require('./modelManager');
     const { executionProviders, dtype } = resolveInferenceConfig();
     // Catalog download size — progress-bar denominator from byte zero. The
     // lookup is best-effort: if it's missing (unknown id) or the call fails
@@ -101,6 +101,17 @@ export function buildWorkerInitMessage(modelId: string): WorkerInitMessage {
     } catch {
         expectedBytes = 0;
     }
+    // External-data flag for checkpoints whose weights live in sibling
+    // `*.onnx_data` files but whose own config.json doesn't declare it (e.g.
+    // Whisper Large v3 Turbo). undefined for every other model — the worker
+    // then lets transformers read each model's config.json as before. Like the
+    // size lookup above, never let this block worker startup.
+    let useExternalDataFormat: boolean | Record<string, boolean> | undefined;
+    try {
+        useExternalDataFormat = getModelExternalDataFormat(modelId);
+    } catch {
+        useExternalDataFormat = undefined;
+    }
     return {
         type: 'init',
         modelId,
@@ -108,6 +119,7 @@ export function buildWorkerInitMessage(modelId: string): WorkerInitMessage {
         executionProviders,
         dtype,
         expectedBytes,
+        useExternalDataFormat,
     };
 }
 
