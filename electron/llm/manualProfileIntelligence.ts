@@ -151,6 +151,11 @@ const NAME_PATTERNS = [
 const EXPERIENCE_PATTERNS = [
   /\b(my|your)\s+experiences?\b/,
   /\bexperience\s+do\s+i\s+have\b/,
+  // "How many years of experience do you have?" / "how much experience…" (A09 fix) —
+  // ensures the years-count question routes through the candidate-voice experience path
+  // and gets a first-person answer instead of a 2nd-person LLM aside ("You have…").
+  /\bhow\s+(?:many\s+years?|much)\s+(?:of\s+)?experience\b/,
+  /\byears?\s+of\s+experience\s+(?:do\s+)?(?:you|i)\b/,
   /\bwork\s+experience\b/,
   /\bwork\s+history\b/,
   /\bprevious\s+roles?\b/,

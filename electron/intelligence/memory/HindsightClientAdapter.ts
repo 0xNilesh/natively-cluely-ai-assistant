@@ -98,6 +98,7 @@ export class HindsightClientAdapter implements MemoryProvider {
     const timeoutMs = options.timeoutMs ?? this.config.timeoutMs ?? 800;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let raceTimer: NodeJS.Timeout | undefined; // the Promise.race fallback timer (clear on win)
     try {
       // 0.8.2 recall bounds by TOKENS, not result count. Approximate a result cap by
       // budgeting ~120 tokens per desired result (the server returns the most relevant
@@ -110,7 +111,7 @@ export class HindsightClientAdapter implements MemoryProvider {
           maxTokens,
           signal: controller.signal,
         }),
-        new Promise<{ results: [] }>((resolve) => setTimeout(() => resolve({ results: [] }), timeoutMs)),
+        new Promise<{ results: [] }>((resolve) => { raceTimer = setTimeout(() => resolve({ results: [] }), timeoutMs); }),
       ]);
       const results = (res as { results?: HindsightRecallResult[] })?.results;
       if (!Array.isArray(results)) return [];
@@ -128,6 +129,7 @@ export class HindsightClientAdapter implements MemoryProvider {
       return [];
     } finally {
       clearTimeout(timer);
+      if (raceTimer) clearTimeout(raceTimer); // don't leave the fallback timer dangling on win
     }
   }
 

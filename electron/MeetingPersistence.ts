@@ -420,15 +420,19 @@ Return ONLY valid JSON (no markdown code blocks):
                 // Config from HindsightManager (settings OR env) so this works in a packaged
                 // build, not just when HINDSIGHT_BASE_URL is exported in a dev shell.
                 const { HindsightManager } = require('./services/HindsightManager') as typeof import('./services/HindsightManager');
-                const hsCfg = HindsightManager.getInstance().getHindsightConfig();
-                if (isIntelligenceFlagEnabled('hindsightPostMeetingRetain') && hsCfg) {
+                const _hm = HindsightManager.getInstance();
+                const hsCfg = _hm.getHindsightConfig();
+                // Skip a known-down server (cached health) — don't queue a retain that
+                // can't land (2026-06-14 fix).
+                if (isIntelligenceFlagEnabled('hindsightPostMeetingRetain') && hsCfg && _hm.isAvailable()) {
                     const ltm = LongTermMemoryService.fromFlags({ hindsight: hsCfg });
                     if (ltm.enabled) {
                         const summaryText = typeof summaryData?.overview === 'string'
                             ? summaryData.overview
                             : JSON.stringify(summaryData?.keyPoints ?? []);
-                        // Single-user desktop → 'local' scope; mode tag scopes by meeting mode.
-                        ltm.retainMeetingSummary(meetingId, summaryText, { userId: 'local', meetingId }, modeSnapshot?.templateType);
+                        // Per-install scope id (isolates two installs sharing one Cloud
+                        // account); mode tag scopes by meeting mode.
+                        ltm.retainMeetingSummary(meetingId, summaryText, { userId: _hm.localUserId(), meetingId }, modeSnapshot?.templateType);
                         console.log('[Hindsight] queued post-meeting summary retain', { meetingId, provider: ltm.providerName });
                     }
                 }

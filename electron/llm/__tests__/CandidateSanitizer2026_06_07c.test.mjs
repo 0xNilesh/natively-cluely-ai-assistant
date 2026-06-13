@@ -41,7 +41,9 @@ describe('sanitizeCandidateAnswer — does NOT damage legitimate content', () =>
     'I would rate my Python an 8 out of 10, grounded in the FastAPI work I shipped.',
     'I am an AI Engineer with experience building ML pipelines and LLM applications.',
     'My best project is a low-latency data pipeline I built end to end.',
-    "You're a strong fit: you have the SQL and dashboarding the role needs.",
+    // NOTE: the old "You're a strong fit: you have the SQL…" fixture moved to the
+    // perspective-flip block below — it is NOT clean (2nd-person addressing the
+    // candidate), and the A09 fix (2026-06-14) now corrects it to 1st person.
     // code-review 2026-06-07c false-positive guards — these must be PRESERVED:
     'I cannot share the exact revenue figure but it grew 30% year over year.',
     'I do not have ratings yet for that framework, but I am learning it quickly.',
@@ -54,6 +56,34 @@ describe('sanitizeCandidateAnswer — does NOT damage legitimate content', () =>
       const r = sanitizeCandidateAnswer(clean);
       assert.equal(r.repaired, false, 'no repair on clean content');
       assert.equal(r.text.trim(), clean.trim());
+    });
+  }
+});
+
+// A09 fix (2026-06-14): a candidate-voice answer that ADDRESSES the candidate in the
+// second person ("You have…", "You're a strong fit") must be flipped to first person.
+describe('sanitizeCandidateAnswer — perspective flip (2nd → 1st person)', () => {
+  for (const [input, mustMatch] of [
+    ['You have roughly 0.4 years of experience.', /^I have roughly 0\.4 years/],
+    ["You're a strong fit: you have the SQL and dashboarding the role needs.", /^I'm a strong fit: I have the SQL/],
+    ['Your experience includes backend work at Acme.', /^My experience includes/],
+    ["You've built a search engine and you led the team.", /I've built .* I led the team/],
+  ]) {
+    test(`flips: "${input.slice(0, 40)}…"`, () => {
+      const r = sanitizeCandidateAnswer(input);
+      assert.equal(r.repaired, true, 'perspective flip counts as a repair');
+      assert.match(r.text.trim(), mustMatch);
+    });
+  }
+  // Safety: a direct question to the user / generic advice must NOT be flipped.
+  for (const keep of [
+    'Could you clarify which role you mean?',
+    'You should mention your Redis work.',
+    'Thank you for your time.',
+  ]) {
+    test(`does NOT flip user-addressed: "${keep.slice(0, 40)}…"`, () => {
+      const r = sanitizeCandidateAnswer(keep);
+      assert.equal(r.text.trim(), keep.trim());
     });
   }
 });

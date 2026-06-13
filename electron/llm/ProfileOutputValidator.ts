@@ -413,9 +413,51 @@ const CANDIDATE_META_MARKERS: RegExp[] = [
   /^\s*(?:please\s+)?(?:upload|paste|provide|share|attach)\s+(?:your|the)\s+(?:resume|cv|profile|job description|jd)\b/i,
 ];
 
+// PERSPECTIVE REPAIR (2026-06-14, A09 fix). A candidate-voice answer must speak AS the
+// candidate ("I have 5 years…"), not ABOUT them ("You have 5 years…"). The LLM sometimes
+// addresses the candidate in the second person on factual questions ("How many years of
+// experience do you have?" → "You have roughly 0.4 years"). This flips the candidate-
+// addressing second person to first person. Conservative: only verb-anchored "you/your"
+// forms, applied per-sentence to prose (fenced code is preserved by the caller's split).
+// We do NOT touch a trailing question to the user, generic "you can/you should" advice,
+// or "thank you", so an interviewer-facing aside isn't mangled.
+const SECOND_PERSON_REPAIRS: Array<[RegExp, string]> = [
+  [/\byou have\b/gi, 'I have'],
+  [/\byou'?ve\b/gi, "I've"],
+  [/\byou had\b/gi, 'I had'],
+  [/\byou are\b/gi, 'I am'],
+  [/\byou'?re\b/gi, "I'm"],
+  [/\byou were\b/gi, 'I was'],
+  [/\byou worked\b/gi, 'I worked'],
+  [/\byou built\b/gi, 'I built'],
+  [/\byou led\b/gi, 'I led'],
+  [/\byou bring\b/gi, 'I bring'],
+  [/\byou possess\b/gi, 'I possess'],
+  [/\byour experience\b/gi, 'my experience'],
+  [/\byour background\b/gi, 'my background'],
+  [/\byour skills?\b/gi, 'my skill'],
+  [/\byour projects?\b/gi, 'my project'],
+  [/\byour strongest\b/gi, 'my strongest'],
+  [/\byour role\b/gi, 'my role'],
+];
+// A sentence we must NOT flip: a direct question/instruction to the user, or generic
+// advice. If the sentence is itself a question addressed outward, leave it alone.
+const ADDRESSES_USER_RE = /\?\s*$|\b(?:you can|you could|you should|you might|you may|you'?ll want|let me know|feel free)\b|\bthank you\b/i;
+
+function repairCandidatePerspective(sentence: string): { text: string; changed: boolean } {
+  if (!/\byou(?:'?(?:ve|re|ll|d))?\b|\byour\b/i.test(sentence)) return { text: sentence, changed: false };
+  if (ADDRESSES_USER_RE.test(sentence)) return { text: sentence, changed: false };
+  let out = sentence;
+  for (const [re, rep] of SECOND_PERSON_REPAIRS) {
+    re.lastIndex = 0;
+    out = out.replace(re, (m) => (m[0] === m[0].toUpperCase() ? rep.charAt(0).toUpperCase() + rep.slice(1) : rep));
+  }
+  return { text: out, changed: out !== sentence };
+}
+
 export interface CandidateSanitizeResult {
   text: string;
-  /** True when at least one offending sentence was removed. */
+  /** True when at least one offending sentence was removed OR a perspective flip applied. */
   repaired: boolean;
   /** True when stripping left nothing usable — caller MUST use a deterministic fallback. */
   needsFallback: boolean;
@@ -434,6 +476,7 @@ export function sanitizeCandidateAnswer(answer: string): CandidateSanitizeResult
   const original = String(answer || '');
   if (!original.trim()) return { text: original, repaired: false, needsFallback: true, removedMarkers: [] };
   const removed = new Set<string>();
+  let perspectiveFlipped = false;
   const markerHit = (s: string): boolean => {
     let hit = false;
     for (let i = 0; i < CANDIDATE_META_MARKERS.length; i++) {
@@ -447,12 +490,20 @@ export function sanitizeCandidateAnswer(answer: string): CandidateSanitizeResult
     if (seg.startsWith('```')) return seg;
     return seg.split('\n').map(line => {
       if (!line.trim()) return line;
-      const kept = line.split(/(?<=[.!?])\s+/).filter(sentence => !markerHit(sentence)).join(' ');
+      const kept = line.split(/(?<=[.!?])\s+/)
+        .filter(sentence => !markerHit(sentence))
+        // A09 fix: flip candidate-addressing 2nd person ("You have…") to 1st ("I have…").
+        .map(sentence => {
+          const r = repairCandidatePerspective(sentence);
+          if (r.changed) perspectiveFlipped = true;
+          return r.text;
+        })
+        .join(' ');
       return kept;
     }).join('\n');
   }).join('');
   const text = cleaned.replace(/\n{3,}/g, '\n\n').replace(/[ \t]{2,}/g, ' ').trim();
-  const repaired = removed.size > 0 && text !== original.trim();
+  const repaired = (removed.size > 0 || perspectiveFlipped) && text !== original.trim();
   // If stripping emptied the answer (the whole thing was assistant-meta) or left a
   // fragment too short to be useful, the caller must fall back deterministically.
   const needsFallback = text.length < 15;

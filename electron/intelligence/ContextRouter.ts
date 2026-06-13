@@ -82,7 +82,11 @@ export interface ContextRouterDecision {
 
 // Questions that look backward at prior meetings/conversations → long-term memory
 // territory (Hindsight + MeetingMemory + GlobalSearch when they exist).
-const RECALL_RE = /\b(last (time|meeting|call|session)|previous(ly)?|earlier|before|recurring|history|past (meetings?|calls?)|we (discuss|talked|spoke)|did (we|they|i) (discuss|talk|cover|say)|summari[sz]e (all|our|the) (meetings?|calls?)|what did .* (say|ask) (about|last)|came up (in|before)|prior (call|meeting|interview))\b/i;
+// Tightened 2026-06-14: bare tokens (`earlier`/`before`/`history`/`recurring`) used to
+// over-trigger recall on unrelated prose ("explain BFS before recursion", "browser
+// history"). They now require a meeting/conversation/discussion anchor nearby, so only a
+// genuinely backward-looking ASK fires the (gated, timeout-bounded) Hindsight recall.
+const RECALL_RE = /\b(last (time|meeting|call|session)|previous (meeting|call|session|conversation|discussion|time)|(earlier|before)\s+(meeting|call|session|conversation|we (?:discuss|talk|spoke|met|covered))|past (meetings?|calls?|sessions?|conversations?)|recurring (topic|theme|issue|question|pattern)|we (discuss|discussed|talked|spoke) (about|on)|did (we|they|i) (discuss|talk|cover|say|mention)|summari[sz]e (all|our|the|my)( (previous|past|recent|prior|last))? (meetings?|calls?|sessions?|conversations?)|what did .* (say|ask|mention) (about|last|before|earlier)|came up (in|before|earlier|previously)|prior (call|meeting|interview|session|conversation))\b/i;
 
 /**
  * Is this question backward-looking — i.e. asking about PRIOR meetings/conversations

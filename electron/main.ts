@@ -5856,10 +5856,12 @@ if (process.env.THINKING_MATRIX === '1') {
     console.log("App is quitting, cleaning up resources...");
     appState.setQuitting(true);
 
-    // Stop an app-managed Hindsight server (no-op unless the deferred auto-spawn owns one).
+    // Stop an app-managed Hindsight server SYNCHRONOUSLY (kills the detached process group
+    // → no orphaned Python/Postgres). No-op unless we spawned one. Must be sync: the app
+    // can exit before any async kill completes.
     try {
       const { HindsightManager } = require('./services/HindsightManager');
-      HindsightManager.getInstance().stop().catch(() => { /* best effort */ });
+      HindsightManager.getInstance().stopSync();
     } catch { /* optional */ }
 
     // Stop the default-output watcher so the setInterval doesn't keep calling

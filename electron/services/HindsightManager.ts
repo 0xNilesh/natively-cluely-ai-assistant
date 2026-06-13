@@ -11,10 +11,13 @@
 //              + the server) and points baseUrl at http://localhost:8888.
 //   • Cloud  — user pastes their Hindsight Cloud baseUrl + apiKey.
 //
-// THIS PASS: config-from-settings + cached health-gating only. The retain/recall paths
-// gate on isAvailable(), so a running (local or Cloud) server works in a packaged build —
-// config flows from SettingsManager, not just shell env. The auto-spawn/process-lifecycle
-// (start/stop/pollUntilReady) is DEFERRED to a follow-up; see startManagedServer() TODO.
+// Config-from-settings + cached health-gating: the retain/recall paths gate on
+// isAvailable(), so a running (local or Cloud) server works in a packaged build — config
+// flows from SettingsManager, not just shell env. Auto-spawn IS implemented: when the
+// memory flag is on + a baseUrl is configured + the server is not already healthy + a
+// hindsightServerCommand is set (autoStart defaults on), start() spawns it (detached,
+// group-killed on quit via stopSync) and polls for readiness. Cloud / a user-run server
+// stays healthy → no spawn.
 
 import type { HindsightConfig } from '../intelligence/memory/HindsightClientAdapter';
 import type { ChildProcess } from 'child_process';
@@ -76,6 +79,27 @@ export class HindsightManager {
     }
   }
 
+  /**
+   * Stable per-install memory scope id. Used as the Hindsight `userId` so the bank/tags
+   * are unique to THIS install. Matters for the Cloud path: two different installs that
+   * point at the same Cloud account would otherwise both write to bank `user_local` with
+   * identical tags and MERGE each other's memories. Derived from the persisted install
+   * UUID (getOrCreateInstallId). Falls back to 'local' if unavailable (local-only path is
+   * single-user so the constant is safe there).
+   */
+  private _localUserId: string | null = null;
+  localUserId(): string {
+    if (this._localUserId) return this._localUserId;
+    try {
+      const { getOrCreateInstallId } = require('./InstallPingManager');
+      const id = String(getOrCreateInstallId() || '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 16);
+      this._localUserId = id ? `local_${id}` : 'local';
+    } catch {
+      this._localUserId = 'local';
+    }
+    return this._localUserId;
+  }
+
   /** GET <baseUrl>/health with a 1s timeout. Returns false on any error/timeout. */
   async healthCheck(): Promise<boolean> {
     const cfg = this.getHindsightConfig();
@@ -109,6 +133,11 @@ export class HindsightManager {
    */
   isAvailable(): boolean {
     if (!this.getHindsightConfig()) return false;
+    // Cold start: never health-checked yet (e.g. start() hasn't run / completed). Be
+    // OPTIMISTIC — return true and kick a check. Worst case is one recall to a down server
+    // (already timeout-bounded); the alternative (return false) would wrongly skip recall
+    // for a configured+healthy server on the first question after launch.
+    if (this.lastCheckedAt === 0) { void this.healthCheck(); return true; }
     const stale = Date.now() - this.lastCheckedAt > AVAILABILITY_TTL_MS;
     if (stale) { void this.healthCheck(); } // fire-and-forget refresh; never awaited here
     return this.lastHealthy;
@@ -181,13 +210,21 @@ export class HindsightManager {
       const { spawn } = require('child_process') as typeof import('child_process');
       this.isAppManaged = true;
       // Shell form so a multi-token command (`bash scripts/...`) works cross-platform.
+      // detached:true on POSIX puts the server in its OWN process group, so on quit we can
+      // synchronously kill the WHOLE tree (Python + embedded Postgres workers, which
+      // re-parent/daemonize) with one `process.kill(-pid)` inside before-quit — tree-kill
+      // is async and the app can exit before it finishes, orphaning Postgres. (Windows has
+      // no process groups; we fall back to taskkill /T in stopSync.)
+      const isWin = process.platform === 'win32';
       this.serverProcess = spawn(command, {
         shell: true,
-        detached: false,    // attached to app lifecycle (like OllamaManager)
+        detached: !isWin,   // own process group on POSIX for group-kill on quit
         windowsHide: true,
         stdio: 'ignore',
         cwd: process.cwd(),
       });
+      // Don't let the detached child keep the parent event loop alive.
+      this.serverProcess.unref?.();
       this.serverProcess.on('error', (err: any) => {
         console.error('[HindsightManager] failed to start server (is it installed?):', err?.message);
         this.isAppManaged = false;
@@ -206,6 +243,9 @@ export class HindsightManager {
 
   /** Poll /health every 5s for up to ~3min (first boot downloads embedding models). */
   private pollUntilReady(): void {
+    // Guard against a leaked interval if pollUntilReady is ever entered twice (e.g. a
+    // future second start()): clear any prior one before arming a new one.
+    if (this.pollInterval) { clearInterval(this.pollInterval); this.pollInterval = null; }
     this.spawnAttempts = 0;
     this.pollInterval = setInterval(async () => {
       this.spawnAttempts++;
@@ -223,24 +263,38 @@ export class HindsightManager {
     this.pollInterval.unref?.(); // never keep the process alive for this
   }
 
-  /** Quit hook. Kills the server ONLY if we spawned it (avoids an orphaned Postgres). A
-   *  user-run or Cloud server is left untouched. Never throws. */
-  async stop(): Promise<void> {
+  /**
+   * SYNCHRONOUS quit hook. Kills the server tree ONLY if WE spawned it (a user-run or
+   * Cloud server is left untouched). Must be synchronous: the `before-quit` handler can let
+   * the app exit before any async work (tree-kill) completes, orphaning the Python+Postgres
+   * tree. Because the server was spawned detached (its own process group on POSIX), one
+   * `process.kill(-pid, SIGKILL)` takes down the whole group right now. Never throws.
+   */
+  stopSync(): void {
     try {
       if (this.pollInterval) { clearInterval(this.pollInterval); this.pollInterval = null; }
       if (!this.isAppManaged || !this.serverProcess?.pid) return;
       const pid = this.serverProcess.pid;
-      try {
-        const treeKill = require('tree-kill');
-        treeKill(pid); // kill the whole process tree (Python + embedded Postgres children)
-      } catch {
-        try { process.kill(pid); } catch { /* already gone */ }
+      if (process.platform === 'win32') {
+        // No process groups on Windows — taskkill the tree synchronously.
+        try {
+          require('child_process').execFileSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
+        } catch { try { process.kill(pid); } catch { /* gone */ } }
+      } else {
+        // Negative pid → kill the whole process group (server + Postgres workers).
+        try { process.kill(-pid, 'SIGKILL'); }
+        catch { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
       }
       this.serverProcess = null;
       this.isAppManaged = false;
-      console.log('[HindsightManager] app-managed server terminated on quit.');
+      console.log('[HindsightManager] app-managed server tree terminated on quit.');
     } catch (e: any) {
-      console.warn('[HindsightManager] stop skipped (non-fatal):', e?.message);
+      console.warn('[HindsightManager] stopSync skipped (non-fatal):', e?.message);
     }
+  }
+
+  /** Async wrapper kept for API compatibility / non-quit callers. Delegates to stopSync. */
+  async stop(): Promise<void> {
+    this.stopSync();
   }
 }

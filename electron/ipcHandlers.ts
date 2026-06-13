@@ -1006,10 +1006,14 @@ export function initializeIpcHandlers(appState: AppState): void {
         // build. Resolved up-front so the gate itself depends on a configured server, not env.
         const { HindsightManager: _HM } = require('./services/HindsightManager') as typeof import('./services/HindsightManager');
         const _liveHsCfg = _HM.getInstance().getHindsightConfig();
+        // isAvailable() = configured AND a recent health-check passed (cached ~30s, primed
+        // at startup). Short-circuit a known-down server so the live answer NEVER pays the
+        // 800ms recall timeout when Hindsight is unreachable (2026-06-14 fix).
         if (!isCodingChat && !isContractEnforced
             && isIntelligenceFlagEnabled('hindsightLiveRecall')
             && isIntelligenceFlagEnabled('hindsightMemory')
             && _liveHsCfg
+            && _HM.getInstance().isAvailable()
             && typeof message === 'string'
             && isBackwardLookingQuery(message)) {
           try {
@@ -1017,14 +1021,26 @@ export function initializeIpcHandlers(appState: AppState): void {
             const ltm = LongTermMemoryService.fromFlags({ hindsight: { ..._liveHsCfg, timeoutMs: 800 } });
             if (ltm.enabled) {
               const t0 = Date.now();
-              const memories = await ltm.recallRelevantMemory(message, { userId: 'local' }, { timeoutMs: 800, maxResults: 5 });
+              const memories = await ltm.recallRelevantMemory(message, { userId: _HM.getInstance().localUserId() }, { timeoutMs: 800, maxResults: 5 });
               const recallMs = Date.now() - t0;
               const facts = memories.map((m) => m?.text?.trim()).filter(Boolean) as string[];
               if (facts.length > 0) {
                 const memBlock = `RELEVANT LONG-TERM MEMORY (from prior meetings — may be incomplete):\n${facts.map((f) => `- ${f}`).join('\n')}\nUse these only if they help answer the question; ignore if irrelevant.`;
                 context = context ? `${memBlock}\n\n${context}` : memBlock;
               }
-              console.log('[HindsightLiveRecall]', { ms: recallMs, facts: facts.length, injected: facts.length > 0 });
+              // Record real recall latency + empty-rate into the metrics registry
+              // (was dead code with 0 callers — code-review M1). Cheap, content-free.
+              try {
+                const { intelligenceMetrics } = require('./intelligence/IntelligenceMetrics') as typeof import('./intelligence/IntelligenceMetrics');
+                intelligenceMetrics.timing('hindsight_recall_ms', recallMs);
+                intelligenceMetrics.rate('memory_recall_empty_rate', facts.length === 0);
+              } catch { /* metrics never affect the answer */ }
+              // Content-free debug line (counts/timing only), gated behind the trace flag
+              // so it stays quiet by default (the iTrace context note below is the durable
+              // record). Only fires on a real recall (flag on + backward query + server up).
+              if (isIntelligenceFlagEnabled('trace')) {
+                console.log('[HindsightLiveRecall]', { ms: recallMs, facts: facts.length, injected: facts.length > 0 });
+              }
               iTrace.noteContext({ source: 'hindsight_recall', trustLevel: 'medium', requested: true, retrieved: facts.length > 0, included: facts.length > 0, reason: 'live_backward_recall' });
             }
           } catch (recallErr: any) {
@@ -1458,18 +1474,22 @@ export function initializeIpcHandlers(appState: AppState): void {
               // Log Usage for streaming chat
               intelligenceManager.logUsage('chat', message, fullResponse);
               // Conversation Memory V2 (Phase 11): record this turn so a later bare
-              // follow-up in this session can resolve against it. Cheap in-memory,
-              // bounded per session; recorded regardless of the flag (so enabling the
-              // flag mid-session still has history), but only CONSUMED when the flag is on.
-              try {
-                _manualConversationMemory.record({
-                  sessionId: String(senderId),
-                  userMessage: message,
-                  assistantAnswer: fullResponse,
-                  mode: manualActiveMode?.templateType,
-                  timestamp: Date.now(),
-                });
-              } catch { /* memory recording never affects the answer */ }
+              // follow-up in this session can resolve against it. GATED on the flag
+              // (2026-06-14 fix): previously recorded unconditionally, which retained raw
+              // Q/A in process memory even with every Intelligence flag OFF — breaking the
+              // "flag-OFF is byte-for-byte the original path" guarantee. The small cost of
+              // gating is that enabling mid-session starts with empty history (negligible).
+              if (isIntelligenceFlagEnabled('conversationMemoryV2')) {
+                try {
+                  _manualConversationMemory.record({
+                    sessionId: String(senderId),
+                    userMessage: message,
+                    assistantAnswer: fullResponse,
+                    mode: manualActiveMode?.templateType,
+                    timestamp: Date.now(),
+                  });
+                } catch { /* memory recording never affects the answer */ }
+              }
             }
 
             // VERIFIED CODE EXECUTION (background, strictly additive). For coding
@@ -4058,12 +4078,15 @@ export function initializeIpcHandlers(appState: AppState): void {
         // Config from HindsightManager (settings OR env) so global recall works in a
         // packaged build, not only when HINDSIGHT_BASE_URL is exported in a dev shell.
         const { HindsightManager } = require('./services/HindsightManager') as typeof import('./services/HindsightManager');
-        const hsCfg = HindsightManager.getInstance().getHindsightConfig();
-        if (isIntelligenceFlagEnabled('hindsightMemory') && hsCfg) {
+        const _hm = HindsightManager.getInstance();
+        const hsCfg = _hm.getHindsightConfig();
+        // Short-circuit a known-down server (cached health) so search doesn't pay the 2s
+        // recall timeout when Hindsight is unreachable (2026-06-14 fix).
+        if (isIntelligenceFlagEnabled('hindsightMemory') && hsCfg && _hm.isAvailable()) {
           const { LongTermMemoryService } = require('./intelligence/memory/LongTermMemoryService') as typeof import('./intelligence/memory/LongTermMemoryService');
           const ltm = LongTermMemoryService.fromFlags({ hindsight: { ...hsCfg, timeoutMs: 2000 } });
           if (ltm.enabled) {
-            const memories = await ltm.recallRelevantMemory(q, { userId: 'local' }, { timeoutMs: 2000, maxResults: 8 });
+            const memories = await ltm.recallRelevantMemory(q, { userId: _hm.localUserId() }, { timeoutMs: 2000, maxResults: 8 });
             for (const mem of memories) {
               if (!mem?.text?.trim()) continue;
               candidates.push({
@@ -4082,7 +4105,12 @@ export function initializeIpcHandlers(appState: AppState): void {
         console.warn('[GlobalSearchV2] Hindsight recall skipped (non-fatal):', memErr?.message);
       }
 
+      const _gsT0 = Date.now();
       const results = new SearchOrchestrator().globalSearch(candidates, { userId: 'local' }, filters || {}, Date.now());
+      try {
+        const { intelligenceMetrics } = require('./intelligence/IntelligenceMetrics') as typeof import('./intelligence/IntelligenceMetrics');
+        intelligenceMetrics.timing('global_search_ms', Date.now() - _gsT0);
+      } catch { /* metrics never affect results */ }
       return { enabled: true, results };
     } catch (e: any) {
       console.warn('[GlobalSearchV2] search failed (non-fatal):', e?.message);
