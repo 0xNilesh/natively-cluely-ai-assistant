@@ -10,7 +10,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const { classifyProviderError, isClarificationStall } = await import(
+const { classifyProviderError, isClarificationStall, isPermanentKeyError } = await import(
   pathToFileURL(path.resolve(__dirname, '../../../dist-electron/electron/llm/index.js')).href
 );
 
@@ -67,6 +67,42 @@ describe('isClarificationStall', () => {
   test('a long answer that happens to contain "repeat" is not a stall', () => {
     assert.equal(isClarificationStall('I built a retry system that can repeat failed requests with exponential backoff, which I used in production for over a year on a high-traffic service.'), false);
   });
+});
+
+describe('isPermanentKeyError — shared-key fatal vs transient (Gemini cascade abort)', () => {
+  // PERMANENT: same API key → every sibling model fails identically. Abort cascade.
+  const permanent = [
+    ['401 status', { status: 401 }],
+    ['403 status', { status: 403 }],
+    ['402 payment required', { status: 402 }],
+    ['expired API key', new Error('API key expired. Please renew the API key.')],
+    ['invalid API key', new Error('API_KEY_INVALID: API key not valid')],
+    ['unauthorized', new Error('401 Unauthorized')],
+    ['permission denied', new Error('PERMISSION_DENIED: permission denied on resource')],
+    ['billing disabled', new Error('FAILED_PRECONDITION: billing account is not configured')],
+    ['no credits', new Error('You have run out of credits')],
+    ['insufficient credit', new Error('insufficient_credit for this request')],
+    ['account suspended', new Error('This account has been suspended')],
+  ];
+  for (const [name, err] of permanent) {
+    test(`${name} → permanent (abort whole cascade)`, () => assert.equal(isPermanentKeyError(err), true));
+  }
+
+  // TRANSIENT: worth walking the next model tier on the same key.
+  const transient = [
+    ['plain 429 rate limit', { status: 429 }],
+    ['bare RESOURCE_EXHAUSTED (per-minute rate)', new Error('429 RESOURCE_EXHAUSTED: quota exceeded for requests per minute')],
+    ['503 overloaded', { status: 503 }],
+    ['529 overloaded', new Error('model is overloaded, please try again')],
+    ['timeout', new Error('deadline exceeded; aborted')],
+    ['network ENOTFOUND', new Error('getaddrinfo ENOTFOUND generativelanguage.googleapis.com')],
+    ['500 server error', { status: 500 }],
+    ['null error', null],
+    ['empty', new Error('')],
+  ];
+  for (const [name, err] of transient) {
+    test(`${name} → transient (keep walking the cascade)`, () => assert.equal(isPermanentKeyError(err), false));
+  }
 });
 
 describe('outage classification gates benchmark scoring correctly', () => {

@@ -36,6 +36,7 @@ import {
   DEFAULT_TEXT_FALLBACK_CONFIG,
   type TextStreamProvider,
 } from "./llm/textStreamFallback"
+import { isPermanentKeyError } from "./llm/providerErrorClassifier"
 import { telemetryService } from "./services/telemetry/TelemetryService"
 import {
   ollamaVisionFromShow,
@@ -97,50 +98,16 @@ interface OllamaResponse {
   done: boolean
 }
 
-// Model constants for Gemini (priority: flash → flash-lite → pro)
+// Model constants for Gemini (priority: flash-lite → flash → pro)
 const GEMINI_FLASH_MODEL = "gemini-3.5-flash"
 const GEMINI_FLASH_LITE_MODEL = "gemini-3.1-flash-lite"
 const GEMINI_PRO_MODEL = "gemini-3.1-pro-preview"
 
-// Vision tail-latency hedging: when ON, the Gemini Flash vision provider hedges
-// with flash-lite — if 3.5-flash hasn't produced a first token within a short
-// EWMA-derived delay, flash-lite is launched in parallel and the first usable
-// token wins (loser aborted). Cuts the slow-tail TTFT (the >20s screenshot
-// stalls) without doubling quota on the fast common case. Env kill-switch;
-// default ON (set NATIVELY_VISION_HEDGE=0 to disable).
-const VISION_HEDGE_ENABLED = process.env.NATIVELY_VISION_HEDGE !== '0';
-// Text tail-latency hedging: the direct-Gemini TEXT path (a user on the Gemini
-// model, no Natively/Groq fronting it) used a SINGLE un-hedged
-// streamWithGeminiModel call, so a slow 3.5-flash first token (measured tail:
-// median 2.8s, up to 5.7s on a degraded day) stalled the live answer with no
-// recourse — the dominant cause of first-useful-token latency failures in the
-// 2026-06-06 release benchmark (79/94 fails were latency, p95 TTFT ~3.1s vs
-// flash-lite's rock-steady ~0.55s). When ON, the flash text provider hedges
-// with flash-lite exactly like the vision path: if 3.5-flash hasn't produced a
-// token within a short delay, flash-lite is launched in parallel and the first
-// usable token wins (loser aborted). Env kill-switch; default ON (set
-// NATIVELY_TEXT_HEDGE=0 to disable).
-const TEXT_HEDGE_ENABLED = process.env.NATIVELY_TEXT_HEDGE !== '0';
-// Hedge config for the direct-Gemini TEXT path. Unlike the conservative vision
-// hedge (min 2.5s — vision prefill is genuinely slow), text first-token is fast,
-// so the hedge fires AROUND flash's p50 (~1.1s): if flash is on its slow tail we
-// want flash-lite racing before the per-difficulty latency target (1.2s direct /
-// 1.8s medium) is blown, but not so early that we double quota on every healthy
-// request. ttftTimeout stays 6s so a genuinely dead flash still fails over.
-const GEMINI_TEXT_HEDGE_CONFIG: VisionFallbackConfig = {
-  ...DEFAULT_TEXT_FALLBACK_CONFIG,
-  ttftTimeoutMs: 6_000,
-  hedgeEnabled: TEXT_HEDGE_ENABLED,
-  // Cold (no EWMA yet): hedge at 700ms so even the first request has flash-lite
-  // (~0.55s TTFT) racing before the tightest 1200ms direct target. Once the EWMA
-  // warms, the delay self-tunes to ~p50 of the real flash TTFT (factor 0.7),
-  // clamped to [700,1500] so a healthy-fast flash isn't doubled and a slow flash
-  // is hedged well before the very_hard 3500ms target.
-  hedgeDelayDefaultMs: 700,
-  hedgeDelayEmaFactor: 0.7,
-  hedgeDelayMinMs: 700,
-  hedgeDelayMaxMs: 1_500,
-};
+// NOTE: tail-latency hedging (racing flash against flash-lite) has been removed
+// from BOTH the vision and the direct-Gemini text paths. Both now run a strict
+// serial Gemini cascade (flash-lite → flash → pro) — flash-lite leads, flash and
+// pro are pure pre-first-token fallbacks. The former VISION_HEDGE_ENABLED /
+// TEXT_HEDGE_ENABLED / GEMINI_TEXT_HEDGE_CONFIG knobs were removed.
 const GROQ_MODEL = "llama-3.3-70b-versatile"
 const OPENAI_MODEL = "gpt-5.4"
 const CLAUDE_MODEL = "claude-sonnet-4-6"
@@ -648,7 +615,7 @@ export class LLMHelper {
   // these named entry points so the surface stays auditable.
 
   public async runVisionRequest(
-    providerId: 'natively' | 'openai' | 'claude' | 'gemini_flash' | 'gemini_pro' | 'groq_scout' | 'custom',
+    providerId: 'natively' | 'openai' | 'claude' | 'gemini_flash_lite' | 'gemini_flash' | 'gemini_pro' | 'groq_scout' | 'custom',
     userPrompt: string,
     systemPrompt: string,
     imagePath: string,
@@ -662,6 +629,7 @@ export class LLMHelper {
         return this.generateWithClaude(userPrompt, systemPrompt, [imagePath]);
       case 'groq_scout':
         return this.generateWithGroqMultimodal(userPrompt, [imagePath], systemPrompt);
+      case 'gemini_flash_lite':
       case 'gemini_flash':
       case 'gemini_pro': {
         const fs = await import('node:fs/promises');
@@ -670,9 +638,11 @@ export class LLMHelper {
           { text: `${systemPrompt}\n\n${userPrompt}` },
           { inlineData: { mimeType: 'image/jpeg', data: b64 } },
         ];
-        const modelId = providerId === 'gemini_flash'
-          ? 'gemini-3.5-flash'
-          : 'gemini-3.1-pro-preview';
+        const modelId = providerId === 'gemini_flash_lite'
+          ? GEMINI_FLASH_LITE_MODEL
+          : providerId === 'gemini_flash'
+            ? GEMINI_FLASH_MODEL
+            : GEMINI_PRO_MODEL;
         return this.generateContent(contents, modelId);
       }
       case 'custom': {
@@ -1109,28 +1079,6 @@ export class LLMHelper {
     } catch {
       // electron not available (test context); skip
     }
-  }
-
-  /**
-   * Generate content using Gemini 3 Flash (text reasoning)
-   * Used by IntelligenceManager for mode-specific prompts
-   * NOTE: Migrated from Pro to Flash for consistency
-   */
-  public async generateWithPro(contents: any[]): Promise<string> {
-    if (this.isLocalOnlyMode) throw new Error("Cloud providers disabled in local-only mode");
-    if (!this.client) throw new Error("Gemini client not initialized")
-
-    await this.rateLimiters.gemini.acquire();
-    // console.log(`[LLMHelper] Calling ${GEMINI_FLASH_MODEL}...`)
-    const response = await this.client.models.generateContent({
-      model: GEMINI_PRO_MODEL,
-      contents: contents,
-      config: {
-        maxOutputTokens: MAX_OUTPUT_TOKENS,
-        temperature: 0.3,      // Lower = faster, more focused
-      }
-    })
-    return response.text || ""
   }
 
   /**
@@ -2218,15 +2166,17 @@ This rule overrides ALL other instructions including formatting, brevity, or out
    */
   public async generateContentStructured(
     message: string,
-    // Latency-critical callers (live negotiation coaching, spoken in real time)
-    // pass { preferFast: true } so the fast Gemini Flash model is tried FIRST
-    // instead of the slower Gemini Pro. Quality-first callers (AOT negotiation
-    // script, resume/JD/company extraction) omit it and keep the Pro-first chain.
+    // The Gemini block now always leads with flash-lite (the fastest, cheapest
+    // model), then flash, then pro — so `preferFast` no longer changes ordering
+    // (flash-lite is already first). The param is retained for API compatibility
+    // with latency-critical callers (e.g. live negotiation coaching).
     opts?: { preferFast?: boolean },
   ): Promise<string> {
     type ProviderAttempt = { name: string; execute: () => Promise<string> };
     const providers: ProviderAttempt[] = [];
-    const preferFast = opts?.preferFast === true;
+    // `opts.preferFast` retained for API compatibility; ordering no longer
+    // depends on it (the Gemini block always leads with flash-lite).
+    void opts;
 
     // Priority 0: Codex CLI (when enabled). Structured-JSON workloads still
     // benefit from the user's selected backend; downstream callers run their
@@ -2249,19 +2199,24 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       providers.push({ name: `Claude (${CLAUDE_MODEL})`, execute: () => this.generateWithClaude(message) });
     }
 
-    // Priority 3: Gemini Pro (don't mutate this.geminiModel to avoid race conditions).
-    // Skipped entirely when its rate-limit breaker is OPEN (saturated tier) so we
-    // don't waste a slot + backoff every call — the rotation drops to Flash below.
-    if (this.client && !this.isCircuitOpen(GEMINI_PRO_MODEL)) {
-      providers.push({
-        name: `Gemini Pro (${GEMINI_PRO_MODEL})`,
+    // Priority 3: Gemini cascade — flash-lite → flash → pro (cheapest/fastest
+    // first). Each model is a distinct provider so the rotation falls through
+    // lite → flash → pro on failure, and each carries its OWN circuit key so a
+    // saturated tier (repeated 429s) trips independently without burning the
+    // others' backoff. Pro keeps its pre-skip when its breaker is OPEN; lite and
+    // flash always lead (withRetry fast-fails an open key anyway).
+    // `preferFast` no longer reorders — flash-lite already leads — but is honored
+    // by keeping the cheapest model first.
+    if (this.client) {
+      const buildGeminiProvider = (modelId: string): ProviderAttempt => ({
+        name: `Gemini (${modelId})`,
         execute: async () => {
-          // Call the API directly with the Pro model instead of touching shared state
+          // Call the API directly with the target model instead of touching shared state.
           await this.rateLimiters.gemini.acquire();
           const response = await this.withRetry(async () => {
             // @ts-ignore
             const res = await this.client!.models.generateContent({
-              model: GEMINI_PRO_MODEL,
+              model: modelId,
               contents: [{ role: 'user', parts: [{ text: message }] }],
               config: { maxOutputTokens: MAX_OUTPUT_TOKENS, temperature: 0.4 }
             });
@@ -2270,39 +2225,17 @@ This rule overrides ALL other instructions including formatting, brevity, or out
             if (res.text) return res.text;
             const parts = candidate.content?.parts ?? [];
             return (Array.isArray(parts) ? parts : [parts]).map((p: any) => p?.text ?? '').join('');
-          }, 3, GEMINI_PRO_MODEL);   // circuitKey → trips after repeated 429s
+          }, 3, modelId);   // per-model circuitKey → trips after repeated 429s
           return response;
         }
       });
-    }
-    if (this.client) {
-
-      // Priority 4: Gemini Flash (fallback if Pro is unavailable/fails). When the
-      // caller asked for low latency (preferFast — live negotiation coaching), the
-      // fast Flash model is moved to the FRONT of the chain so it's tried before
-      // Pro/OpenAI/Claude; otherwise it stays a fallback after Pro.
-      const geminiFlashProvider: ProviderAttempt = {
-        name: `Gemini Flash (${GEMINI_FLASH_MODEL})`,
-        execute: async () => {
-          await this.rateLimiters.gemini.acquire();
-          const response = await this.withRetry(async () => {
-            // @ts-ignore
-            const res = await this.client!.models.generateContent({
-              model: GEMINI_FLASH_MODEL,
-              contents: [{ role: 'user', parts: [{ text: message }] }],
-              config: { maxOutputTokens: MAX_OUTPUT_TOKENS, temperature: 0.4 }
-            });
-            const candidate = res.candidates?.[0];
-            if (!candidate) return '';
-            if (res.text) return res.text;
-            const parts = candidate.content?.parts ?? [];
-            return (Array.isArray(parts) ? parts : [parts]).map((p: any) => p?.text ?? '').join('');
-          });
-          return response;
-        }
-      };
-      if (preferFast) providers.unshift(geminiFlashProvider);
-      else providers.push(geminiFlashProvider);
+      providers.push(buildGeminiProvider(GEMINI_FLASH_LITE_MODEL));
+      providers.push(buildGeminiProvider(GEMINI_FLASH_MODEL));
+      // Pro is skipped only when its own breaker is OPEN (saturated tier) so we
+      // don't waste a slot + backoff — lite/flash above already cover the fast path.
+      if (!this.isCircuitOpen(GEMINI_PRO_MODEL)) {
+        providers.push(buildGeminiProvider(GEMINI_PRO_MODEL));
+      }
     }
 
     // Priority 5: Groq (Fallback despite JSON hallucination risks)
@@ -3169,10 +3102,14 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
     // ──────────────────────────────────────────────────────────────────
     // Build 3-tier retry rotation from ModelVersionManager.
-    // PRIORITY ORDER: OpenAI (fastest) → Claude → Gemini Flash → Gemini Pro →
-    //                 Groq Scout → remaining providers.
+    // PRIORITY ORDER: OpenAI (fastest) → Claude → Gemini Flash-Lite → Gemini
+    //                 Flash → Gemini Pro → Groq Scout → remaining providers.
     // Each provider gets MAX_RETRIES_PER_PROVIDER attempts before moving on.
     // Providers are re-ordered dynamically when a provider is unavailable.
+    // NOTE: ModelVersionManager folds flash-lite into the GEMINI_FLASH family
+    // (its baseline is 3.5-flash), so flash-lite never surfaces via tiers. We
+    // inject it explicitly ahead of the flash tier attempt below so the Gemini
+    // cascade leads with the cheapest model.
     // ──────────────────────────────────────────────────────────────────
     const MAX_RETRIES_PER_PROVIDER = 3;
 
@@ -3199,6 +3136,13 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     const buildTierProviders = (tierKey: 'tier1' | 'tier2' | 'tier3'): ProviderAttempt[] => {
       const result: ProviderAttempt[] = [];
       for (const entry of sortedAllTiers) {
+        // Lead the Gemini Flash family with flash-lite (cheapest/fastest) so the
+        // per-tier Gemini order is flash-lite → flash → pro. tier2/tier3 are pure
+        // retries of tier1, so only inject on tier1 to avoid redundant attempts.
+        if (entry.family === ModelFamily.GEMINI_FLASH && tierKey === 'tier1') {
+          const liteAttempt = buildProviderForFamily(ModelFamily.GEMINI_FLASH, GEMINI_FLASH_LITE_MODEL);
+          if (liteAttempt) result.push(liteAttempt);
+        }
         const modelId = entry[tierKey];
         const attempt = buildProviderForFamily(entry.family, modelId);
         if (attempt) result.push(attempt);
@@ -3478,7 +3422,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     const textGroq = this.modelVersionManager.getTextTieredModels(TextModelFamily.GROQ).tier1;
 
     if (isMultimodal) {
-      // MULTIMODAL PROVIDER ORDER: [Natively] -> Codex CLI -> OpenAI -> Gemini Flash -> Claude -> Gemini Pro -> Groq Scout 4
+      // MULTIMODAL PROVIDER ORDER: [Natively] -> Codex CLI -> OpenAI -> Gemini Flash-Lite -> Gemini Flash -> Claude -> Gemini Pro -> Groq Scout 4
       if (this.hasNatively()) {
         providers.push({ name: 'Natively API', execute: () => this.streamWithNatively(userContent, openaiSystemPrompt, imagePaths, abortSignal) });
       }
@@ -3489,7 +3433,9 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         providers.push({ name: `OpenAI (${textOpenAI})`, execute: () => this.streamWithOpenaiMultimodal(userContent, imagePaths!, openaiSystemPrompt, textOpenAI, abortSignal) });
       }
       if (this.client) {
+        // Gemini cascade leads with flash-lite (cheapest/fastest), then flash.
         // CACHE: pass system via systemInstruction so it is separated from per-request contents.
+        providers.push({ name: `Gemini Flash-Lite (${GEMINI_FLASH_LITE_MODEL})`, execute: () => this.streamWithGeminiModel(userContent, GEMINI_FLASH_LITE_MODEL, imagePaths, geminiSystemForCache, abortSignal) });
         providers.push({ name: `Gemini Flash (${textGeminiFlash})`, execute: () => this.streamWithGeminiModel(userContent, textGeminiFlash, imagePaths, geminiSystemForCache, abortSignal) });
       }
       if (this.claudeClient) {
@@ -3503,7 +3449,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         providers.push({ name: `Groq (meta-llama/llama-4-scout-17b-16e-instruct)`, execute: () => this.streamWithGroqMultimodal(userContent, imagePaths!, openaiSystemPrompt, abortSignal) });
       }
     } else {
-      // TEXT-ONLY PROVIDER ORDER: [Natively] -> Groq -> Codex CLI -> OpenAI -> Claude -> Gemini Flash -> Gemini Pro
+      // TEXT-ONLY PROVIDER ORDER: [Natively] -> Groq -> Codex CLI -> OpenAI -> Claude -> Gemini Flash-Lite -> Gemini Flash -> Gemini Pro
       if (this.hasNatively()) {
         providers.push({ name: 'Natively API', execute: () => this.streamWithNatively(userContent, openaiSystemPrompt, undefined, abortSignal) });
       }
@@ -3526,7 +3472,9 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         providers.push({ name: `DeepSeek (${dsModel})`, execute: () => this.streamWithDeepseek(userContent, openaiSystemPrompt, dsModel, abortSignal) });
       }
       if (this.client) {
+        // Gemini cascade leads with flash-lite (cheapest/fastest), then flash, then pro.
         // CACHE: pass system via systemInstruction so it is separated from per-request contents.
+        providers.push({ name: `Gemini Flash-Lite (${GEMINI_FLASH_LITE_MODEL})`, execute: () => this.streamWithGeminiModel(userContent, GEMINI_FLASH_LITE_MODEL, undefined, geminiSystemForCache, abortSignal) });
         providers.push({ name: `Gemini Flash (${textGeminiFlash})`, execute: () => this.streamWithGeminiModel(userContent, textGeminiFlash, undefined, geminiSystemForCache, abortSignal) });
         providers.push({ name: `Gemini Pro (${textGeminiPro})`, execute: () => this.streamWithGeminiModel(userContent, textGeminiPro, undefined, geminiSystemForCache, abortSignal) });
       }
@@ -3694,14 +3642,13 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           open: (sig, att) => this.streamWithClaudeMultimodal(userContent, imagePaths, systemPrompt, tierModel(ModelFamily.CLAUDE, att), sig) });
       }
       if (this.client) {
+        // Strict serial Gemini cascade (flash-lite → flash → pro), no hedge.
+        // flash-lite leads (cheapest/fastest); flash and pro are pure serial
+        // fallbacks if the earlier model fails before its first token.
+        cloud.push({ id: 'gemini_flash_lite', name: 'Gemini Flash-Lite', isLocal: false, priority: prio++, ttftTimeoutMs: FLASH_TTFT_MS,
+          open: (sig) => this.streamWithGeminiModel(userContent, GEMINI_FLASH_LITE_MODEL, imagePaths, systemPrompt, sig, INTERACTIVE_THINKING_BUDGET) });
         cloud.push({ id: 'gemini_flash', name: 'Gemini Flash', isLocal: false, priority: prio++, ttftTimeoutMs: FLASH_TTFT_MS,
-          open: (sig, att) => this.streamWithGeminiModel(userContent, tierModel(ModelFamily.GEMINI_FLASH, att) || GEMINI_FLASH_MODEL, imagePaths, systemPrompt, sig),
-          // Tail-latency hedge: race flash-lite (minimal thinking) if 3.5-flash
-          // is slow to first token. First usable token wins; loser aborted.
-          hedgeWith: VISION_HEDGE_ENABLED ? {
-            id: 'gemini_flash_lite', name: 'Gemini Flash-Lite',
-            open: (sig) => this.streamWithGeminiModel(userContent, GEMINI_FLASH_LITE_MODEL, imagePaths, systemPrompt, sig, INTERACTIVE_THINKING_BUDGET),
-          } : undefined });
+          open: (sig, att) => this.streamWithGeminiModel(userContent, tierModel(ModelFamily.GEMINI_FLASH, att) || GEMINI_FLASH_MODEL, imagePaths, systemPrompt, sig) });
         cloud.push({ id: 'gemini_pro', name: 'Gemini Pro', isLocal: false, priority: prio++, ttftTimeoutMs: PRO_TTFT_MS,
           open: (sig, att) => this.streamWithGeminiModel(userContent, tierModel(ModelFamily.GEMINI_PRO, att) || GEMINI_PRO_MODEL, imagePaths, systemPrompt, sig) });
       }
@@ -3762,9 +3709,11 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     }
 
     // Delegate the first-token-commit + retry + circuit-breaker state machine.
+    // hedgeEnabled:false — the Gemini cascade is strict serial (flash-lite →
+    // flash → pro), so no provider sets hedgeWith and nothing is raced.
     yield* runStreamingVisionFallback(
       ordered,
-      { ...DEFAULT_VISION_FALLBACK_CONFIG, hedgeEnabled: VISION_HEDGE_ENABLED },
+      { ...DEFAULT_VISION_FALLBACK_CONFIG, hedgeEnabled: false },
       this.visionHealth,
       { log: (m) => console.log(m), warn: (m) => console.warn(m) },
       abortSignal,
@@ -4329,47 +4278,38 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       // separated from per-request user content. Static content also leads in
       // `userContent` is not the case — userContent is dynamic — so the system
       // instruction channel is the cacheable surface for Gemini.
-      if (this.isGeminiModel(this.currentModelId)) {
-        // TAIL-LATENCY HEDGE: when the selected model is 3.5-flash (the default
-        // interactive model) and hedging is enabled, race it against flash-lite
-        // through the shared text-fallback engine — if flash hasn't produced a
-        // first token within a short delay, flash-lite is launched in parallel
-        // and the first usable token wins (loser aborted). This collapses the
-        // slow flash TTFT tail (2026-06-06 release benchmark: 79/94 fails were
-        // latency, flash p95 ~3.1s vs flash-lite ~0.55s) without doubling quota
-        // on the fast common case. Only the bare flash model hedges; an
-        // explicitly-chosen flash-lite/Pro model streams directly (no partner).
-        const isFlash = this.currentModelId === GEMINI_FLASH_MODEL;
-        if (TEXT_HEDGE_ENABLED && isFlash && !imagePaths?.length) {
-          const flashProvider: TextStreamProvider = {
-            id: 'gemini_flash', name: 'Gemini Flash', isLocal: false, priority: 0,
-            ttftTimeoutMs: GEMINI_TEXT_HEDGE_CONFIG.ttftTimeoutMs,
-            open: (sig) => this.streamWithGeminiModel(userContent, GEMINI_FLASH_MODEL, imagePaths, finalSystemPrompt, sig, thinkingBudget),
-            hedgeWith: {
-              id: 'gemini_flash_lite', name: 'Gemini Flash-Lite',
-              open: (sig) => this.streamWithGeminiModel(userContent, GEMINI_FLASH_LITE_MODEL, imagePaths, finalSystemPrompt, sig, thinkingBudget),
-            },
-          };
-          const ordered = orderTextByHealth([flashProvider], this.textHealth, Date.now());
-          try {
-            yield* runStreamingTextFallback(ordered, this.textHealth, GEMINI_TEXT_HEDGE_CONFIG, {}, abortSignal);
-            return;
-          } catch (hedgeErr: any) {
-            // Hedge engine exhausted (both flash + flash-lite failed). Fall
-            // through to the direct single-call as a last-resort safety net.
-            console.warn('[LLMHelper] Gemini text hedge exhausted, falling back to direct stream:', hedgeErr?.message);
-          }
+      //
+      // SERIAL GEMINI CASCADE (full ladder flash-lite → flash → pro). The user's
+      // selected Gemini model is the STARTING rung and the cascade falls FORWARD
+      // (toward more capable) from there: pick Pro → Pro only; pick Flash →
+      // Flash→Pro; default/flash-lite (and non-Gemini selections that fell
+      // through to here) → full ladder. No tail-latency hedge. The commit-point-
+      // safe engine (textStreamFallback) guarantees a provider that has yielded
+      // its first token is never switched mid-stream. See streamGeminiTextCascade.
+      //
+      // If the cascade throws, NOTHING was yielded (it only throws pre-commit, or
+      // aborts the whole chain on a permanent shared-key failure — expired key /
+      // no credits / 401/403). In that case fall through to a DIFFERENT provider
+      // (Natively below) instead of failing the whole answer: a dead Gemini key
+      // should not take the live answer down when another provider is configured.
+      let geminiYielded = false;
+      try {
+        for await (const chunk of this.streamGeminiTextCascade(userContent, imagePaths, finalSystemPrompt, abortSignal, thinkingBudget)) {
+          geminiYielded = true;
+          yield chunk;
         }
-        yield* this.streamWithGeminiModel(userContent, this.currentModelId, imagePaths, finalSystemPrompt, abortSignal, thinkingBudget);
         return;
+      } catch (e: any) {
+        if (geminiYielded || abortSignal?.aborted) throw e; // mid-stream: cannot switch (would duplicate)
+        console.warn('[LLMHelper] Gemini cascade failed pre-commit — falling through to next provider:', e?.message || e);
+        // fall through to the Natively last-resort below
       }
-
-      // Race strategy (default)
-      yield* this.streamWithGeminiParallelRace(userContent, imagePaths, finalSystemPrompt, abortSignal, thinkingBudget);
-      return;
     }
 
-    // 5. Last-resort: Natively API (if user has a key but no cloud provider configured)
+    // 5. Last-resort: Natively API. Reached when no Gemini client is configured,
+    // OR the Gemini cascade above failed pre-commit (e.g. an expired/no-credit
+    // key took out all three rungs). A dead primary provider should fall through
+    // to a different one rather than failing the answer.
     if (this.hasNatively()) {
       try {
         yield* this.streamWithNatively(userContent, finalSystemPrompt, imagePaths, abortSignal);
@@ -5180,157 +5120,62 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   }
 
   /**
-   * Race Flash and Pro streams, return whichever succeeds first.
-   * Optional `systemInstruction` is forwarded to both racers so the static
-   * system prompt is separated from `fullMessage` (cache-friendly).
+   * Serial Gemini cascade for the live interactive text path. The full ladder is
+   * flash-lite → flash → pro (cheapest/fastest first). The user's explicitly
+   * selected Gemini model is honored as the STARTING rung, and the cascade falls
+   * FORWARD (toward more capable models) from there:
+   *   - flash-lite selected (the default) → flash-lite → flash → pro
+   *   - flash selected                    → flash → pro
+   *   - pro selected                      → pro only
+   *   - any other (or a non-Gemini selection that fell through to Gemini)
+   *                                       → full ladder (flash-lite → flash → pro)
+   * Falling forward (never down to a weaker model than the user chose) keeps the
+   * selector meaningful while still providing a fallback if the chosen tier fails.
+   *
+   * There is NO tail-latency hedge (no parallel racing). Delegates to the
+   * commit-point-safe streaming fallback engine (textStreamFallback /
+   * visionStreamFallback): a provider that stalls or errors BEFORE its first
+   * token fails over to the next; once a provider yields its first token it is
+   * committed and never switched mid-stream, so the cascade can never emit
+   * duplicated output.
+   *
+   * Note: `orderTextByHealth` may reorder the active rungs by measured TTFT once
+   * the EWMA warms, but cold / equal-health the strict order holds. The same
+   * `thinkingBudget` is forwarded to all rungs — `buildThinkingConfig` (inside
+   * streamWithGeminiModel) applies the correct per-model level (flash-lite/flash
+   * → minimal at budget≤0, pro → forced 'low').
    */
-  private async * streamWithGeminiParallelRace(fullMessage: string, imagePaths?: string[], systemInstruction?: string, abortSignal?: AbortSignal, thinkingBudget: number = INTERACTIVE_THINKING_BUDGET): AsyncGenerator<string, void, unknown> {
+  private async * streamGeminiTextCascade(fullMessage: string, imagePaths: string[] | undefined, systemInstruction: string | undefined, abortSignal: AbortSignal | undefined, thinkingBudget: number = INTERACTIVE_THINKING_BUDGET): AsyncGenerator<string, void, unknown> {
     if (!this.client) throw new Error("Gemini client not initialized");
 
-    // BUG-1 fix: use a shared AbortController so the winning model cancels the loser.
-    // Previously, both Flash AND Pro ran to full completion — only the winner's response
-    // was used, but the loser's entire API call (tokens + compute) was silently wasted.
-    // Note: the Google GenAI SDK does not expose AbortSignal on generateContent, so the
-    // underlying HTTP call for the loser still runs to completion. We cancel our WAIT
-    // for the result — the HTTP connection is released when the SDK call eventually settles.
-    // Timing reference: Flash ≤15s (≤30s with images), Pro ≤30s.
-    if (abortSignal?.aborted) return;
-    const raceController = new AbortController();
+    // Full ladder, cheapest → most capable. priority encodes the ladder order.
+    const ladder: TextStreamProvider[] = [
+      { id: 'gemini_flash_lite', name: 'Gemini Flash-Lite', isLocal: false, priority: 0,
+        open: (sig) => this.streamWithGeminiModel(fullMessage, GEMINI_FLASH_LITE_MODEL, imagePaths, systemInstruction, sig, thinkingBudget) },
+      { id: 'gemini_flash', name: 'Gemini Flash', isLocal: false, priority: 1,
+        open: (sig) => this.streamWithGeminiModel(fullMessage, GEMINI_FLASH_MODEL, imagePaths, systemInstruction, sig, thinkingBudget) },
+      { id: 'gemini_pro', name: 'Gemini Pro', isLocal: false, priority: 2,
+        open: (sig) => this.streamWithGeminiModel(fullMessage, GEMINI_PRO_MODEL, imagePaths, systemInstruction, sig, thinkingBudget) },
+    ];
 
-    const race = async (model: string): Promise<string> => {
-      const result = await this.collectStreamResponse(fullMessage, model, imagePaths, AbortSignal.any([raceController.signal, abortSignal].filter(Boolean) as AbortSignal[]), systemInstruction, thinkingBudget);
-      // This model won — signal the other to stop waiting for its result.
-      raceController.abort(new Error(`${model} won the race`));
-      return result;
-    };
+    // Honor the selected Gemini model as the starting rung; fall forward only.
+    // Non-Gemini selections (fell through to Gemini) and flash-lite start at 0.
+    const startIndex =
+      this.currentModelId === GEMINI_PRO_MODEL ? 2 :
+      this.currentModelId === GEMINI_FLASH_MODEL ? 1 :
+      0;
+    const providers = ladder.slice(startIndex);
 
-    let result: string;
-    try {
-      result = await Promise.any([race(GEMINI_FLASH_MODEL), race(GEMINI_PRO_MODEL)]);
-    } catch (agg: any) {
-      // Promise.any throws AggregateError when ALL promises reject.
-      // agg.message is always the unhelpful 'All promises were rejected' —
-      // unwrap individual errors so the caller's catch logs Flash+Pro failure details.
-      const details = Array.isArray(agg.errors)
-        ? agg.errors.map((e: any) => e?.message ?? String(e)).join(' | ')
-        : agg.message;
-      throw new Error(`Both Gemini models failed in parallel race: ${details}`);
-    }
+    // All rungs share ONE Gemini API key. A permanent key-level failure (expired
+    // / invalid key, no credits, billing, 401/403) on one rung means every other
+    // rung fails identically — so abort the whole Gemini cascade immediately and
+    // let the caller fall through to a DIFFERENT provider, instead of burning
+    // latency on two more doomed calls. Transient errors (429 rate, 503 overload,
+    // timeout, 5xx) still walk lite→flash→pro normally.
+    const cfg: VisionFallbackConfig = { ...DEFAULT_TEXT_FALLBACK_CONFIG, stopChainOnError: isPermanentKeyError };
 
-    // Yield in chunks to simulate incremental streaming UX.
-    const chunkSize = 10;
-    for (let i = 0; i < result.length; i += chunkSize) {
-      if (abortSignal?.aborted) return;
-      yield result.substring(i, i + chunkSize);
-    }
-  }
-
-  /**
-   * Collect full response from a Gemini model (non-streaming, used by parallel race).
-   * Accepts an AbortSignal so the losing model can be cancelled by the winner.
-   * Timing reference: Flash 10-15s (up to 30s with images), Pro up to 30s.
-   */
-  private async collectStreamResponse(fullMessage: string, model: string, imagePaths?: string[], signal?: AbortSignal, systemInstruction?: string, thinkingBudget: number = INTERACTIVE_THINKING_BUDGET): Promise<string> {
-    if (!this.client) throw new Error("Gemini client not initialized");
-    this.assertOutboundScopes('gemini', fullMessage, imagePaths);
-
-    // Bail immediately if already cancelled (e.g. the other model already won).
-    if (signal?.aborted) throw new Error(`Gemini ${model} request cancelled before start`);
-
-    const contents: any[] = [{ text: fullMessage }];
-    if (imagePaths?.length) {
-      for (const p of imagePaths) {
-        if (fs.existsSync(p)) {
-          const { mimeType, data } = await this.processImage(p);
-          contents.push({
-            inlineData: {
-              mimeType,
-              data,
-            }
-          });
-        }
-      }
-    }
-
-    // Gated stage timing (MEASURE_LATENCY=true) — isolates the cache-create
-    // round-trip and provider TTFT, the prime suspects for slow first token.
-    const _gt0 = Date.now();
-    const _gmeasure = (() => { try { return process.env.MEASURE_LATENCY === 'true' || process.env.PI_LATENCY_TRACE === 'true'; } catch { return false; } })();
-
-    // CACHE BOUNDARY: static system content lives in `config.cachedContent`
-    // (or `config.systemInstruction` on fallback); dynamic content stays in `contents`.
-    //
-    // LATENCY (perf fix): use the NON-BLOCKING cache resolve. A cache HIT returns
-    // the name synchronously; a MISS returns null instantly and warms the cache
-    // in the BACKGROUND for the next request. This moves the multi-second
-    // `caches.create` round-trip OFF the first-token path — measured at 2.4s of
-    // dead time before any token when create ran inline. On a miss this request
-    // streams immediately with `systemInstruction` (implicit caching still helps).
-    const cacheName = systemInstruction
-      ? this.geminiPromptCache.getCachedOrWarmInBackground(this.client, model, systemInstruction)
-      : null;
-    if (_gmeasure) console.log(`[Gemini.stream] +${Date.now() - _gt0}ms  cache resolve done (cacheHit=${Boolean(cacheName)}, sysPrompt=${systemInstruction?.length ?? 0}c, model=${model})`);
-
-    const buildConfig = (useCacheName: string | null) => ({
-      maxOutputTokens: MAX_OUTPUT_TOKENS,
-      temperature: INTERACTIVE_TEMPERATURE,
-      seed: INTERACTIVE_SEED, // Gemini v1alpha honors seed in generationConfig
-      // Per-request thinking config (doc-correct 3.x thinkingLevel): 'minimal'
-      // (off, fast) for budget≤0, 'low' for Pro (which can't disable), or an
-      // explicit numeric budget when a caller passes a positive one. Threaded
-      // budget comes from the caller; model picks the level/floor.
-      thinkingConfig: buildThinkingConfig(model, thinkingBudget),
-      ...(useCacheName
-        ? { cachedContent: useCacheName }
-        : systemInstruction
-          ? { systemInstruction: { parts: [{ text: systemInstruction }] } }
-          : {}),
-    });
-
-    // Wrap the API call in an abort-aware race so the signal can interrupt it.
-    // The Google GenAI SDK does not natively support AbortSignal on generateContent,
-    // so we implement manual cancellation via Promise.race.
-    const callWithConfig = (useCacheName: string | null) => this.client!.models.generateContent({
-      model,
-      contents,
-      config: buildConfig(useCacheName),
-    });
-
-    const runOnce = async (useCacheName: string | null): Promise<any> => {
-      const apiCall = callWithConfig(useCacheName);
-      if (signal) {
-        let onAbort: (() => void) | null = null;
-        const abortPromise = new Promise<never>((_, reject) => {
-          if (signal.aborted) { reject(new Error(`Gemini ${model} aborted`)); return; }
-          onAbort = () => reject(new Error(`Gemini ${model} aborted`));
-          signal.addEventListener('abort', onAbort, { once: true });
-        });
-        apiCall.catch((): void => {});
-        try {
-          return await Promise.race([apiCall, abortPromise]);
-        } finally {
-          if (onAbort) signal.removeEventListener('abort', onAbort);
-        }
-      }
-      return apiCall;
-    };
-
-    let response: any;
-    try {
-      response = await runOnce(cacheName);
-    } catch (err: any) {
-      // If the explicit cache turned stale between getOrCreate and the call,
-      // drop it and retry with systemInstruction. Aborts re-throw unchanged.
-      const msg = String(err?.message || err);
-      if (cacheName && !signal?.aborted && /cached?[\s_]?content|not\s*found|expired/i.test(msg)) {
-        console.warn(`[LLMHelper] Gemini cachedContent ${cacheName} stale (${msg}); retrying with systemInstruction`);
-        this.geminiPromptCache.invalidate(cacheName);
-        response = await runOnce(null);
-      } else {
-        throw err;
-      }
-    }
-    return response.text || "";
+    const ordered = orderTextByHealth(providers, this.textHealth, Date.now());
+    yield* runStreamingTextFallback(ordered, this.textHealth, cfg, {}, abortSignal);
   }
 
   // --- OLLAMA STREAMING (uses /api/chat with proper messages array) ---
@@ -6055,7 +5900,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     console.log(`[LLMHelper] generateMeetingSummary called. Context length: ${context.length}`);
     // Short-circuit on empty/whitespace context. With no transcript content to
     // summarise, the provider fallback chain (Natively → Codex → Groq → Gemini
-    // Flash → Gemini Pro) burns up to ~10 minutes of wall-clock time on retries
+    // Flash-Lite → Flash → Pro) burns up to ~10 minutes of wall-clock time on retries
     // for a result that will be discarded by the caller anyway. The caller
     // (MeetingPersistence) already checks `transcript.length > 2` before using
     // the summary, but the title-generation call site does NOT — so this guard
@@ -6174,10 +6019,32 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       }
     }
 
-    // ATTEMPT 3: Gemini Flash (with 2 retries = 3 attempts total)
-    console.log(`[LLMHelper] Attempting Gemini Flash for summary...`);
     const contents = [{ text: `${systemPrompt}\n\nCONTEXT:\n${context}` }];
 
+    // ATTEMPT 3: Gemini Flash-Lite (cheapest/fastest — leads the Gemini cascade).
+    // 3 attempts with linear backoff before dropping to full Flash.
+    console.log(`[LLMHelper] Attempting Gemini Flash-Lite for summary...`);
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const text = await this.withTimeout(
+          this.generateContent(contents, GEMINI_FLASH_LITE_MODEL),
+          45000,
+          `Gemini Flash-Lite Summary (Attempt ${attempt})`
+        );
+        if (text.trim().length > 0) {
+          console.log(`[LLMHelper] ✅ Gemini Flash-Lite summary generated successfully (Attempt ${attempt}).`);
+          return this.processResponse(text);
+        }
+      } catch (e: any) {
+        console.warn(`[LLMHelper] ⚠️ Gemini Flash-Lite attempt ${attempt}/3 failed: ${e.message}`);
+        if (attempt < 3) {
+          await new Promise(r => setTimeout(r, 1000 * attempt)); // Linear backoff
+        }
+      }
+    }
+
+    // ATTEMPT 4: Gemini Flash (with 2 retries = 3 attempts total)
+    console.log(`[LLMHelper] ⚠️ Flash-Lite exhausted. Switching to Gemini Flash...`);
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         const text = await this.withTimeout(
@@ -6197,7 +6064,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       }
     }
 
-    // ATTEMPT 4: Gemini Pro
+    // ATTEMPT 5: Gemini Pro
     console.log(`[LLMHelper] ⚠️ Flash exhausted. Switching to Gemini Pro for robust retry...`);
     const maxProRetries = 5;
 

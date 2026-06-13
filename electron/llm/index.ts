@@ -42,7 +42,7 @@ export type { AnswerPlan, AnswerSource, AnswerType, ContextLayer, OutputPerspect
 export { applyModeFallback, MODE_CONTEXT_PROFILES } from "./modeProfiles";
 export type { ActiveModeInfo, ModeContextProfile, ModeTemplateType } from "./modeProfiles";
 export { resolveFollowUp, resolveFollowUpOrClarify, isBareFollowUp, buildContextFreeClarification } from "./FollowUpResolver";
-export { classifyProviderError, isClarificationStall } from "./providerErrorClassifier";
+export { classifyProviderError, isClarificationStall, isPermanentKeyError } from "./providerErrorClassifier";
 export type { ProviderErrorKind, ProviderErrorClassification } from "./providerErrorClassifier";
 export { SessionMemory, isKindAllowedInMode } from "./SessionMemory";
 export type { MemoryMode, MemoryItemKind, MemoryItem, MemoryQuery, MemoryRecall } from "./SessionMemory";

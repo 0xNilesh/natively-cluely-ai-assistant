@@ -47,6 +47,51 @@ function statusOf(err: any): number {
 }
 
 /**
+ * Is this a PERMANENT, account-level failure that will NOT self-heal on retry
+ * and — critically — is shared across every model that uses the SAME API key?
+ *
+ * Returns true for: expired / invalid / missing API key, 401/403 auth &
+ * permission failures, and BILLING / credit exhaustion (Gemini surfaces these as
+ * RESOURCE_EXHAUSTED with a "billing"/"credit" hint, or FAILED_PRECONDITION /
+ * "billing account"). These mean the KEY is the problem, so retrying a sibling
+ * model on the same key is pointless — the caller should abandon that provider's
+ * cascade entirely and fall through to the NEXT provider.
+ *
+ * Returns false for transient conditions that ARE worth walking sibling models
+ * for: plain 429 rate limits (per-model quota buckets differ), 503/529 overload,
+ * timeouts, network blips, and generic 5xx. A bare "quota"/"RESOURCE_EXHAUSTED"
+ * without a billing/credit hint is treated as a transient rate limit, NOT a
+ * permanent billing failure (Gemini uses RESOURCE_EXHAUSTED for per-minute rate
+ * limits too), so we still try the next model tier.
+ */
+export function isPermanentKeyError(err: any): boolean {
+  if (!err) return false;
+  const msg = String(err?.message ?? err ?? '').toLowerCase();
+  const status = statusOf(err);
+
+  // 401/403 + auth/permission/expired/invalid-key signals → key is bad.
+  if (
+    status === 401 || status === 403 ||
+    /\b401\b|\b403\b|unauthor|forbidden|permission_denied|permission denied|\bpermission\b/.test(msg) ||
+    /api[_ ]?key (?:not valid|invalid|expired)|invalid.*api[_ ]?key|expired.*api[_ ]?key|api[_ ]?key.*(?:invalid|expired)|api_key_invalid|invalid_api_key|missing.*api[_ ]?key/.test(msg)
+  ) {
+    return true;
+  }
+
+  // Billing / credit exhaustion → account can't pay; sibling models share it.
+  // Gemini: FAILED_PRECONDITION + "billing"; or RESOURCE_EXHAUSTED that explicitly
+  // names billing/credit (vs a bare per-minute rate-limit RESOURCE_EXHAUSTED).
+  if (
+    /billing|insufficient[_ ]?(?:credit|quota|funds)|no credits?|out of credits?|payment required|account.*(?:suspend|disabled|deactivat)|failed_precondition.*billing/.test(msg)
+  ) {
+    return true;
+  }
+  if (status === 402 || /\b402\b/.test(msg)) return true; // Payment Required
+
+  return false;
+}
+
+/**
  * Classify a provider failure from an error object and/or the produced text.
  * Pass `text` (possibly empty) so a successful HTTP call that returned no tokens or
  * a stall is still classified as an outage rather than a logic pass.

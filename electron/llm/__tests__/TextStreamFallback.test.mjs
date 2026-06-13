@@ -222,3 +222,43 @@ describe('runStreamingTextFallback — race semantics', () => {
     assert.deepEqual(out, [], 'aborted before start yields nothing');
   });
 });
+
+describe('runStreamingTextFallback — stopChainOnError (shared-credential cascade abort)', () => {
+  // Models the Gemini cascade: all rungs share one API key. A permanent key error
+  // on the FIRST rung must abort the whole chain so the caller can switch provider,
+  // instead of wasting two more doomed calls on the same dead key.
+  test('a matching pre-commit error aborts the WHOLE chain (siblings never opened) and throws', async () => {
+    const health = new Map();
+    const flashLite = throwBeforeFirst('gemini_flash_lite', 'API key expired');
+    const flash = okProvider('gemini_flash', ['SHOULD-NOT-APPEAR']);
+    const pro = okProvider('gemini_pro', ['SHOULD-NOT-APPEAR']);
+    const cfg = { ...DEFAULT_TEXT_FALLBACK_CONFIG, maxAttempts: 1, stopChainOnError: (err) => /expired|api key/i.test(String(err?.message)) };
+    await assert.rejects(
+      () => collect(runStreamingTextFallback([flashLite, flash, pro], health, cfg, fastHooks())),
+      /chain aborted/i,
+    );
+    assert.equal(flashLite._calls, 1, 'primary attempted once');
+    assert.equal(flash._calls, 0, 'sibling on the same key NOT opened');
+    assert.equal(pro._calls, 0, 'sibling on the same key NOT opened');
+  });
+
+  test('a NON-matching (transient) pre-commit error still walks the cascade normally', async () => {
+    const health = new Map();
+    const flashLite = throwBeforeFirst('gemini_flash_lite', '429 rate limit');
+    const flash = okProvider('gemini_flash', ['from flash']);
+    const cfg = { ...DEFAULT_TEXT_FALLBACK_CONFIG, maxAttempts: 1, stopChainOnError: (err) => /expired|api key/i.test(String(err?.message)) };
+    const out = await collect(runStreamingTextFallback([flashLite, flash], health, cfg, fastHooks()));
+    assert.deepEqual(out, ['from flash'], 'transient error fell through to the next rung');
+    assert.equal(flash._calls, 1);
+  });
+
+  test('without stopChainOnError (default) every rung is walked even on a key error', async () => {
+    const health = new Map();
+    const flashLite = throwBeforeFirst('gemini_flash_lite', 'API key expired');
+    const flash = okProvider('gemini_flash', ['flash answers']);
+    const cfg = { ...DEFAULT_TEXT_FALLBACK_CONFIG, maxAttempts: 1 };
+    const out = await collect(runStreamingTextFallback([flashLite, flash], health, cfg, fastHooks()));
+    assert.deepEqual(out, ['flash answers'], 'no abort hook → normal fall-through');
+    assert.equal(flash._calls, 1);
+  });
+});
