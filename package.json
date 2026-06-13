@@ -88,7 +88,8 @@
       "**/*.node",
       "**/*.dylib",
       "**/vectorSearchWorker.js",
-      "**/whisperWorker.js"
+      "**/whisperWorker.js",
+      "**/intentClassifierWorker.js"
     ],
     "directories": {
       "output": "release",

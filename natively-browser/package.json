@@ -8,6 +8,7 @@
   "scripts": {
     "build": "node esbuild.config.mjs",
     "build:test": "node esbuild.test.mjs",
+    "build:store": "npm run build && node scripts/build-store.js",
     "typecheck": "tsc --noEmit",
     "test": "node esbuild.test.mjs && node --test src/__tests__/*.test.mjs"
   },

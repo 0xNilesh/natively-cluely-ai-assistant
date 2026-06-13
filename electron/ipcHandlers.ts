@@ -564,6 +564,11 @@ export function initializeIpcHandlers(appState: AppState): void {
   // against the prior turn instead. Same-session only (no Hindsight). Bounded per session.
   const { ConversationMemoryService } = require('./intelligence/ConversationMemoryService') as typeof import('./intelligence/ConversationMemoryService');
   const _manualConversationMemory = new ConversationMemoryService();
+  // Senders that already have a one-time conversation-memory cleanup listener attached.
+  // The 'destroyed' listener must be registered ONCE per WebContents, not per chat
+  // message — otherwise every message adds another listener (the MaxListenersExceeded
+  // warning at 11 messages). Guarded by this set.
+  const _convoCleanupRegistered = new Set<number>();
 
   // Identity-probe routing lives in electron/llm/manualIdentityRouting.ts
   // (manual regression 2026-06-12): the old inline IDENTITY_PROBE_RE answered
@@ -605,12 +610,17 @@ export function initializeIpcHandlers(appState: AppState): void {
         // Reap this sender's conversation memory when the renderer goes away, so the
         // per-process store cannot grow unbounded across window reloads / churn and
         // doesn't retain raw Q/A content after a window closes (security review
-        // 2026-06-13 MEDIUM). Registered once; `once` makes repeat-stream re-registration
-        // harmless (listener fires a single time on destroy).
+        // 2026-06-13 MEDIUM). Register the 'destroyed' listener ONCE per WebContents
+        // (guarded by _convoCleanupRegistered) — registering per-message added a new
+        // listener each time and tripped MaxListenersExceeded at 11 messages.
         try {
-          event.sender?.once?.('destroyed', () => {
-            try { _manualConversationMemory.clearSession(String(senderId)); } catch { /* noop */ }
-          });
+          if (!_convoCleanupRegistered.has(senderId)) {
+            _convoCleanupRegistered.add(senderId);
+            event.sender?.once?.('destroyed', () => {
+              _convoCleanupRegistered.delete(senderId);
+              try { _manualConversationMemory.clearSession(String(senderId)); } catch { /* noop */ }
+            });
+          }
         } catch { /* noop */ }
 
         const intelligenceManager = appState.getIntelligenceManager();

@@ -876,8 +876,8 @@ export class AppState {
 
     this.setupIntelligenceEvents()
 
-    // Pre-warm the zero-shot intent classifier in background
-    warmupIntentClassifier();
+    // Intent-classifier warmup is scheduled after the launcher is visible so
+    // transformers/ONNX initialization cannot contend with the first paint.
 
     // Setup Ollama IPC
     this.setupOllamaIpcHandlers()
@@ -5597,6 +5597,17 @@ if (process.env.THINKING_MATRIX === '1') {
   }
 
   appState.createWindow()
+
+  // Defer the zero-shot intent classifier warmup until after the launcher has
+  // had a chance to paint and settle. The classifier still lazy-loads on first
+  // use, so this only moves startup CPU work out of the visible launch path.
+  setTimeout(() => {
+    try {
+      warmupIntentClassifier();
+    } catch (err) {
+      console.warn('[Init] Intent classifier warmup scheduling failed (non-fatal):', err);
+    }
+  }, Number(process.env.NATIVELY_INTENT_WARMUP_DELAY_MS || '2500'));
 
   // DUAL-DOCK-ICON FIX (promotion half): now that the disguised name/icon are
   // applied and the window exists, promote back to 'regular' so a SINGLE dock

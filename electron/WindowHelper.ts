@@ -46,6 +46,7 @@ export class WindowHelper {
   private appState: AppState;
   private contentProtection: boolean = false;
   private opacityTimeout: NodeJS.Timeout | null = null;
+  private lastLauncherShowInactive: boolean | null = null;
 
   // Hover-gated click-through state. Because the fixed-width (780) overlay
   // window is WIDER than its painted panel when collapsed (600), the ~90px
@@ -666,6 +667,7 @@ export class WindowHelper {
     }
     this.launcherWindow?.hide();
     this.overlayWindow?.hide();
+    this.lastLauncherShowInactive = null;
     this.isWindowVisible = false;
   }
 
@@ -883,13 +885,40 @@ export class WindowHelper {
     // Hide Launcher SECOND
     if (this.launcherWindow && !this.launcherWindow.isDestroyed()) {
       this.launcherWindow.hide();
+      this.lastLauncherShowInactive = null;
     }
   }
 
   public switchToLauncher(inactive?: boolean): void {
-    console.log(`[WindowHelper] Switching to LAUNCHER (inactive: ${!!inactive})`);
+    const requestedInactive = !!inactive;
+    console.log(`[WindowHelper] Switching to LAUNCHER (inactive: ${requestedInactive})`);
+    const wasLauncher = this.currentWindowMode === 'launcher';
     this.currentWindowMode = 'launcher';
     KeybindManager.getInstance().setMode('launcher'); // Adapted from public PR #123 — verify premium interaction
+
+    const launcherAlreadyVisible =
+      !!this.launcherWindow &&
+      !this.launcherWindow.isDestroyed() &&
+      this.launcherWindow.isVisible() &&
+      this.isWindowVisible;
+    const overlayAlreadyHidden =
+      !this.overlayWindow ||
+      this.overlayWindow.isDestroyed() ||
+      !this.overlayWindow.isVisible();
+
+    // Cold-start can call switchToLauncher twice (launcher ready-to-show plus
+    // startup convergence paths). If the launcher is already visible with the
+    // same focus semantics and the overlay is already hidden, skip repeated
+    // opacity/show/focus work so Chromium/WindowServer don't repaint mid-animation.
+    if (
+      wasLauncher &&
+      launcherAlreadyVisible &&
+      overlayAlreadyHidden &&
+      this.lastLauncherShowInactive === requestedInactive
+    ) {
+      console.log('[WindowHelper] Launcher already visible; skipping duplicate show');
+      return;
+    }
 
     // Show Launcher FIRST
     if (this.launcherWindow && !this.launcherWindow.isDestroyed()) {
@@ -915,6 +944,7 @@ export class WindowHelper {
         else this.launcherWindow.show();
         if (!inactive) this.launcherWindow.focus();
       }
+      this.lastLauncherShowInactive = requestedInactive;
       this.isWindowVisible = true;
     }
 
