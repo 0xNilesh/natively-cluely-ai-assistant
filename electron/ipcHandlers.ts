@@ -3956,9 +3956,11 @@ export function initializeIpcHandlers(appState: AppState): void {
   // "literal search" in Launcher.tsx that just re-ran the AI query. Builds search
   // candidates from each meeting's title + summary + structured meetingMemory
   // (Phase 8: topics/entities/decisions/questions), then ranks them with
-  // SearchOrchestrator.globalSearch (the spec's fusion formula). NO Hindsight (rule:
-  // local-first). Single-user desktop DB → all candidates share the one local user,
-  // so the isolation invariant (user/org filter before ranking) holds trivially.
+  // SearchOrchestrator.globalSearch (the spec's fusion formula). Local-first: results
+  // come from the local DB; when Hindsight is configured (Phase D) cross-meeting
+  // long-term memories are ALSO merged in as memory-source candidates (see below).
+  // Single-user desktop DB → all candidates share the one local user, so the isolation
+  // invariant (user/org filter before ranking) holds trivially.
   // Returns [] when the flag is off so the renderer keeps its current behavior.
   safeHandle('search:global-meetings', async (_event, { query, filters }: { query: string; filters?: any }) => {
     try {
@@ -4009,6 +4011,41 @@ export function initializeIpcHandlers(appState: AppState): void {
           metadata: { company: String(mem.companiesDiscussed?.[0] ?? '') },
         });
       }
+      // HINDSIGHT GLOBAL RECALL (Phase D, behind hindsight_memory + a configured server).
+      // Surface cross-meeting long-term memories ("what did we discuss last time?") as
+      // additional MEMORY-source candidates so they fuse with the local lexical hits.
+      // Bounded 2s timeout; Noop/[] when Hindsight is off, unconfigured, or the server is
+      // down — the local results always stand. NOT on the live answer path (search only).
+      try {
+        if (isIntelligenceFlagEnabled('hindsightMemory') && process.env.HINDSIGHT_BASE_URL) {
+          const { LongTermMemoryService } = require('./intelligence/memory/LongTermMemoryService') as typeof import('./intelligence/memory/LongTermMemoryService');
+          const ltm = LongTermMemoryService.fromFlags({
+            hindsight: {
+              baseUrl: process.env.HINDSIGHT_BASE_URL,
+              apiKey: process.env.HINDSIGHT_API_KEY,
+              timeoutMs: Number(process.env.HINDSIGHT_TIMEOUT_MS) || 2000,
+            },
+          });
+          if (ltm.enabled) {
+            const memories = await ltm.recallRelevantMemory(q, { userId: 'local' }, { timeoutMs: 2000, maxResults: 8 });
+            for (const mem of memories) {
+              if (!mem?.text?.trim()) continue;
+              candidates.push({
+                meetingId: `hindsight:${candidates.length}`, // no source meeting; memory-level
+                title: 'Long-term memory',
+                snippet: mem.text.slice(0, 240),
+                source: 'memory',
+                score: 0.85, // recall already relevance-ranked server-side
+                userId: 'local',
+                metadata: { hindsight: '1', factType: mem.source || '' },
+              });
+            }
+          }
+        }
+      } catch (memErr: any) {
+        console.warn('[GlobalSearchV2] Hindsight recall skipped (non-fatal):', memErr?.message);
+      }
+
       const results = new SearchOrchestrator().globalSearch(candidates, { userId: 'local' }, filters || {}, Date.now());
       return { enabled: true, results };
     } catch (e: any) {

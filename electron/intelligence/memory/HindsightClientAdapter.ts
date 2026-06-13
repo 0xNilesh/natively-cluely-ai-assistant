@@ -9,9 +9,12 @@
 // Noop. retain is async (fire-and-forget queue); recall is bounded by AbortSignal +
 // a Promise.race timeout. Isolation = per-scope bank + strict tags (HindsightTagBuilder).
 //
-// Per the researched API:
-//   client.retain(bankId, content, { tags, async, signal, timestamp })
-//   client.recall(bankId, query, { tags, tagsMatch: 'all_strict', maxResults, signal })
+// Verified against @vectorize-io/hindsight-client@0.8.2 (dist/index.d.ts):
+//   client.retain(bankId, content, { tags, async, timestamp, signal, ... }) → RetainResponse
+//   client.recall(bankId, query, { tags, tagsMatch: 'all_strict', maxTokens, signal, ... })
+//     → RecallResponse = { results: Array<{ id, text, type?, context?, ... }> }
+//   tagsMatch 'all_strict' = AND + EXCLUDE untagged (the isolation guarantee).
+//   NOTE: recall has NO `maxResults` (use maxTokens) and RecallResult has NO score/tags.
 
 import type { MemoryProvider, RetainItem, MemoryScope, RecallOptions, RecalledMemory } from './MemoryProvider';
 import { HindsightTagBuilder } from './HindsightTagBuilder';
@@ -26,9 +29,11 @@ export interface HindsightConfig {
 }
 
 // Structural type for just the bits of the client we use (so we don't hard-import it).
+// Mirrors the real 0.8.2 RecallResult: { id, text, type?, context?, ... } (no score/tags).
+interface HindsightRecallResult { id?: string; text?: string; type?: string | null; context?: string | null; }
 interface HindsightClientLike {
   retain(bankId: string, content: string, options?: Record<string, unknown>): Promise<unknown>;
-  recall(bankId: string, query: string, options?: Record<string, unknown>): Promise<{ results?: Array<{ text?: string; score?: number; tags?: string[] }> }>;
+  recall(bankId: string, query: string, options?: Record<string, unknown>): Promise<{ results?: HindsightRecallResult[] }>;
 }
 
 /** Lazily require the optional client. Returns null when it isn't installed. */
@@ -94,20 +99,31 @@ export class HindsightClientAdapter implements MemoryProvider {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
+      // 0.8.2 recall bounds by TOKENS, not result count. Approximate a result cap by
+      // budgeting ~120 tokens per desired result (the server returns the most relevant
+      // facts within the budget). tagsMatch 'all_strict' = AND + exclude untagged.
+      const maxTokens = Math.max(256, (options.maxResults ?? 8) * 120);
       const res = await Promise.race([
         this.client.recall(bankId, query, {
           tags,
-          tagsMatch: 'all_strict', // exclude untagged/foreign memories (isolation)
-          maxResults: options.maxResults ?? 8,
+          tagsMatch: 'all_strict',
+          maxTokens,
           signal: controller.signal,
         }),
         new Promise<{ results: [] }>((resolve) => setTimeout(() => resolve({ results: [] }), timeoutMs)),
       ]);
-      const results = (res as any)?.results;
+      const results = (res as { results?: HindsightRecallResult[] })?.results;
       if (!Array.isArray(results)) return [];
+      // Map the real RecallResult → our RecalledMemory. No score/tags on 0.8.2 results;
+      // carry `type` as `source` and append `context` to the text when present.
       return results
-        .map((r: any) => ({ text: String(r?.text ?? ''), score: typeof r?.score === 'number' ? r.score : undefined, tags: Array.isArray(r?.tags) ? r.tags : undefined }))
-        .filter((r: RecalledMemory) => r.text.trim().length > 0);
+        .map((r): RecalledMemory => {
+          const base = String(r?.text ?? '').trim();
+          const ctx = r?.context ? String(r.context).trim() : '';
+          const text = ctx && !base.includes(ctx) ? `${base} (${ctx})` : base;
+          return { text, source: r?.type ? String(r.type) : undefined };
+        })
+        .filter((r) => r.text.trim().length > 0);
     } catch {
       return [];
     } finally {

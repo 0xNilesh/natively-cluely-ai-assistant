@@ -49,32 +49,25 @@ describe('Phase 13 — fromFlags is Noop unless flag ON + baseUrl + client insta
     assert.equal(ltm.providerName, 'noop');
   });
 
-  test('(b) flag ON + baseUrl set BUT client NOT installed → STILL Noop (works configured-but-client-absent)', () => {
-    // This is the load-bearing Phase 13 property. The @vectorize-io/hindsight-client is not
-    // installed in this repo, so HindsightClientAdapter.enabled is false → fromFlags returns
-    // a Noop-backed service even with the flag ON and a baseUrl configured.
-    process.env[HINDSIGHT_MEMORY_ENV] = 'on';
-    const ltm = LongTermMemoryService.fromFlags({
-      hindsight: { baseUrl: 'http://localhost:8888', apiKey: 'k', timeoutMs: 800 },
-    });
-    assert.equal(ltm.enabled, false, 'client absent must keep the service disabled even with the flag ON');
-    assert.equal(ltm.providerName, 'noop', 'must fall back to the Noop provider, never a broken adapter');
-  });
-
   test('(b2) flag ON but NO baseUrl → Noop (config guard, before any client load)', () => {
+    // The load-bearing fallback that does NOT depend on the client being absent: with no
+    // baseUrl configured, fromFlags returns Noop BEFORE ever constructing the adapter.
+    // This holds whether or not @vectorize-io/hindsight-client is installed.
     process.env[HINDSIGHT_MEMORY_ENV] = 'on';
     const ltm = LongTermMemoryService.fromFlags({ hindsight: { baseUrl: '' } });
     assert.equal(ltm.enabled, false);
     assert.equal(ltm.providerName, 'noop');
   });
 
-  test('(b3) the REAL HindsightClientAdapter (no client override) is disabled in this env', () => {
-    // Directly prove the lazy require of @vectorize-io/hindsight-client fails → enabled=false.
-    // This is what makes (b) true: the adapter constructed for a configured baseUrl reports
-    // enabled=false because the optional module cannot be required.
+  test('(b3) flag ON + baseUrl set + client installed → adapter is constructed (enabled)', () => {
+    // The @vectorize-io/hindsight-client IS now an installed optionalDependency, so a
+    // configured adapter constructs successfully and reports enabled. (Whether a SERVER is
+    // actually reachable is orthogonal — recall/retain degrade gracefully if it's down.)
+    // The "client-absent → Noop" safety path is covered at the unit level in
+    // HindsightMemory.test.mjs via a mock, and structurally by the lazy try/catch require.
     const adapter = new HindsightClientAdapter({ baseUrl: 'http://localhost:8888', apiKey: 'k' });
-    assert.equal(adapter.enabled, false, 'with the optional client absent the adapter must report disabled');
     assert.equal(adapter.name, 'hindsight');
+    assert.equal(adapter.enabled, true, 'with the client installed + a baseUrl, the adapter constructs enabled');
   });
 });
 

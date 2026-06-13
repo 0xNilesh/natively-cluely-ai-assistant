@@ -10,30 +10,42 @@ memory). When Hindsight is not installed/configured/running, Natively's memory p
 
 ## Requirements
 
-- **PostgreSQL 14+ with a vector extension** (pgvector by default; pgvectorscale / vchord / scann
-  also supported). An embedded `pg0` exists for dev but is not recommended for production.
-- **An LLM provider + API key** for the Hindsight server (OpenAI / Anthropic / Gemini / Groq /
-  Ollama / etc.) — Hindsight uses an LLM for fact extraction and reflect.
-- **The TS client** in Natively: `npm install @vectorize-io/hindsight-client` (optionalDependency;
-  Natively's adapter lazy-requires it and falls back to Noop if absent).
+- **The TS client** in Natively: already declared as an `optionalDependency`
+  (`@vectorize-io/hindsight-client@^0.8.2`). Natively's adapter lazy-requires it (and esbuild keeps
+  it external), so it loads from `node_modules` at runtime and falls back to Noop if absent.
+- **An LLM provider + API key** for the Hindsight server (OpenAI / Anthropic / **Gemini** / Groq /
+  Ollama / lmstudio / minimax) — Hindsight uses an LLM for fact extraction and reflect. Natively
+  already has `GEMINI_API_KEY`, so Gemini is the path of least resistance.
+- A vector-capable Postgres — **the embedded `pg0` (bundled) is used automatically**, so you do NOT
+  need to install or run Postgres yourself for local use.
 
-## Run the server (Docker — simplest)
+## Run the server — Python embedded (recommended, NO Docker)
+
+This is the verified local path (the dev machine has Python 3.12 + the Gemini key; Docker is not
+required).
 
 ```bash
-docker run -it --pull always --name hindsight --restart unless-stopped \
-  -p 8888:8888 -p 9999:9999 \
-  -e HINDSIGHT_API_LLM_API_KEY=$OPENAI_API_KEY \
-  -v hindsight-data:/home/hindsight/.pg0 \
-  ghcr.io/vectorize-io/hindsight:latest
+# 1. Install the embedded server (bundles pg0 Postgres + pgvector + the API):
+pip3 install hindsight-all -U          # Intel Macs: pip3 install hindsight-all-slim -U
+
+# 2. Start it (reads GEMINI_API_KEY from your env; first boot downloads embedding models):
+GEMINI_API_KEY=... python3 scripts/hindsight-dev-server.py
+# → "[hindsight-dev-server] READY at http://127.0.0.1:8888"
 ```
 
-- API: `http://localhost:8888` · Control-plane UI: `http://localhost:9999`
-- For an external Postgres, set `HINDSIGHT_API_DATABASE_URL` and run `CREATE EXTENSION vector;` in
-  that DB. Other server vars: `HINDSIGHT_API_LLM_PROVIDER`, `HINDSIGHT_API_LLM_MODEL`,
-  `HINDSIGHT_API_PORT`.
+The helper `scripts/hindsight-dev-server.py` runs `HindsightServer(llm_provider="gemini",
+llm_model="gemini-2.5-flash", llm_api_key=$GEMINI_API_KEY, port=8888)` and keeps it alive until
+Ctrl-C. Override with `HINDSIGHT_PORT`, `HINDSIGHT_LLM_PROVIDER`, `HINDSIGHT_LLM_MODEL`,
+`HINDSIGHT_START_TIMEOUT`. First boot downloads `BAAI/bge-small-en-v1.5` + a reranker (~1 min);
+subsequent boots are fast (HF-cached).
 
-A managed **Hindsight Cloud** also exists (`ui.hindsight.vectorize.io`) — use its base URL + an API
-key instead of self-hosting.
+> **Async extraction:** retain runs server-side fact extraction asynchronously (via the LLM), so a
+> just-retained fact is **not** instantly recallable — it appears a few seconds later. This is why
+> Natively retains post-meeting and recalls later in search, never on the live answer path.
+
+### Alternatives
+- **Docker** (if you have it): `docker run -it --pull always -p 8888:8888 -p 9999:9999 -e HINDSIGHT_API_LLM_API_KEY=$GEMINI_API_KEY -e HINDSIGHT_API_LLM_PROVIDER=gemini -v hindsight-data:/home/hindsight/.pg0 ghcr.io/vectorize-io/hindsight:latest`
+- **Hindsight Cloud** (hosted): sign up at `https://ui.hindsight.vectorize.io/signup`, use its base URL + an API key (set `HINDSIGHT_API_KEY`). Note: memory data then lives on their servers (privacy consideration for a local-first app).
 
 ## Health check
 
