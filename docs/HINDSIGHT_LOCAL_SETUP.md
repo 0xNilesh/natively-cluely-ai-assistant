@@ -8,6 +8,29 @@ memory). When Hindsight is not installed/configured/running, Natively's memory p
 > **Source:** verified from the Hindsight repo (MIT, `github.com/vectorize-io/hindsight`) during the
 > Intelligence OS Phase 0 research. See `NATIVELY_EXTERNAL_RESEARCH_NOTES.md`.
 
+## Production / shipped app
+
+Hindsight's server is Python + an embedded Postgres + a HuggingFace model — **far too heavy to bundle**
+into the signed Electron app, and there's no precedent for bundling a Python runtime here. So, exactly
+like Ollama and the Codex CLI, Hindsight is an **optional, user-provisioned sidecar**: `HindsightManager`
+(`electron/services/HindsightManager.ts`) health-checks a configured server and the app degrades to
+**Noop** when it's absent. Config comes from **SettingsManager** (so it works in a packaged build, not
+just a dev shell), with `HINDSIGHT_BASE_URL` env taking precedence for development.
+
+Two supported targets — **same code path, just a different `baseUrl`:**
+- **Cloud** (zero local deps): sign up at `https://ui.hindsight.vectorize.io/signup`; set
+  `hindsightBaseUrl` to your Cloud URL + `hindsightApiKey`. Note: memory data lives on their servers.
+- **Local** (fully private/on-device): run the server (`bash scripts/hindsight-start.sh`, needs
+  `pip install hindsight-all`); set `hindsightBaseUrl` to `http://localhost:8888`.
+
+Settings keys (in `SettingsManager`): `hindsightBaseUrl`, `hindsightApiKey`, `hindsightAutoStart`,
+`hindsightServerCommand`, `hindsightLlmProvider`. **Default off** (no baseUrl) — opt-in only.
+
+> **Current scope:** the app health-checks + connects to a server you've already started (local or
+> Cloud). **Auto-spawning** a local server from the app (start/stop/poll, auto-start-when-installed
+> like Ollama) is a planned follow-up — `HindsightManager.start()`/`stop()` are stubbed for it. Until
+> then, start the local server yourself (or point at Cloud).
+
 ## Requirements
 
 - **The TS client** in Natively: already declared as an `optionalDependency`

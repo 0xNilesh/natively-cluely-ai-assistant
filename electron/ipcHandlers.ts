@@ -1002,21 +1002,19 @@ export function initializeIpcHandlers(appState: AppState): void {
         // on the vast majority of answers. Hard 800ms timeout (AbortController+Promise.race
         // in the adapter): on timeout/empty/error it returns [] and the answer proceeds
         // WITHOUT memory — never blocks, never throws. Skipped for coding/safety answers.
+        // Config from HindsightManager (settings OR env) so live recall works in a packaged
+        // build. Resolved up-front so the gate itself depends on a configured server, not env.
+        const { HindsightManager: _HM } = require('./services/HindsightManager') as typeof import('./services/HindsightManager');
+        const _liveHsCfg = _HM.getInstance().getHindsightConfig();
         if (!isCodingChat && !isContractEnforced
             && isIntelligenceFlagEnabled('hindsightLiveRecall')
             && isIntelligenceFlagEnabled('hindsightMemory')
-            && process.env.HINDSIGHT_BASE_URL
+            && _liveHsCfg
             && typeof message === 'string'
             && isBackwardLookingQuery(message)) {
           try {
             const { LongTermMemoryService } = require('./intelligence/memory/LongTermMemoryService') as typeof import('./intelligence/memory/LongTermMemoryService');
-            const ltm = LongTermMemoryService.fromFlags({
-              hindsight: {
-                baseUrl: process.env.HINDSIGHT_BASE_URL,
-                apiKey: process.env.HINDSIGHT_API_KEY,
-                timeoutMs: 800,
-              },
-            });
+            const ltm = LongTermMemoryService.fromFlags({ hindsight: { ..._liveHsCfg, timeoutMs: 800 } });
             if (ltm.enabled) {
               const t0 = Date.now();
               const memories = await ltm.recallRelevantMemory(message, { userId: 'local' }, { timeoutMs: 800, maxResults: 5 });
@@ -4057,15 +4055,13 @@ export function initializeIpcHandlers(appState: AppState): void {
       // Bounded 2s timeout; Noop/[] when Hindsight is off, unconfigured, or the server is
       // down — the local results always stand. NOT on the live answer path (search only).
       try {
-        if (isIntelligenceFlagEnabled('hindsightMemory') && process.env.HINDSIGHT_BASE_URL) {
+        // Config from HindsightManager (settings OR env) so global recall works in a
+        // packaged build, not only when HINDSIGHT_BASE_URL is exported in a dev shell.
+        const { HindsightManager } = require('./services/HindsightManager') as typeof import('./services/HindsightManager');
+        const hsCfg = HindsightManager.getInstance().getHindsightConfig();
+        if (isIntelligenceFlagEnabled('hindsightMemory') && hsCfg) {
           const { LongTermMemoryService } = require('./intelligence/memory/LongTermMemoryService') as typeof import('./intelligence/memory/LongTermMemoryService');
-          const ltm = LongTermMemoryService.fromFlags({
-            hindsight: {
-              baseUrl: process.env.HINDSIGHT_BASE_URL,
-              apiKey: process.env.HINDSIGHT_API_KEY,
-              timeoutMs: Number(process.env.HINDSIGHT_TIMEOUT_MS) || 2000,
-            },
-          });
+          const ltm = LongTermMemoryService.fromFlags({ hindsight: { ...hsCfg, timeoutMs: 2000 } });
           if (ltm.enabled) {
             const memories = await ltm.recallRelevantMemory(q, { userId: 'local' }, { timeoutMs: 2000, maxResults: 8 });
             for (const mem of memories) {

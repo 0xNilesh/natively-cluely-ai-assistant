@@ -19,6 +19,15 @@ export interface AppSettings {
     codexCliSandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
     codexCliServiceTier?: 'default' | 'fast' | 'flex';
     codexCliModelReasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh';
+    // Hindsight long-term memory server (optional, user-provisioned sidecar — Cloud OR
+    // local). baseUrl empty by default → feature off. Env (HINDSIGHT_BASE_URL) overrides
+    // these for dev. apiKey only for Hindsight Cloud. autoStart/serverCommand reserved for
+    // the deferred auto-spawn follow-up (auto-start-when-installed, like Ollama).
+    hindsightBaseUrl?: string;
+    hindsightApiKey?: string;
+    hindsightAutoStart?: boolean;
+    hindsightServerCommand?: string;
+    hindsightLlmProvider?: string;
     knowledgeMode?: boolean;
     phoneMirrorEnabled?: boolean;
     phoneMirrorExposeOnLan?: boolean;

@@ -873,6 +873,12 @@ export class AppState {
     // Check and prep Ollama embedding model
     this.bootstrapOllamaEmbeddings()
 
+    // Prime the optional Hindsight long-term-memory server health cache (settings/env
+    // config; Noop when unconfigured). Fire-and-forget — never blocks startup.
+    try {
+      const { HindsightManager } = require('./services/HindsightManager');
+      HindsightManager.getInstance().start().catch(() => { /* never blocks startup */ });
+    } catch { /* optional */ }
 
     this.setupIntelligenceEvents()
 
@@ -5849,6 +5855,12 @@ if (process.env.THINKING_MATRIX === '1') {
   app.on("before-quit", (event) => {
     console.log("App is quitting, cleaning up resources...");
     appState.setQuitting(true);
+
+    // Stop an app-managed Hindsight server (no-op unless the deferred auto-spawn owns one).
+    try {
+      const { HindsightManager } = require('./services/HindsightManager');
+      HindsightManager.getInstance().stop().catch(() => { /* best effort */ });
+    } catch { /* optional */ }
 
     // Stop the default-output watcher so the setInterval doesn't keep calling
     // into the native module while V8 is tearing down. Without this, quitting

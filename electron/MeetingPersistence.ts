@@ -417,14 +417,12 @@ Return ONLY valid JSON (no markdown code blocks):
             // is async/queued (never blocks). Scope tags enforce per-user/org isolation.
             // Runs in the already-background processAndSaveMeeting worker.
             try {
-                if (isIntelligenceFlagEnabled('hindsightPostMeetingRetain')) {
-                    const ltm = LongTermMemoryService.fromFlags({
-                        hindsight: {
-                            baseUrl: process.env.HINDSIGHT_BASE_URL || '',
-                            apiKey: process.env.HINDSIGHT_API_KEY,
-                            timeoutMs: Number(process.env.HINDSIGHT_TIMEOUT_MS) || 800,
-                        },
-                    });
+                // Config from HindsightManager (settings OR env) so this works in a packaged
+                // build, not just when HINDSIGHT_BASE_URL is exported in a dev shell.
+                const { HindsightManager } = require('./services/HindsightManager') as typeof import('./services/HindsightManager');
+                const hsCfg = HindsightManager.getInstance().getHindsightConfig();
+                if (isIntelligenceFlagEnabled('hindsightPostMeetingRetain') && hsCfg) {
+                    const ltm = LongTermMemoryService.fromFlags({ hindsight: hsCfg });
                     if (ltm.enabled) {
                         const summaryText = typeof summaryData?.overview === 'string'
                             ? summaryData.overview
