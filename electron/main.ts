@@ -1505,7 +1505,22 @@ export class AppState {
         // 'system' for interviewer (system audio), 'mic' for user (microphone).
         // The server uses ${key}:${channel} as the session key so both streams
         // can coexist without triggering concurrent_session_blocked.
-        stt = new NativelyProSTT(nativelyKey, speaker === 'interviewer' ? 'system' : 'mic');
+        //
+        // Phase 7/8: pass appVersion + platform for the regional-relay
+        // session-create body. The class reads the relay feature flags from
+        // SettingsManager itself and derives the control-plane base URL from
+        // its own host, so the construction site stays tiny. The relay path is
+        // flag-gated OFF by default — this is inert until regionalSttRelayEnabled.
+        stt = new NativelyProSTT(
+          nativelyKey,
+          speaker === 'interviewer' ? 'system' : 'mic',
+          {
+            appVersion: app.getVersion(),
+            platform: process.platform === 'darwin' ? 'mac'
+              : process.platform === 'win32' ? 'windows'
+              : 'linux',
+          },
+        );
       }
     } else if (sttProvider === 'deepgram') {
       const apiKey = CredentialsManager.getInstance().getDeepgramApiKey();

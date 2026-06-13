@@ -22,6 +22,15 @@ export type TelemetryEventName =
   | 'stt_final_latency'
   | 'stt_reconnect'
   | 'stt_error'
+  // ── Regional STT relay (Phase 7/8) — never carry token/key/transcript text.
+  // Properties are metadata only (region, url-kind, close code, latency bucket).
+  | 'relay_session_resolved'
+  | 'relay_selected'
+  | 'relay_connected'
+  | 'relay_failed'
+  | 'relay_fallback_used'
+  | 'first_transcript_latency_bucket'
+  | 'stt_relay_disabled_flag_off'
   | 'rag_query'
   | 'rag_hit'
   | 'rag_miss'

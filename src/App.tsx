@@ -34,6 +34,7 @@ import { analytics } from "./lib/analytics/analytics.service"
 import { ErrorBoundary } from "./components/ErrorBoundary"
 import ModesSettings from "./components/settings/ModesSettings"
 import { ProfileIntelligenceSettings } from "./components/ProfileIntelligenceSettings"
+import logoAsset from "./assets/logo.png"
 
 const queryClient = new QueryClient()
 
@@ -103,6 +104,8 @@ const App: React.FC = () => {
       return null;
     }
   });
+  const shouldShowLaunchBranding = isLauncherWindow || isDefault;
+  const [showLaunchBranding, setShowLaunchBranding] = useState(shouldShowLaunchBranding);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState<string>('general');
   const [isModesOpen, setIsModesOpen] = useState(false);
@@ -174,7 +177,7 @@ const App: React.FC = () => {
   } | null>(null);
   const [showTrialExpiredModal, setShowTrialExpiredModal] = useState(false);
 
-  const isAppReady = !isSettingsWindow && !isOverlayWindow && !isModelSelectorWindow && !showStartup && !isSettingsOpen && isLauncherMainView && !isProfileOpen;
+  const isAppReady = !isSettingsWindow && !isOverlayWindow && !isModelSelectorWindow && !showStartup && !showLaunchBranding && !isSettingsOpen && isLauncherMainView && !isProfileOpen;
   const { activeAd, dismissAd } = useAdCampaigns(
     planDetails,
     hasProfile,
@@ -186,6 +189,12 @@ const App: React.FC = () => {
   );
 
 
+
+  useEffect(() => {
+    if (!shouldShowLaunchBranding) return;
+    const timer = window.setTimeout(() => setShowLaunchBranding(false), 1150);
+    return () => window.clearTimeout(timer);
+  }, [shouldShowLaunchBranding]);
 
   useEffect(() => {
     // Track app opens for global gating
