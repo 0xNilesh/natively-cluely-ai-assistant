@@ -38,10 +38,26 @@ export type { PlannerDecision, PlannerDecisionKind, PlannerInput } from "./Plann
 export { planAnswer, formatAnswerPlanForPrompt, isCodingAnswerType, shouldScaffold, isStealthEvasionQuestion } from "./AnswerPlanner";
 export { detectAnswerStyle, styleSuppressesScaffold } from "./answerStyle";
 export type { AnswerStyle, AnswerStyleResult } from "./answerStyle";
+export { detectExplicitCodingContract, isCodingContinuation, buildPriorCodingContextBlock, buildCodingContractPrompt, explicitContractProducesCode } from "./codingFollowup";
+export type { ExplicitCodingContract, PriorCodingTurn } from "./codingFollowup";
+export { shouldHumanize, shouldHumanizeOutput, detectCorporateFiller, humanizeDirectiveFor, HUMANIZE_DIRECTIVE, humanizeSpokenAnswer, humanizeForAnswerType } from "./humanLikeness";
+export type { CorporateFillerVerdict } from "./humanLikeness";
+export {
+  countSpokenWordsExcludingCode, estimateSpeakSeconds, decideSpeakability,
+  trimToSpeakable, applySpeakabilityBudget, compressTechnicalConcept,
+  classifySpeakability, classifyTargetSpeakability,
+  classifyShortBand, shortBandTargetWords,
+  SOFT_MIN_WORDS, SOFT_MAX_WORDS, HARD_MAX_WORDS, HARD_MAX_SECONDS, SPOKEN_FULL_MAX_WORDS,
+} from "./speakability";
+export type { SpeakabilityDecision, SpeakabilityClass, SpeakabilityTarget, ShortLengthBand, ShortBandTarget } from "./speakability";
+export { checkAnswerForCodeBugs, checkCodeCompleteness } from "./CodeSanityCheck";
+export type { CodeSanityResult, CodeSanityIssue } from "./CodeSanityCheck";
+export { AnswerDiversityGuard, cleanAnswerArtifacts, compressToSpeakable, varySpokenOpening } from "./answerPolish";
+export type { RepetitionVerdict, RepetitionReason, DiversityCheckOpts } from "./answerPolish";
 export type { AnswerPlan, AnswerSource, AnswerType, ContextLayer, OutputPerspective, SpeakerPerspective } from "./AnswerPlanner";
 export { applyModeFallback, MODE_CONTEXT_PROFILES } from "./modeProfiles";
 export type { ActiveModeInfo, ModeContextProfile, ModeTemplateType } from "./modeProfiles";
-export { resolveFollowUp, resolveFollowUpOrClarify, isBareFollowUp, buildContextFreeClarification } from "./FollowUpResolver";
+export { resolveFollowUp, resolveFollowUpOrClarify, isBareFollowUp, isRefinementFollowUp, isSameSessionFollowUp, buildContextFreeClarification } from "./FollowUpResolver";
 export { classifyProviderError, isClarificationStall, isPermanentKeyError } from "./providerErrorClassifier";
 export type { ProviderErrorKind, ProviderErrorClassification } from "./providerErrorClassifier";
 export { SessionMemory, isKindAllowedInMode } from "./SessionMemory";
@@ -60,13 +76,14 @@ export {
   raceStreamWithDeadline, firstUsefulDeadlineMs,
   LIVE_FIRST_USEFUL_BUDGET_MS, LIVE_PROVIDER_FIRST_USEFUL_HARD_TIMEOUT_MS,
   LIVE_PROVIDER_FIRST_USEFUL_COMPLEX_TIMEOUT_MS, LIVE_TOTAL_HARD_TIMEOUT_MS,
+  LIVE_LOCAL_FIRST_USEFUL_TIMEOUT_MS, LIVE_LOCAL_TOTAL_HARD_TIMEOUT_MS,
   LIVE_INTER_TOKEN_STALL_MS, BENCHMARK_PER_QUESTION_HARD_TIMEOUT_MS,
 } from "./liveDeadlines";
 export type { FollowUpContext, ResolvedFollowUp, FollowUpSurface } from "./FollowUpResolver";
 export { renderCodingAnswerMarkdown, repairCodingAnswer, repairCodingMarkdown, validateAnswerStructure, validateCodingMarkdown, buildCodingScaffold } from "./AnswerValidator";
 export type { AnswerValidationResult, CodingAnswer } from "./AnswerValidator";
-export { validateProfileOutput, buildProfileRepairInstruction, stripProfileTokensFromCoding, sanitizeCandidateAnswer, CANDIDATE_VOICE_ANSWER_TYPES } from "./ProfileOutputValidator";
-export type { ProfileValidationResult, ProfileViolation, ProfileViolationCode, ProfileValidationInput, CandidateSanitizeResult } from "./ProfileOutputValidator";
+export { validateProfileOutput, buildProfileRepairInstruction, stripProfileTokensFromCoding, sanitizeCandidateAnswer, CANDIDATE_VOICE_ANSWER_TYPES, detectAssistantVoiceMisfire, ASSISTANT_VOICE_ANSWER_TYPES } from "./ProfileOutputValidator";
+export type { ProfileValidationResult, ProfileViolation, ProfileViolationCode, ProfileValidationInput, CandidateSanitizeResult, AssistantVoiceSanitizeResult } from "./ProfileOutputValidator";
 export { validateProfileEvidence } from "./profileEvidenceValidator";
 export type { EvidenceValidationResult, EvidenceViolation, EvidenceViolationCode, EvidenceValidationInput } from "./profileEvidenceValidator";
 export { decideProfileIntelligence } from "./ProfileIntelligenceRouter";

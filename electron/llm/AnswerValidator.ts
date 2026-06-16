@@ -1,5 +1,6 @@
 import type { AnswerType } from './AnswerPlanner';
 import { CODING_SECTIONS as CANONICAL_CODING_SECTIONS } from './codingContract';
+import type { ExplicitCodingContract } from './codingFollowup';
 
 export interface CodingAnswer {
   approach: string;
@@ -387,7 +388,16 @@ export const validateCodingMarkdown = (response: string): AnswerValidationResult
   };
 };
 
-export const validateAnswerStructure = (answerType: AnswerType, answer: string): AnswerValidationResult => {
+export const validateAnswerStructure = (
+  answerType: AnswerType,
+  answer: string,
+  // When the user gave an EXPLICIT format constraint ("code only", "give the
+  // complexity", "dry run this", "explain without code"), the six-section DSA
+  // template MUST NOT be enforced — that was the bug where "code only" got a full
+  // template force-injected by repair (task Phase 11). For an explicit contract we
+  // only sanity-check the user's REQUESTED shape and never rewrite into six sections.
+  explicitContract: ExplicitCodingContract = null,
+): AnswerValidationResult => {
   if (!isCodingType(answerType)) {
     return {
       ok: true,
@@ -397,5 +407,67 @@ export const validateAnswerStructure = (answerType: AnswerType, answer: string):
     };
   }
 
+  if (explicitContract) {
+    return validateExplicitCodingContract(explicitContract, answer);
+  }
+
   return validateCodingMarkdown(answer);
+};
+
+/**
+ * Validate (but do NOT template-repair) a coding answer that the user explicitly
+ * constrained. The only "repair" we ever do here is the narrow, honest case where the
+ * user asked for CODE ONLY and the model still wrapped it in prose/headings: we strip
+ * to the first fenced code block. Every other explicit shape is accepted as-is — the
+ * user's instruction wins over the default template. Never forces six sections.
+ */
+export const validateExplicitCodingContract = (
+  explicitContract: ExplicitCodingContract,
+  answer: string,
+): AnswerValidationResult => {
+  const trimmed = (answer || '').trim();
+  const codeBlock = extractFirstCodeBlock(trimmed);
+
+  if (explicitContract === 'code_only') {
+    // Accept a clean single fenced block. If the model added prose/headings around
+    // it, reduce to just the code (honoring "code only"). If there is no code block
+    // at all, leave it alone (don't fabricate) — the contract prompt already told the
+    // model what to do; a missing block is a model failure repair can't invent past.
+    const onlyCode = codeBlock ? codeBlock.block.trim() : trimmed;
+    const hasExtraProse = codeBlock
+      ? trimmed.replace(codeBlock.block, '').replace(/\s+/g, '').length > 0
+      : false;
+    const ok = Boolean(codeBlock) && !hasExtraProse && !/^#{1,3}\s/m.test(trimmed);
+    return {
+      ok,
+      missingSections: [],
+      hasCodeBlock: Boolean(codeBlock),
+      hasComplexity: hasComplexity(trimmed),
+      repaired: ok ? undefined : onlyCode,
+    };
+  }
+
+  // complexity_only / dry_run_only / explain_only: accept the model's shape verbatim.
+  // We never inject the six-section template; the user constrained the format.
+  if (explicitContract === 'explain_only') {
+    // "without code" — if the model still emitted ANY fenced block(s), strip them ALL
+    // (a model can emit more than one; the first-block-only strip left blocks 2+ —
+    // code-review LOW 2026-06-15). Collapse the blank runs the removal leaves.
+    const ok = !codeBlock;
+    const stripped = trimmed.replace(/```[\s\S]*?```/g, '').replace(/\n{3,}/g, '\n\n').trim();
+    return {
+      ok,
+      missingSections: [],
+      hasCodeBlock: Boolean(codeBlock),
+      hasComplexity: hasComplexity(trimmed),
+      repaired: ok ? undefined : stripped,
+    };
+  }
+
+  return {
+    ok: true,
+    missingSections: [],
+    hasCodeBlock: Boolean(codeBlock),
+    hasComplexity: hasComplexity(trimmed),
+  };
 };

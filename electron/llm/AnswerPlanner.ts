@@ -2,6 +2,7 @@ import type { IntentResult } from './IntentClassifier';
 import type { ExtractedQuestion } from './transcriptQuestionExtractor';
 import { CODING_CONTRACT, CODING_VERIFICATION_INSTRUCTION } from './codingContract';
 import { detectAnswerStyle, type AnswerStyle } from './answerStyle';
+import { classifyTargetSpeakability, classifyShortBand, shortBandTargetWords } from './speakability';
 import { applyModeFallback, type ActiveModeInfo } from './modeProfiles';
 
 export type AnswerType =
@@ -309,6 +310,28 @@ const DIRECT_SHORT_TEMPLATE = `Answer directly in 1-2 sentences. Do not include 
 // loaded experience; speak to the user about their own skill.
 const SKILL_RATING_TEMPLATE = `Answer in 1-2 sentences as the candidate. If asked to rate a skill (e.g. "out of 10"), GIVE a concrete number grounded in the loaded experience and add one phrase of justification. Never refuse, never say you are an AI or that you "cannot assign ratings". Do not mention the profile/context explicitly — just answer confidently.`;
 const GENERAL_TEMPLATE = `Answer naturally and directly. Use only relevant context. Keep it predictable and concise.`;
+
+// Generic technical-concept answers (what is Redis / JWT / CORS / caching / REST) were
+// coming back as long beginner TUTORIALS. In an interview the user needs a short, confident
+// spoken answer, not a classroom lesson (spoken-answer-quality sprint 2026-06-15).
+const TECHNICAL_CONCEPT_TEMPLATE = `You are the candidate SPEAKING this answer aloud to an interviewer. Give the exact words you'd SAY — a short, plain spoken answer, NOT documentation.
+
+THIS IS A SPOKEN ANSWER. Output MUST be ONE short paragraph of plain sentences. It is WRONG if it contains ANY of these:
+- a markdown heading (## or **Heading**)
+- a bullet list or a numbered list
+- a "Key Concepts" / "How it works" / "Common use cases" / "Performance" section
+- a code block or a code example
+- a table
+
+Shape:
+- 2 to 4 sentences, usually 40 to 80 words. If a single sentence answers it, stop there.
+- Sentence 1 is a plain one-line definition. Then at most one or two sentences with the single most relevant tradeoff or use, woven into prose.
+- No analogy unless the user asked for simple terms / "explain like I'm 5".
+
+Example of the RIGHT shape (for "what is Redis?"):
+"Redis is an in-memory key-value store, so reads and writes are extremely fast. People mostly use it for caching, sessions, and rate limiting, and the main tradeoff is that it lives in memory, so you watch cost and what data really belongs there."
+
+Sound like a competent engineer answering quickly in conversation — calm, specific, done in about 20 seconds.`;
 
 // SALES voice (manual regression 2026-06-12): real sales-mode sessions answered
 // "why is your product expensive?" with "I'm Natively, an AI assistant. I don't
@@ -855,12 +878,24 @@ const SKILLS_PATTERNS = [
   /\bwhat(?:'s| is) (your|my) strongest (skill|area|tech|language|domain)\b/i,
   /\bwhere do (you|i) special/i,
 ];
+// A PEOPLE / leadership / conflict OBJECT after a lead/manage/handle verb marks a behavioral
+// STORY (not a skill probe). This ONE source is interpolated into the behavioral matcher AND
+// its two skill-side guards so the guard is always a superset of the matcher and the three lists
+// can never drift apart (code-review 2026-06-16). A tech/tool object ("a database", "Python")
+// is deliberately NOT here — those stay skill_experience.
+const PEOPLE_OR_CONFLICT_OBJECT =
+  '(?:team|teams|people|person|peers?|reports?|engineers?|developers?|juniors?|staff|direct\\s+reports?|group|anyone|someone|somebody|anybody|conflict|disagreement|crisis|escalation|difficult|tough)';
+
 // Spec Case F exception: "have you used / worked with / do you know <tech>" is a
 // SKILL-EXPERIENCE question about the USER (profile YES, first person) — NOT a
 // generic technical concept. This must be checked BEFORE coding/DSA patterns so
 // "have you used a hashmap?" routes to skills, not to the coding contract.
 const SKILL_EXPERIENCE_PATTERNS = [
-  /\bhave you (ever )?(used|worked with|worked on|built|built with|written|coded in|programmed in|implemented|done|created|handled|analy[sz]ed|normali[sz]ed|deployed|designed|managed)\b/i,
+  // "have you used/built/managed <tech>" is a skill probe. But "have you managed/handled/led
+  // PEOPLE / a TEAM" is a behavioral STORY, not a skill — the negative lookahead lets those
+  // fall through to BEHAVIORAL_PATTERNS (code-review caveat 2026-06-16). A tech object after
+  // managed/handled (e.g. "have you managed a database/cluster") still routes to skills.
+  new RegExp(`\\bhave you (ever )?(?:(?:managed|handled|led)\\b(?!\\s+(?:a\\s+|an\\s+|the\\s+|your\\s+|some\\s+|any\\s+)?${PEOPLE_OR_CONFLICT_OBJECT}\\b)|(?:used|worked with|worked on|built|built with|written|coded in|programmed in|implemented|done|created|analy[sz]ed|normali[sz]ed|deployed|designed))\\b`, 'i'),
   /\bdo you (know|have experience (with|in)|use)\b/i,
   /\bare you (familiar|comfortable|proficient|experienced) (with|in)\b/i,
   // "Are you good/strong/skilled at X?", "are you any good with React?" — a
@@ -887,8 +922,12 @@ const SKILL_EXPERIENCE_PATTERNS = [
   /\bhow (much |many years )?(experience|familiar).*\b(with|in|using)\b/i,
   /\bever (used|worked with|built)\b/i,
   // "Did you actually use X / use X or just know it", "did you work with X" —
-  // past-experience probes (benchmark 2026-06-05 would-vs-have, honest-evidence).
-  /\bdid you (actually |really |ever )?(use|work with|work on|build|implement|write|do|handle|analy[sz]e|deal with)\b/i,
+  // past-experience probes (benchmark 2026-06-05 would-vs-have, honest-evidence). The
+  // handle/deal-with verbs are split out with a people/conflict-object negative lookahead so
+  // "did you handle a crisis" / "did you deal with a difficult teammate" fall through to a
+  // behavioral STORY instead of a skill probe (code-review 2026-06-16).
+  /\bdid you (actually |really |ever )?(use|work with|work on|build|implement|write|analy[sz]e)\b/i,
+  new RegExp(`\\bdid you (actually |really |ever )?(do|handle|deal with|manage)\\b(?!\\s+(?:a\\s+|an\\s+|the\\s+|your\\s+|some\\s+|any\\s+)?${PEOPLE_OR_CONFLICT_OBJECT}\\b)`, 'i'),
   /\b(used|worked with) [\w ]+ or just (know|knew|theoretical|theory)\b/i,
   /\bexperienced or just theoretical\b/i,
   // "How HAVE you used X", "where HAVE you used X" — explicit past usage (vs the
@@ -1053,6 +1092,16 @@ const BEHAVIORAL_PATTERNS = [
   /\bdescribe (a time|a situation|an? (?:experience|instance))\b|\bdescribe a time (you|i)\b/i,
   /\b(time|example|instance) (you|i|when (?:you|i))\s+(took|showed|demonstrated|led|handled|overcame|failed|learned|built|shipped|resolved|managed)\b/i,
   /\bwhat (do|would) you do (when|if)\b.{0,40}\b(stuck|fail|wrong|conflict|disagree|pressure|deadline)\b/i,
+  // "Did/Have you ever <lead/manage/mentor/handle> <people/team/conflict>" or "...deliver under
+  // pressure" — a past-experience yes/no that really wants a STAR story ("Did you ever lead a
+  // team?", "Have you managed people?", "Have you handled a conflict?", "Have you mentored
+  // anyone?"). The PEOPLE/leadership/conflict OBJECT is the discriminator (shared
+  // PEOPLE_OR_CONFLICT_OBJECT): a tool/task object ("have you built a REST API", "what projects
+  // have you built", "did you finish the migration") is NOT a story and is deliberately excluded
+  // (code-review caveat 2026-06-16). The object list here is identical to the one the two
+  // skill-side guards exclude, so they can never drift.
+  new RegExp(`\\b(?:did|have|has)\\s+(?:you|u)\\s+(?:ever\\s+)?(?:led|lead|manage[d]?|mentor(?:ed)?|coach(?:ed)?|supervis(?:e|ed)|handle[d]?|resolv(?:e|ed)|navigat(?:e|ed)|deal[t]?\\s+with)\\s+(?:a\\s+|an\\s+|the\\s+|your\\s+|some\\s+|any\\s+)?${PEOPLE_OR_CONFLICT_OBJECT}\\w*\\b`, 'i'),
+  /\b(?:did|have|has)\s+(?:you|u)\s+(?:ever\s+)?(?:deliver(?:ed)?|shipped?|launched?|worked|performed)\b.{0,30}\b(?:under\s+(?:pressure|a\s+(?:tight\s+)?deadline)|tight\s+deadline|crunch|high[- ]pressure)\b/i,
   /\b(can you )?talk (more )?about your (project )?coordination\b/i,
   /\bproject coordinati(on|vely)\b/i,
   /\bproof of\b|\bprove[sd]? (your|my|analytical|that you|i)\b|\bthat proves?\b/i,
@@ -1326,9 +1375,9 @@ const templateFor = (answerType: AnswerType): string => {
     case 'debugging_question_answer':
       return DEBUGGING_TEMPLATE;
     case 'technical_concept_answer':
-      // Generic technical explanation — no profile, no persona. Same shape as
-      // general but explicitly free of candidate framing.
-      return GENERAL_TEMPLATE;
+      // Generic technical explanation — no profile, no persona, and a SHORT spoken
+      // interview answer (not a tutorial). spoken-answer-quality sprint 2026-06-15.
+      return TECHNICAL_CONCEPT_TEMPLATE;
     case 'identity_answer':
     case 'profile_fact_answer':
     case 'skills_answer':
@@ -1774,7 +1823,11 @@ export const planAnswer = (input: PlanAnswerInput): AnswerPlan => {
   const isProjectDrillIn = includesAny(text, PROJECT_FOLLOWUP_PATTERNS)
     || /\b(there|in it|on it|in that|in the project|build it|built it)\b/i.test(text)
     || /\b(tech|technology|technical)\s+stack\b/i.test(text);
-  const isExplicitExperienceProbe = !hasWriteCodeVerb && !asksAboutNatively && !asksAboutProjectsList && !isProjectDrillIn && (
+  // A PEOPLE/team/leadership object after managed/handled/led marks a behavioral STORY, not a
+  // skill probe — exclude it so it falls through to BEHAVIORAL_PATTERNS (code-review caveat
+  // 2026-06-16). "have you managed a database/cluster" (a tech object) stays a skill probe.
+  const hasPeopleObject = new RegExp(`\\b(?:manage[d]?|handle[d]?|led|lead|mentor(?:ed)?|coach(?:ed)?|supervis(?:e|ed)|resolv(?:e|ed)|navigat(?:e|ed)|deal[t]?\\s+with)\\s+(?:a\\s+|an\\s+|the\\s+|your\\s+|some\\s+|any\\s+)?${PEOPLE_OR_CONFLICT_OBJECT}\\b`, 'i').test(text);
+  const isExplicitExperienceProbe = !hasWriteCodeVerb && !asksAboutNatively && !asksAboutProjectsList && !isProjectDrillIn && !hasPeopleObject && (
     /\bhave (you|u) (ever )?(used|worked with|worked on|built|implemented|written|coded|deployed|designed|done|handled|managed)\b/i.test(text)
     || /\bdid (you|u) (actually |really |ever )?(use|work with|build|implement|write|deploy|design|do|handle)\b/i.test(text)
     || /\bwhere have (you|i) (used|worked|applied|built|implemented)\b/i.test(text)
@@ -2166,6 +2219,15 @@ export const shouldScaffold = (answerType: AnswerType): boolean =>
 const SCAFFOLDED_PROFILE_TYPES: ReadonlySet<AnswerType> = new Set<AnswerType>([
   'behavioral_interview_answer', 'project_answer', 'jd_fit_answer',
   'gap_analysis_answer', 'negotiation_answer',
+  // Audit 2026-06-16 (H6): simple factual profile questions — "what companies have
+  // you worked at", "how many years of experience", "introduce yourself", "what is
+  // your current role" — were shipping their full template scaffold (STAR / Direct
+  // Answer / Why It Matters …) because they were absent here, so isSpeakableOnlyPlan
+  // returned false and the scaffold rendered verbatim. A factual question must answer
+  // in natural spoken prose, not a story scaffold. Adding them flips on the speakable
+  // rendering directive (headings suppressed; explicit "detailed/bullets/STAR" style
+  // still keeps structure via STRUCTURE_REQUESTING_STYLES below).
+  'experience_answer', 'skill_experience_answer', 'profile_fact_answer', 'identity_answer',
 ]);
 
 // Styles that explicitly request visible structure — sections/bullets stay.
@@ -2222,6 +2284,21 @@ export const formatAnswerPlanForPrompt = (plan: AnswerPlan, includeVerificationS
   const styleDirective = plan.answerStyle && plan.answerStyle !== 'default'
     ? `\n\n${detectAnswerStyle(plan.question).directive}`
     : '';
+  // Adaptive LENGTH directive (2026-06-16): for a default-style SPOKEN_SHORT answer, inject a
+  // CONCRETE per-answer word/second target so the model lands in the 15-30s band by question
+  // intent instead of always running ~30s. Only fires for SPOKEN_SHORT with no explicit style
+  // cue — SPOKEN_FULL / STRUCTURED_FULL and explicit styles own their own length, so emit
+  // nothing for them (additive, non-conflicting). Prompt-guidance only; the deterministic
+  // trimmer is unchanged.
+  let lengthDirective = '';
+  if (!plan.answerStyle || plan.answerStyle === 'default') {
+    const tier = classifyTargetSpeakability(plan.answerType, plan.answerStyle, plan.question);
+    if (tier === 'SPOKEN_SHORT') {
+      const band = classifyShortBand(plan.answerType, plan.answerStyle, plan.question);
+      const t = shortBandTargetWords(band);
+      lengthDirective = `\n\nLENGTH: aim for about ${t.seconds}s spoken — roughly ${t.min} to ${t.max} words (${t.guidance}). Use fewer if the question is fully answered in fewer; never pad to reach the number.`;
+    }
+  }
   // Speakable-by-default (manual regression 2026-06-12): scaffolded profile
   // templates become internal thinking structure; the rendered answer is
   // natural prose unless the user explicitly asked for structure.
@@ -2242,6 +2319,6 @@ VOICE: ${voiceLine}
 GROUNDING: ${policyLine}
 
 STRICT RESPONSE TEMPLATE:
-${plan.responseTemplate}${renderingDirective}${styleDirective}${verificationBlock}
+${plan.responseTemplate}${renderingDirective}${styleDirective}${lengthDirective}${verificationBlock}
 </answer_contract>`;
 };

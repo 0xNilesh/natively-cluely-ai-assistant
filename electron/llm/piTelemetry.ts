@@ -36,7 +36,9 @@ export type PiTelemetryEvent =
   | 'first_useful_token_recorded'
   // Manual regression 2026-06-12: final-boundary answer polish markers.
   | 'pi_scaffold_compressed'
-  | 'pi_answer_repeated';
+  | 'pi_answer_repeated'
+  // Groq-scout E2E sprint 2026-06-14: assistant-voice identity/refusal misfire guard.
+  | 'pi_assistant_voice_misfire_repaired';
 
 export interface PiTelemetryRecord {
   event: PiTelemetryEvent;
@@ -67,6 +69,8 @@ const ALLOWED_KEYS = new Set<string>([
   'firstTokenMs', 'firstUsefulMs', 'totalMs',
   // validator / sanitizer markers
   'sanitizerApplied', 'repaired', 'needsFallback', 'markerCount', 'violationCode',
+  // speakability markers (coarse class only — never raw answer text)
+  'speakabilityClass',
 ]);
 // Even for an allowed key, a string value is bounded + must look like a marker label
 // (no free-text, no salary/PII numbers). Defense-in-depth on top of the allowlist.

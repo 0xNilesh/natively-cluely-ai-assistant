@@ -244,6 +244,13 @@ export class LLMHelper {
   private useOllama: boolean = false
   private ollamaModel: string = ""
   private ollamaUrl: string = "http://127.0.0.1:11434"
+  // How long Ollama keeps the model resident in RAM after a request (the
+  // `keep_alive` field on /api/chat). Default "30m" so a live session doesn't pay
+  // the multi-second cold-load tax on every turn after a short pause (Ollama's own
+  // default is 5m). prewarmPromptCache() upgrades this to "-1" (pin indefinitely)
+  // once it has warmed the model, and switching away from Ollama unloads it ("0")
+  // so a "-1" pin never strands GBs of weights in RAM for an idle provider.
+  private ollamaKeepAlive: string | number = "30m";
   // Best vision-capable Ollama model found among installed models (authoritative
   // via /api/show capabilities, name-heuristic fallback). null = none found yet
   // or not probed. Used so a screenshot uses a vision model even when the
@@ -812,8 +819,14 @@ export class LLMHelper {
     if (modelId === 'deepseek') targetModelId = DEEPSEEK_MODEL;
 
     if (targetModelId.startsWith('ollama-')) {
+      const nextOllamaModel = targetModelId.replace('ollama-', '');
+      // Switching between two Ollama models: unload the OLD one if it was pinned so
+      // we don't hold two models resident; the new one re-pins on its next prewarm.
+      if (this.useOllama && this.ollamaModel && this.ollamaModel !== nextOllamaModel) {
+        this.releaseOllamaPin(this.ollamaModel);
+      }
       this.useOllama = true;
-      this.ollamaModel = targetModelId.replace('ollama-', '');
+      this.ollamaModel = nextOllamaModel;
       this.customProvider = null;
       this.activeCurlProvider = null;
       console.log(`[LLMHelper] Switched to Ollama: ${this.ollamaModel}`);
@@ -822,6 +835,7 @@ export class LLMHelper {
 
     const custom = customProviders.find(p => p.id === targetModelId);
     if (custom) {
+      if (this.useOllama) this.releaseOllamaPin(this.ollamaModel);
       this.useOllama = false;
       this.customProvider = custom;
       this.activeCurlProvider = null;
@@ -830,6 +844,7 @@ export class LLMHelper {
     }
 
     // Standard Cloud Models
+    if (this.useOllama) this.releaseOllamaPin(this.ollamaModel);
     this.useOllama = false;
     this.customProvider = null;
     this.activeCurlProvider = null;
@@ -885,6 +900,7 @@ export class LLMHelper {
   }
 
   public switchToCurl(provider: CurlProvider) {
+    if (this.useOllama) this.releaseOllamaPin(this.ollamaModel);
     this.useOllama = false;
     this.customProvider = null;
     this.activeCurlProvider = provider;
@@ -968,6 +984,8 @@ export class LLMHelper {
         model: this.ollamaModel,
         messages,
         stream: false,
+        // Keep the model resident between turns (see ollamaKeepAlive / streamWithOllama).
+        keep_alive: this.ollamaKeepAlive,
         options: {
           temperature: 0.7,
           top_p: 0.9,
@@ -1742,7 +1760,14 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       const staticPrompt = this.injectLanguageInstruction(HARD_SYSTEM_PROMPT);
       const model = this.useOllama ? this.ollamaModel : this.currentModelId;
       const key = `${model}|${createHash('sha1').update(staticPrompt).digest('hex')}`;
-      if (this._prewarmedKeys.has(key)) return; // already warmed this session
+      // Dedup so repeated activations are free — EXCEPT for an Ollama model that is
+      // no longer pinned. Switching away from Ollama unloads the model and resets
+      // ollamaKeepAlive to "30m" (releaseOllamaPin); switching back hits this cached
+      // key, so without the pin-state check we'd neither re-load nor re-pin the model
+      // and the first question would pay the cold-load tax again. Re-warming an
+      // already-resident model is cheap (one buffered token), so this is safe.
+      const ollamaNeedsRepin = this.useOllama && this.ollamaKeepAlive !== -1;
+      if (this._prewarmedKeys.has(key) && !ollamaNeedsRepin) return; // already warmed this session
       this._prewarmedKeys.add(key);
 
       // Gemini explicit cache — the one with real create() setup cost.
@@ -1767,7 +1792,14 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       } else if (!this.useOllama && this.isGroqModel(this.currentModelId) && this.groqClient) {
         await warm(this.streamWithGroq('Hi', this.currentModelId, staticPrompt)).catch((_e: any): void => {});
       } else if (this.useOllama) {
+        // Pin the model in RAM indefinitely BEFORE the warm call, so the warming
+        // request itself carries keep_alive:-1 and the model stays resident for the
+        // whole session — no cold-load tax on any later live turn. Released to "0"
+        // (unload) when the user switches away from Ollama (see setModel /
+        // switchToGemini / switchToCustom).
+        this.ollamaKeepAlive = -1;
         await warm(this.streamWithOllama('Hi', undefined, staticPrompt) as any).catch((_e: any): void => {});
+        console.log(`[LLMHelper] Prewarm: Ollama model ${this.ollamaModel} pinned in memory (keep_alive=-1)`);
       } else {
         // Natively / custom / curl — server-side caching, nothing to prime client-side.
         return;
@@ -5064,12 +5096,32 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       // explicit numeric budget when a caller passes a positive one. Threaded
       // budget comes from the caller; model picks the level/floor.
       thinkingConfig: buildThinkingConfig(model, thinkingBudget),
+      // Propagate the caller's AbortSignal into the SDK so cancelling a stream
+      // (supersession or gemini-chat-stream-stop) aborts the client-side HTTP
+      // request and rejects the in-flight iterator immediately — instead of us
+      // continuing to pull/process tokens we'll never use. @google/genai reads
+      // config.abortSignal and wires it to the underlying fetch. NOTE: per the SDK
+      // (genai.d.ts), abortSignal is CLIENT-ONLY — it does NOT cancel generation
+      // server-side and usage may still be billed. The win here is freeing the
+      // local connection + stopping downstream token work on cancel (audit finding #4).
+      ...(abortSignal ? { abortSignal } : {}),
       ...(useCacheName
         ? { cachedContent: useCacheName }
         : systemInstruction
           ? { systemInstruction: { parts: [{ text: systemInstruction }] } }
           : {}),
     });
+
+    // Now that the AbortSignal is wired into the SDK (config.abortSignal), an
+    // abort no longer just stops us pulling tokens — the SDK rejects the in-flight
+    // request/iterator with an abort error. Treat that as a CLEAN stop (return),
+    // exactly as the old generator-boundary `if (aborted) return` checks did, so a
+    // cancelled stream never surfaces as a user-visible error. Non-abort errors
+    // still propagate unchanged.
+    const isAbortError = (e: any): boolean =>
+      Boolean(abortSignal?.aborted) ||
+      e?.name === 'AbortError' ||
+      /\baborted?\b/i.test(String(e?.message || ''));
 
     let streamResult: any;
     try {
@@ -5079,17 +5131,23 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         config: buildConfig(cacheName),
       });
     } catch (err: any) {
+      if (isAbortError(err)) return;
       // The cache may have expired between getOrCreate() and this call. If we
       // see a cache-related error, drop the entry and retry with systemInstruction.
       const msg = String(err?.message || err);
       if (cacheName && /cached?[\s_]?content|not\s*found|expired/i.test(msg)) {
         console.warn(`[LLMHelper] Gemini cachedContent ${cacheName} stale (${msg}); retrying with systemInstruction`);
         this.geminiPromptCache.invalidate(cacheName);
-        streamResult = await this.client.models.generateContentStream({
-          model,
-          contents,
-          config: buildConfig(null),
-        });
+        try {
+          streamResult = await this.client.models.generateContentStream({
+            model,
+            contents,
+            config: buildConfig(null),
+          });
+        } catch (retryErr: any) {
+          if (isAbortError(retryErr)) return;
+          throw retryErr;
+        }
       } else {
         throw err;
       }
@@ -5099,23 +5157,30 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     const stream = streamResult.stream || streamResult;
 
     let _firstChunk = true;
-    for await (const chunk of stream) {
-      if (abortSignal?.aborted) return;
-      if (_firstChunk) {
-        _firstChunk = false;
-        if (_gmeasure) console.log(`[Gemini.stream] +${Date.now() - _gt0}ms  FIRST TOKEN from provider (this is the provider TTFT — prefill of the system prompt)`);
+    try {
+      for await (const chunk of stream) {
+        if (abortSignal?.aborted) return;
+        if (_firstChunk) {
+          _firstChunk = false;
+          if (_gmeasure) console.log(`[Gemini.stream] +${Date.now() - _gt0}ms  FIRST TOKEN from provider (this is the provider TTFT — prefill of the system prompt)`);
+        }
+        let chunkText = "";
+        if (typeof chunk.text === 'function') {
+          chunkText = chunk.text();
+        } else if (typeof chunk.text === 'string') {
+          chunkText = chunk.text;
+        } else if (chunk.candidates?.[0]?.content?.parts?.[0]?.text) {
+          chunkText = chunk.candidates[0].content.parts[0].text;
+        }
+        if (chunkText) {
+          yield chunkText;
+        }
       }
-      let chunkText = "";
-      if (typeof chunk.text === 'function') {
-        chunkText = chunk.text();
-      } else if (typeof chunk.text === 'string') {
-        chunkText = chunk.text;
-      } else if (chunk.candidates?.[0]?.content?.parts?.[0]?.text) {
-        chunkText = chunk.candidates[0].content.parts[0].text;
-      }
-      if (chunkText) {
-        yield chunkText;
-      }
+    } catch (streamErr: any) {
+      // A mid-stream abort now rejects the SDK iterator; swallow it as a clean
+      // stop (same observable behavior as the pre-signal boundary `return`).
+      if (isAbortError(streamErr)) return;
+      throw streamErr;
     }
   }
 
@@ -5235,6 +5300,10 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         model: ollamaModel,
         messages,
         stream: true,
+        // Keep the model resident between turns so we don't re-pay the cold-load
+        // tax (8-12s for a 7-9B model) on every request after a pause. Pinned to
+        // "-1" once prewarm has warmed it; see ollamaKeepAlive.
+        keep_alive: this.ollamaKeepAlive,
         options: {
           temperature: getModelCapabilities(ollamaModel, true).tier === 'local-small' ? 0.2 : 0.7,
           top_p: getModelCapabilities(ollamaModel, true).tier === 'local-small' ? 0.8 : undefined,
@@ -5459,6 +5528,30 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
+  /**
+   * Release a pinned Ollama model from RAM and reset the session keep-alive to its
+   * default. Called when the user switches the active provider AWAY from Ollama, so
+   * a prior prewarm's keep_alive:-1 pin doesn't strand the model's weights (GBs) in
+   * memory for a provider we're no longer using. Best-effort and fully swallowed —
+   * a failed unload (e.g. Ollama already stopped) must never block a model switch.
+   * `keep_alive: 0` tells Ollama to unload the model immediately after this no-op
+   * request. Captures the model name up front so a concurrent switch can't unload
+   * the wrong one.
+   */
+  private releaseOllamaPin(modelToUnload: string): void {
+    const wasPinned = this.ollamaKeepAlive === -1;
+    this.ollamaKeepAlive = "30m";
+    if (!wasPinned || !modelToUnload) return;
+    // Fire-and-forget: don't make the synchronous switch path await a network call.
+    void fetch(`${this.ollamaUrl}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: modelToUnload, messages: [], keep_alive: 0 }),
+      signal: AbortSignal.timeout(5_000),
+    }).then(() => {
+      console.log(`[LLMHelper] Released Ollama pin: ${modelToUnload} unloaded from memory`);
+    }).catch(() => { /* unload is best-effort */ });
+  }
 
   public isUsingOllama(): boolean {
     return this.useOllama;
@@ -6108,6 +6201,14 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   }
 
   public async switchToOllama(model?: string, url?: string): Promise<void> {
+    // Switching to a DIFFERENT Ollama model (or host): unload the old pinned model
+    // so we don't keep two models resident. The new model re-pins on next prewarm.
+    if (this.useOllama && this.ollamaModel && (model ? model !== this.ollamaModel : false)) {
+      this.releaseOllamaPin(this.ollamaModel);
+    } else if (this.useOllama && url && url !== this.ollamaUrl) {
+      // Changing host: the pin lived on the old host; just reset the local flag.
+      this.ollamaKeepAlive = "30m";
+    }
     this.useOllama = true;
     if (url) this.ollamaUrl = url;
     // URL/model change invalidates the per-model vision cache from a prior host.
@@ -6144,12 +6245,14 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       throw new Error("No Gemini API key provided and no existing client");
     }
 
+    if (this.useOllama) this.releaseOllamaPin(this.ollamaModel);
     this.useOllama = false;
     this.customProvider = null;
     // console.log(`[LLMHelper] Switched to Gemini: ${this.geminiModel}`);
   }
 
   public async switchToCustom(provider: CustomProvider): Promise<void> {
+    if (this.useOllama) this.releaseOllamaPin(this.ollamaModel);
     this.customProvider = provider;
     this.useOllama = false;
     this.client = null;

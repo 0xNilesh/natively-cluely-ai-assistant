@@ -41,7 +41,9 @@ describe('W5: pipeline shape (source pins)', () => {
 
     test('mode retrieval is kicked as a promise and handed to generateStream', () => {
         assert.match(engineSrc, /const modeContextPromise: Promise<string>/);
-        assert.match(engineSrc, /generateStream\([^)]*modeContextPromise\)/s);
+        // The prefetch promise is still threaded; the request snapshot (audit #6)
+        // is appended after it, so allow an optional trailing arg.
+        assert.match(engineSrc, /generateStream\([^)]*modeContextPromise(?:, requestSnapshot)?\)/s);
     });
 
     test('the floating intent promise carries an inline rejection handler', () => {

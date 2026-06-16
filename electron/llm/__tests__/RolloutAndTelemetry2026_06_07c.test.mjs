@@ -177,4 +177,31 @@ describe('Telemetry — marker only, no sensitive content', () => {
     assert.equal(ageBucket(3700), '60min+');
     assert.equal(ageBucket(null), 'none');
   });
+
+  // ── Fix D: speakabilityClass is allow-listed but still value-gated ───────────
+  test('speakabilityClass marker is KEPT (allow-listed + marker-shaped value)', () => {
+    for (const cls of ['exempt', 'over_budget', 'over_soft', 'standard']) {
+      const out = scrubTelemetry({ speakabilityClass: cls, answerType: 'experience_answer' });
+      assert.equal(out.speakabilityClass, cls, `${cls} must survive the allowlist`);
+    }
+  });
+  test('speakabilityClass with a SENSITIVE value is DROPPED (privacy backstop holds)', () => {
+    const out = scrubTelemetry({ speakabilityClass: '$120k secret', answerType: 'experience_answer' });
+    assert.ok(!('speakabilityClass' in out), 'a salary/PII-shaped value must be dropped even under an allowed key');
+    assert.equal(out.answerType, 'experience_answer');
+  });
+  test('speakabilityClass with free-text is DROPPED (marker-shape backstop holds)', () => {
+    const out = scrubTelemetry({ speakabilityClass: 'this answer was way too long to say aloud in an interview', mode: 'sales' });
+    assert.ok(!('speakabilityClass' in out), 'long free-text rejected even under an allowed key');
+    assert.equal(out.mode, 'sales');
+  });
+  test('emit("pi_context_policy_applied", {via, speakabilityClass}) stores a scrubbed marker', () => {
+    piTelemetry.emit('pi_context_policy_applied', { answerType: 'experience_answer', via: 'speakability_measured', speakabilityClass: 'over_budget', markerCount: 130 });
+    const recent = piTelemetry.recent(5);
+    const rec = recent[recent.length - 1];
+    assert.equal(rec.event, 'pi_context_policy_applied');
+    assert.equal(rec.data.via, 'speakability_measured');
+    assert.equal(rec.data.speakabilityClass, 'over_budget');
+    assert.equal(rec.data.markerCount, 130);
+  });
 });

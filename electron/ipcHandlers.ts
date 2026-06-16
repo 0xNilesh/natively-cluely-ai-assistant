@@ -15,7 +15,7 @@ import { SkillsManager } from './services/SkillsManager';
 
 import { TRIAL_SENTINEL_KEY, DOM_CONTEXT_MAX_CHARS } from './config/constants';
 import { AI_RESPONSE_LANGUAGES, RECOGNITION_LANGUAGES } from './config/languages';
-import { planAnswer, formatAnswerPlanForPrompt, isCodingAnswerType, validateAnswerStructure, validateProfileOutput, validateProfileEvidence, buildProfileRepairInstruction, raceStreamWithDeadline, firstUsefulDeadlineMs, isStealthEvasionQuestion, stripProfileTokensFromCoding, isBareFollowUp, buildContextFreeClarification, sanitizeCandidateAnswer, CANDIDATE_VOICE_ANSWER_TYPES, piTelemetry, classifyProviderError } from './llm';
+import { planAnswer, formatAnswerPlanForPrompt, isCodingAnswerType, validateAnswerStructure, validateProfileOutput, validateProfileEvidence, buildProfileRepairInstruction, raceStreamWithDeadline, firstUsefulDeadlineMs, LIVE_LOCAL_FIRST_USEFUL_TIMEOUT_MS, isStealthEvasionQuestion, stripProfileTokensFromCoding, isBareFollowUp, isRefinementFollowUp, buildContextFreeClarification, sanitizeCandidateAnswer, CANDIDATE_VOICE_ANSWER_TYPES, detectAssistantVoiceMisfire, ASSISTANT_VOICE_ANSWER_TYPES, piTelemetry, classifyProviderError, detectExplicitCodingContract, isCodingContinuation, buildPriorCodingContextBlock, buildCodingContractPrompt, explicitContractProducesCode, CODING_VERIFICATION_INSTRUCTION, humanizeDirectiveFor, detectCorporateFiller, humanizeForAnswerType, applySpeakabilityBudget, compressTechnicalConcept, checkCodeCompleteness, varySpokenOpening, type ExplicitCodingContract } from './llm';
 import { buildLiveFallbackAnswer } from './llm/manualProfileIntelligence';
 import { isCodeVerificationEnabled } from './llm/codeVerification/verificationEnabled';
 import { CodingStreamGate } from './llm/codingStreamGate';
@@ -23,6 +23,7 @@ import { PiLatencyTrace } from './services/telemetry/PiLatencyTracer';
 import { beginTrace, commitTrace } from './intelligence/IntelligenceTrace';
 import { ProfileTreeService } from './intelligence/ProfileTreeService';
 import { isIntelligenceFlagEnabled } from './intelligence/intelligenceFlags';
+import { recordAttribution, hindsightModeFor, type AttributionInput } from './intelligence/IntelligenceAttribution';
 import { routeContext, isBackwardLookingQuery } from './intelligence/ContextRouter';
 import { SearchOrchestrator, type SearchCandidate } from './intelligence/SearchOrchestrator';
 import { CHAT_MODE_PROMPT } from './llm/prompts';
@@ -549,6 +550,14 @@ export function initializeIpcHandlers(appState: AppState): void {
   let _chatStreamId = 0;
   // Keep IDs globally unique for phone/desktop message correlation; supersession is per sender.
   const _chatStreamsBySender = new Map<number, { streamId: number; controller: AbortController }>();
+  // Phone-mirror chat supersession is tracked SEPARATELY from the global id counter.
+  // `_chatStreamId` is shared with the desktop chat path purely to keep correlation ids
+  // globally unique, so checking it for phone supersession let a desktop message (which
+  // bumps the same counter) falsely abort an in-flight phone answer — and the phone user's
+  // answer would die mid-stream because the desktop user typed something on a different
+  // surface. Phone supersession compares against this dedicated latest-phone marker instead,
+  // so only a NEWER PHONE message supersedes a phone stream (desktop streams stay per-sender).
+  let _phoneChatLatestId = 0;
   // Per-process diversity guard for manual chat (manual regression 2026-06-12):
   // last-20 answer fingerprints; repeated answers across DIFFERENT questions are
   // compressed to speakable prose. Survives across questions within the app run
@@ -564,6 +573,12 @@ export function initializeIpcHandlers(appState: AppState): void {
   // against the prior turn instead. Same-session only (no Hindsight). Bounded per session.
   const { ConversationMemoryService } = require('./intelligence/ConversationMemoryService') as typeof import('./intelligence/ConversationMemoryService');
   const _manualConversationMemory = new ConversationMemoryService();
+  // Coding thread state (spoken-answer-quality sprint 2026-06-15): tracks original vs
+  // current problem across a multi-turn coding session so "what was the ORIGINAL problem?"
+  // resolves to the first problem, and complexity/dry-run/optimize follow-ups resolve to
+  // the current one. Gated on the same conversationMemoryV2 flag as the rest of the memory.
+  const { CodingConversationState } = require('./intelligence/CodingConversationState') as typeof import('./intelligence/CodingConversationState');
+  const _manualCodingState = new CodingConversationState();
   // Senders that already have a one-time conversation-memory cleanup listener attached.
   // The 'destroyed' listener must be registered ONCE per WebContents, not per chat
   // message — otherwise every message adds another listener (the MaxListenersExceeded
@@ -732,6 +747,10 @@ export function initializeIpcHandlers(appState: AppState): void {
         // zero-cost NO-OP when intelligence_trace_enabled is off (default), so this
         // never affects answer behavior or latency. Committed at every exit point.
         iTrace = beginTrace(typeof message === 'string' ? message : '');
+        // Correlation ids (audit finding #9): share the latency trace's requestId and
+        // the sender/stream ids so this answer is joinable across the IPC boundary,
+        // the engine trace, and the PiLatencyTrace. Ids only — never raw content.
+        iTrace.setCorrelation({ requestId: chatTrace.requestId, sessionId: String(senderId), surface: 'manual' });
 
         // Foreground gate (manual regression 2026-06-12): pause background
         // embedding/RAG drain loops while this answer is in flight so their
@@ -754,9 +773,93 @@ export function initializeIpcHandlers(appState: AppState): void {
           speakerPerspective: 'user',
           activeMode: manualActiveMode,
         });
-        const isCodingChat = isCodingAnswerType(answerPlan.answerType);
+        let isCodingChat = isCodingAnswerType(answerPlan.answerType);
         chatTrace.mark('answer_type_selected', { answerType: answerPlan.answerType, isCoding: isCodingChat });
         piTelemetry.emit('pi_answer_plan_created', { answerType: answerPlan.answerType, surface: 'manual', isCoding: isCodingChat, profilePolicy: answerPlan.profileContextPolicy, answerStyle: answerPlan.answerStyle });
+
+        // CODING FORMAT CONTRACT + CODING FOLLOW-UP (task Phase 11, observed bugs #5/#6/#7).
+        //   #5/#7: an EXPLICIT format instruction ("code only", "give the complexity",
+        //          "dry run this", "explain without code") must beat the default six-section
+        //          DSA template — both in the PROMPT (minimal contract) and in the post-stream
+        //          repair (don't force the six sections back in).
+        //   #6:    a coding FOLLOW-UP ("give time and space complexity", "now optimize it",
+        //          "dry run this with …") must inherit the PRIOR coding problem + code instead
+        //          of being re-planned as a fresh, context-free question.
+        // Deterministic, no LLM. The prior-problem recall reads the SAME conversation memory
+        // service the bare-follow-up path uses; gated on conversationMemoryV2 (flag OFF →
+        // exactly the legacy behavior). All variables default to "no change".
+        let explicitCodingContract: ExplicitCodingContract = detectExplicitCodingContract(message);
+        let codingPriorProblemBlock = '';
+        let codingFollowupResolved = false;
+        {
+          const looksLikeCodingFollowup = isCodingContinuation(message);
+          const convMemOn = isIntelligenceFlagEnabled('conversationMemoryV2');
+          // A coding continuation ("complexity?", "dry run this", "optimize it") that
+          // planAnswer classified as NON-coding (follow_up_answer / unknown_answer) only
+          // becomes a coding answer when a prior coding turn actually exists in memory.
+          // "what was the ORIGINAL problem I asked?" must resolve to the FIRST coding
+          // problem, not the most recent unrelated one. CodingConversationState keeps that
+          // sticky; resolve it here so the prior-problem block anchors on the right problem.
+          const wantsOriginalProblem = convMemOn && _manualCodingState.isOriginalProblemQuery(message);
+          // "what was the original problem I asked?" is NOT an isCodingContinuation shape
+          // (no complexity/dry-run/optimize cue), but it IS a coding-thread follow-up when a
+          // coding thread exists. Trigger the coding path for it too so it resolves to the
+          // ORIGINAL problem (and bypasses the assistant security misfire that otherwise
+          // reads "what did I ask?" as a system-prompt probe). spoken-answer-quality 2026-06-15.
+          if ((looksLikeCodingFollowup || wantsOriginalProblem) && convMemOn) {
+            try {
+              const priorCoding = _manualConversationMemory.getLastCodingTurn(String(senderId));
+              const resolvedProblem = _manualCodingState.resolveProblemFor(String(senderId), message);
+              if (priorCoding && priorCoding.userMessage && priorCoding.assistantAnswer) {
+                if (wantsOriginalProblem && resolvedProblem?.isOriginal && resolvedProblem.problem) {
+                  // Just STATE the original problem — don't re-solve it. A short factual recall.
+                  // Force explain_only so the coding contract/validator produce a short prose
+                  // answer (no six-section template, no code) for this recall.
+                  explicitCodingContract = 'explain_only';
+                  codingPriorProblemBlock = `The user is asking what coding problem they ORIGINALLY asked about in this conversation. Answer in ONE short sentence by naming that problem. Do NOT solve it again, do NOT add code, and do NOT refuse — this is the user's own earlier question.\n\nThe original problem was: ${resolvedProblem.problem}`;
+                } else {
+                  codingPriorProblemBlock = buildPriorCodingContextBlock({
+                    userMessage: priorCoding.userMessage,
+                    assistantAnswer: priorCoding.assistantAnswer,
+                  });
+                }
+                codingFollowupResolved = true;
+                // Promote to the coding path so it gets the coding contract + no-profile
+                // grounding, even if the bare fragment was planned as follow_up/unknown.
+                if (!isCodingChat) {
+                  isCodingChat = true;
+                  iTrace.noteContext({ source: 'conversation_history', trustLevel: 'high', requested: true, retrieved: true, included: true, reason: 'coding_followup_prior_problem' });
+                }
+                chatTrace.mark('coding_followup_resolved' as any, { explicitContract: explicitCodingContract || 'none' });
+                piTelemetry.emit('pi_context_policy_applied', { answerType: answerPlan.answerType, via: wantsOriginalProblem ? 'coding_original_recall' : 'coding_followup', profilePolicy: 'forbidden' });
+              }
+            } catch { /* memory recall never blocks the answer */ }
+          }
+        }
+
+        // ── INTELLIGENCE ATTRIBUTION accumulator (task Phase 3) ──────────────────
+        // One privacy-safe record per answer says which memory/context layers were
+        // actually used. Populated as the handler progresses; emitted (recordAttribution)
+        // at each exit. Booleans/counts/labels + query HASH only — never raw content.
+        const _attr: AttributionInput = {
+          question: message,
+          traceId: undefined,
+          answer_type: answerPlan.answerType,
+          mode: manualActiveMode?.templateType || 'manual',
+          surface: 'manual',
+          knowledge_orchestrator_used: true, // the manual path always reads activeResume/JD from it
+          context_router_mode: isIntelligenceFlagEnabled('contextRouterV2') ? 'shadow' : 'off',
+          context_router_used: isIntelligenceFlagEnabled('contextRouterV2'),
+          prompt_assembler_v2_mode: 'off', // manual path never uses PromptAssemblerV2 (WTA-only, shadow)
+          live_transcript_brain_mode: 'off',
+          coding_explicit_contract: explicitCodingContract || 'none',
+          coding_followup_resolved: codingFollowupResolved,
+          conversation_memory_used: codingFollowupResolved,
+          conversation_memory_turns_used: codingFollowupResolved ? 1 : 0,
+        };
+        const _emitAttr = (extra?: AttributionInput) => {
+          try { recordAttribution({ ..._attr, ...(extra || {}) }); } catch { /* never breaks the answer */ }
+        };
         iTrace.setRouting({
           source: 'manual_input',
           mode: manualActiveMode?.templateType,
@@ -837,8 +940,32 @@ export function initializeIpcHandlers(appState: AppState): void {
             if (prior && prior.userMessage && prior.assistantAnswer) {
               context = `PRIOR EXCHANGE IN THIS CONVERSATION:\nUser asked: ${prior.userMessage}\nYou answered: ${prior.assistantAnswer}\n\nThe user's new message is a follow-up to that. Resolve it against the prior exchange.`;
               iTrace.noteContext({ source: 'conversation_history', trustLevel: 'medium', requested: true, retrieved: true, included: true, reason: 'same_session_followup' });
+              _attr.conversation_memory_used = true;
+              _attr.conversation_memory_turns_used = 1;
             }
           } catch { /* fall through to the clarification below */ }
+        }
+
+        // REFINEMENT / EDITING follow-up (task Phase 8, bug #3): "make that shorter",
+        // "make it more confident", "remove the exaggeration", "give me the final spoken
+        // version". These carry content words (NOT bare) but OPERATE ON the prior answer —
+        // without the prior turn the model re-dumps a fresh full answer (the observed bug).
+        // Inject the prior turn AS the answer to edit. Runs even when other context exists
+        // (the prior answer is what the edit targets). Coding follow-ups are handled by the
+        // coding-followup block above, so skip when already a coding chat. Flag-gated.
+        if (!isCodingChat && !context && isRefinementFollowUp(message)
+            && isIntelligenceFlagEnabled('conversationMemoryV2')) {
+          try {
+            const prior = _manualConversationMemory.resolveSameSession(String(senderId), message)
+              || (() => { const a = _manualConversationMemory.getLastAssistantAnswer(String(senderId)); return a ? { userMessage: '', assistantAnswer: a } as any : null; })();
+            if (prior && prior.assistantAnswer) {
+              context = `PRIOR ANSWER IN THIS CONVERSATION (the user wants you to EDIT this exact answer, not produce a new one):\n${prior.userMessage ? `Original question: ${prior.userMessage}\n` : ''}Previous answer:\n${prior.assistantAnswer}\n\nApply the user's new instruction ("${message}") to THAT answer — keep the same facts, change only what was asked. Do not start over or re-list everything.`;
+              iTrace.noteContext({ source: 'conversation_history', trustLevel: 'medium', requested: true, retrieved: true, included: true, reason: 'refinement_followup' });
+              _attr.conversation_memory_used = true;
+              _attr.conversation_memory_turns_used = 1;
+              piTelemetry.emit('pi_context_policy_applied', { answerType: answerPlan.answerType, via: 'refinement_followup', profilePolicy: answerPlan.profileContextPolicy });
+            }
+          } catch { /* refinement recall never blocks the answer */ }
         }
         if (!context && !autoContextSnapshot && isBareFollowUp(message)) {
           let clarSurface: 'manual' | 'lecture' | 'sales' = 'manual';
@@ -861,6 +988,7 @@ export function initializeIpcHandlers(appState: AppState): void {
           chatTrace.finish({ chars: clarification.length });
           iTrace.setRouting({ answerType: 'follow_up_answer', deterministicFastPathUsed: true }).noteFallback('context_free_clarification');
           commitTrace(iTrace);
+          _emitAttr({ answer_type: 'follow_up_answer', conversation_memory_used: Boolean(context) });
           return null;
         }
 
@@ -912,6 +1040,15 @@ export function initializeIpcHandlers(appState: AppState): void {
               });
               iTrace.noteContext({ source: 'profile_tree', trustLevel: 'high', requested: true, retrieved: true, included: true, reason: 'manual_fast_path' });
               commitTrace(iTrace);
+              // ATTRIBUTION: the ProfileTree deterministic fast path actually answered —
+              // first-person, providerUsed=false (bug #2: prove the fast path fired).
+              _emitAttr({
+                answer_type: fastPath.answerType,
+                profile_tree_used: true,
+                profile_tree_fast_path_used: true,
+                structured_resume_used: true,
+                structured_jd_used: (fastPath.selectedContextLayers || []).includes('jd'),
+              });
               return null;
             }
           } catch (profileRouteError: any) {
@@ -954,8 +1091,46 @@ export function initializeIpcHandlers(appState: AppState): void {
           'source_code_evidence_answer', 'project_about_answer',
         ]);
         const isContractEnforced = CONTRACT_ENFORCED_TYPES.has(answerPlan.answerType);
-        if (isCodingChat || isContractEnforced) {
-          context = formatAnswerPlanForPrompt(answerPlan, isCodingChat && isCodeVerificationEnabled());
+        if (isCodingChat) {
+          // Coding contract. THREE cases:
+          //  (a) explicit format constraint (code_only/complexity_only/dry_run_only/
+          //      explain_only) → MINIMAL contract, NOT the six-section template, so the
+          //      model outputs only what was asked and repair has nothing to force back
+          //      in (bugs #5/#7).
+          //  (b) resolved coding FOLLOW-UP (no explicit constraint) → the standard
+          //      six-section contract PLUS the prior problem+code prepended (bug #6).
+          //  (c) plain coding question (no constraint, no follow-up) → the EXACT proven
+          //      path (formatAnswerPlanForPrompt with the full CODING_TEMPLATE) — byte
+          //      unchanged from before this fix.
+          const planIsCodingType = isCodingAnswerType(answerPlan.answerType);
+          if (explicitCodingContract) {
+            const includeVerification = explicitContractProducesCode(explicitCodingContract) && isCodeVerificationEnabled();
+            const codingContract = buildCodingContractPrompt(explicitCodingContract, {
+              includeVerification,
+              verificationInstruction: CODING_VERIFICATION_INSTRUCTION,
+            });
+            context = codingPriorProblemBlock ? `${codingContract}\n\n${codingPriorProblemBlock}` : codingContract;
+          } else if (planIsCodingType) {
+            // Plain coding question (no constraint) → the EXACT proven path, byte unchanged.
+            const baseContract = formatAnswerPlanForPrompt(answerPlan, isCodeVerificationEnabled());
+            context = codingPriorProblemBlock ? `${baseContract}\n\n${codingPriorProblemBlock}` : baseContract;
+          } else {
+            // A follow-up ("now optimize it") promoted to coding though the plan type is
+            // follow_up/unknown → use the full six-section coding contract (null builder),
+            // NOT the follow_up template, plus the prior problem.
+            const codingContract = buildCodingContractPrompt(null, {
+              includeVerification: isCodeVerificationEnabled(),
+              verificationInstruction: CODING_VERIFICATION_INSTRUCTION,
+            });
+            context = codingPriorProblemBlock ? `${codingContract}\n\n${codingPriorProblemBlock}` : codingContract;
+          }
+          console.log('[IPC] Coding contract enforced; rolling context excluded', {
+            answerType: answerPlan.answerType,
+            explicitContract: explicitCodingContract || 'none',
+            followupResolved: codingFollowupResolved,
+          });
+        } else if (isContractEnforced) {
+          context = formatAnswerPlanForPrompt(answerPlan, false);
           console.log('[IPC] Answer-contract enforced; rolling context excluded', {
             answerType: answerPlan.answerType,
           });
@@ -991,7 +1166,24 @@ export function initializeIpcHandlers(appState: AppState): void {
           || (answerPlan.answerStyle && answerPlan.answerStyle !== 'default');
         if (wantsCandidateContract && !isContractEnforced && !isCodingChat) {
           const candidateContract = formatAnswerPlanForPrompt(answerPlan, false);
-          context = context ? `${candidateContract}\n\n${context}` : candidateContract;
+          // HUMAN-LIKENESS (task Phase 12): append the anti-corporate-filler directive for
+          // spoken candidate/sales answers so they sound like a person, not a brochure.
+          // Form-only (never changes grounding/voice). No-op for code/lecture/technical.
+          const humanize = humanizeDirectiveFor(answerPlan.answerType);
+          const contractWithVoice = humanize ? `${candidateContract}\n\n${humanize}` : candidateContract;
+          context = context ? `${contractWithVoice}\n\n${context}` : contractWithVoice;
+          // ATTRIBUTION: a candidate-grounded answer that goes through the LLM with the
+          // resume/JD facts in context (the non-fast-path profile answer).
+          try {
+            const orchA = llmHelper.getKnowledgeOrchestrator?.();
+            const resumeA = (orchA as any)?.activeResume?.structured_data ?? null;
+            const jdA = (orchA as any)?.activeJD?.structured_data ?? null;
+            if (profileFactsReady(resumeA)) {
+              _attr.structured_resume_used = answerPlan.profileContextPolicy !== 'forbidden';
+              _attr.structured_jd_used = Boolean(jdA) && answerPlan.requiredContextLayers.includes('jd');
+              _attr.hybrid_rag_used = answerPlan.requiredContextLayers.includes('resume') || answerPlan.requiredContextLayers.includes('jd');
+            }
+          } catch { /* attribution only */ }
         }
 
         // HINDSIGHT LIVE RECALL (the deferred last step, behind hindsight_live_recall_enabled).
@@ -1006,6 +1198,14 @@ export function initializeIpcHandlers(appState: AppState): void {
         // build. Resolved up-front so the gate itself depends on a configured server, not env.
         const { HindsightManager: _HM } = require('./services/HindsightManager') as typeof import('./services/HindsightManager');
         const _liveHsCfg = _HM.getInstance().getHindsightConfig();
+        // ATTRIBUTION: classify Hindsight HONESTLY for this answer (task hard rules 9-12).
+        const _hsMemoryOn = isIntelligenceFlagEnabled('hindsightMemory');
+        _attr.hindsight_enabled = _hsMemoryOn && isIntelligenceFlagEnabled('hindsightLiveRecall');
+        _attr.hindsight_mode = hindsightModeFor({
+          memoryFlagOn: _hsMemoryOn,
+          configured: Boolean(_liveHsCfg),
+          available: Boolean(_liveHsCfg) && _HM.getInstance().isAvailable(),
+        });
         // isAvailable() = configured AND a recent health-check passed (cached ~30s, primed
         // at startup). Short-circuit a known-down server so the live answer NEVER pays the
         // 800ms recall timeout when Hindsight is unreachable (2026-06-14 fix).
@@ -1027,6 +1227,8 @@ export function initializeIpcHandlers(appState: AppState): void {
               if (facts.length > 0) {
                 const memBlock = `RELEVANT LONG-TERM MEMORY (from prior meetings — may be incomplete):\n${facts.map((f) => `- ${f}`).join('\n')}\nUse these only if they help answer the question; ignore if irrelevant.`;
                 context = context ? `${memBlock}\n\n${context}` : memBlock;
+                _attr.hindsight_recall_used = true;
+                _attr.hindsight_recall_count = facts.length;
               }
               // Record real recall latency + empty-rate into the metrics registry
               // (was dead code with 0 callers — code-review M1). Cheap, content-free.
@@ -1105,7 +1307,10 @@ export function initializeIpcHandlers(appState: AppState): void {
           const sendChunk = (chunk: string) => {
             const visible = chatSpecStripper ? chatSpecStripper.push(chunk) : chunk;
             if (!visible) return;
-            event.sender.send('gemini-stream-token', visible);
+            // Carry the stream id (audit finding #3) as an optional 2nd arg so the
+            // renderer can drop tokens from a superseded chat stream. Backward
+            // compatible: existing (token)=>… callbacks ignore the extra arg.
+            event.sender.send('gemini-stream-token', visible, { streamId: myStreamId });
             try {
               PhoneMirrorService.getInstance().publishToken(String(myStreamId), visible);
             } catch (_) {
@@ -1120,11 +1325,17 @@ export function initializeIpcHandlers(appState: AppState): void {
           // cleanup. First-useful budget (per answer type) then an inter-token
           // stall guard (not a wall-clock cap, so long coding answers stream in
           // full). This is the no-134s / no-30s-hang guarantee (Issue 1, P0).
+          //
+          // LOCAL PROVIDER: a local Ollama model cold-loads its weights (8-12s for
+          // a 7-9B model) before the first token, so it gets the far longer local
+          // first-useful budget — otherwise every cold local generation aborted to
+          // zero tokens and the user saw the canned fallback line below.
+          const usingLocalLlm = llmHelper.isUsingOllama();
           let manualFirstUseful = false;
           let manualSuperseded = false;
           await raceStreamWithDeadline({
             stream: stream as AsyncGenerator<string>,
-            firstUsefulDeadlineMs: firstUsefulDeadlineMs(answerPlan.answerType),
+            firstUsefulDeadlineMs: firstUsefulDeadlineMs(answerPlan.answerType, usingLocalLlm),
             isUsefulYet: () => manualFirstUseful,
             shouldAbort: () => {
               if (_chatStreamsBySender.get(senderId)?.streamId !== myStreamId) {
@@ -1160,7 +1371,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             const gatedTail = codingGate.finish();
             const tail = chatSpecStripper ? (chatSpecStripper.push(gatedTail) + chatSpecStripper.finish()) : gatedTail;
             if (tail) {
-              event.sender.send('gemini-stream-token', tail);
+              event.sender.send('gemini-stream-token', tail, { streamId: myStreamId });
               try { PhoneMirrorService.getInstance().publishToken(String(myStreamId), tail); } catch (_) { /* noop */ }
             }
           }
@@ -1200,10 +1411,21 @@ export function initializeIpcHandlers(appState: AppState): void {
           // actually changes it do we hand the renderer a corrective finalText.
           let finalText: string | undefined;
           if (isCodingChat) {
-            const structureValidation = validateAnswerStructure(answerPlan.answerType, fullResponse);
+            // Pass the explicit format contract so repair RESPECTS it (bug #5/#7): with
+            // an explicit contract validateAnswerStructure never forces the six-section
+            // template — at most it strips prose off a "code only" / "without code" reply.
+            // When a follow-up PROMOTED a non-coding plan to coding (bug #6), validate
+            // under a coding answer type so the contract path runs (the plan type is still
+            // follow_up/unknown). With NO explicit contract on a genuine coding type, this
+            // is the unchanged six-section safety net.
+            const validationType = isCodingAnswerType(answerPlan.answerType)
+              ? answerPlan.answerType
+              : 'dsa_question_answer';
+            const structureValidation = validateAnswerStructure(validationType, fullResponse, explicitCodingContract);
             if (!structureValidation.ok && structureValidation.repaired) {
               console.warn('[IPC] Repaired coding chat answer structure', {
                 answerType: answerPlan.answerType,
+                explicitContract: explicitCodingContract || 'none',
                 missingSections: structureValidation.missingSections,
                 hasCodeBlock: structureValidation.hasCodeBlock,
                 hasComplexity: structureValidation.hasComplexity,
@@ -1212,6 +1434,40 @@ export function initializeIpcHandlers(appState: AppState): void {
                 finalText = structureValidation.repaired;
               }
               fullResponse = structureValidation.repaired;
+            }
+            // CODE-ONLY COMPLETENESS (spoken-answer-quality sprint 2026-06-15): a code answer
+            // cut off by max-tokens / a stream error ships truncated code (unbalanced
+            // brackets, unclosed function, dangling token). Detect it and regenerate ONCE
+            // before display, rather than show broken code. Conservative (string/comment
+            // masked, unclosed-only) so valid code never triggers a regen.
+            try {
+              const completeness = checkCodeCompleteness(fullResponse);
+              if (!completeness.ok && _chatStreamsBySender.get(senderId)?.streamId === myStreamId) {
+                piTelemetry.emit('pi_context_policy_applied', { answerType: answerPlan.answerType, via: 'code_truncation_detected', markerCount: completeness.issues.length });
+                console.warn('[IPC] code-only answer looks truncated, regenerating once', { issues: completeness.issues.map(i => i.code) });
+                const regenContract = explicitCodingContract
+                  ? buildCodingContractPrompt(explicitCodingContract)
+                  : buildCodingContractPrompt(null);
+                const regenPrompt = `${regenContract}\n\nThe previous answer was cut off before the code finished. Output the COMPLETE code now, nothing truncated.\n\nProblem: ${message}`;
+                let regen = '';
+                await raceStreamWithDeadline({
+                  stream: llmHelper.streamChat(regenPrompt, undefined, codingPriorProblemBlock || undefined, undefined, true, true) as AsyncGenerator<string>,
+                  firstUsefulDeadlineMs: usingLocalLlm ? LIVE_LOCAL_FIRST_USEFUL_TIMEOUT_MS : 8000,
+                  isUsefulYet: () => regen.length >= 10,
+                  shouldAbort: () => regen.length > 4000,
+                  onToken: (tok: string) => { regen += tok; },
+                });
+                const regenTrim = regen.trim();
+                // Accept the regen only if it is itself complete (don't replace a truncated
+                // answer with another truncated one).
+                if (regenTrim.length >= 20 && checkCodeCompleteness(regenTrim).ok) {
+                  fullResponse = regenTrim;
+                  finalText = regenTrim;
+                  piTelemetry.emit('pi_context_policy_applied', { answerType: answerPlan.answerType, via: 'code_regenerated_complete' });
+                }
+              }
+            } catch (completenessErr: any) {
+              console.warn('[IPC] code completeness check skipped:', completenessErr?.message);
             }
           } else {
             // Spec §7 / §12.9: validate PROFILE answers post-generation. Detects
@@ -1272,9 +1528,10 @@ export function initializeIpcHandlers(appState: AppState): void {
                   // Deadline-guarded (7s) so a stalled repair provider can't re-hang
                   // the request after a streamed answer already showed (Issue 1). 7s
                   // (was 4s) clears MiniMax's 4-6s first-token when it's the fallback.
+                  // Local model: longer budget for the same cold-load reason as above.
                   await raceStreamWithDeadline({
                     stream: llmHelper.streamChat(repairPrompt, undefined, undefined, undefined, true, true) as AsyncGenerator<string>,
-                    firstUsefulDeadlineMs: 7000,
+                    firstUsefulDeadlineMs: usingLocalLlm ? LIVE_LOCAL_FIRST_USEFUL_TIMEOUT_MS : 7000,
                     isUsefulYet: () => repaired.length >= 5,
                     shouldAbort: () => repaired.length > 1200,
                     onToken: (tok: string) => { repaired += tok; },
@@ -1355,6 +1612,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             if (isIntelligenceFlagEnabled('profileTreeV2')) {
               const guard = ProfileTreeService.getCandidatePerspectiveGuard(manualActiveMode?.templateType, message);
               _perspectiveExpectsCandidate = guard.assistantIdentityWouldLeak;
+              _attr.profile_tree_used = true; // ProfileTreeService guard consulted on this answer
             }
           } catch { /* guard never blocks the answer */ }
           if (CANDIDATE_VOICE_ANSWER_TYPES.has(answerPlan.answerType) || _perspectiveExpectsCandidate) {
@@ -1363,6 +1621,7 @@ export function initializeIpcHandlers(appState: AppState): void {
               if (sani.repaired && !sani.needsFallback) {
                 fullResponse = sani.text;
                 finalText = sani.text;
+                _attr.assistant_voice_guard_triggered = true;
                 piTelemetry.emit('pi_candidate_sanitizer_applied', { answerType: answerPlan.answerType, repaired: true, needsFallback: false, markerCount: sani.removedMarkers.length });
                 console.warn('[ProfileIntelligence] sanitized assistant-meta tail from candidate answer', { answerType: answerPlan.answerType, markers: sani.removedMarkers });
               } else if (sani.needsFallback) {
@@ -1394,10 +1653,72 @@ export function initializeIpcHandlers(appState: AppState): void {
                   } catch { /* keep sanitized-but-thin answer */ }
                 }
               }
+              // Audit 2026-06-16 (H3): a PRODUCT-ABOUT question ("what is Natively built with",
+              // "what platforms does it support") that the model answered with the stock
+              // "I can't share that information." refusal — and for which neither fallback above
+              // produced a real answer — must NOT ship as a bare refusal. The honest behavior
+              // (which PRODUCT_ABOUT_TEMPLATE already instructs) is to say the detail isn't in
+              // the loaded context, not to refuse. M3 over-applies the system-prompt refusal here;
+              // this is the post-gen backstop. Only fires when the answer IS (still) the stock
+              // refusal AND the type is a product-about/project type.
+              if ((answerPlan.answerType === 'project_about_answer' || answerPlan.answerType === 'project_answer')
+                  && /^\s*(?:I(?:'m| am) Natively[.,]?\s*(?:an? AI assistant[.,]?\s*)?)?I\s+(?:cannot|can\s?not|can'?t)\s+share\s+that(?:\s+information)?\s*\.?\s*$/i.test(fullResponse.trim())) {
+                const honest = "I don't have that product detail in my loaded context. I can only speak to what's in the loaded project description.";
+                fullResponse = honest;
+                finalText = honest;
+                _attr.assistant_voice_guard_triggered = true;
+                piTelemetry.emit('pi_context_policy_applied', { answerType: answerPlan.answerType, via: 'product_about_refusal_repaired' });
+                console.warn('[ProfileIntelligence] product-about stock refusal replaced with honest no-context line', { answerType: answerPlan.answerType });
+              }
             } catch (saniErr: any) {
               console.warn('[ProfileIntelligence] candidate sanitizer skipped:', saniErr?.message);
             }
           }
+
+          // ── ASSISTANT-VOICE IDENTITY-MISFIRE GUARD (Groq-scout E2E sprint 2026-06-14) ──
+          // The meeting/lecture/sales/general/follow-up surfaces speak in the
+          // ASSISTANT's voice, so they bypass the candidate sanitizer above. Smaller
+          // models (e.g. Groq llama-4-scout) over-apply the prompt's "if asked who you
+          // are…" identity reply to short, context-free questions ("who owns the next
+          // step", "what's the pricing model", "now optimize it") and emit the canned
+          // "I'm Natively, an AI assistant" / "I can't share that information" instead
+          // of a real answer. Detect that misfire (conservative: only when the canned
+          // line IS the whole short answer) and substitute an honest, grounded line —
+          // never ship a self-identification or stock refusal as the answer.
+          if (!isCodingChat && ASSISTANT_VOICE_ANSWER_TYPES.has(answerPlan.answerType)) {
+            try {
+              const misfire = detectAssistantVoiceMisfire(fullResponse);
+              if (misfire.isMisfire) {
+                _attr.assistant_voice_guard_triggered = true;
+                const honest = (answerPlan.answerType === 'general_meeting_answer' || answerPlan.answerType === 'lecture_answer')
+                  ? "I don't have enough context from the conversation to answer that yet."
+                  : answerPlan.answerType === 'sales_answer'
+                    ? "I don't have enough context on that yet — could you share a bit more?"
+                    : "Could you give me a bit more to go on?";
+                piTelemetry.emit('pi_assistant_voice_misfire_repaired', { answerType: answerPlan.answerType, reason: misfire.reason });
+                console.warn('[ProfileIntelligence] assistant-voice identity/refusal misfire replaced with honest line', { answerType: answerPlan.answerType, reason: misfire.reason });
+                fullResponse = honest;
+                finalText = honest;
+              }
+            } catch (avErr: any) {
+              console.warn('[ProfileIntelligence] assistant-voice guard skipped:', avErr?.message);
+            }
+          }
+
+          // ── HUMAN-LIKENESS detection (task Phase 12) ──────────────────────────────
+          // For spoken candidate/sales answers, flag corporate/LinkedIn filler that
+          // survived the prompt directive. Log-only (no rewrite — rewriting risks the
+          // grounding); the directive does the real work up front. The matched phrases
+          // are generic boilerplate (safe to log), never profile content.
+          try {
+            if (humanizeDirectiveFor(answerPlan.answerType)) {
+              const filler = detectCorporateFiller(fullResponse);
+              if (filler.hasFiller) {
+                console.warn('[HumanLikeness] corporate filler detected in candidate answer', { answerType: answerPlan.answerType, count: filler.count, phrases: filler.matches.slice(0, 5) });
+                piTelemetry.emit('pi_context_policy_applied', { answerType: answerPlan.answerType, via: 'corporate_filler_detected', markerCount: filler.count });
+              }
+            }
+          } catch { /* detection never affects the answer */ }
 
           // ── FINAL ANSWER POLISH + DIVERSITY GUARD (manual regression 2026-06-12) ──
           // 1. Artifact cleanup: orphan "*" bullet lines, dangling markers, blank-
@@ -1417,6 +1738,43 @@ export function initializeIpcHandlers(appState: AppState): void {
                 fullResponse = cleaned;
                 finalText = cleaned;
               }
+              // HUMAN-LIKENESS final pass (task Phase 6): for a spoken candidate/sales
+              // answer, deterministically swap surviving corporate idioms for plain
+              // speech, drop "Based on your resume" / "the candidate" narration, and
+              // strip mid-speech bold. Style-only + fact-preserving + fence-safe, and a
+              // strict no-op for any non-spoken type (humanizeForAnswerType gates on
+              // shouldHumanize). The prompt directive does the real work up front; this
+              // is the last-mile backstop so a stray idiom never reaches the user.
+              const humanized = humanizeForAnswerType(answerPlan.answerType, fullResponse);
+              if (humanized.changed && humanized.text.trim().length >= 10) {
+                fullResponse = humanized.text;
+                finalText = humanized.text;
+                piTelemetry.emit('pi_context_policy_applied', { answerType: answerPlan.answerType, via: 'humanized_spoken_answer' });
+              }
+              // GENERIC TECH BREVITY (spoken-answer-quality sprint 2026-06-15): a
+              // technical-concept answer that came back tutorial-shaped (a "Common use
+              // cases" list, a long analogy the user didn't ask for) is tightened to a
+              // short spoken answer. Only for technical_concept_answer; analogy kept when
+              // the user asked for simple/beginner terms.
+              if (answerPlan.answerType === 'technical_concept_answer') {
+                const simpleRequested = answerPlan.answerStyle === 'beginner' || /\b(simple|simply|beginner|eli5|like i'?m (?:5|five)|layman)\b/i.test(message);
+                // FLATTEN-ONLY (user decision 2026-06-16): strip doc structure (headers/bullets/
+                // tables/code) into one spoken paragraph, but NEVER truncate — all prose content
+                // is kept. Length is the prompt's job; nothing is cut for any answer type.
+                const tech = compressTechnicalConcept(fullResponse, simpleRequested);
+                if (tech.changed && tech.text.trim().length >= 20) {
+                  fullResponse = tech.text;
+                  finalText = tech.text;
+                  piTelemetry.emit('pi_context_policy_applied', { answerType: answerPlan.answerType, via: 'technical_concept_flattened' });
+                }
+              }
+              // SPEAKABILITY (MEASURE-ONLY since 2026-06-16): length is the model's job via the
+              // prompt (the 15-30s band + the SPOKEN_SHORT/FULL/STRUCTURED tiers). The
+              // deterministic trimmer was REMOVED because it cropped the conclusion off long
+              // answers — so we NEVER trim here, we only measure the answer for telemetry (the
+              // coarse length class + word count). The answer text is left exactly as produced.
+              const budget = applySpeakabilityBudget(fullResponse, answerPlan.answerType, answerPlan.answerStyle as any, message, isCodingChat);
+              piTelemetry.emit('pi_context_policy_applied', { answerType: answerPlan.answerType, via: 'speakability_measured', speakabilityClass: budget.speakability_class, markerCount: budget.spoken_word_count });
               // Visible scaffold in a DEFAULT-style answer (user didn't ask for
               // structure): compress to the speakable form. detectAnswerStyle
               // already ran inside planAnswer (answerStyle on the plan).
@@ -1431,21 +1789,43 @@ export function initializeIpcHandlers(appState: AppState): void {
                   piTelemetry.emit('pi_scaffold_compressed', { answerType: answerPlan.answerType });
                 }
               }
-              // Diversity check vs the session's recent answers.
-              const verdict = _manualDiversityGuard.check(fullResponse, answerPlan.answerType, message);
+              // Diversity check vs the session's recent answers. Supply the grounded
+              // project names so "same project reused when another was available" can fire
+              // and suggest the unused one (spoken-answer-quality sprint 2026-06-15).
+              let availableProjects: string[] | undefined;
+              try {
+                const orchD = llmHelper.getKnowledgeOrchestrator?.();
+                const resumeD = (orchD as any)?.activeResume?.structured_data ?? null;
+                availableProjects = resumeD
+                  ? (resumeD.projects || []).map((p: any) => (p?.name || '').split(/[–—-]/)[0].trim()).filter((s: string) => s.length >= 3)
+                  : undefined;
+              } catch { /* projects optional */ }
+              const verdict = _manualDiversityGuard.check(fullResponse, answerPlan.answerType, message, { availableProjects });
               if (verdict.repeated) {
                 piTelemetry.emit('pi_answer_repeated', { answerType: answerPlan.answerType, reason: verdict.reason });
-                const speakable = compressToSpeakable(fullResponse);
-                // Only swap when compression actually changes the shape — a
-                // repeated PROSE answer can't be improved deterministically
-                // without an LLM round-trip (the prompt-side anti-repetition
-                // context already biases against it).
-                if (speakable.length >= 40 && speakable !== fullResponse && !_manualDiversityGuard.check(speakable, answerPlan.answerType, message).repeated) {
-                  fullResponse = speakable;
-                  finalText = speakable;
+                // Deterministic repair, cheapest-first: (1) vary the OPENING so two answers
+                // don't start identically, (2) fall back to scaffold compression. Both keep
+                // the facts intact; only the shape/opening changes. No LLM round-trip.
+                let repaired = fullResponse;
+                if (verdict.reason === 'same_opening_window' || verdict.reason === 'same_first_sentence') {
+                  const varied = varySpokenOpening(fullResponse, _manualDiversityGuard.size);
+                  if (varied !== fullResponse && !_manualDiversityGuard.check(varied, answerPlan.answerType, message, { availableProjects }).repeated) {
+                    repaired = varied;
+                  }
+                }
+                if (repaired === fullResponse) {
+                  const speakable = compressToSpeakable(fullResponse);
+                  if (speakable.length >= 40 && speakable !== fullResponse && !_manualDiversityGuard.check(speakable, answerPlan.answerType, message, { availableProjects }).repeated) {
+                    repaired = speakable;
+                  }
+                }
+                if (repaired !== fullResponse) {
+                  fullResponse = repaired;
+                  finalText = repaired;
+                  piTelemetry.emit('pi_context_policy_applied', { answerType: answerPlan.answerType, via: 'repetition_guard_repaired' });
                 }
               }
-              _manualDiversityGuard.record(fullResponse, answerPlan.answerType, message);
+              _manualDiversityGuard.record(fullResponse, answerPlan.answerType, message, { availableProjects });
             } catch (polishErr: any) {
               console.warn('[ProfileIntelligence] answer polish skipped:', polishErr?.message);
             }
@@ -1456,8 +1836,9 @@ export function initializeIpcHandlers(appState: AppState): void {
             // finalText is set ONLY when repair changed the streamed answer — the
             // renderer replaces the streamed row in place (no double-render). When
             // the streamed answer was already valid, finalText is undefined and the
-            // already-streamed tokens stand.
-            event.sender.send('gemini-stream-done', finalText ? { finalText } : undefined);
+            // already-streamed tokens stand. streamId (audit finding #3) lets the
+            // renderer ignore a stale done from a superseded stream.
+            event.sender.send('gemini-stream-done', { ...(finalText ? { finalText } : {}), streamId: myStreamId });
             chatTrace.mark('response_completed', { chars: fullResponse.length, repaired: Boolean(finalText) });
             chatTrace.finish({ chars: fullResponse.length });
             iTrace.setProvider({ provider: 'llm', model: undefined });
@@ -1488,15 +1869,37 @@ export function initializeIpcHandlers(appState: AppState): void {
                     mode: manualActiveMode?.templateType,
                     timestamp: Date.now(),
                   });
+                  // CODING THREAD STATE (spoken-answer-quality sprint 2026-06-15): record a
+                  // coding turn so original-vs-current problem resolution works on later
+                  // follow-ups. Only for coding answers; isContinuation reuses the same
+                  // isCodingContinuation decision (do NOT re-derive).
+                  if (isCodingChat) {
+                    _manualCodingState.recordCodingTurn(String(senderId), {
+                      userMessage: message,
+                      assistantAnswer: fullResponse,
+                      explicitContract: explicitCodingContract,
+                      isContinuation: isCodingContinuation(message),
+                      timestamp: Date.now(),
+                    });
+                  }
                 } catch { /* memory recording never affects the answer */ }
               }
             }
+
+            // ATTRIBUTION: one record for the LLM-path answer (manual chat). The
+            // accumulator carries everything set along the way (profile/RAG/Hindsight/
+            // coding-followup/guards). Emitted exactly once on the done boundary.
+            _emitAttr({ assistant_voice_guard_triggered: Boolean(finalText) && _attr.assistant_voice_guard_triggered });
 
             // VERIFIED CODE EXECUTION (background, strictly additive). For coding
             // chat answers, run the code against test cases AFTER it's shown —
             // never awaited, so first answer has zero added latency. Emits a ✓
             // badge on pass or a corrected message on a re-verified fix.
-            if (isCodingChat && fullResponse.trim().length > 0 && isCodeVerificationEnabled()) {
+            if (isCodingChat && fullResponse.trim().length > 0 && isCodeVerificationEnabled()
+                && explicitContractProducesCode(explicitCodingContract)) {
+              // Only verify when NEW code was produced (default contract or code_only).
+              // A complexity_only / dry_run_only / explain_only follow-up emits no code
+              // and no <verification_spec>, so there is nothing to run.
               // Verify against the RAW response (keeps the spec); if repair changed
               // the answer, prefer the repaired (already spec-free) text.
               const verifyTarget = finalText || rawResponseForVerify;
@@ -1566,6 +1969,9 @@ export function initializeIpcHandlers(appState: AppState): void {
                 event.sender.send('gemini-stream-done', { finalText: fb.route.answer });
                 try { PhoneMirrorService.getInstance().publishToken(String(myStreamId), fb.route.answer); PhoneMirrorService.getInstance().publishDone(String(myStreamId), fb.route.answer); } catch (_) { /* noop */ }
                 intelligenceManager.addAssistantMessage(fb.route.answer);
+                // ATTRIBUTION: the provider failed but a grounded deterministic fallback
+                // (ProfileTree) answered — keep one record per delivered answer (LOW fix).
+                _emitAttr({ answer_type: fb.route.answerType, profile_tree_used: true, profile_tree_fast_path_used: true, structured_resume_used: true });
                 return null;
               }
             }
@@ -2172,6 +2578,13 @@ export function initializeIpcHandlers(appState: AppState): void {
     try {
       const llmHelper = appState.processingHelper.getLLMHelper();
       await llmHelper.switchToOllama(model, url);
+      // Warm + pin the local model off the hot path so the FIRST live question
+      // doesn't pay the cold weight-load tax (8-12s for a 7-9B model) that would
+      // otherwise blow the live first-token deadline. Fire-and-forget; never
+      // blocks the switch. prewarmPromptCache itself no-ops for non-Ollama.
+      if (llmHelper.isUsingOllama()) {
+        llmHelper.prewarmPromptCache().catch((_e: any): void => {});
+      }
       return { success: true };
     } catch (error: any) {
       // console.error("Error switching to Ollama:", error);
@@ -3918,6 +4331,13 @@ export function initializeIpcHandlers(appState: AppState): void {
 
       llmHelper.setModel(modelId, allProviders);
 
+      // If the user just selected a local Ollama model, warm + pin it now (off the
+      // hot path) so the first live question doesn't cold-load it and miss the
+      // first-token deadline. Fire-and-forget; no-ops for non-Ollama models.
+      if (llmHelper.isUsingOllama()) {
+        llmHelper.prewarmPromptCache().catch((_e: any): void => {});
+      }
+
       appState.broadcast('model-changed', modelId);
 
       // Close the selector window if open
@@ -3943,6 +4363,12 @@ export function initializeIpcHandlers(appState: AppState): void {
       const legacyProviders = cm.getCustomProviders() || [];
       const allProviders = [...curlProviders, ...legacyProviders];
       llmHelper.setModel(modelId, allProviders);
+
+      // Warm + pin a newly-selected local Ollama model off the hot path (see
+      // set-model / switch-to-ollama). Fire-and-forget; no-ops for non-Ollama.
+      if (llmHelper.isUsingOllama()) {
+        llmHelper.prewarmPromptCache().catch((_e: any): void => {});
+      }
 
       appState.broadcast('model-changed', modelId);
 
@@ -6446,7 +6872,12 @@ export function initializeIpcHandlers(appState: AppState): void {
       // but without requiring a renderer event sender. Tokens are pushed directly to
       // the phone over WebSocket; desktop renderer also receives them so both views
       // stay in sync.
+      // myStreamId is the globally-unique correlation id (shared counter with desktop
+      // chat). myPhoneId is the phone-only supersession marker — a later phone message
+      // bumps it, a desktop message does NOT, so cross-surface false supersession can't
+      // happen (audit RC-1 / finding #2).
       const myStreamId = ++_chatStreamId;
+      const myPhoneId = ++_phoneChatLatestId;
       const message = cmd.message;
       const phoneMirror = PhoneMirrorService.getInstance();
       const intelligenceManager = appState.getIntelligenceManager();
@@ -6491,8 +6922,8 @@ export function initializeIpcHandlers(appState: AppState): void {
           firstUsefulDeadlineMs: firstUsefulDeadlineMs('general_meeting_answer'),
           isUsefulYet: () => full.trim().length >= 5,
           shouldAbort: () => {
-            if (_chatStreamId !== myStreamId) {
-              console.log(`[PhoneMirror] phone-chat ${myStreamId} superseded by ${_chatStreamId}, stopping.`);
+            if (_phoneChatLatestId !== myPhoneId) {
+              console.log(`[PhoneMirror] phone-chat ${myStreamId} superseded by a newer phone message, stopping.`);
               phoneSuperseded = true; return true;
             }
             // Cancel early if all phones disconnected and there's no desktop renderer.
@@ -6501,17 +6932,19 @@ export function initializeIpcHandlers(appState: AppState): void {
           },
           onToken: (token: string) => {
             try { phoneMirror.publishToken(String(myStreamId), token); } catch (_) {}
-            win?.webContents.send('gemini-stream-token', token);
+            // streamId lets the desktop renderer drop tokens from a superseded
+            // chat stream (audit finding #3); backward-compatible optional arg.
+            win?.webContents.send('gemini-stream-token', token, { streamId: myStreamId });
             full += token;
           },
           onCleanup: () => { try { phoneController.abort(); } catch { /* noop */ } },
         });
         if (phoneSuperseded) return;
-        if (_chatStreamId === myStreamId) {
+        if (_phoneChatLatestId === myPhoneId) {
           try {
             phoneMirror.publishDone(String(myStreamId), full);
           } catch (_) {}
-          win?.webContents.send('gemini-stream-done');
+          win?.webContents.send('gemini-stream-done', { streamId: myStreamId });
           if (full.trim().length > 0) {
             intelligenceManager.addAssistantMessage(full);
             intelligenceManager.logUsage('chat', message, full);
@@ -6519,7 +6952,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         }
       } catch (err: any) {
         console.error('[PhoneMirror] phone-chat stream error:', err);
-        if (_chatStreamId === myStreamId) {
+        if (_phoneChatLatestId === myPhoneId) {
           try {
             phoneMirror.publishError(String(myStreamId), err?.message || 'stream error');
           } catch (_) {}

@@ -510,6 +510,64 @@ export function sanitizeCandidateAnswer(answer: string): CandidateSanitizeResult
   return { text, repaired, needsFallback, removedMarkers: Array.from(removed) };
 }
 
+// Assistant-voice answer types — the meeting/lecture/sales/general/follow-up
+// surfaces that legitimately speak in the ASSISTANT's voice (NOT the candidate's),
+// so they are NOT in CANDIDATE_VOICE_ANSWER_TYPES and never reach
+// sanitizeCandidateAnswer. They still must not emit the canned IDENTITY reply
+// ("I'm Natively, an AI assistant" / "I was developed by Evin John") or a stock
+// REFUSAL ("I can't share that information") in place of a real answer — a
+// robustness gap surfaced by the Groq-scout E2E sprint (2026-06-14): smaller models
+// over-apply the prompt's "if asked who you are…" identity instruction to short,
+// context-free meeting/sales/follow-up questions ("who owns the next step",
+// "what's the pricing model", "now optimize it").
+export const ASSISTANT_VOICE_ANSWER_TYPES = new Set<AnswerType>([
+  'general_meeting_answer',
+  'lecture_answer',
+  'sales_answer',
+  'unknown_answer',
+  'follow_up_answer',
+]);
+
+// The canned NON-ANSWERS a model misfires here: the assistant identity reply and
+// the stock "I can't share" refusal. Reuse the identity markers; add the bare
+// identity sentence + the create/identity stock lines from prompts.ts.
+//
+// The "I'm an AI assistant" branch ANCHORS the noun at a clause boundary — end of
+// string, sentence punctuation, or a self-referential continuation ("…assistant
+// developed by / here to / designed to / that helps"). This fires on the real
+// misfire ("I'm an AI assistant." / "I'm an AI assistant developed by Evin John")
+// but NOT on a legitimate role description that happens to start the same way
+// ("I am an assistant coach, so I handle the drills") — code-review 2026-06-14
+// MEDIUM-1.
+const ASSISTANT_IDENTITY_MISFIRE_RE = /\bI(?:'m| am)\s+Natively\b|\bI(?:'m| am)\s+an?\s+(?:AI\s+)?(?:assistant|language model|chat\s?bot)(?=\s*(?:[.,!?;]|$|\s+(?:developed|created|made|built|designed|trained|here|created|that|who|which|to\b|and\s+I\b)))|\bI\s+was\s+developed\s+by\s+Evin\s+John\b|\bas\s+an\s+AI(?:\s+(?:language\s+)?model)?,?\s+I\b/i;
+const ASSISTANT_STOCK_REFUSAL_RE = /\bI\s+(?:cannot|can\s?not|can'?t)\s+share\s+that(?:\s+information)?\s*\.?\s*$/i;
+
+export interface AssistantVoiceSanitizeResult {
+  /** True when the answer is a canned identity/refusal misfire (no real content). */
+  isMisfire: boolean;
+  /** Which pattern fired (telemetry; no raw content). */
+  reason: 'identity' | 'refusal' | null;
+}
+
+/**
+ * Detect whether an assistant-voice answer is a canned identity/refusal misfire
+ * rather than a real answer. Deterministic, content-free. The caller substitutes a
+ * deterministic honest answer (e.g. the no-context line) when `isMisfire` is true.
+ *
+ * Conservative by design: only flags when the canned line is the WHOLE answer (short
+ * + matches), so a long, real meeting answer that merely quotes "I can't share the
+ * revenue figure" is never falsely flagged.
+ */
+export function detectAssistantVoiceMisfire(answer: string): AssistantVoiceSanitizeResult {
+  const t = String(answer || '').trim();
+  if (!t) return { isMisfire: false, reason: null };
+  // Only a SHORT answer can be a pure canned non-answer; a real answer is longer.
+  if (t.length > 240) return { isMisfire: false, reason: null };
+  if (ASSISTANT_IDENTITY_MISFIRE_RE.test(t)) return { isMisfire: true, reason: 'identity' };
+  if (ASSISTANT_STOCK_REFUSAL_RE.test(t)) return { isMisfire: true, reason: 'refusal' };
+  return { isMisfire: false, reason: null };
+}
+
 // Single-word profile tokens that are ALSO common technical vocabulary — excluded
 // from the dynamic leak-token check so a project/company name like "Search" or
 // "Node" can't delete or flag legitimate coding prose (code-review 2026-06-07).
