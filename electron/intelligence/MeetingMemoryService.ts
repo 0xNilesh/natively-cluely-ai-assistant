@@ -27,6 +27,8 @@ export interface MeetingInsights {
   questionsAsked: string[];
   decisions: string[];
   actionItems: string[];
+  /** Risks/blockers raised ("Risk: …", "blocker", "concern", "may exceed budget"). */
+  risks: string[];
   entities: string[];
   skillsDiscussed: string[];
   companiesDiscussed: string[];
@@ -43,10 +45,26 @@ export interface MeetingRecord extends MeetingInsights {
   sourceQuality: number;
 }
 
-// Reuse the patterns proven in electron/rag/TranscriptPreprocessor.ts.
+// Reuse the patterns proven in electron/rag/TranscriptPreprocessor.ts, PLUS the natural
+// meeting phrasings the original set missed (task Phase 9, bug #4): a "Decision:" / "Action:" /
+// "Risk:" LABEL prefix, and ownership phrasing ("Mark owns X", "Anu will do Y by Friday").
 const QUESTION_PATTERNS = [/\?\s*$/, /^(what|who|when|where|why|how|can|could|would|should|is|are|do|does|did)\b/i];
-const DECISION_PATTERNS = [/\b(decided|agreed|confirmed|approved|let'?s go with|we'?ll do|going with|we will|final decision)\b/i];
-const ACTION_PATTERNS = [/\b(will|going to|need to|have to|must|action item|to[- ]?do|follow[- ]?up)\b/i];
+const DECISION_PATTERNS = [
+  /\b(decided|agreed|confirmed|approved|let'?s go with|we'?ll do|going with|we will|final decision)\b/i,
+  /^\s*decision\b\s*[:\-]/i,                 // "Decision: beta launches next Tuesday"
+  /\b(launch(?:es|ing)?|ship(?:s|ping)?|go(?:ing)? live)\b.*\b(next|on|by)\b/i, // "beta launches next Tuesday"
+];
+const ACTION_PATTERNS = [
+  /\b(will|going to|need to|have to|must|action item|to[- ]?do|follow[- ]?up)\b/i,
+  /^\s*(action|todo|to[- ]?do|task)\b\s*[:\-]/i,    // "Action: …", "TODO: …"
+  /\b(owns?|owner|responsible for|on the hook for|takes? (?:on|over)|assigned to)\b/i, // "Mark owns Redis migration"
+  /\b\w+\b\s+(?:will|to)\s+\w+.*\bby\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|eod|tomorrow|next week|\w+day)\b/i,
+];
+// Risks / blockers / concerns raised in the meeting.
+const RISK_PATTERNS = [
+  /^\s*(risk|blocker|concern|issue)\b\s*[:\-]/i,    // "Risk: Deepgram cost may exceed budget"
+  /\b(risk|blocker|blocked by|concern(?:ed)?|may (?:exceed|slip|overrun|miss)|might (?:exceed|slip|fail)|over budget|behind schedule|won'?t (?:make|hit))\b/i,
+];
 
 // Lightweight tech-skill lexicon for skillsDiscussed (generic; not user-specific).
 const SKILL_LEXICON = /\b(python|java(?:script)?|typescript|react|node(?:\.?js)?|c\+\+|go(?:lang)?|rust|sql|nosql|redis|postgres(?:ql)?|mongodb|kafka|docker|kubernetes|aws|gcp|azure|graphql|rest|grpc|tensorflow|pytorch|spark|hadoop|terraform|microservices?|system design|scalability|caching|sharding|load balanc\w+|machine learning|ml|deep learning)\b/gi;
@@ -81,13 +99,14 @@ function cleanLine(text: string): string {
 export class MeetingInsightExtractor {
   extract(segments: MeetingTranscriptSegment[], max = 20): MeetingInsights {
     const empty: MeetingInsights = {
-      topics: [], questionsAsked: [], decisions: [], actionItems: [], entities: [], skillsDiscussed: [], companiesDiscussed: [],
+      topics: [], questionsAsked: [], decisions: [], actionItems: [], risks: [], entities: [], skillsDiscussed: [], companiesDiscussed: [],
     };
     try {
       if (!Array.isArray(segments) || segments.length === 0) return empty;
       const questions: string[] = [];
       const decisions: string[] = [];
       const actions: string[] = [];
+      const risks: string[] = [];
       const entities: string[] = [];
       const skills: string[] = [];
       const seenEnt = new Set<string>();
@@ -98,9 +117,14 @@ export class MeetingInsightExtractor {
         const line = cleanLine(raw);
         if (!line) continue;
 
+        // Risk is checked FIRST and is exclusive — a "Risk: …" line is not also an
+        // action just because it contains "may exceed". Decision/action are not mutually
+        // exclusive of each other (an agreed action is both), matching prior behavior.
+        const isRisk = hasAny(line, RISK_PATTERNS);
+        if (isRisk) risks.push(line);
         if (hasAny(line, QUESTION_PATTERNS) && line.length > 8) questions.push(line);
-        if (hasAny(line, DECISION_PATTERNS)) decisions.push(line);
-        if (hasAny(line, ACTION_PATTERNS) && line.length > 8) actions.push(line);
+        if (!isRisk && hasAny(line, DECISION_PATTERNS)) decisions.push(line);
+        if (!isRisk && hasAny(line, ACTION_PATTERNS) && line.length > 8) actions.push(line);
 
         // Skills (generic lexicon).
         let m: RegExpExecArray | null;
@@ -130,6 +154,7 @@ export class MeetingInsightExtractor {
         questionsAsked: dedupe(questions).slice(0, max),
         decisions: dedupe(decisions).slice(0, max),
         actionItems: dedupe(actions).slice(0, max),
+        risks: dedupe(risks).slice(0, max),
         entities: dedupe(entities).slice(0, max),
         skillsDiscussed: dedupe(topSkills).slice(0, max),
         companiesDiscussed: companies,
@@ -168,7 +193,7 @@ export class MeetingMemoryService {
 
     // Coarse source quality: more turns + presence of structure → higher.
     const turns = segments.length;
-    const structureScore = (insights.questionsAsked.length > 0 ? 0.3 : 0) + (insights.decisions.length > 0 ? 0.2 : 0) + (insights.actionItems.length > 0 ? 0.2 : 0);
+    const structureScore = (insights.questionsAsked.length > 0 ? 0.3 : 0) + (insights.decisions.length > 0 ? 0.2 : 0) + (insights.actionItems.length > 0 ? 0.2 : 0) + (insights.risks.length > 0 ? 0.1 : 0);
     const sourceQuality = Math.max(0, Math.min(1, Math.min(turns / 20, 0.3) + structureScore));
 
     return {

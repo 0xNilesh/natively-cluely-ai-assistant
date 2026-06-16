@@ -104,6 +104,25 @@ export class ConversationMemoryService {
   }
 
   /**
+   * The most recent CODING turn in the session — a prior Q/A whose answer contains a
+   * fenced code block (so "give the complexity" / "dry run this" / "now optimize it"
+   * can inherit the same problem + code). Returns null when no coding turn exists.
+   * Used by the manual coding follow-up path (task Phase 11, bug #6). Synchronous.
+   */
+  getLastCodingTurn(sessionId: string): StoredTurn | null {
+    const arr = this.bySession.get(sessionId) || [];
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const a = arr[i].assistantAnswer || '';
+      // A coding turn = the assistant answer has a fenced code block, OR the turn was
+      // explicitly tagged as coding via contextSourcesUsed (the caller may set this).
+      if (/```[\s\S]*```/.test(a) || (arr[i].contextSourcesUsed || []).includes('coding')) {
+        return arr[i];
+      }
+    }
+    return null;
+  }
+
+  /**
    * SAME-SESSION follow-up: resolve from local history first (the spec's rule). Returns
    * the most relevant prior turn by entity/token overlap, or null. Synchronous + fast.
    */

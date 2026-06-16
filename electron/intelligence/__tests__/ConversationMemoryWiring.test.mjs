@@ -221,3 +221,47 @@ describe('Phase 11 wiring — matching is appropriate for bare follow-ups (recen
     assert.equal(resolve(svc, 'r', 'what is the capital of France and its population today'), null);
   });
 });
+
+describe('Phase 11 (2026-06-15) — getLastCodingTurn: coding follow-up inheritance (bug #6)', () => {
+  const TWO_SUM = '## Approach\nHash map.\n\n## Code\n```python\ndef twoSum(nums, target):\n    seen = {}\n    for i, n in enumerate(nums):\n        if target - n in seen: return [seen[target-n], i]\n        seen[n] = i\n```';
+
+  test('returns the most-recent turn whose answer contains code', () => {
+    const svc = new ConversationMemoryService();
+    recordTurn(svc, 'c', 'Tell me about your experience', 'I have built X and Y.', 'manual', 1000);
+    recordTurn(svc, 'c', 'Solve Two Sum in Python', TWO_SUM, 'manual', 2000);
+    const prior = svc.getLastCodingTurn('c');
+    assert.ok(prior, 'a coding turn (with a fenced code block) must be found');
+    assert.match(prior.userMessage, /Two Sum/);
+    assert.match(prior.assistantAnswer, /def twoSum/);
+  });
+
+  test('a later NON-coding turn does not hide the prior coding turn', () => {
+    // "Give time and space complexity" produces no code; the original Two Sum turn must
+    // still be recoverable so the follow-up resolves against the right problem.
+    const svc = new ConversationMemoryService();
+    recordTurn(svc, 'c', 'Solve Two Sum in Python', TWO_SUM, 'manual', 1000);
+    recordTurn(svc, 'c', 'Give time and space complexity', 'Time O(n), Space O(n).', 'manual', 2000);
+    const prior = svc.getLastCodingTurn('c');
+    assert.ok(prior, 'the earlier coding turn is still found behind a no-code follow-up');
+    assert.match(prior.assistantAnswer, /def twoSum/);
+  });
+
+  test('returns null when the session has no coding turn', () => {
+    const svc = new ConversationMemoryService();
+    recordTurn(svc, 'c', 'What is your name?', 'I am the candidate.', 'manual', 1000);
+    assert.equal(svc.getLastCodingTurn('c'), null);
+  });
+
+  test('SESSION ISOLATION — a coding turn in A is invisible to B', () => {
+    const svc = new ConversationMemoryService();
+    recordTurn(svc, 'A', 'Solve Two Sum', TWO_SUM, 'manual', 1000);
+    assert.ok(svc.getLastCodingTurn('A'));
+    assert.equal(svc.getLastCodingTurn('B'), null);
+  });
+
+  test('never throws on an unknown session', () => {
+    const svc = new ConversationMemoryService();
+    assert.doesNotThrow(() => svc.getLastCodingTurn('nope'));
+    assert.equal(svc.getLastCodingTurn('nope'), null);
+  });
+});

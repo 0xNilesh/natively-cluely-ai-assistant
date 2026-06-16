@@ -1155,6 +1155,17 @@ export class DatabaseManager {
             VALUES (?, ?, ?, ?, ?, ?)
         `);
 
+        // Idempotency: the meetings row uses INSERT OR REPLACE, but transcripts
+        // and ai_interactions are append-only with autoincrement ids, so a second
+        // saveMeeting() for the same id (the normal flow: stopMeeting writes a
+        // placeholder snapshot, then processAndSaveMeeting writes the final one —
+        // see MeetingPersistence) would APPEND a duplicate copy of every child
+        // row. Recovery re-saves and RAG reprocessing would then read doubled
+        // transcripts. Clearing the existing children inside the same transaction
+        // before re-inserting makes saveMeeting idempotent for a given meeting id.
+        const deleteTranscripts = this.db.prepare(`DELETE FROM transcripts WHERE meeting_id = ?`);
+        const deleteInteractions = this.db.prepare(`DELETE FROM ai_interactions WHERE meeting_id = ?`);
+
         const summaryJson = JSON.stringify({
             legacySummary: meeting.summary,
             detailedSummary: meeting.detailedSummary
@@ -1175,6 +1186,9 @@ export class DatabaseManager {
             );
 
             // 2. Insert Transcript
+            // Clear any prior child rows for this meeting first so re-saving the
+            // same meeting id (placeholder → final) does not duplicate them.
+            deleteTranscripts.run(meeting.id);
             if (meeting.transcript) {
                 for (const segment of meeting.transcript) {
                     insertTranscript.run(
@@ -1187,6 +1201,7 @@ export class DatabaseManager {
             }
 
             // 3. Insert Interactions
+            deleteInteractions.run(meeting.id);
             if (meeting.usage) {
                 for (const usage of meeting.usage) {
                     let metadata = null;

@@ -57,6 +57,26 @@ export interface IntelligenceTraceRecord {
   /** sha256(query).slice(0,12) — never the raw query. */
   queryHash: string;
   queryLength: number;
+  // ── Correlation ids (audit finding #9) — let one answer be joined across the
+  // IPC boundary, the engine trace, and the PiLatencyTrace. All are short opaque
+  // markers (ids / hashes), never raw content. Optional + additive: a trace that
+  // never calls setCorrelation() looks exactly as before.
+  /** Per-answer request id minted at the IPC boundary (e.g. PiLatencyTrace.requestId). */
+  requestId?: string;
+  /** Renderer sender id / session id, when known. */
+  sessionId?: string;
+  /** Active meeting id, when an answer happens inside a meeting. */
+  meetingId?: string;
+  /** Surface marker: manual | what_to_answer | phone | system. */
+  surface?: string;
+  /** Mode id (distinct from the human-facing `mode` template label). */
+  modeId?: string;
+  /** Provider retry count, when the execution path tracks it. */
+  retryCount?: number;
+  /** True when the answer was aborted/superseded before completing. */
+  aborted?: boolean;
+  /** Coarse error category marker (e.g. rate_limit, timeout, network). */
+  errorCategory?: string;
   mode?: string;
   source?: string; // manual | what_to_answer | transcript | system
   answerType?: string;
@@ -103,6 +123,17 @@ function marker(v: string | undefined, max = 48): string | undefined {
  */
 export interface IntelligenceTrace {
   readonly enabled: boolean;
+  /** Attach correlation ids so this answer can be joined across IPC/engine/latency traces. */
+  setCorrelation(info: {
+    requestId?: string;
+    sessionId?: string;
+    meetingId?: string;
+    surface?: string;
+    modeId?: string;
+    retryCount?: number;
+    aborted?: boolean;
+    errorCategory?: string;
+  }): IntelligenceTrace;
   setRouting(info: {
     mode?: string;
     source?: string;
@@ -125,6 +156,7 @@ export interface IntelligenceTrace {
 // A shared no-op so the disabled path allocates nothing per call.
 const NOOP: IntelligenceTrace = {
   enabled: false,
+  setCorrelation() { return NOOP; },
   setRouting() { return NOOP; },
   noteContext() { return NOOP; },
   stage() { return NOOP; },
@@ -154,6 +186,20 @@ class ActiveTrace implements IntelligenceTrace {
       flags: safeFlagSnapshot(),
       seq: SEQ++,
     };
+  }
+
+  setCorrelation(info: { requestId?: string; sessionId?: string; meetingId?: string; surface?: string; modeId?: string; retryCount?: number; aborted?: boolean; errorCategory?: string }): IntelligenceTrace {
+    try {
+      if (info.requestId !== undefined) this.rec.requestId = marker(info.requestId, 64);
+      if (info.sessionId !== undefined) this.rec.sessionId = marker(info.sessionId, 64);
+      if (info.meetingId !== undefined) this.rec.meetingId = marker(info.meetingId, 64);
+      if (info.surface !== undefined) this.rec.surface = marker(info.surface, 24);
+      if (info.modeId !== undefined) this.rec.modeId = marker(info.modeId, 40);
+      if (typeof info.retryCount === 'number') this.rec.retryCount = numOrUndef(info.retryCount);
+      if (typeof info.aborted === 'boolean') this.rec.aborted = info.aborted;
+      if (info.errorCategory !== undefined) this.rec.errorCategory = marker(info.errorCategory, 32);
+    } catch { /* never throw */ }
+    return this;
   }
 
   setRouting(info: { mode?: string; source?: string; answerType?: string; answerContract?: string; deterministicFastPathUsed?: boolean; profileFactsReady?: boolean; promptContainsProfileContext?: boolean; routerDecision?: Record<string, unknown> }): IntelligenceTrace {

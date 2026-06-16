@@ -10,6 +10,7 @@ import { buildPostCallEnhancements } from './services/post-call/PostCallWorkflow
 import { MeetingMemoryService } from './intelligence/MeetingMemoryService';
 import { LongTermMemoryService } from './intelligence/memory/LongTermMemoryService';
 import { isIntelligenceFlagEnabled } from './intelligence/intelligenceFlags';
+import { recordAttribution, hindsightModeFor } from './intelligence/IntelligenceAttribution';
 import { telemetryService } from './services/telemetry/TelemetryService';
 import type { ProviderDataScopePolicy } from './llm/ProviderRouter';
 const crypto = require('crypto');
@@ -152,6 +153,10 @@ export class MeetingPersistence {
         // Phase 6 — post_call_summary lifecycle telemetry. Wrapped in try/catch
         // around track calls so a telemetry sink fault never breaks persistence.
         const _postCallStart = Date.now();
+        // ATTRIBUTION (task Phase 3/9): prove the post-meeting memory pipeline ran.
+        let _meetingMemoryRecorded = false;
+        let _meetingMemoryCounts: { topics: number; decisions: number; actionItems: number; entities: number } | null = null;
+        let _hindsightRetainQueued = false;
         try {
             telemetryService.track({
                 name: 'post_call_summary_started',
@@ -371,12 +376,21 @@ Return ONLY valid JSON (no markdown code blocks):
                         questionsAsked: record.questionsAsked,
                         decisions: record.decisions,
                         actionItems: record.actionItems,
+                        risks: record.risks,
                         entities: record.entities,
                         skillsDiscussed: record.skillsDiscussed,
                         companiesDiscussed: record.companiesDiscussed,
                         participants: record.participants,
                         sourceQuality: record.sourceQuality,
-                        schemaVersion: 1,
+                        schemaVersion: 2,
+                    };
+                    _meetingMemoryRecorded = true;
+                    // Content-free attribution: COUNTS only, never the extracted text.
+                    _meetingMemoryCounts = {
+                        topics: record.topics.length,
+                        decisions: record.decisions.length,
+                        actionItems: record.actionItems.length,
+                        entities: record.entities.length,
                     };
                 }
             } catch (memErr) {
@@ -433,6 +447,7 @@ Return ONLY valid JSON (no markdown code blocks):
                         // Per-install scope id (isolates two installs sharing one Cloud
                         // account); mode tag scopes by meeting mode.
                         ltm.retainMeetingSummary(meetingId, summaryText, { userId: _hm.localUserId(), meetingId }, modeSnapshot?.templateType);
+                        _hindsightRetainQueued = true;
                         console.log('[Hindsight] queued post-meeting summary retain', { meetingId, provider: ltm.providerName });
                     }
                 }
@@ -445,6 +460,32 @@ Return ONLY valid JSON (no markdown code blocks):
             // Notify Frontend to refresh list
             const wins = require('electron').BrowserWindow.getAllWindows();
             wins.forEach((w: any) => w.webContents.send('meetings-updated'));
+
+            // ATTRIBUTION: one record proving which post-meeting memory layers ran on save
+            // (bug #4: MeetingMemoryService + Hindsight retain not previously evidenced).
+            try {
+                const _hmEnabled = isIntelligenceFlagEnabled('hindsightMemory') && isIntelligenceFlagEnabled('hindsightPostMeetingRetain');
+                let _hsConfigured = false; let _hsAvailable = false;
+                try {
+                    const { HindsightManager } = require('./services/HindsightManager') as typeof import('./services/HindsightManager');
+                    const _hm2 = HindsightManager.getInstance();
+                    _hsConfigured = Boolean(_hm2.getHindsightConfig());
+                    _hsAvailable = _hsConfigured && _hm2.isAvailable();
+                } catch { /* attribution only */ }
+                recordAttribution({
+                    answer_type: 'meeting_summary',
+                    mode: modeSnapshot?.templateType || 'meeting',
+                    surface: 'meeting',
+                    meeting_memory_used: isIntelligenceFlagEnabled('meetingMemoryV2'),
+                    meeting_memory_record_used: _meetingMemoryRecorded,
+                    hindsight_enabled: _hmEnabled,
+                    hindsight_mode: hindsightModeFor({ memoryFlagOn: isIntelligenceFlagEnabled('hindsightMemory'), configured: _hsConfigured, available: _hsAvailable }),
+                    hindsight_retain_queued: _hindsightRetainQueued,
+                });
+                if (_meetingMemoryCounts) {
+                    console.log('[MeetingMemoryV2] structured memory persisted', { meetingId, ..._meetingMemoryCounts, hindsightRetainQueued: _hindsightRetainQueued });
+                }
+            } catch { /* attribution never breaks persistence */ }
 
             // Phase 6 — post_call_summary_completed (no transcript / no summary text;
             // counts and durations only).

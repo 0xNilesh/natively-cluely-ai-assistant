@@ -23,8 +23,11 @@ import {
   compressToSpeakable,
   SCAFFOLD_LABEL_RE,
   AnswerDiversityGuard,
+  varySpokenOpening,
   type RepetitionVerdict,
 } from '../llm/answerPolish';
+import { humanizeForAnswerType } from '../llm/humanLikeness';
+import type { AnswerType } from '../llm/AnswerPlanner';
 
 /** Answer styles (from AnswerPlanner) under which visible scaffold labels are OK. */
 const STRUCTURE_STYLES = new Set(['detailed', 'bullets', 'star', 'exam', 'notes']);
@@ -36,6 +39,10 @@ export interface NormalizeInput {
   answerStyle?: string;
   /** True for coding answers (their fenced/sectioned shape is intentional — skip). */
   isCoding?: boolean;
+  /** The answer type (enables the speakability budget + humanizer final pass). */
+  answerType?: AnswerType;
+  /** The user's question (enables detail-request exception detection). */
+  question?: string;
 }
 
 export interface NormalizeResult {
@@ -73,6 +80,19 @@ export function normalizeOutputShape(input: NormalizeInput): NormalizeResult {
       if (speakable.length >= 40) {
         text = speakable;
         applied.push('compressed_to_speakable');
+      }
+    }
+
+    // Humanizer final pass (spoken-answer-quality sprint 2026-06-15) — strips residual
+    // corporate filler / source narration. Gates internally on answer type, so a coding /
+    // lecture / technical answer is a no-op. NOTE: the speakability TRIM was removed
+    // 2026-06-16 (it cropped the conclusion off long answers); length is the model's job via
+    // the prompt, so the WTA path no longer trims either.
+    if (input.answerType) {
+      const human = humanizeForAnswerType(input.answerType, text);
+      if (human.changed && human.text.trim().length >= 10) {
+        text = human.text;
+        applied.push('humanized_spoken_answer');
       }
     }
   } catch {
