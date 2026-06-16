@@ -298,8 +298,8 @@ export interface ElectronAPI {
 
   // Streaming listeners
   streamGeminiChat: (message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean, ignoreKnowledgeMode?: boolean }) => Promise<void>
-  onGeminiStreamToken: (callback: (token: string) => void) => () => void
-  onGeminiStreamDone: (callback: (data?: { finalText?: string }) => void) => () => void
+  onGeminiStreamToken: (callback: (token: string, meta?: { streamId?: number }) => void) => () => void
+  onGeminiStreamDone: (callback: (data?: { finalText?: string; streamId?: number }) => void) => () => void
   onGeminiStreamError: (callback: (error: string) => void) => () => void;
   cancelChatStream: () => void;
 

@@ -553,6 +553,18 @@ export class AppState {
   // first-chunk handler reads the freshly-detected native rate.
   private _sysSttRateApplied: boolean = false;
   private _micSttRateApplied: boolean = false;
+  // Per-speaker throttle for the display-only `native-audio-transcript` IPC.
+  // Finals are sent immediately; partials coalesce to latest-wins within
+  // PARTIAL_TRANSCRIPT_THROTTLE_MS so a fast STT (e.g. OpenAI per-delta partials)
+  // can't flood both windows with near-per-token IPC during a long meeting
+  // (audit finding #7). The answer path (intelligenceManager.handleTranscript /
+  // RAG feed) runs BEFORE this send and is unaffected — this only paces the
+  // renderer's rolling transcript bar, which renders the latest preview anyway.
+  private static readonly PARTIAL_TRANSCRIPT_THROTTLE_MS = 100;
+  private _transcriptPartialThrottle = new Map<string, {
+    timer: ReturnType<typeof setTimeout> | null;
+    pending: { speaker: string; text: string; timestamp: number; final: boolean; confidence: number } | null;
+  }>();
   private _disguiseTimers: NodeJS.Timeout[] = []; // Track forceUpdate timeouts
   private _dockDebounceTimer: NodeJS.Timeout | null = null; // Debounce dock state changes
   private _dockReassertTimers: NodeJS.Timeout[] = []; // Self-verifying dock-enforcement retry timers
@@ -924,6 +936,58 @@ export class AppState {
     };
     sendOnce(this.settingsWindowHelper.getSettingsWindow());
     sendOnce(this.windowHelper.getLauncherWindow());
+  }
+
+  /** Push a transcript payload to the launcher + overlay rolling-transcript bar. */
+  private emitTranscriptToSurfaces(payload: { speaker: string; text: string; timestamp: number; final: boolean; confidence: number }): void {
+    const helper = this.getWindowHelper();
+    helper.getLauncherWindow()?.webContents.send('native-audio-transcript', payload);
+    helper.getOverlayWindow()?.webContents.send('native-audio-transcript', payload);
+  }
+
+  /**
+   * Display-only transcript IPC with partial throttling (audit finding #7).
+   * Finals flush any pending partial then send immediately (preserving order);
+   * partials coalesce to latest-wins within PARTIAL_TRANSCRIPT_THROTTLE_MS so a
+   * chatty STT doesn't generate near-per-token IPC to two windows. Keyed per
+   * speaker so interviewer + user channels throttle independently.
+   */
+  private sendThrottledTranscript(payload: { speaker: string; text: string; timestamp: number; final: boolean; confidence: number }): void {
+    const key = payload.speaker;
+    let state = this._transcriptPartialThrottle.get(key);
+    if (!state) {
+      state = { timer: null, pending: null };
+      this._transcriptPartialThrottle.set(key, state);
+    }
+
+    if (payload.final) {
+      // Cancel any pending partial — the final supersedes it — then send now.
+      if (state.timer) { clearTimeout(state.timer); state.timer = null; }
+      state.pending = null;
+      this.emitTranscriptToSurfaces(payload);
+      return;
+    }
+
+    // Partial: remember the latest and ensure a flush is scheduled.
+    state.pending = payload;
+    if (state.timer) return; // a flush is already pending; latest-wins
+    state.timer = setTimeout(() => {
+      const s = this._transcriptPartialThrottle.get(key);
+      if (!s) return;
+      s.timer = null;
+      const p = s.pending;
+      s.pending = null;
+      if (p) this.emitTranscriptToSurfaces(p);
+    }, AppState.PARTIAL_TRANSCRIPT_THROTTLE_MS);
+  }
+
+  /** Drop any pending throttled partials + timers (called on meeting teardown). */
+  private clearTranscriptThrottle(): void {
+    for (const state of this._transcriptPartialThrottle.values()) {
+      if (state.timer) { clearTimeout(state.timer); state.timer = null; }
+      state.pending = null;
+    }
+    this._transcriptPartialThrottle.clear();
   }
 
   private sendSttStatus(payload: any): void {
@@ -1644,7 +1708,6 @@ export class AppState {
         }]);
       }
 
-      const helper = this.getWindowHelper();
       const payload = {
         speaker: speaker,
         text: segment.text,
@@ -1652,8 +1715,9 @@ export class AppState {
         final: segment.isFinal,
         confidence: segment.confidence
       };
-      helper.getLauncherWindow()?.webContents.send('native-audio-transcript', payload);
-      helper.getOverlayWindow()?.webContents.send('native-audio-transcript', payload);
+      // Display-only send, partial-throttled (finals pass through immediately).
+      // The answer path above (handleTranscript / RAG feed) is unaffected.
+      this.sendThrottledTranscript(payload);
 
       // Feed final recruiter (system audio) transcripts to the premium
       // negotiation tracker. Issue #272: gate by active mode template so the
@@ -2409,6 +2473,23 @@ export class AppState {
       this._micRecoveryTimer = null;
     }
 
+    // STT sockets do NOT reliably survive a sleep/wake cycle: the WebSocket can be
+    // half-open (no FIN observed) so writes after wake silently go nowhere and no
+    // transcript ever arrives. Recreating the captures alone (below) left the OLD
+    // STT instances in place, relying on an assumed-but-not-coded reconnect (audit
+    // finding #5). Explicitly tear them down here — same pattern as
+    // _doReconfigureSttProvider — and recreate fresh instances after the captures
+    // are back, so the data path wires to live sockets. Captures are already
+    // stopped/destroyed below, so no audio events race this teardown.
+    if (this.googleSTT) {
+      try { this.googleSTT.stop(); this.googleSTT.removeAllListeners(); } catch (e) { console.warn('[Main] Resume: googleSTT teardown threw:', e); }
+      this.googleSTT = null;
+    }
+    if (this.googleSTT_User) {
+      try { this.googleSTT_User.stop(); this.googleSTT_User.removeAllListeners(); } catch (e) { console.warn('[Main] Resume: googleSTT_User teardown threw:', e); }
+      this.googleSTT_User = null;
+    }
+
     // System audio (CoreAudio Tap is the most fragile across sleep cycles).
     if (this.systemAudioCapture) {
       try {
@@ -2472,6 +2553,32 @@ export class AppState {
         terminal: true,
         stuck: false,
       });
+    }
+
+    // Recreate the STT providers we tore down above so the freshly-restarted
+    // captures feed live sockets (audit finding #5). Mirrors the STT block in
+    // setupSystemAudioPipeline + the .start() in _doReconfigureSttProvider. Each
+    // is guarded so a single provider failure doesn't abort the other channel; a
+    // failed createSTTProvider leaves the field null and the capture's `?.write`
+    // becomes a no-op rather than throwing. We only recreate ones we nulled, so
+    // there is no risk of double-starting an existing provider.
+    if (!this.googleSTT) {
+      try {
+        this.googleSTT = this.createSTTProvider('interviewer');
+        this.googleSTT?.start();
+      } catch (sttErr) {
+        console.error('[Main] Resume: interviewer STT recreate failed:', sttErr);
+        this.googleSTT = null;
+      }
+    }
+    if (!this.googleSTT_User) {
+      try {
+        this.googleSTT_User = this.createSTTProvider('user');
+        this.googleSTT_User?.start();
+      } catch (sttErr) {
+        console.error('[Main] Resume: user STT recreate failed:', sttErr);
+        this.googleSTT_User = null;
+      }
     }
   }
 
@@ -3823,6 +3930,19 @@ export class AppState {
     this.getWindowHelper().getOverlayWindow()?.webContents.send('session-reset');
     this.getWindowHelper().getLauncherWindow()?.webContents.send('session-reset');
 
+    // LOCAL-MODEL WARMUP: if the active model is a local Ollama model, warm + pin
+    // it now (fire-and-forget) so the cold weight-load (8-12s for a 7-9B model)
+    // happens DURING the meeting-start / audio-init window instead of on the user's
+    // first live question — where it would otherwise blow the first-token deadline
+    // and surface the canned fallback. Cloud models no-op here (prewarm returns
+    // fast for non-Ollama), so a cloud session pays nothing. Never blocks start.
+    try {
+      const llmHelper = this.processingHelper.getLLMHelper();
+      if (llmHelper?.isUsingOllama?.()) {
+        llmHelper.prewarmPromptCache().catch((_e: any): void => {});
+      }
+    } catch { /* non-fatal — warmup must never block meeting start */ }
+
     // ★ ASYNC AUDIO INIT: Return INSTANTLY so the IPC response goes back
     // to the renderer immediately, allowing the UI to switch to overlay
     // without waiting for SCK/audio initialization (which takes 5-7 seconds).
@@ -4182,6 +4302,7 @@ export class AppState {
         console.error('[Main] Background meeting teardown failed:', err);
       } finally {
         this._isDraining = false;
+        this.clearTranscriptThrottle();
       }
     })();
     // endMeeting returns NOW — the IPC handler resolves and the renderer's
@@ -4331,9 +4452,12 @@ export class AppState {
 
     })
 
-    this.intelligenceManager.on('suggested_answer_token', (token: string, question: string, confidence: number) => {
+    this.intelligenceManager.on('suggested_answer_token', (token: string, question: string, confidence: number, generationId?: number) => {
       // Sprint 9: batch instead of per-token webContents.send.
-      queueBatch('suggested_answer', { token, question, confidence });
+      // generationId (audit finding #3): carried per-item so the renderer can
+      // drop a batch belonging to a superseded live answer. Undefined for the
+      // other live streams (code hint / brainstorm) — id-less items are accepted.
+      queueBatch('suggested_answer', { token, question, confidence, generationId });
     })
 
     // Orphaned-scaffold fix: a what-to-answer stream that already showed a

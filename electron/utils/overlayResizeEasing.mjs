@@ -1,22 +1,52 @@
 // Shared width-resize easing for the overlay shell.
 //
-// THE SYNC CONTRACT: the renderer (CSS width on the React shell) and the main
-// process (native window setBounds) must trace the SAME width over the SAME
-// wall-clock duration. They do NOT chase each other over IPC — each side runs
-// its own clock and computes width(t) from THIS module. Identical math + a
-// shared start signal ⇒ they land on every keyframe together. That is what
-// makes the resize look like one object instead of a CSS layer with the OS
-// window lagging a frame behind it.
+// HISTORICAL "SYNC CONTRACT" (now superseded — kept for context):
+// There USED to be a hard contract that the renderer (CSS width on the React
+// shell) and the main process (native window width setBounds) trace the SAME
+// width over the SAME wall-clock duration, each running its own clock and
+// computing width(t) from THIS module, so the CSS layer and the OS window
+// landed on every keyframe together. That mattered when the OS window itself
+// width-resized in lockstep with the shell.
+//
+// THAT IS NO LONGER TRUE. The OS overlay window is now a FIXED WIDTH (780) for
+// its entire visible lifetime; only the panel animates 600↔780 centered inside
+// it (see WindowHelper.setOverlayDimensionsCentered + the startTransition in
+// NativelyInterface). The main process never animates width and never imports
+// this module's width sampler — grep WindowHelper.ts: no widthAt /
+// easeOverlayResize / resize loop. So the width channel is now PURELY
+// renderer-side, and nothing downstream consumes an in-between width. That
+// freedom is why the renderer can use a velocity-continuous SPRING for the
+// width motion value (see OVERLAY_RESIZE_SPRING): an interrupted/retargeted
+// scroll-driven transition no longer restarts a bezier from zero velocity (the
+// old hitch), and any spring micro-overshoot stays entirely renderer-side — it
+// can NOT reach a native width setBounds, because there is no native one.
+//
+// HOW THE RENDERER ANIMATES IT (corrected — the prior wording implied
+// framer-motion composited `width`, which is FALSE): the OVERLAY_RESIZE_SPRING
+// drives a `shellWidth` MOTION VALUE only. The DOM box is laid out at a DISCRETE
+// width (600 or 780, flipped at transition boundaries — never per frame, because
+// a motion value bound to the CSS `width` key is written as raw
+// element.style.width every frame, which is layout-triggering, NOT a composited
+// transform). The smooth visual 600↔780 travel is a COMPOSITOR `clip-path:
+// inset()` derived from the live `shellWidth` value, so the in-between frames
+// are pure GPU compositing with no per-frame layout. `shellWidth` here is the
+// VISUAL width (what the clip reveals), consumed by the clip transform, the
+// resize-button anchor, and the rate-limited height channel.
+//
+// The bezier (OVERLAY_RESIZE_EASE / easeOverlayResize / widthAt) is RETAINED:
+//   • it documents the original curve intent,
+//   • the pure samplers remain unit-tested,
+//   • a future consumer that needs a deterministic non-spring width(t) (e.g. a
+//     reduced-motion fallback, or a re-introduced native width loop) can use it.
 //
 // Pure, dependency-free, importable from:
 //   • renderer  (src/components/NativelyInterface.tsx)
-//   • main      (electron/WindowHelper.ts, via the compiled copy)
-//   • node test (src/lib/__tests__/overlayResizeEasing.test.mjs)
+//   • node test (electron/utils/__tests__/overlayResizeEasing.test.mjs)
 //
-// MONOTONIC BY CONSTRUCTION: easeOutQuint is strictly non-overshooting, so the
-// native window never receives an out-of-range width to snap back from. This
-// replaces the old spring (bounce: 0.16), whose overshoot was pushed verbatim
-// to setBounds and read as a cheap end-of-animation snap.
+// MONOTONIC BY CONSTRUCTION: easeOverlayResize / easeOutQuint are strictly
+// non-overshooting — relevant for any pure deterministic consumer. The live
+// width spring is allowed a tiny overshoot precisely because it is compositor-
+// only and never pushed to setBounds.
 
 /** Total resize duration in milliseconds. 420ms for ~180px of glass travel:
  *  long enough to read as a weighted physical object settling (280ms felt
@@ -31,6 +61,38 @@ export const OVERLAY_RESIZE_DURATION_MS = 420;
  * @type {[number, number, number, number]}
  */
 export const OVERLAY_RESIZE_EASE = [0.32, 0.72, 0, 1];
+
+/**
+ * Velocity-continuous spring for the LIVE renderer width channel (600↔780 CSS
+ * panel inside the fixed-width window). framer-motion consumes this object as
+ * the `animate(shellWidth, target, { ...OVERLAY_RESIZE_SPRING })` options.
+ *
+ * WHY A SPRING (not the bezier tween it replaces for the live channel):
+ * the scroll scanner re-triggers a transition whenever a code block crosses the
+ * viewport edge. A duration+bezier RESTARTS from progress 0 at the current
+ * width on every re-trigger, so a fast scroll through mixed code/text produced a
+ * velocity discontinuity each time (decelerating tail → abrupt fast restart) —
+ * the "stutter". framer retargets a spring IN-FLIGHT, carrying the current
+ * velocity into the new target, so consecutive expand/contract scans blend into
+ * one continuous motion instead of a stack of restarts.
+ *
+ * Tuning: visualDuration ≈ the old 420ms perceived settle so the feel matches
+ * the established drawer timing; bounce 0 = critically-damped, NO overshoot at
+ * the resting target for an uninterrupted run (reads as a weighted pane settling
+ * exactly like the bezier did). The only time the spring can momentarily pass
+ * the target is during an interruption, and that excursion is compositor-only
+ * (fixed-width window → never reaches a native width setBounds), so it is safe.
+ *
+ * NOTE: the renderer (TS) consumes this via the hand-maintained sibling
+ * overlayResizeEasing.d.mts, which types `type` as the literal "spring" so it
+ * matches framer-motion's discriminated transition-options union. Keep that
+ * declaration in sync if this shape changes.
+ */
+export const OVERLAY_RESIZE_SPRING = {
+  type: 'spring',
+  visualDuration: OVERLAY_RESIZE_DURATION_MS / 1000,
+  bounce: 0,
+};
 
 /**
  * Cubic-bezier evaluator for the drawer curve above. framer-motion handles the

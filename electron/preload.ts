@@ -519,8 +519,8 @@ interface ElectronAPI {
     context?: string,
     options?: { skipSystemPrompt?: boolean; ignoreKnowledgeMode?: boolean },
   ) => Promise<void>;
-  onGeminiStreamToken: (callback: (token: string) => void) => () => void;
-  onGeminiStreamDone: (callback: (data?: { finalText?: string }) => void) => () => void;
+  onGeminiStreamToken: (callback: (token: string, meta?: { streamId?: number }) => void) => () => void;
+  onGeminiStreamDone: (callback: (data?: { finalText?: string; streamId?: number }) => void) => () => void;
   onGeminiStreamError: (callback: (error: string) => void) => () => void;
 
   onUndetectableChanged: (callback: (state: boolean) => void) => () => void;
@@ -1645,16 +1645,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
     options?: { skipSystemPrompt?: boolean; ignoreKnowledgeMode?: boolean },
   ) => ipcRenderer.invoke('gemini-chat-stream', message, imagePaths, context, options),
 
-  onGeminiStreamToken: (callback: (token: string) => void) => {
-    const subscription = (_: any, token: string) => callback(token);
+  onGeminiStreamToken: (callback: (token: string, meta?: { streamId?: number }) => void) => {
+    // meta is an optional 2nd arg carrying { streamId } (audit finding #3). Existing
+    // (token)=>… callbacks ignore it; the renderer uses it to drop stale-stream tokens.
+    const subscription = (_: any, token: string, meta?: { streamId?: number }) => callback(token, meta);
     ipcRenderer.on('gemini-stream-token', subscription);
     return () => {
       ipcRenderer.removeListener('gemini-stream-token', subscription);
     };
   },
 
-  onGeminiStreamDone: (callback: (data?: { finalText?: string }) => void) => {
-    const subscription = (_: any, data?: { finalText?: string }) => callback(data);
+  onGeminiStreamDone: (callback: (data?: { finalText?: string; streamId?: number }) => void) => {
+    const subscription = (_: any, data?: { finalText?: string; streamId?: number }) => callback(data);
     ipcRenderer.on('gemini-stream-done', subscription);
     return () => {
       ipcRenderer.removeListener('gemini-stream-done', subscription);
