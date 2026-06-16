@@ -13,11 +13,18 @@ interface ResizeToggleProps {
   interfaceTheme?: string;
   /**
    * Live right-offset motion value so the button tracks the panel's top-right
-   * corner as the CSS width tween animates. Computed in NativelyInterface as
-   * useTransform(shellWidth, w => (OVERLAY_WINDOW_WIDTH - w) / 2 + GAP_PX).
-   * When provided, overrides the className's right-3 positioning.
+   * corner as the width spring animates. Computed in NativelyInterface from the
+   * live shellWidth so the button sits in the side gutter just OUTSIDE the
+   * panel's right edge. When provided, overrides the className's right positioning.
    */
   rightOffset?: MotionValue<number>;
+  /**
+   * Live top-offset motion value (px from the viewport top) so the button aligns
+   * with the panel CARD's top edge — which sits below the TopPill + gap, not at
+   * the window top. Measured from the panel rect in NativelyInterface. When
+   * provided, overrides the className's top positioning.
+   */
+  topOffset?: MotionValue<number>;
 }
 
 /**
@@ -35,11 +42,13 @@ interface ResizeToggleProps {
  *    button's rect (via forwarded ref) so hovering it keeps the window interactive
  *    and the stealth passthrough path still wins when undetectable is on.
  *
- * The button is `position: fixed` at `top-3 right-3` so it sticks to the
- * top-right corner of the BrowserWindow viewport regardless of the panel height.
+ * The button is `position: fixed`; its `top`/`right` are driven by the
+ * topOffset/rightOffset motion values so it hugs the PANEL card's top-right
+ * corner (which sits below the TopPill), not the bare window corner. It falls
+ * back to a static `top-3 right-3` when those offsets are not supplied.
  */
 const ResizeToggle = forwardRef<HTMLButtonElement, ResizeToggleProps>(
-  function ResizeToggle({ expanded, onToggle, appearance, interfaceTheme, rightOffset }, ref) {
+  function ResizeToggle({ expanded, onToggle, appearance, interfaceTheme, rightOffset, topOffset }, ref) {
     const reduce = useReducedMotion();
     const [hovered, setHovered] = useState(false);
 
@@ -54,9 +63,10 @@ const ResizeToggle = forwardRef<HTMLButtonElement, ResizeToggleProps>(
         aria-pressed={expanded}
         title={expanded ? 'Collapse' : 'Expand'}
         data-interface-theme={interfaceTheme}
-        className="no-drag fixed top-3 z-[9999] flex h-[28px] w-[28px] items-center justify-center overflow-hidden rounded-full overlay-icon-surface overlay-icon-surface-hover overlay-text-interactive"
+        className="no-drag fixed z-[9999] flex h-[28px] w-[28px] items-center justify-center overflow-hidden rounded-full overlay-icon-surface overlay-icon-surface-hover overlay-text-interactive"
         style={{
           ...appearance.iconStyle,
+          top: topOffset ?? 12,
           right: rightOffset ?? 12,
           border: '1px solid rgba(128,128,128,0.22)',
           backdropFilter: 'blur(12px) saturate(140%)',

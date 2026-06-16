@@ -1237,13 +1237,41 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const scrollMaxH = useTransform([shellWidth, verticalCap], ([w, cap]: number[]) =>
     Math.min(widthDerivedScrollMax(w), cap),
   );
-  // Tracks the panel's top-right corner as the width spring runs, off the LIVE
-  // `shellWidth`. The OS window is a fixed OVERLAY_WINDOW_WIDTH; the panel is
-  // centered inside it, so the panel's right edge sits
-  // (OVERLAY_WINDOW_WIDTH - shellWidth) / 2 px from the window right. The button
-  // floats 8 px outside that edge so it stays adjacent to the corner in every
-  // collapsed/expanded/in-between state, following the spring continuously.
-  const buttonRight = useTransform(shellWidth, (w) => (OVERLAY_WINDOW_WIDTH - w) / 2 + 8);
+  // The floating resize toggle is CENTERED EXACTLY ON the panel's top-right
+  // CORNER POINT, and tracks that point live as the panel resizes. Centering a
+  // square on the corner means it straddles the corner symmetrically — equal
+  // overlap into the panel and into the side/top gutters — so its center rides
+  // the 45° bisector of the corner, which is the placement requested.
+  //
+  // Corner point in viewport coords:
+  //   • x: the panel is centered in the fixed-width OVERLAY_WINDOW_WIDTH window,
+  //     so its right edge sits M = (OVERLAY_WINDOW_WIDTH - shellWidth) / 2 px from
+  //     the window right (M = 90 collapsed → 0 expanded). Tracked off the LIVE
+  //     `shellWidth`, so the button follows the corner every spring frame.
+  //   • y: the panel's measured top edge (panelTop), set by measureButtonTop().
+  //
+  // To center the 28 px button on the corner: pull its right edge BTN/2 inside
+  // the corner (right = M - BTN/2) and its top edge BTN/2 above the corner
+  // (top = panelTop - BTN/2). When expanded (M → 0) the corner coincides with the
+  // window's right edge; the right clamp keeps the button fully on-screen, parked
+  // on the corner, instead of half-clipping past the window edge.
+  const RESIZE_BTN_SIZE = 28; // matches ResizeToggle's w-[28px]
+  const RESIZE_BTN_MIN_RIGHT = 2; // keep the button on-screen when expanded (M→0)
+  const buttonRight = useTransform(shellWidth, (w) =>
+    Math.max(
+      RESIZE_BTN_MIN_RIGHT,
+      (OVERLAY_WINDOW_WIDTH - w) / 2 - RESIZE_BTN_SIZE / 2,
+    ),
+  );
+  // Vertical anchor: the button center sits on the panel's TOP edge line. The
+  // button is position:fixed (viewport-relative), but the panel card is NOT at
+  // the window top — it sits below the TopPill + an 8 px gap (plus any status
+  // pills / banners). measureButtonTop() measures the panel's real top edge and
+  // stores (panelTop - BTN/2) here so the button is vertically centered on the
+  // corner. The panel's TOP does not move during a width animation (only its
+  // width does), so a value refreshed on layout change — not per frame — is
+  // sufficient and cheap. Initial guess covers TopPill(~36) + gap(8) - BTN/2.
+  const buttonTop = useMotionValue(30);
 
   // isExpanded mirror for closures inside refs/observers that must not
   // re-bind on every toggle.
@@ -1555,6 +1583,24 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     verticalCap.set(nextCap);
   }, [attachedContext.length, verticalCap]);
 
+  // Measure the panel card's top edge (viewport-relative) so the floating resize
+  // toggle can be CENTERED on the panel's TOP-RIGHT CORNER, not pinned to the
+  // window top. The panel sits below the TopPill + 8px gap (and any status pills /
+  // warning banners that push it further down), so this offset is dynamic. We
+  // read shellRef (the rounded panel card itself), not contentRef (the whole stack
+  // including the TopPill). Store (panelTop - BTN/2) so the button's CENTER lands
+  // on the panel's top edge line — combined with buttonRight (= M - BTN/2) the
+  // button straddles the exact corner point. getBoundingClientRect().top is
+  // viewport-relative, which is what position:fixed `top` wants. The panel's TOP
+  // does not move during a width animation (only its width does), so measuring on
+  // layout change — not per frame — is correct and cheap.
+  const measureButtonTop = useCallback(() => {
+    const shellEl = shellRef.current;
+    if (!shellEl) return;
+    const top = shellEl.getBoundingClientRect().top;
+    if (top > 0) buttonTop.set(Math.round(top - RESIZE_BTN_SIZE / 2));
+  }, [buttonTop]);
+
   // NOTE: the old per-frame "chase" subscriber that pushed the live shell width
   // to setBounds every frame is GONE. The OS window is a fixed width (780) for
   // its whole lifetime, so there is nothing to chase — the panel animates
@@ -1576,6 +1622,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         // the observer fires again and this self-converges in ≤2 frames; chrome
         // height is scroll-invariant, so there is no feedback loop.
         measureVerticalCap();
+        // Re-anchor the floating resize toggle: anything that changes content
+        // height above the panel (status pills, warning banners, an attached
+        // screenshot strip) shifts the panel's top edge, so the button's `top`
+        // must follow. Cheap rect read, not per width-frame.
+        measureButtonTop();
         // FLICKER GUARD: during the CSS width tween the panel width changes every
         // frame, which reflows content height every frame and fires this observer
         // ~60×; each reportShellSize() would do a native height setBounds, and
@@ -1598,7 +1649,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         rafDimUpdateRef.current = null;
       }
     };
-  }, [reportShellSize, measureVerticalCap]);
+  }, [reportShellSize, measureVerticalCap, measureButtonTop]);
 
   // ── Hover-gated click-through for the fixed-width window's transparent margins
   // The OS window is a fixed 780px wide but the painted panel is only 600px when
@@ -1663,18 +1714,20 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   useEffect(() => {
     const id = requestAnimationFrame(() => {
       measureVerticalCap();
+      measureButtonTop();
       reportShellSize();
     });
     return () => cancelAnimationFrame(id);
-  }, [attachedContext, reportShellSize, measureVerticalCap]);
+  }, [attachedContext, reportShellSize, measureVerticalCap, measureButtonTop]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
       measureVerticalCap();
+      measureButtonTop();
       reportShellSize();
     }, 600);
     return () => clearTimeout(timer);
-  }, [reportShellSize, measureVerticalCap]);
+  }, [reportShellSize, measureVerticalCap, measureButtonTop]);
 
   // ── Code-expansion (renderer-only width spring, fixed-width window) ──────────
   // THE FIX: the OS window is a FIXED WIDTH (OVERLAY_WINDOW_WIDTH = 780) for its
@@ -5262,6 +5315,7 @@ Provide only the answer, nothing else.`;
         appearance={appearance}
         interfaceTheme={isGlassTheme ? 'liquid-glass' : isModernTheme ? 'modern' : undefined}
         rightOffset={buttonRight}
+        topOffset={buttonTop}
       />
     )}
     <div
