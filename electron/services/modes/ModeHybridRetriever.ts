@@ -110,6 +110,14 @@ export class ModeHybridRetriever {
     private embeddingPipeline: EmbeddingPipeline;
     private vectorStore: VectorStore;
     private db: Database.Database;
+    // Per-file chunk cache keyed by file id. Chunking a reference file is pure and
+    // deterministic for a given content, but getModeFileChunks() re-ran chunkText()
+    // on every query (audit finding #8). Cache the chunk text keyed by content hash
+    // so repeated questions against the same unchanged file skip the re-chunk; a
+    // changed file (hash mismatch) re-chunks and refreshes the entry. Invalidated
+    // on removeFileIndex/removeFile. Bounded only by the number of reference files,
+    // which is already a small, user-curated set.
+    private chunkCache = new Map<string, { hash: string; chunks: string[] }>();
 
     constructor(db: Database.Database, vectorStore: VectorStore, embeddingPipeline: EmbeddingPipeline) {
         this.db = db;
@@ -312,6 +320,7 @@ export class ModeHybridRetriever {
             console.warn('[ModeHybridRetriever] removeFileIndex failed:', e);
         }
         this.removeIndexState(fileId);
+        this.chunkCache.delete(fileId);
     }
 
     /**
@@ -351,11 +360,17 @@ export class ModeHybridRetriever {
 
             const content = file.content.trim();
             const contentHash = hashContent(content);
-            const existingState = this.getIndexState(file.id);
 
-            // Check if file has changed - if hash matches and we have chunks, skip re-chunking
-            // However, we still need to chunk for retrieval even if not re-indexing
-            const chunks = this.chunkText(content);
+            // Reuse cached chunks when the content is unchanged; otherwise re-chunk
+            // and refresh the cache (audit finding #8 — was re-chunking every query).
+            let chunks: string[];
+            const cached = this.chunkCache.get(file.id);
+            if (cached && cached.hash === contentHash) {
+                chunks = cached.chunks;
+            } else {
+                chunks = this.chunkText(content);
+                this.chunkCache.set(file.id, { hash: contentHash, chunks });
+            }
 
             for (let i = 0; i < chunks.length; i++) {
                 candidates.push({
@@ -901,6 +916,7 @@ export class ModeHybridRetriever {
      */
     removeFile(fileId: string): void {
         this.removeIndexState(fileId);
+        this.chunkCache.delete(fileId);
     }
 
     /**

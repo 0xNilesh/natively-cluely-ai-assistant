@@ -239,6 +239,23 @@ export class ModesManager {
         return row ? rowToMode(row) : null;
     }
 
+    // ── Pinned-mode resolution (audit finding #6) ─────────────────
+    // The live answer path captures the active mode ONCE at t0 (the
+    // WhatToAnswerRequestSnapshot) and the prompt builders below take an
+    // optional `pinnedModeId` so they read the SAME mode the answer contract was
+    // planned from — even if `modes:set-active` flips the active mode while the
+    // request is parked at an await. When no id is pinned (every existing
+    // caller) this returns the live active mode, so behavior is unchanged.
+    private resolveMode(pinnedModeId?: string): Mode | null {
+        if (pinnedModeId) {
+            const pinned = this.getModes().find(m => m.id === pinnedModeId);
+            // Fall back to the active mode only if the pinned mode was deleted
+            // mid-request (rare); otherwise the pinned mode wins.
+            if (pinned) return pinned;
+        }
+        return this.getActiveMode();
+    }
+
     // ── Active-mode info cache (PI v3, W1) ────────────────────────
     // The live answer path consults the active mode on EVERY turn (routing
     // prior, pinned instructions, retrieval). The mode itself changes only via
@@ -460,8 +477,8 @@ export class ModesManager {
      * and technical-interview's MODE_TECHNICAL_INTERVIEW_PROMPT). Empty string
      * only when no mode is active.
      */
-    public getActiveModeSystemPromptSuffix(): string {
-        const mode = this.getActiveMode();
+    public getActiveModeSystemPromptSuffix(pinnedModeId?: string): string {
+        const mode = this.resolveMode(pinnedModeId);
         if (!mode) return '';
         const full = TEMPLATE_SYSTEM_PROMPTS[mode.templateType] ?? '';
         // Strip the shared prefix that's already in HARD_SYSTEM_PROMPT, otherwise
@@ -501,8 +518,8 @@ export class ModesManager {
      * (user-built) modes the mode NAME is prepended so the model knows whose
      * instructions these are.
      */
-    public getActiveModePinnedInstructions(answerType?: AnswerType): string {
-        const mode = this.getActiveMode();
+    public getActiveModePinnedInstructions(answerType?: AnswerType, pinnedModeId?: string): string {
+        const mode = this.resolveMode(pinnedModeId);
         if (!mode) return '';
         const raw = (mode.customContext || '').trim();
         if (!raw) return '';
@@ -514,8 +531,11 @@ export class ModesManager {
         if (text.length > ModesManager.PINNED_INSTRUCTIONS_MAX_CHARS) {
             text = text.slice(0, ModesManager.PINNED_INSTRUCTIONS_MAX_CHARS) + ' …[truncated]';
         }
-        const info = this.getActiveModeInfo();
-        return info?.isCustom ? `Mode: ${mode.name}\n${text}` : text;
+        // isCustom is a pure function of (templateType, name) on the resolved
+        // mode — derive it directly so a pinned mode reports correctly even when
+        // it differs from the (possibly switched) live active mode.
+        const isCustom = mode.templateType === 'general' && mode.name !== 'General';
+        return isCustom ? `Mode: ${mode.name}\n${text}` : text;
     }
 
     /**
@@ -528,8 +548,8 @@ export class ModesManager {
     private static readonly MAX_FILE_CHARS = 12_000;
     private static readonly MAX_TOTAL_CHARS = 40_000;
 
-    public buildRetrievedActiveModeContextBlock(query: string, transcript?: string, tokenBudget?: number, answerType?: AnswerType, excludeCustomContext?: boolean): string {
-        const mode = this.getActiveMode();
+    public buildRetrievedActiveModeContextBlock(query: string, transcript?: string, tokenBudget?: number, answerType?: AnswerType, excludeCustomContext?: boolean, pinnedModeId?: string): string {
+        const mode = this.resolveMode(pinnedModeId);
         if (!mode) return '';
 
         const result = this.modeContextRetriever.retrieve(mode, this.getReferenceFiles(mode.id), {
@@ -550,8 +570,8 @@ export class ModesManager {
      * we fall back to the existing sync lexical path so the answer flow
      * never breaks. Telemetry distinguishes hybrid hits from lexical fallback.
      */
-    public async buildRetrievedActiveModeContextBlockHybrid(query: string, transcript?: string, tokenBudget?: number, answerType?: AnswerType, excludeCustomContext?: boolean): Promise<string> {
-        const mode = this.getActiveMode();
+    public async buildRetrievedActiveModeContextBlockHybrid(query: string, transcript?: string, tokenBudget?: number, answerType?: AnswerType, excludeCustomContext?: boolean, pinnedModeId?: string): Promise<string> {
+        const mode = this.resolveMode(pinnedModeId);
         if (!mode) return '';
         const files = this.getReferenceFiles(mode.id);
 
@@ -594,7 +614,7 @@ export class ModesManager {
             console.warn('[ModesManager] hybrid retrieval failed, falling back to lexical:', (err as Error)?.message);
         }
 
-        const lexical = this.buildRetrievedActiveModeContextBlock(query, transcript, tokenBudget, answerType, excludeCustomContext);
+        const lexical = this.buildRetrievedActiveModeContextBlock(query, transcript, tokenBudget, answerType, excludeCustomContext, pinnedModeId);
         try {
             const { telemetryService } = require('./telemetry/TelemetryService');
             telemetryService.track({

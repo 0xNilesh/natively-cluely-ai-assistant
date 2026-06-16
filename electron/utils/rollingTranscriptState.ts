@@ -14,6 +14,37 @@
 
 const FINAL_SEPARATOR = '  ·  ';
 
+/**
+ * Hard cap on the rolling-transcript display string. The bar only ever shows the
+ * most recent line or two, but the merge helpers appended every finalized segment
+ * forever, so a long meeting grew this React state string without bound — each
+ * subsequent merge re-normalised/re-scanned a string that kept getting larger
+ * (audit finding #7). 8 KiB is far more than the few hundred chars the UI shows
+ * yet small enough that the per-event string work stays flat over a long meeting.
+ * The cap drops from the FRONT (oldest committed segments) on a finalized-segment
+ * boundary so the visible tail is never cut mid-word.
+ */
+export const ROLLING_TRANSCRIPT_MAX_CHARS = 8192;
+
+/**
+ * Bound a rolling-transcript string to ROLLING_TRANSCRIPT_MAX_CHARS by dropping
+ * whole leading segments (split on FINAL_SEPARATOR). Pure; never splits a segment.
+ * Returns the input unchanged when already within budget.
+ */
+export function capRollingTranscript(s: string, maxChars: number = ROLLING_TRANSCRIPT_MAX_CHARS): string {
+  if (s.length <= maxChars) return s;
+  // Drop whole leading segments until we fit. Keep at least the final segment,
+  // even if it alone exceeds the cap (truncating the visible line is worse than
+  // a slightly-over-budget single segment, which is already bounded by STT turn).
+  let idx = s.indexOf(FINAL_SEPARATOR);
+  let out = s;
+  while (out.length > maxChars && idx >= 0) {
+    out = out.substring(idx + FINAL_SEPARATOR.length);
+    idx = out.indexOf(FINAL_SEPARATOR);
+  }
+  return out;
+}
+
 /** Normalise a string for overlap comparison only — never used for display. */
 function norm(s: string): string {
   return s.toLowerCase()
@@ -60,7 +91,7 @@ export function mergeRollingTranscriptPartial(prev: string, partialText: string)
 
   // New utterance after prior committed content.
   if (prev) {
-    return prev + FINAL_SEPARATOR + text;
+    return capRollingTranscript(prev + FINAL_SEPARATOR + text);
   }
 
   return text;
@@ -84,5 +115,5 @@ export function mergeRollingTranscriptFinal(prev: string, finalText: string): st
     return prev;
   }
 
-  return prev ? prev + FINAL_SEPARATOR + text : text;
+  return capRollingTranscript(prev ? prev + FINAL_SEPARATOR + text : text);
 }

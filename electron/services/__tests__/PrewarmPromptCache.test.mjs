@@ -13,8 +13,11 @@ import { createHash } from 'node:crypto';
 
 // Mirrors the routing in LLMHelper.prewarmPromptCache. Returns the provider that
 // would be warmed (or 'skip'), and records dedupe state. Pure — no network.
-function makePrewarmer({ isLocalOnlyMode = false, useOllama = false, model = 'gemini-3.1-flash', clients = {}, warmImpl } = {}) {
+function makePrewarmer({ isLocalOnlyMode = false, useOllama = false, model = 'gemini-3.1-flash', clients = {}, warmImpl, ollamaKeepAlive = '30m' } = {}) {
   const prewarmedKeys = new Set();
+  // Mirrors LLMHelper.ollamaKeepAlive: "30m" by default, set to -1 (pinned) once a
+  // warm succeeds, reset to "30m" by releaseOllamaPin on switch-away.
+  const state = { ollamaKeepAlive };
   // These mirror the real predicates in LLMHelper (isGeminiModel/isClaudeModel/
   // isOpenAiModel/isGroqModel) exactly, so fixtures classify the same way prod does.
   const isGemini = m => m.toLowerCase().startsWith('gemini');
@@ -24,17 +27,22 @@ function makePrewarmer({ isLocalOnlyMode = false, useOllama = false, model = 'ge
 
   return {
     prewarmedKeys,
+    state,
     async prewarm() {
       if (isLocalOnlyMode && !useOllama) return 'skip:local-only';
       const staticPrompt = 'HARD_SYSTEM_PROMPT_BODY_static_prefix';
       const activeModel = useOllama ? 'ollama-model' : model;
       const key = `${activeModel}|${createHash('sha1').update(staticPrompt).digest('hex')}`;
-      if (prewarmedKeys.has(key)) return 'skip:deduped';
+      // Dedup EXCEPT for an Ollama model that is no longer pinned (switched away and
+      // back): re-warm + re-pin so the model is resident again. Mirrors LLMHelper.
+      const ollamaNeedsRepin = useOllama && state.ollamaKeepAlive !== -1;
+      if (prewarmedKeys.has(key) && !ollamaNeedsRepin) return 'skip:deduped';
       prewarmedKeys.add(key);
 
       const run = async (provider) => {
         try {
           if (warmImpl) await warmImpl(provider);
+          if (provider === 'ollama') state.ollamaKeepAlive = -1; // pin on successful warm
           return provider;
         } catch {
           return provider; // best-effort — errors swallowed, provider still "attempted"
@@ -99,6 +107,21 @@ describe('prewarm: guards', () => {
     assert.strictEqual(await p.prewarm(), 'claude');
     assert.strictEqual(await p.prewarm(), 'skip:deduped');
     assert.strictEqual(p.prewarmedKeys.size, 1);
+  });
+
+  test('Ollama re-warms (not deduped) when the model is no longer pinned', async () => {
+    // First warm pins the model (keep_alive -1). A second back-to-back call is a
+    // normal dedup no-op. But after a switch-away resets keep_alive to "30m"
+    // (simulated), a later prewarm MUST re-warm so the model is resident + pinned
+    // again — otherwise the first question pays the cold-load tax.
+    const p = makePrewarmer({ useOllama: true, clients: {} });
+    assert.strictEqual(await p.prewarm(), 'ollama');
+    assert.strictEqual(p.state.ollamaKeepAlive, -1, 'pinned after first warm');
+    assert.strictEqual(await p.prewarm(), 'skip:deduped', 'still pinned → dedup');
+    // Simulate releaseOllamaPin on switch-away:
+    p.state.ollamaKeepAlive = '30m';
+    assert.strictEqual(await p.prewarm(), 'ollama', 'unpinned → re-warm, not deduped');
+    assert.strictEqual(p.state.ollamaKeepAlive, -1, 're-pinned after re-warm');
   });
 
   test('best-effort — a throwing warmer does not reject', async () => {
