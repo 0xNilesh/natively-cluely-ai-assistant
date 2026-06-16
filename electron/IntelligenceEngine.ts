@@ -16,11 +16,9 @@ import {
     buildContextRoute, summarizeContextRoute, shouldThrottleTrigger,
     validateProfileOutput, validateProfileEvidence, buildProfileRepairInstruction, sanitizeCandidateAnswer, CANDIDATE_VOICE_ANSWER_TYPES,
     detectAssistantVoiceMisfire, ASSISTANT_VOICE_ANSWER_TYPES,
-    raceStreamWithDeadline, firstUsefulDeadlineMs, LIVE_INTER_TOKEN_STALL_MS, LIVE_TOTAL_HARD_TIMEOUT_MS,
-    LIVE_LOCAL_FIRST_USEFUL_TIMEOUT_MS, LIVE_LOCAL_TOTAL_HARD_TIMEOUT_MS
+    raceStreamWithDeadline, firstUsefulDeadlineMs, LIVE_INTER_TOKEN_STALL_MS, LIVE_TOTAL_HARD_TIMEOUT_MS
 } from './llm';
 import type { ActiveModeInfo } from './llm/modeProfiles';
-import type { WhatToAnswerRequestSnapshot } from './llm/whatToAnswerRequestSnapshot';
 import { buildGracefulRetry } from './llm/manualProfileIntelligence';
 import { CodingStreamGate } from './llm/codingStreamGate';
 import { isCodeVerificationEnabled } from './llm/codeVerification/verificationEnabled';
@@ -88,12 +86,7 @@ function detectRefinementIntent(userText: string): { isRefinement: boolean; inte
 export interface IntelligenceModeEvents {
     'assist_update': (insight: string) => void;
     'suggested_answer': (answer: string, question: string, confidence: number) => void;
-    // generationId (audit finding #3): the request's supersession id, stamped on
-    // every live token so the renderer can drop a batch from an answer that was
-    // already superseded (defense-in-depth alongside engine-side supersession,
-    // for the window where tokens are already queued in main's batch buffer when
-    // a newer answer starts). Optional → id-less emits still accepted downstream.
-    'suggested_answer_token': (token: string, question: string, confidence: number, generationId?: number) => void;
+    'suggested_answer_token': (token: string, question: string, confidence: number) => void;
     // Emitted when an in-flight what-to-answer stream that ALREADY showed a
     // deterministic scaffold ends WITHOUT a final answer (superseded by a newer
     // generation, declined as a non-answer sentinel, or errored). The renderer
@@ -723,39 +716,6 @@ export class IntelligenceEngine extends EventEmitter {
         });
         this.lastTrace = trace;
 
-        // ── REQUEST SNAPSHOT (audit findings #6 + #3 + #9) ─────────────────
-        // Capture the active mode ONCE here, at t0, before any `await` boundary.
-        // Every downstream stage (the follow-up planner, the main answer planner,
-        // and WhatToAnswerLLM's prompt-suffix / pinned-instructions / reference
-        // retrieval) reads the snapshot instead of re-querying the live
-        // ModesManager singleton — so a `modes:set-active` IPC that lands while
-        // this request is parked at an await can no longer split one answer
-        // across two modes (mismatched contract vs. prompt). When no mid-request
-        // switch happens the snapshot equals what the live reads would return, so
-        // the common-case behavior is byte-identical. generationId is the
-        // request's authoritative supersession id (minted with the stream below);
-        // we record it on the snapshot at that point and stamp it onto every live
-        // token (#3). The snapshot also carries the correlation ids (#9).
-        const snapshotModeInfo = this.getActiveModeInfo();
-        const snapshotModeId = this.getActiveModeId();
-        // Stable meeting marker for telemetry correlation (#9): the per-meeting
-        // session id, falling back to the calendar event id when present. IDs only.
-        const meetingMarker = this.currentSessionId
-            ?? (this.session.getMeetingMetadata?.()?.calendarEventId)
-            ?? undefined;
-        // Correlate the engine's observe-only IntelligenceTrace with the
-        // PiLatencyTrace on a SHARED requestId so this live answer is joinable
-        // across IPC → engine → provider, exactly like the manual chat path
-        // already is. NOOP when the trace flag is off. Markers only — never raw
-        // transcript / prompt / profile / question text.
-        wtaTrace.setCorrelation({
-            requestId: trace.requestId,
-            sessionId: this.currentSessionId ?? undefined,
-            meetingId: meetingMarker,
-            surface: 'what_to_answer',
-            modeId: snapshotModeId,
-        });
-
         // Foreground gate (manual regression 2026-06-12): pause background
         // embedding/RAG drains while a live answer is in flight. Speculative
         // prefetch doesn't gate (no user is waiting on it). Auto-expires in
@@ -892,12 +852,8 @@ export class IntelligenceEngine extends EventEmitter {
                         const { ModesManager } = require('./services/ModesManager') as typeof import('./services/ModesManager');
                         const mm = ModesManager.getInstance();
                         if (typeof mm.buildRetrievedActiveModeContextBlockHybrid === 'function') {
-                            // pinnedModeId (#6): the parallel-prefetched retrieval
-                            // reads the SAME mode captured at t0, so a mid-request
-                            // mode switch can't make the prefetch fetch a different
-                            // mode's reference files than the answer was planned for.
                             return await mm.buildRetrievedActiveModeContextBlockHybrid(
-                                preparedTranscript, preparedTranscript, 1800, undefined, true, snapshotModeInfo?.id,
+                                preparedTranscript, preparedTranscript, 1800, undefined, true,
                             );
                         }
                         return '';
@@ -953,9 +909,7 @@ export class IntelligenceEngine extends EventEmitter {
                         killSwitch: lsmConfig.killSwitch,
                     });
                     if (lsmConfig.enabled) {
-                        // Snapshot read (#6): use the mode captured at t0, not a
-                        // fresh live query that a mid-request mode switch could change.
-                        const modeId = snapshotModeId;
+                        const modeId = this.getActiveModeId();
                         // CRITICAL (code-review 2026-06-07c): SessionMemory's half-life
                         // decay is defined in SECONDS, but SessionTracker timestamps are
                         // wall-clock MILLISECONDS — feeding ms would collapse a 1-hour
@@ -989,10 +943,7 @@ export class IntelligenceEngine extends EventEmitter {
                             question: extractedQuestion.latestQuestion,
                             source: 'what_to_answer',
                             speakerPerspective: 'interviewer',
-                            // Snapshot read (#6): same mode the main answer plan
-                            // below uses, so the memory-mode boundary and the
-                            // answer contract can't diverge mid-request.
-                            activeMode: snapshotModeInfo,
+                            activeMode: this.getActiveModeInfo(),
                         }).answerType;
                         fr = resolveLiveFollowup({
                             turns: memWindowTurns,
@@ -1199,11 +1150,7 @@ export class IntelligenceEngine extends EventEmitter {
                 extractedQuestion,
                 intentResult,
                 hasCandidateProfile: Boolean(candidateProfile),
-                // Snapshot read (#6): the routing prior captured at t0. WTA's
-                // prompt suffix / pinned instructions / reference retrieval read
-                // the SAME snapshot below, so the answer contract and the prompt
-                // can no longer be built from two different modes within one request.
-                activeMode: snapshotModeInfo,
+                activeMode: this.getActiveModeInfo(),
             });
             trace.mark('answer_type_selected', {
                 answerType: answerPlan.answerType,
@@ -1234,23 +1181,6 @@ export class IntelligenceEngine extends EventEmitter {
 
             const generationId = ++this.currentGenerationId;
             let fullAnswer = "";
-
-            // Assemble the immutable request snapshot now that the generationId is
-            // minted. It carries the t0 mode (so WTA's prompt builders read the
-            // SAME mode the plan above used — #6), the correlation ids (#9), and
-            // the generationId stamped onto every live token (#3). modeReader is
-            // omitted: the mode was already read once into snapshotModeInfo/Id
-            // above, so the builder uses those frozen values directly.
-            const requestSnapshot: WhatToAnswerRequestSnapshot = Object.freeze({
-                activeModeInfo: snapshotModeInfo,
-                modeId: snapshotModeId,
-                modeUniqueId: snapshotModeInfo?.id,
-                requestId: trace.requestId,
-                sessionId: this.currentSessionId ?? undefined,
-                meetingId: meetingMarker,
-                surface: 'what_to_answer' as const,
-                generationId,
-            });
 
             // ── CODING SCAFFOLD GATE (REPORT hypothesis C1 / Phase 8) ──────────
             // For structured answer types (coding/DSA/system-design/debugging)
@@ -1285,7 +1215,7 @@ export class IntelligenceEngine extends EventEmitter {
             // PI v3 (W5): modeContextPromise is the parallel-prefetched mode-context retrieval
             // (overlaps intent classification + profile grounding). Both args coexist —
             // generateStream's signature is (…activeSkill, domContext, candidateProfile, answerPlan, preFetchedModeContext).
-            const stream = this.whatToAnswerLLM.generateStream(preparedTranscript, temporalContext, intentResult, imagePaths, screenContext, options?.promptInstruction, options?.activeSkill, options?.domContext, candidateProfile || undefined, answerPlan, modeContextPromise, requestSnapshot);
+            const stream = this.whatToAnswerLLM.generateStream(preparedTranscript, temporalContext, intentResult, imagePaths, screenContext, options?.promptInstruction, options?.activeSkill, options?.domContext, candidateProfile || undefined, answerPlan, modeContextPromise);
             let streamAborted = false;
             let emittedStreamingToken = false;
             let streamingTokenBuffer = '';
@@ -1321,19 +1251,15 @@ export class IntelligenceEngine extends EventEmitter {
                 } catch { /* no fallback */ }
             }
             const hasLiveFallback = liveFallbackAnswer.length > 0;
-            // LOCAL PROVIDER: a local Ollama model cold-loads its weights (8-12s for
-            // a 7-9B model) before the first token, so the cloud-tuned 7s/8s caps
-            // abort it to empty. Give it the long local budget for both branches.
-            const usingLocalLlm = this.llmHelper.isUsingOllama();
             // First-useful deadline: when we have a deterministic fallback we abort
             // fast (the spec's hard/complex cap) and swap it in; when we don't
             // (negotiation/meeting/coding with no profile fallback) we extend to the
             // total live ceiling so we never abort to empty. After streaming begins,
             // an inter-token STALL guard (not a wall-clock cap) protects long
             // answers from truncation while still killing a mid-stream hang.
-            const firstUsefulDeadline = usingLocalLlm
-                ? (hasLiveFallback ? LIVE_LOCAL_FIRST_USEFUL_TIMEOUT_MS : LIVE_LOCAL_TOTAL_HARD_TIMEOUT_MS)
-                : (hasLiveFallback ? firstUsefulDeadlineMs(answerPlan.answerType) : LIVE_TOTAL_HARD_TIMEOUT_MS);
+            const firstUsefulDeadline = hasLiveFallback
+                ? firstUsefulDeadlineMs(answerPlan.answerType)
+                : LIVE_TOTAL_HARD_TIMEOUT_MS;
             let liveDeadlineFired = false;
 
             const emitChunk = (chunk: string) => {
@@ -1342,9 +1268,7 @@ export class IntelligenceEngine extends EventEmitter {
                 if (trace.markFirstUseful({ via: 'stream', answerType: answerPlan.answerType })) {
                     trace.mark('first_visible_text', { via: 'stream' });
                 }
-                // #3: stamp this request's generationId so a superseded answer's
-                // already-queued tokens can be dropped renderer-side.
-                this.emit('suggested_answer_token', chunk, question || 'inferred', confidence, generationId);
+                this.emit('suggested_answer_token', chunk, question || 'inferred', confidence);
             };
 
             // Centralized live-deadline driver (electron/llm/liveDeadlines.ts) — a
@@ -1525,7 +1449,7 @@ export class IntelligenceEngine extends EventEmitter {
                         try {
                             await raceStreamWithDeadline({
                                 stream: this.llmHelper.streamChat(repairPrompt, undefined, undefined, undefined, true, true) as AsyncGenerator<string>,
-                                firstUsefulDeadlineMs: this.llmHelper.isUsingOllama() ? LIVE_LOCAL_FIRST_USEFUL_TIMEOUT_MS : 7000,
+                                firstUsefulDeadlineMs: 7000,
                                 isUsefulYet: () => repaired.length >= 5,
                                 shouldAbort: () => repaired.length > 1200,
                                 onToken: (tok: string) => { repaired += tok; },
@@ -1655,13 +1579,13 @@ export class IntelligenceEngine extends EventEmitter {
             if (codingGate) {
                 const gatedTail = codingGate.finish();
                 const tail = specStripper ? (specStripper.push(gatedTail) + specStripper.finish()) : gatedTail;
-                if (tail) this.emit('suggested_answer_token', tail, question || 'inferred', confidence, generationId);
+                if (tail) this.emit('suggested_answer_token', tail, question || 'inferred', confidence);
             } else {
                 if (emittedStreamingToken && streamingTokenBuffer.trim()) {
-                    this.emit('suggested_answer_token', streamingTokenBuffer, question || 'inferred', confidence, generationId);
+                    this.emit('suggested_answer_token', streamingTokenBuffer, question || 'inferred', confidence);
                 }
                 if (!emittedStreamingToken) {
-                    this.emit('suggested_answer_token', fullAnswer, question || 'inferred', confidence, generationId);
+                    this.emit('suggested_answer_token', fullAnswer, question || 'inferred', confidence);
                 }
             }
             // OUTPUT SHAPE NORMALIZER (Phase 4 wiring, behind answer_diversity_guard_enabled):
@@ -1794,7 +1718,7 @@ export class IntelligenceEngine extends EventEmitter {
                     let fixed = '';
                     await raceStreamWithDeadline({
                         stream: this.llmHelper.streamChat(repairPrompt, undefined, undefined, undefined, true, true) as AsyncGenerator<string>,
-                        firstUsefulDeadlineMs: this.llmHelper.isUsingOllama() ? LIVE_LOCAL_FIRST_USEFUL_TIMEOUT_MS : 7000,
+                        firstUsefulDeadlineMs: 7000,
                         isUsefulYet: () => fixed.length >= 5,
                         onToken: (tok: string) => { fixed += tok; },
                     });
