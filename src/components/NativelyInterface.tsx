@@ -1198,17 +1198,17 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   );
 
   // ── Code-expansion spring ────────────────────────────────────────────────
-  // Architecture: OS window resizes in lockstep with the renderer spring.
+  // Architecture: the OS window is a FIXED WIDTH (780) for its whole lifetime;
+  // only the CSS panel animates 600↔780, centered inside it. So width motion is
+  // PURELY renderer-side — there is no per-frame native width setBounds and the
+  // window X origin never moves (TopPill stays pixel-stable, no blur re-raster).
   //
-  // The shell width animates 600 ↔ 780 via a Framer tween and the OS window
-  // width follows on the same clock: a motion-value subscriber pushes width
-  // to the main process per frame (rAF-coalesced, ≤1px deduped). The IPC
-  // (setOverlayDimensionsCentered) does an atomic center-preserving
-  // setBounds so the TopPill stays anchored as the frame shrinks/grows.
-  //
-  // Height is still driven by the ResizeObserver; width is the motion value.
-  // The two channels never disagree because reportShellSize also reads
-  // shellWidth.get() instead of trusting an expansion flag.
+  // `shellWidth` is a MotionValue driven by OVERLAY_RESIZE_SPRING and bound
+  // directly to the panel's CSS `width`. Content reflows to the real panel width
+  // on every frame (correct at every in-between width — no clip/scale/transform).
+  // Only HEIGHT flows to the OS, via the ResizeObserver / reportShellSize (and a
+  // rate-limited channel during the tween); reportShellSize reads shellWidth.get()
+  // so the height it reports always matches the panel's current width.
   const SHELL_WIDTH_COLLAPSED = 600;
   const SHELL_WIDTH_EXPANDED = 780;
   // The OS overlay window is a FIXED WIDTH for its entire visible lifetime, equal
@@ -1227,90 +1227,23 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // ≤ the budget the OS window will be granted, so the footer (model selector /
   // settings / send) can never be cropped below the clamped window edge.
   const verticalCap = useMotionValue(Infinity);
-  // DISCRETE layout width of the shell box (600 OR 780 only — never an in-between
-  // value). This is what the DOM `width` style is bound to, NOT the live
-  // `shellWidth` motion value. Why: framer-motion writes a motion value bound to
-  // the `width` style key as raw `element.style.width` EVERY FRAME (confirmed in
-  // motion-dom buildHTMLStyles — `width` is not in transformProps, so it falls to
-  // the `style[key] = …` branch, not the composited transform string). A per-frame
-  // `width` write forces layout (reflow) of the box AND its content subtree on
-  // every one of ~60 frames. With wrapping text + syntax-highlighted code inside,
-  // that subtree reflow (text re-wrap + code re-highlight line layout) blows the
-  // 16.6ms frame budget → dropped frames → the stutter.
-  //
-  // By making the layout width DISCRETE (it only flips to the target at a
-  // transition boundary, ~twice per user action, not 60×/s) the content subtree
-  // reflows at most twice per action instead of every frame. The smooth visual
-  // 600↔780 travel is the COMPOSITOR clip-path inset animation below; the box is
-  // laid out at the target width for the whole tween and the clip reveals more/less
-  // of it. So the resting states are laid out at their true width (code gets the
-  // real room it needs) while the in-between is pure GPU compositing.
-  const [shellLayoutWidth, setShellLayoutWidth] = useState(SHELL_WIDTH_COLLAPSED);
-  // Discrete mirror of `shellLayoutWidth` as a motion value, so the height-budget
-  // transforms (scrollMaxH, buttonRight) can read it without re-subscribing on
-  // every render. It is `.set()` exactly when the layout width flips (transition
-  // boundary), so the values it feeds are STABLE for the whole tween — never a
-  // per-frame layout property.
-  const shellLayoutWidthMV = useMotionValue(SHELL_WIDTH_COLLAPSED);
-  useEffect(() => {
-    shellLayoutWidthMV.set(shellLayoutWidth);
-  }, [shellLayoutWidth, shellLayoutWidthMV]);
-  // scrollMaxH is the chat viewport's MAX-HEIGHT. It is derived from the DISCRETE
-  // layout width, not the live `shellWidth` — binding it to the live motion value
-  // made `max-height` a SECOND per-frame layout (reflow) property animating
-  // simultaneously with width (worst case: two stacked per-frame reflows). Pinned
-  // to the discrete width it changes only at transition boundaries, so the
-  // viewport height is STABLE for the whole tween — the clip-path reveal handles
-  // the visible growth, and the height channel below settles the OS window to the
-  // final laid-out height.
-  const scrollMaxH = useTransform([shellLayoutWidthMV, verticalCap], ([w, cap]: number[]) =>
+  // scrollMaxH is the chat viewport's MAX-HEIGHT, derived from the LIVE
+  // `shellWidth` motion value (the panel's actual animating width) mins'd against
+  // the measured vertical budget cap. Binding it to the live width means the
+  // scroll area's tall/short budget grows/shrinks IN STEP with the panel as the
+  // spring runs (widthDerivedScrollMax: 320px collapsed → 560px expanded), so the
+  // visible chat region tracks the panel size frame-for-frame. This is a motion
+  // value bound to a style, so it updates without a React re-render.
+  const scrollMaxH = useTransform([shellWidth, verticalCap], ([w, cap]: number[]) =>
     Math.min(widthDerivedScrollMax(w), cap),
   );
-  // Tracks the panel's VISIBLE top-right corner as the width spring runs. Reads
-  // the live `shellWidth` (the visible width the clip reveals), NOT the discrete
-  // layout width — the box is laid out at the wider extent during the tween but
-  // the clip hides the surplus, so the visible right edge is governed by
-  // shellWidth. The OS window is a fixed OVERLAY_WINDOW_WIDTH; the panel is
-  // centered inside it, so the visible right edge sits
+  // Tracks the panel's top-right corner as the width spring runs, off the LIVE
+  // `shellWidth`. The OS window is a fixed OVERLAY_WINDOW_WIDTH; the panel is
+  // centered inside it, so the panel's right edge sits
   // (OVERLAY_WINDOW_WIDTH - shellWidth) / 2 px from the window right. The button
   // floats 8 px outside that edge so it stays adjacent to the corner in every
-  // collapsed/expanded/in-between state.
+  // collapsed/expanded/in-between state, following the spring continuously.
   const buttonRight = useTransform(shellWidth, (w) => (OVERLAY_WINDOW_WIDTH - w) / 2 + 8);
-
-  // ── Compositor reveal clip ───────────────────────────────────────────────
-  // The smooth 600↔780 visual travel is a `clip-path: inset()` animation, NOT a
-  // CSS `width` animation. The shell box is laid out at the DISCRETE
-  // `shellLayoutWidth` (600 or 780) for the whole tween; this clip reveals only
-  // `shellWidth` (the live spring value) worth of that box, centered, so it
-  // VISUALLY shrinks/grows on the compositor with zero per-frame layout.
-  //
-  // `clip-path: inset(...)` is GPU-compositable in Chromium (Electron 33 ≈
-  // Chromium 130): an inset clip animates on the compositor thread without
-  // re-running layout or paint of the clipped element — exactly the property
-  // class we want (alongside transform/opacity). It also clips the element's
-  // backdrop-filter to the visible rect, so the glass blur stays confined to the
-  // visible pill and is NOT killed (unlike `contain: paint`, which the constraint
-  // forbids).
-  //
-  // inset per horizontal side = (laidOutWidth − visibleWidth) / 2, clamped ≥0
-  // (a momentary spring overshoot where visible > laidOut must not produce a
-  // negative inset that would reveal beyond the box). `round 24px` keeps the
-  // clipped edge's corners matching the shell's rounded-[24px] radius, so the
-  // reveal edge stays a rounded glass corner, never a hard square cut. The
-  // vertical insets are 0 — only the width dimension animates.
-  //
-  // NOTE: at BOTH resting states the inset is 0 (visible === laid-out width), so
-  // the full 4-edge border + rounded corners render normally at rest. The side
-  // border is only clipped DURING the in-between travel, which is imperceptible
-  // against a 420ms glass settle and far better than the permanent per-frame
-  // reflow of the old `width` animation.
-  const shellClipPath = useTransform(
-    [shellLayoutWidthMV, shellWidth],
-    ([laidOut, visible]: number[]) => {
-      const sideInset = Math.max(0, (laidOut - visible) / 2);
-      return `inset(0px ${sideInset}px 0px ${sideInset}px round 24px)`;
-    },
-  );
 
   // isExpanded mirror for closures inside refs/observers that must not
   // re-bind on every toggle.
@@ -1625,9 +1558,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // NOTE: the old per-frame "chase" subscriber that pushed the live shell width
   // to setBounds every frame is GONE. The OS window is a fixed width (780) for
   // its whole lifetime, so there is nothing to chase — the panel animates
-  // 600↔780 entirely on the compositor (a clip-path inset reveal over a
-  // discrete-width box, see the shell render site) with no native width resize at
-  // all. Only HEIGHT flows to the OS, via reportShellSize / the ResizeObserver.
+  // 600↔780 purely renderer-side (CSS `width` bound to the shellWidth spring),
+  // with no native width resize at all. Only HEIGHT flows to the OS, via
+  // reportShellSize / the ResizeObserver.
 
   // ResizeObserver: rAF-debounced so the spring can update height without
   useLayoutEffect(() => {
@@ -1743,17 +1676,17 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     return () => clearTimeout(timer);
   }, [reportShellSize, measureVerticalCap]);
 
-  // ── Code-expansion (COMPOSITOR clip reveal, fixed-width window) ──────────
-  // THE FIX (now root-caused to the renderer too): the OS window is a FIXED
-  // WIDTH (OVERLAY_WINDOW_WIDTH = 780) for its entire visible lifetime, and the
-  // panel is centered (mx-auto) inside it. There is NO width setBounds during
-  // the interaction at all. The expand/contract VISUAL travel is a compositor
-  // `clip-path: inset()` reveal: the `shellWidth` spring drives the visible
-  // width while the box stays laid out at a DISCRETE width (600/780), so no CSS
-  // `width` is written per frame and the content subtree does not reflow during
-  // the tween. (The earlier "CSS-only" framing bound `width` to the live motion
-  // value, which framer writes as raw element.style.width every frame → per-
-  // frame layout/paint of the content — that was the residual 60fps stutter.)
+  // ── Code-expansion (renderer-only width spring, fixed-width window) ──────────
+  // THE FIX: the OS window is a FIXED WIDTH (OVERLAY_WINDOW_WIDTH = 780) for its
+  // entire visible lifetime, and the panel is centered (mx-auto) inside it. There
+  // is NO width setBounds during the interaction at all. The expand/contract
+  // travel is a renderer-only CSS `width` animation: the `shellWidth` spring is
+  // bound to the panel's `width` style, so the content reflows (text re-wrap +
+  // code re-layout) to the real panel width on every frame and is correct at
+  // every in-between width — no clipping, no phantom layout width, no transform
+  // distortion. Per-frame reflow cost is held down by `contain: layout style` on
+  // the shell (scopes the reflow) + memoized syntax highlighting (a width change
+  // re-wraps without re-tokenizing).
   //
   // Why: the previous two attempts shifted the window's X origin during the
   // animation (to keep the panel centered as the window width changed). But
@@ -1817,9 +1750,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       if (Math.abs(targetWidth - fromWidth) <= 1) {
         if (animationControlsRef.current) animationControlsRef.current.stop();
         animationControlsRef.current = null;
-        // Snap BOTH the discrete layout width and the visual spring value to the
-        // target → inset 0, full border, content laid out at the true width.
-        setShellLayoutWidth(targetWidth);
+        // Snap the live width to the target so the box rests at the exact width.
         shellWidth.set(targetWidth);
         return;
       }
@@ -1831,9 +1762,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         if (animationControlsRef.current) animationControlsRef.current.stop();
         animationControlsRef.current = null;
         heightReportSuppressedUntilRef.current = 0;
-        // Snap layout + visual together → no clip travel, content reflows once
-        // to the final width, inset 0.
-        setShellLayoutWidth(targetWidth);
+        // Snap the width to the target with no animated travel; content reflows
+        // once to the final width.
         shellWidth.set(targetWidth);
         pinScrollBottomIfNeeded();
         const h = contentRef.current?.offsetHeight ?? 0;
@@ -1841,61 +1771,39 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         return;
       }
 
-      // Lay the box out at the LARGER of {from, target} for the whole tween, so
-      // the clip-path reveal always has enough laid-out box to expose and the
-      // content subtree reflows AT MOST ONCE here (not per frame). Expanding:
-      // jump to the expanded layout now, the clip starts insetting it down to the
-      // current (smaller) visible width and animates open. Collapsing: keep the
-      // expanded layout (clip insets inward) and shrink the layout to the
-      // collapsed width only at onComplete, where visible === laid-out so the
-      // shrink is invisible. A mid-flight retarget toward the wider state is
-      // already covered because we never shrank below the wider extent until a
-      // collapse fully completes.
-      setShellLayoutWidth((prev) => Math.max(prev, fromWidth, targetWidth));
-
       // Suppress the ResizeObserver's own per-frame HEIGHT reporting for the
-      // whole animation: the discrete layout-width flip changes content height in
-      // ONE step (no longer per-frame, since width is no longer animated as a CSS
-      // layout property), but the ResizeObserver still fires on that flip and on
-      // any streaming growth mid-tween, and a height setBounds re-rasters the
-      // transparent backdrop-blur window → flicker. (There is NO width setBounds
-      // to suppress — the window width is fixed.) Instead the animation drives a
-      // single, RATE-LIMITED height channel below. The deadline EXTENDS on every
-      // (re)trigger so a mid-flight scroll retarget keeps the observer suppressed
-      // across the blended motion; a generous tail covers the spring's settle
-      // past visualDuration. Self-expiring so an interrupted spring can never
-      // wedge reporting off.
+      // whole animation: the live `width` animation reflows content height every
+      // frame, so the ResizeObserver fires ~60× and each height setBounds would
+      // re-raster the transparent backdrop-blur window → flicker. (There is NO
+      // width setBounds to suppress — the window width is fixed.) Instead the
+      // animation drives a single, RATE-LIMITED height channel below. The
+      // deadline EXTENDS on every (re)trigger so a mid-flight scroll retarget
+      // keeps the observer suppressed across the blended motion; a generous tail
+      // covers the spring's settle past visualDuration. Self-expiring so an
+      // interrupted spring can never wedge reporting off.
       heightReportSuppressedUntilRef.current =
         Date.now() + OVERLAY_RESIZE_DURATION_MS + 260;
 
       // Height channel for the animation. The chat scroll viewport's max-height
-      // is now derived from the DISCRETE layout width (widthDerivedScrollMax:
-      // 320px collapsed → 560px expanded), so on EXPAND it jumps to its tall
-      // value the moment setShellLayoutWidth(780) above flips (one step, not a
-      // per-frame ramp). If we only settled height at onComplete the OS window
-      // would stay short for the whole expand and CLIP the bottom ~240px of
-      // content (which is already laid out tall) until it jumped at the end.
-      //
-      // So we still track height during the animation, but:
+      // is derived from the LIVE width (widthDerivedScrollMax: 320px collapsed →
+      // 560px expanded), so it ramps up with the spring on EXPAND. If we only
+      // settled height at onComplete the OS window would stay short for the whole
+      // expand and CLIP the bottom of the growing content until it jumped at the
+      // end. So we track height during the animation, but:
       //   • driven from the spring's onUpdate (same frame it reads offsetHeight
       //     from, so the window edge and the panel are computed from one
-      //     consistent layout, never a frame apart). offsetHeight is the LAYOUT
-      //     height — it is stable through the clip-path reveal (the clip changes
-      //     no layout), so the channel converges to the post-flip height within a
-      //     frame or two and then dedupes to silence;
+      //     consistent layout, never a frame apart);
       //   • rate-limited to ~30fps (33ms) so a height step from streaming growth
       //     mid-tween stays below perception;
       //   • integer-deduped, so a stable height issues no redundant setBounds
-      //     (no needless blur re-raster). With the height now stepping once
-      //     rather than ramping, most onUpdate frames hit this dedup early-out.
+      //     (no needless blur re-raster).
       // 30fps stays well under 60fps, so it does not reintroduce the per-frame
       // native setBounds that the suppression machinery exists to prevent.
       let lastHeightReportAt = 0;
       let lastReportedHeight = -1;
       const HEIGHT_REPORT_INTERVAL_MS = 33; // ~30fps
 
-      // VISUAL-width SPRING on the compositor clock (600↔780 inside the fixed
-      // window), realized as a clip-path reveal over the discrete-width box. Why
+      // WIDTH SPRING on the renderer clock (600↔780 inside the fixed window). Why
       // a spring instead of the old duration+bezier tween:
       //
       //   The scroll scanner re-fires startTransition whenever a code block
@@ -1912,9 +1820,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       //   bounce:0 (critically damped, see OVERLAY_RESIZE_SPRING) means an
       //   uninterrupted run has NO overshoot and reads identically to the old
       //   drawer tween. Any micro-overshoot during an interrupted retarget is
-      //   compositor-only (it nudges the clip inset, never a CSS width or a
-      //   native setBounds) and the clip inset is clamped ≥0, so an overshoot
-      //   past the laid-out width can never reveal beyond the box.
+      //   renderer-only (it nudges the CSS width, never a native width setBounds —
+      //   the window width is fixed), so it is safe.
       animationControlsRef.current = animate(shellWidth, targetWidth, {
         ...OVERLAY_RESIZE_SPRING,
         onUpdate: () => {
@@ -1929,16 +1836,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         },
         onComplete: () => {
           animationControlsRef.current = null;
-          // Collapse only: the box was kept laid out at the wider extent for the
-          // whole tween while the clip insets hid the surplus. Now the visible
-          // width has reached the (narrower) target, so snap the LAYOUT width
-          // down to match → inset returns to 0, the full 4-edge border + rounded
-          // corners render at the collapsed size, and the content reflows ONCE to
-          // the collapsed width (code re-wraps for the narrower canvas). visible
-          // === laid-out at this instant, so the layout shrink is visually
-          // seamless (no jump). Expand needs no snap — it already settled at the
-          // expanded layout with inset 0.
-          setShellLayoutWidth(targetWidth);
           // Hand reporting back to normal FIRST so the settle below actually
           // fires (the ResizeObserver early-returns while suppression is live).
           heightReportSuppressedUntilRef.current = 0;
@@ -2248,13 +2145,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       // Release any height-report suppression from an in-flight tween.
       heightReportSuppressedUntilRef.current = 0;
       // Imperative .set() (not animate) — no transient frame. The OS window
-      // stays fixed at OVERLAY_WINDOW_WIDTH, so snapping the shell back to
-      // collapsed is a layout-width reset (content reflows ONCE for the fresh
-      // meeting) with no native resize and no sideways motion. Reset BOTH the
-      // discrete layout width and the visual spring value so visible === laid-out
-      // → clip inset 0, full collapsed border on the first paint of the new
-      // meeting.
-      setShellLayoutWidth(SHELL_WIDTH_COLLAPSED);
+      // stays fixed at OVERLAY_WINDOW_WIDTH, so snapping the shell width back to
+      // collapsed is a renderer-only width reset (content reflows once for the
+      // fresh meeting) with no native resize and no sideways motion.
       shellWidth.set(SHELL_WIDTH_COLLAPSED);
       setInputValue('');
       setAttachedContext([]);
@@ -5412,47 +5305,26 @@ Provide only the answer, nothing else.`;
               className={`relative max-w-full backdrop-blur-2xl border rounded-[24px] overflow-hidden flex flex-col draggable-area overlay-shell-surface ${overlayPanelClass}`}
               style={{
                 ...appearance.shellStyle,
-                // WIDTH IS DISCRETE (600 OR 780), NOT the live spring value.
-                // CORRECTION OF A PRIOR FALSE COMMENT: framer-motion does NOT
-                // animate a `width`-bound motion value via transform/translateX.
-                // It only composites the keys in motion-dom's transformProps set
-                // (x / y / scaleX / scaleY / rotate / …) into the CSS `transform`
-                // string; `width` is NOT in that set, so a motion value bound to
-                // `width` is written as raw `element.style.width` EVERY FRAME —
-                // forcing a full layout (reflow) of this box AND its content
-                // subtree (text re-wrap + syntax-highlight line layout) ~60×/s.
-                // That per-frame content reflow blew the frame budget on coding
-                // answers and WAS the residual stutter.
+                // The panel width is bound to the LIVE `shellWidth` motion value,
+                // animated 600↔780 by OVERLAY_RESIZE_SPRING. The content reflows
+                // (text re-wrap + code re-layout) to the real panel width on every
+                // frame, so it is always correct at every in-between width — there
+                // is no clipping, no phantom layout width, no transform distortion.
+                // The OS window stays a fixed OVERLAY_WINDOW_WIDTH (780) and the
+                // panel is centered (mx-auto) inside it, so this width change never
+                // touches a native setBounds and the X origin never moves.
                 //
-                // So we bind `width` to the DISCRETE `shellLayoutWidth` (flips
-                // 600↔780 only at a transition boundary, ~twice per action). The
-                // box is laid out at the target/wider width for the whole tween;
-                // the content reflows at most twice per user action, never per
-                // frame. The smooth 600↔780 visual travel is the compositor
-                // `clipPath` inset below.
-                width: shellLayoutWidth,
-                // COMPOSITOR REVEAL: `clip-path: inset(... round 24px)` reveals
-                // only the live `shellWidth` worth of the laid-out box, centered.
-                // clip-path inset animates on the compositor thread in Chromium
-                // (Electron 33) — no layout, no paint of the clipped element —
-                // and it clips the backdrop-filter to the visible rect so the
-                // glass blur stays confined to the pill and is NOT killed (unlike
-                // `contain: paint`, which is forbidden for exactly that reason).
-                clipPath: shellClipPath,
-                // will-change: 'clip-path' promotes ONLY the actually-animated
-                // property to its own compositor layer for the tween. NOT
-                // 'width' — the old stale `will-change: width` created a ghost
-                // layer with first-meeting dimensions that blocked correct
-                // compositing on remount. clip-path is safe to hint because it
-                // is the property we animate and it composites cleanly.
-                willChange: 'clip-path',
+                // The cost of reflowing per frame is held down by keeping each
+                // reflow cheap: `contain: layout style` scopes it to this subtree
+                // (below), and syntax highlighting is memoized on the code STRING +
+                // language so a width change re-wraps text without re-tokenizing.
+                width: shellWidth,
                 // contain: layout/style isolates this box's layout/style from the
-                // ancestor chain so the discrete width flip (and any content
-                // growth) does not dirty layout up to the document. It also makes
-                // the box a containing block so the per-transition reflow is
-                // SCOPED to this subtree. NOT `size` (would stop the box sizing
-                // to its content and break offsetHeight reporting); NOT `paint`
-                // (would clip the backdrop-blur).
+                // ancestor chain so the per-frame width reflow (and any content
+                // growth) does not dirty layout up to the document — the reflow is
+                // SCOPED to this subtree. NOT `size` (would stop the box sizing to
+                // its content and break offsetHeight reporting); NOT `paint` (would
+                // clip the backdrop-blur, which must keep working).
                 contain: 'layout style',
               }}
             >

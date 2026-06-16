@@ -21,17 +21,16 @@
 // old hitch), and any spring micro-overshoot stays entirely renderer-side — it
 // can NOT reach a native width setBounds, because there is no native one.
 //
-// HOW THE RENDERER ANIMATES IT (corrected — the prior wording implied
-// framer-motion composited `width`, which is FALSE): the OVERLAY_RESIZE_SPRING
-// drives a `shellWidth` MOTION VALUE only. The DOM box is laid out at a DISCRETE
-// width (600 or 780, flipped at transition boundaries — never per frame, because
-// a motion value bound to the CSS `width` key is written as raw
-// element.style.width every frame, which is layout-triggering, NOT a composited
-// transform). The smooth visual 600↔780 travel is a COMPOSITOR `clip-path:
-// inset()` derived from the live `shellWidth` value, so the in-between frames
-// are pure GPU compositing with no per-frame layout. `shellWidth` here is the
-// VISUAL width (what the clip reveals), consumed by the clip transform, the
-// resize-button anchor, and the rate-limited height channel.
+// HOW THE RENDERER ANIMATES IT: the OVERLAY_RESIZE_SPRING drives a `shellWidth`
+// MOTION VALUE that is bound directly to the panel's CSS `width`. The content
+// reflows (text re-wrap + code re-layout) to the real panel width on every
+// frame, so the layout is correct at every in-between width — there is NO
+// clipping, scaleX, or transform that would distort the content. The per-frame
+// reflow cost is held down on the renderer side (`contain: layout style` scopes
+// it to the shell subtree; syntax highlighting is memoized on code string +
+// language so a width change re-wraps without re-tokenizing), NOT by faking the
+// width. `shellWidth` is consumed by the CSS width, the resize-button anchor,
+// the width-derived scroll-max, and the rate-limited height channel.
 //
 // The bezier (OVERLAY_RESIZE_EASE / easeOverlayResize / widthAt) is RETAINED:
 //   • it documents the original curve intent,
@@ -45,8 +44,8 @@
 //
 // MONOTONIC BY CONSTRUCTION: easeOverlayResize / easeOutQuint are strictly
 // non-overshooting — relevant for any pure deterministic consumer. The live
-// width spring is allowed a tiny overshoot precisely because it is compositor-
-// only and never pushed to setBounds.
+// width spring is allowed a tiny overshoot precisely because it is renderer-
+// only (CSS width) and never pushed to a native setBounds.
 
 /** Total resize duration in milliseconds. 420ms for ~180px of glass travel:
  *  long enough to read as a weighted physical object settling (280ms felt
@@ -80,7 +79,7 @@ export const OVERLAY_RESIZE_EASE = [0.32, 0.72, 0, 1];
  * the established drawer timing; bounce 0 = critically-damped, NO overshoot at
  * the resting target for an uninterrupted run (reads as a weighted pane settling
  * exactly like the bezier did). The only time the spring can momentarily pass
- * the target is during an interruption, and that excursion is compositor-only
+ * the target is during an interruption, and that excursion is renderer-only
  * (fixed-width window → never reaches a native width setBounds), so it is safe.
  *
  * NOTE: the renderer (TS) consumes this via the hand-maintained sibling
