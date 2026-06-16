@@ -42,11 +42,30 @@ export const LIVE_PROVIDER_FIRST_USEFUL_HARD_TIMEOUT_MS = 7000;
  */
 export const LIVE_PROVIDER_FIRST_USEFUL_COMPLEX_TIMEOUT_MS = 7000;
 /**
+ * First-useful cap for a LOCAL provider (Ollama). The 7s cloud cap is wrong for a
+ * local model: a cold model must load its weights into RAM before the first token,
+ * which on a laptop is 8-12s for a 7-9B model (measured: qwen3.5:9b cold-loads in
+ * ~8.5s on a 16GB MacBook Air, before a single token). With the 7s cap, every cold
+ * local generation was aborted to zero tokens and the user saw the canned
+ * "Let me come back to that in just a moment." fallback. 30s covers a cold load +
+ * a slow first token; once the model is warm (we pin keep_alive from prewarm), the
+ * real first token still arrives in <1s and this ceiling is never reached — so the
+ * cost is paid only on the genuine first cold call. This guards first-token only;
+ * the inter-token stall guard (unchanged) still protects against a mid-stream hang.
+ */
+export const LIVE_LOCAL_FIRST_USEFUL_TIMEOUT_MS = 30000;
+/**
  * Absolute ceiling on a live answer's first-useful token (the no-fallback budget).
  * Sits just above the 7s first-useful cap so a MiniMax stream about to deliver at
  * ~6.5s isn't guillotined by this ceiling.
  */
 export const LIVE_TOTAL_HARD_TIMEOUT_MS = 8000;
+/**
+ * Local-provider counterpart to LIVE_TOTAL_HARD_TIMEOUT_MS: the no-fallback ceiling
+ * when there is no deterministic fallback to swap in. Matches the local first-useful
+ * cap so a cold local load isn't aborted to an empty answer.
+ */
+export const LIVE_LOCAL_TOTAL_HARD_TIMEOUT_MS = 30000;
 /**
  * After the first useful token has streamed, a long answer (coding scaffold +
  * sections) may legitimately keep flowing — we only abort on a genuine
@@ -65,8 +84,14 @@ const COMPLEX_TYPES = new Set<AnswerType>([
  * The first-useful-token deadline for a given answer type: the complex cap for
  * coding/system-design, otherwise the standard hard cap. Used as the time the
  * provider has to produce a useful token before we abort and fall back.
+ *
+ * `isLocal` (Ollama / on-device): the cloud caps assume sub-second first-token; a
+ * local model may need to cold-load its weights first, so a local provider gets the
+ * far longer LIVE_LOCAL_FIRST_USEFUL_TIMEOUT_MS regardless of answer type. The
+ * caller passes llmHelper.isUsingOllama(). Defaults false (cloud) for back-compat.
  */
-export function firstUsefulDeadlineMs(answerType: AnswerType): number {
+export function firstUsefulDeadlineMs(answerType: AnswerType, isLocal: boolean = false): number {
+  if (isLocal) return LIVE_LOCAL_FIRST_USEFUL_TIMEOUT_MS;
   return COMPLEX_TYPES.has(answerType)
     ? LIVE_PROVIDER_FIRST_USEFUL_COMPLEX_TIMEOUT_MS
     : LIVE_PROVIDER_FIRST_USEFUL_HARD_TIMEOUT_MS;

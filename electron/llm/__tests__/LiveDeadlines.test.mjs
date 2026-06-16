@@ -12,7 +12,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const { raceStreamWithDeadline, firstUsefulDeadlineMs,
-  LIVE_PROVIDER_FIRST_USEFUL_HARD_TIMEOUT_MS, LIVE_INTER_TOKEN_STALL_MS } = await import(
+  LIVE_PROVIDER_FIRST_USEFUL_HARD_TIMEOUT_MS, LIVE_INTER_TOKEN_STALL_MS,
+  LIVE_LOCAL_FIRST_USEFUL_TIMEOUT_MS } = await import(
   pathToFileURL(path.resolve(__dirname, '../../../dist-electron/electron/llm/index.js')).href
 );
 
@@ -116,6 +117,39 @@ describe('Issue 1: live-deadline harness aborts stalled providers', () => {
     assert.equal(firstUsefulDeadlineMs('system_design_answer'), 7000);
     assert.equal(firstUsefulDeadlineMs('identity_answer'), LIVE_PROVIDER_FIRST_USEFUL_HARD_TIMEOUT_MS);
     assert.equal(firstUsefulDeadlineMs('jd_fit_answer'), 7000);
+  });
+
+  test('firstUsefulDeadlineMs(isLocal=true) returns the long local budget for ANY answer type', () => {
+    // A local Ollama model cold-loads its weights (8-12s for a 7-9B model) before
+    // the first token, so the cloud-tuned 7s cap aborted every cold local
+    // generation to zero tokens → the canned "Let me come back to that" fallback.
+    // The local budget must comfortably exceed a cold load and be answer-type-blind.
+    assert.ok(LIVE_LOCAL_FIRST_USEFUL_TIMEOUT_MS >= 20000,
+      `local budget (${LIVE_LOCAL_FIRST_USEFUL_TIMEOUT_MS}ms) must cover a cold weight-load`);
+    assert.equal(firstUsefulDeadlineMs('identity_answer', true), LIVE_LOCAL_FIRST_USEFUL_TIMEOUT_MS);
+    assert.equal(firstUsefulDeadlineMs('coding_question_answer', true), LIVE_LOCAL_FIRST_USEFUL_TIMEOUT_MS);
+    assert.equal(firstUsefulDeadlineMs('jd_fit_answer', true), LIVE_LOCAL_FIRST_USEFUL_TIMEOUT_MS);
+    // Default (cloud) is unchanged and far shorter — back-compat for existing callers.
+    assert.equal(firstUsefulDeadlineMs('identity_answer'), LIVE_PROVIDER_FIRST_USEFUL_HARD_TIMEOUT_MS);
+    assert.ok(firstUsefulDeadlineMs('coding_question_answer', false) < LIVE_LOCAL_FIRST_USEFUL_TIMEOUT_MS);
+  });
+
+  test('a local model that produces its first token AFTER the cloud cap but WITHIN the local budget is NOT aborted', async () => {
+    // Simulates a cold local model: silence for ~6.2s (past the 7s cloud cap would
+    // be borderline; here we prove the long local budget keeps the stream alive),
+    // then a real token. With the local budget the driver must wait and deliver it.
+    let out = '';
+    const start = Date.now();
+    async function* coldLocal() { await sleep(6200); yield 'Here is the answer.'; }
+    const r = await raceStreamWithDeadline({
+      stream: coldLocal(),
+      firstUsefulDeadlineMs: firstUsefulDeadlineMs('technical_concept_answer', true), // local budget
+      isUsefulYet: () => out.length > 0,
+      onToken: (t) => { out += t; },
+    });
+    assert.equal(r, 'done');
+    assert.equal(out, 'Here is the answer.');
+    assert.ok(Date.now() - start >= 6000, 'waited for the slow cold-load first token');
   });
 
   // The single most important safety test: a hung provider that REJECTS after the
