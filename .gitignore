@@ -362,3 +362,11 @@ _external_research/
 # Filled-in credentials intake (never commit real values)
 docs/CREDENTIALS-INTAKE.local.md
 CREDENTIALS-INTAKE.local.md
+docs/CREDENTIALS-INTAKE.md
+
+# Local sprint reports / scratch notes / leaked-prompt reference (not vendored)
+NATIVELY_*_REPORT.md
+CORE_PIPELINE_AUDIT_REPORT.md
+reportforgpt.md
+testengineer.prompt
+cluely/
