@@ -772,9 +772,9 @@ export class LLMHelper {
    * turn. Returns size in CHARS (≈4 chars/token) so we can cheaply check
    * `text.length` without a tokenizer round-trip.
    *
-   *   Opus 4.7 / 4.6 / 4.5     → 4,096 tokens
+   *   Opus 4.8 / 4.7 / 4.6 / 4.5 → 4,096 tokens
    *   Sonnet 4.6                → 2,048 tokens
-   *   Sonnet 4.5 / 4 + Opus 4.1 → 1,024 tokens
+   *   Sonnet 4.5 / 4 + Opus 4.1 / 4.0 → 1,024 tokens
    *   Haiku 4.5                 → 4,096 tokens
    *   Haiku 3.5                 → 2,048 tokens
    *
@@ -782,7 +782,15 @@ export class LLMHelper {
    */
   private getClaudeCacheMinChars(modelId: string): number {
     const id = modelId.toLowerCase();
-    if (id.startsWith("claude-opus-4-7") || id.startsWith("claude-opus-4-6") || id.startsWith("claude-opus-4-5") || id.startsWith("claude-haiku-4-5")) return 4096 * 4;
+    // Opus 4.0 / 4.1 predate the 4.5 cache-min bump and stay at 1,024 tokens
+    // (they fall through to the generic claude- branch below). Every Opus 4.5
+    // and later — 4.5/4.6/4.7/4.8 — needs 4,096 tokens; match on the family
+    // prefix so new point releases don't silently regress to the wrong floor.
+    // Anchor the 4.0/4.1 carve-out on a terminal version digit (followed by a
+    // hyphen or end-of-string) so a future "claude-opus-4-10" isn't captured by
+    // the "claude-opus-4-1" prefix.
+    if (/^claude-opus-4-[01](-|$)/.test(id)) return 1024 * 4;
+    if (id.startsWith("claude-opus-4-") || id.startsWith("claude-haiku-4-5")) return 4096 * 4;
     if (id.startsWith("claude-sonnet-4-6")) return 2048 * 4;
     if (id.startsWith("claude-3-5-haiku") || id.startsWith("claude-haiku-3-5")) return 2048 * 4;
     if (id.startsWith("claude-")) return 1024 * 4;
@@ -1953,11 +1961,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
       // GROQ FAST TEXT OVERRIDE (Text-Only) — gated on picked model so Gemini/Claude/OpenAI
       // selections aren't silently routed to Groq. See streamChat() for matching gate.
-      // Exclude codex-cli:* selections: fast-mode's codex path uses the hardcoded fastModel
-      // (gpt-5.3-codex), overriding the sub-model the user explicitly chose. Fall through to
-      // the explicit codex block below which calls getSelectedCodexCliModel(false) and honours
-      // currentModelId (e.g. extracts "gpt-5.4" from "codex-cli:gpt-5.4"). (issue #315)
-      const fastModeAppliesNS = this.groqFastTextMode && !isMultimodal && !this.isCodexCliModel(this.currentModelId) && (
+      const fastModeAppliesNS = this.groqFastTextMode && !isMultimodal && (
         this.codexCliConfig.enabled ||
         this.isGroqModel(this.currentModelId) ||
         this.currentModelId === 'natively'
@@ -4065,11 +4069,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     // Gate: only short-circuit to fast paths when the user's picked model is one of
     // the providers fast-mode actually routes to. Otherwise picking Gemini/Claude/OpenAI
     // in the UI is silently ignored because fast-mode returns before model routing runs.
-    // Exclude codex-cli:* selections: fast-mode's codex path uses the hardcoded fastModel
-    // (gpt-5.3-codex), overriding the sub-model the user explicitly chose. Fall through to
-    // the explicit codex block below which calls getSelectedCodexCliModel(false) and honours
-    // currentModelId (e.g. extracts "gpt-5.4" from "codex-cli:gpt-5.4"). (issue #315)
-    const fastModeApplies = this.groqFastTextMode && !isMultimodal && !this.isCodexCliModel(this.currentModelId) && (
+    const fastModeApplies = this.groqFastTextMode && !isMultimodal && (
       this.codexCliConfig.enabled ||
       this.isGroqModel(this.currentModelId) ||
       this.currentModelId === 'natively'
