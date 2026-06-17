@@ -118,12 +118,16 @@ consumes it on the next "What to say".
 
 ## Deterministic extension ID (the `key` field)
 
-The manifest pins a public `key`, which gives the extension a **stable ID across
-dev-load and Web Store publish**: `macjecgdfliikhplbbdbpljomcigjnjg`. The desktop
-**exact-pins this ID** for both `/dom` and `/pair` (CORS responses are only
-readable by this exact origin — a different extension, even one that obtained the
-token, can't read replies cross-origin). Contributors building from source with a
-different unpacked ID can override it via the `NATIVELY_DOM_EXTENSION_ID` env var.
+The manifest pins a public `key`, which gives the **unpacked dev build** a stable
+ID: `macjecgdfliikhplbbdbpljomcigjnjg`. NOTE: the **Chrome Web Store re-signs the
+published extension with Google's own key**, so the store build has a DIFFERENT,
+also-stable ID: `lmhgnkbjnelmciecjkleaomjpejcgaln`. The desktop `/pair` endpoint
+**exact-pins BOTH** (the store ID for normal users, the dev ID for contributors);
+`/dom` uses the looser structural `[a-p]{32}` origin check. CORS responses are only
+readable by the exact requesting origin — a different extension, even one that
+obtained the token, can't read replies cross-origin. Contributors building from
+source with yet another unpacked ID can override via the `NATIVELY_DOM_EXTENSION_ID`
+env var.
 
 The `key` was generated from a 2048-bit RSA keypair:
 

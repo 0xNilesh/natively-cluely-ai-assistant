@@ -83,13 +83,24 @@ const PAIR_ARM_WINDOW_MS = 60_000;
 const CAPTURE_TIMEOUT_MS = 2_500;
 const LIST_TABS_TIMEOUT_MS = 1_500;
 
-// The companion extension's pinned ID (deterministic via the manifest `key`).
-// The one-click /pair endpoint requires this EXACT origin (not the structural
-// [a-p]{32} check used by /dom). Contributors loading an unpacked build with a
-// different ID can override via NATIVELY_DOM_EXTENSION_ID. See natively-browser/README.md.
-const PINNED_EXTENSION_ID =
-  process.env.NATIVELY_DOM_EXTENSION_ID || 'macjecgdfliikhplbbdbpljomcigjnjg';
-const PINNED_EXTENSION_ORIGIN = `chrome-extension://${PINNED_EXTENSION_ID}`;
+// Companion extension IDs the one-click /pair endpoint accepts. /pair requires an
+// EXACT origin match (not the structural [a-p]{32} check /dom uses), so it must
+// know every legitimate ID the extension can present:
+//   - the Chrome Web Store build (Google RE-SIGNS with its own key → this ID),
+//   - the unpacked dev build (deterministic from the manifest `key` → this ID),
+//   - an optional override for contributors loading a differently-keyed build.
+// A web page cannot forge a chrome-extension:// origin, and a different extension
+// won't match any of these exact IDs. See natively-browser/README.md + CONTRACT.md.
+const STORE_EXTENSION_ID = 'lmhgnkbjnelmciecjkleaomjpejcgaln'; // Chrome Web Store
+const DEV_EXTENSION_ID = 'macjecgdfliikhplbbdbpljomcigjnjg'; // unpacked (manifest key)
+const PINNED_EXTENSION_IDS = new Set(
+  [STORE_EXTENSION_ID, DEV_EXTENSION_ID, process.env.NATIVELY_DOM_EXTENSION_ID].filter(
+    (id): id is string => !!id,
+  ),
+);
+const PINNED_EXTENSION_ORIGINS = new Set(
+  [...PINNED_EXTENSION_IDS].map((id) => `chrome-extension://${id}`),
+);
 
 type StatusListener = (info: PhoneMirrorInfo) => void;
 
@@ -759,7 +770,7 @@ export class PhoneMirrorService {
     //    [a-p]{32} check /dom uses),
     //  - must be armed (user clicked "Connect browser extension"); single-use.
     if (fullUrl.pathname === '/pair') {
-      const pairOrigin = requestOrigin === PINNED_EXTENSION_ORIGIN ? requestOrigin : '';
+      const pairOrigin = PINNED_EXTENSION_ORIGINS.has(requestOrigin) ? requestOrigin : '';
       if (req.method === 'OPTIONS') {
         const headers: Record<string, string> = {
           'Access-Control-Allow-Methods': 'POST, OPTIONS',

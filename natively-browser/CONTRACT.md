@@ -44,9 +44,14 @@ Hands the extension the token with no copy-paste. Strictly gated:
 - **POST** (not GET — a Chrome MV3 service worker reliably sends `Origin` on POST but
   often omits it on GET, which would fail the exact-origin pin). **Loopback caller only**
   (never reachable off-box, even with `exposeOnLan`).
-- **Origin must EXACTLY equal** `chrome-extension://macjecgdfliikhplbbdbpljomcigjnjg` (the
-  pinned extension ID — not the structural `[a-p]{32}` check). A web page cannot forge a
-  `chrome-extension://` origin; a different extension won't match the exact ID.
+- **Origin must EXACTLY equal a pinned extension ID** (not the structural `[a-p]{32}`
+  check). The desktop pins TWO IDs because the Chrome Web Store **re-signs** the published
+  extension with Google's own key, giving it a DIFFERENT ID than the unpacked dev build:
+    - `chrome-extension://lmhgnkbjnelmciecjkleaomjpejcgaln` — Chrome Web Store build.
+    - `chrome-extension://macjecgdfliikhplbbdbpljomcigjnjg` — unpacked dev build
+      (deterministic from the manifest `key`).
+  Plus an optional `NATIVELY_DOM_EXTENSION_ID` override. A web page cannot forge a
+  `chrome-extension://` origin; a different extension won't match any pinned ID.
 - **Must be armed**: the user clicked "Connect browser extension" in Settings, which opens
   a 60-second window. **Single-use** — burns on first success.
 
