@@ -758,6 +758,28 @@ export function initializeIpcHandlers(appState: AppState): void {
         // Released in the handler's finally below.
         _manualFgToken = ForegroundGate.begin('manual');
 
+        // Skill invocation: /skill-name or $skill-name prefix (issue #303).
+        // Strip the prefix from message before planAnswer so routing sees the
+        // bare user query, then inject the skill's instructions into context
+        // right before streamChat so the model follows them for this turn only.
+        let skillPromptBlock = '';
+        const skillPrefixMatch = typeof message === 'string'
+          ? message.match(/^[/$]([A-Za-z0-9_-]+)\s*(.*)$/s)
+          : null;
+        if (skillPrefixMatch) {
+          try {
+            const candidateId = skillPrefixMatch[1];
+            const skill = SkillsManager.getInstance().getSkill(candidateId);
+            if (skill) {
+              skillPromptBlock = SkillsManager.getInstance().buildPromptBlock(skill);
+              message = skillPrefixMatch[2].trim() || message;
+              console.log(`[IPC] Skill activated: ${skill.id}`);
+            }
+          } catch (skillErr: any) {
+            console.warn('[IPC] Skill lookup failed (non-fatal):', skillErr?.message || skillErr);
+          }
+        }
+
         // Active mode as a routing PRIOR (PI v3, W1): an ambiguous manual
         // question in a sales/lecture mode routes to that mode's answer type
         // instead of unknown_answer. Read defensively — null keeps mode-blind.
@@ -1248,6 +1270,13 @@ export function initializeIpcHandlers(appState: AppState): void {
           } catch (recallErr: any) {
             console.warn('[HindsightLiveRecall] skipped (non-fatal):', recallErr?.message);
           }
+        }
+
+        // Prepend active-skill instructions so the model follows them for this
+        // turn only. Done after all other context assembly so skill instructions
+        // are the first thing the model sees in the user context block.
+        if (skillPromptBlock) {
+          context = context ? `${skillPromptBlock}\n\n${context}` : skillPromptBlock;
         }
 
         // Use CHAT_MODE_PROMPT for general chat — bypasses the interview-copilot
@@ -3623,6 +3652,7 @@ export function initializeIpcHandlers(appState: AppState): void {
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
       CredentialsManager.getInstance().setDeepgramApiKey(apiKey);
+      await appState.reconfigureSttProvider();
       BrowserWindow.getAllWindows().forEach((win) => {
         if (!win.isDestroyed()) win.webContents.send('credentials-changed');
       });
@@ -3652,6 +3682,7 @@ export function initializeIpcHandlers(appState: AppState): void {
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
       CredentialsManager.getInstance().setElevenLabsApiKey(apiKey);
+      await appState.reconfigureSttProvider();
       BrowserWindow.getAllWindows().forEach((win) => {
         if (!win.isDestroyed()) win.webContents.send('credentials-changed');
       });
@@ -3666,6 +3697,10 @@ export function initializeIpcHandlers(appState: AppState): void {
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
       CredentialsManager.getInstance().setAzureApiKey(apiKey);
+      await appState.reconfigureSttProvider();
+      BrowserWindow.getAllWindows().forEach((win) => {
+        if (!win.isDestroyed()) win.webContents.send('credentials-changed');
+      });
       return { success: true };
     } catch (error: any) {
       console.error('Error saving Azure API key:', error);
@@ -3692,6 +3727,10 @@ export function initializeIpcHandlers(appState: AppState): void {
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
       CredentialsManager.getInstance().setIbmWatsonApiKey(apiKey);
+      await appState.reconfigureSttProvider();
+      BrowserWindow.getAllWindows().forEach((win) => {
+        if (!win.isDestroyed()) win.webContents.send('credentials-changed');
+      });
       return { success: true };
     } catch (error: any) {
       console.error('Error saving IBM Watson API key:', error);
@@ -3703,6 +3742,10 @@ export function initializeIpcHandlers(appState: AppState): void {
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
       CredentialsManager.getInstance().setSonioxApiKey(apiKey);
+      // Reconfigure the active pipeline so a key saved after provider selection
+      // is picked up immediately (without this, the pipeline stays on the GoogleSTT
+      // fallback that was chosen when reconfigure ran before the key was entered).
+      await appState.reconfigureSttProvider();
       BrowserWindow.getAllWindows().forEach((win) => {
         if (!win.isDestroyed()) win.webContents.send('credentials-changed');
       });
