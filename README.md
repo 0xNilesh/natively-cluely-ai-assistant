@@ -42,7 +42,7 @@ If you’re looking for a hosted desktop recording API, consider checking out [R
 [![License](https://img.shields.io/badge/License-AGPL--3.0-blue?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows-blueviolet?style=flat-square)](https://github.com/Natively-AI-assistant/natively-cluely-ai-assistant/releases)
 [![Downloads](https://img.shields.io/github/downloads/evinjohnn/natively-cluely-ai-assistant/total?style=flat-square&color=success)](https://github.com/Natively-AI-assistant/natively-cluely-ai-assistant/releases)
-![Repo Views](https://img.shields.io/badge/Views-341k-orange?style=flat-square)
+![Repo Views](https://img.shields.io/badge/Views-1.2M-orange?style=flat-square)
 [![Stars](https://img.shields.io/github/stars/evinjohnn/natively-cluely-ai-assistant?style=flat-square&color=gold)](https://github.com/Natively-AI-assistant/natively-cluely-ai-assistant)
 ![Status](https://img.shields.io/badge/Status-active-success?style=flat-square)
 [![Telegram Chat](https://img.shields.io/badge/Telegram-Chat-229ED9?style=flat-square&logo=telegram&logoColor=white)](https://t.me/nativelyaichat)
@@ -686,6 +686,15 @@ This runs: Vite build → TypeScript compile → native module build → electro
 - **Negotiation Assistance**: Real-time guidance and strategy during offer and salary negotiations.
 - **Evidence Validator & Live Deadlines**: Real-time validation of factual claims and interactive deadline alert tracker during live assessments.
 - **PI Latency Tracer**: Built-in granular latency profiling mapping exact time spent during the routing and LLM inference loop.
+
+### Skills — Custom AI Personas
+
+Create local `SKILL.md` files to give the AI specialized instructions for any task. Skills are invoked directly from the overlay chat:
+
+- Type `/` or `$` to open a live skill picker — filtered autocomplete with arrow-key navigation, just like Claude Code's slash commands
+- Or type `/skill-name` directly to activate a skill inline
+- Built-in: **Humanize AI Text** — strips AI writing patterns and makes output sound human
+- Add your own: drop a `SKILL.md` with a YAML frontmatter `name:` and `description:` into `~/Library/Application Support/natively/skills/<folder>/`
 
 ### Contextual Actions
 
