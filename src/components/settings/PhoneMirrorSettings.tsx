@@ -1,5 +1,5 @@
-import { Check, Copy, Lock, RefreshCw, ShieldAlert, Smartphone, Wifi } from 'lucide-react';
-import React, { useCallback, useEffect, useState } from 'react';
+import { Check, Copy, Lock, Puzzle, RefreshCw, ShieldAlert, Smartphone, Wifi, Zap } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { PhoneMirrorInfo } from '../../types/electron';
 import { isMac } from '../../utils/platformUtils';
 
@@ -21,6 +21,13 @@ export const PhoneMirrorSettings: React.FC = () => {
   const [busy, setBusy] = useState<null | 'enable' | 'disable' | 'lan' | 'rotate'>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  // Companion browser-extension pairing: countdown (seconds left) while the 60s
+  // one-click /pair window is open after "Connect browser extension".
+  const [armCountdown, setArmCountdown] = useState(0);
+  const [armError, setArmError] = useState<string | null>(null);
+  const [pairCopied, setPairCopied] = useState(false);
+  const [showManualPair, setShowManualPair] = useState(false);
+  const armTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -103,6 +110,58 @@ export const PhoneMirrorSettings: React.FC = () => {
       /* noop */
     }
   }, [info.primaryUrl]);
+
+  // Clear the countdown interval on unmount.
+  useEffect(() => {
+    return () => {
+      if (armTimerRef.current) clearInterval(armTimerRef.current);
+    };
+  }, []);
+
+  // "Connect browser extension" — arm the 60s one-click pairing window on the
+  // desktop, then run a local countdown so the user knows how long they have to
+  // click "Connect to Natively" in the extension popup.
+  const onArmExtension = useCallback(async () => {
+    setArmError(null);
+    try {
+      const result = await window.electronAPI.phoneMirrorArmExtension();
+      if (result && typeof result === 'object' && 'error' in result && result.error) {
+        setArmError(String(result.error));
+        return;
+      }
+      const seconds =
+        result && typeof result === 'object' && 'armedMs' in result
+          ? Math.round((result.armedMs as number) / 1000)
+          : 60;
+      if (armTimerRef.current) clearInterval(armTimerRef.current);
+      setArmCountdown(seconds);
+      armTimerRef.current = setInterval(() => {
+        setArmCountdown((prev) => {
+          if (prev <= 1) {
+            if (armTimerRef.current) clearInterval(armTimerRef.current);
+            armTimerRef.current = null;
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    } catch (e: any) {
+      setArmError(e?.message || 'Failed to arm pairing');
+    }
+  }, []);
+
+  // Manual fallback: copy the raw `port:token` pairing string for the extension's
+  // "Pair manually instead" field. Only shown after the user expands it.
+  const onCopyPairString = useCallback(async () => {
+    if (!info.port || !info.token) return;
+    try {
+      await navigator.clipboard.writeText(`${info.port}:${info.token}`);
+      setPairCopied(true);
+      setTimeout(() => setPairCopied(false), 1200);
+    } catch (_) {
+      /* noop */
+    }
+  }, [info.port, info.token]);
 
   const lanWarning = info.running && info.exposeOnLan;
   const showQr = info.running && info.qrDataUrl;
@@ -301,6 +360,101 @@ export const PhoneMirrorSettings: React.FC = () => {
           Turn on Phone Mirror to generate a pairing URL and QR code.
         </div>
       )}
+
+      {/* Browser Extension card — pair the companion extension to send the active
+          browser tab's page context to the desktop. Shares the Phone Mirror
+          server + pairing token. */}
+      <div className="bg-bg-item-surface rounded-xl border border-border-subtle p-5 space-y-4">
+        <div className="flex items-start gap-3">
+          <div className="rounded-lg bg-bg-main p-2 border border-border-subtle flex-shrink-0">
+            <Puzzle size={16} className="text-indigo-400" />
+          </div>
+          <div className="min-w-0">
+            <div className="text-text-primary font-medium text-sm">Browser Extension</div>
+            <div className="text-text-secondary text-xs mt-1 leading-relaxed">
+              Pair the Natively companion extension to send the active tab's page content
+              to the desktop. Press{' '}
+              <kbd className="px-1 py-0.5 rounded bg-bg-main border border-border-subtle font-mono text-[10px]">
+                {isMac ? '⌘' : 'Ctrl'}+Shift+Y
+              </kbd>{' '}
+              to capture (falls back to a screenshot when no browser is reachable). Install
+              steps are in the Help tab.
+            </div>
+          </div>
+        </div>
+
+        {info.running ? (
+          <>
+            <button
+              type="button"
+              onClick={onArmExtension}
+              disabled={armCountdown > 0}
+              className={`w-full inline-flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+                armCountdown > 0
+                  ? 'bg-blue-500/15 text-blue-300 cursor-default'
+                  : 'bg-blue-500 text-white hover:bg-blue-400'
+              }`}
+            >
+              {armCountdown > 0 ? (
+                <>
+                  <Zap size={14} className="animate-pulse" />
+                  Open the extension and click “Connect to Natively” · {armCountdown}s
+                </>
+              ) : (
+                <>
+                  <Zap size={14} />
+                  Connect browser extension
+                </>
+              )}
+            </button>
+
+            <details
+              className="text-xs"
+              open={showManualPair}
+              onToggle={(e) => setShowManualPair((e.target as HTMLDetailsElement).open)}
+            >
+              <summary className="text-text-secondary cursor-pointer hover:text-text-primary select-none">
+                Pair manually instead
+              </summary>
+              <div className="mt-2 space-y-2">
+                <div className="text-text-secondary leading-relaxed">
+                  In the extension popup, expand <strong>Pair manually instead</strong> and paste
+                  this pairing string:
+                </div>
+                <div className="flex items-center gap-2">
+                  <code className="flex-1 min-w-0 truncate font-mono text-xs px-2.5 py-2 rounded-md bg-bg-main border border-border-subtle text-text-primary">
+                    {info.port && info.token ? `${info.port}:${info.token}` : '—'}
+                  </code>
+                  <button
+                    type="button"
+                    onClick={onCopyPairString}
+                    disabled={!info.port || !info.token}
+                    className="flex-shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-md text-xs font-medium bg-bg-item-active text-text-primary hover:bg-bg-item-active/70 disabled:opacity-50 transition-colors"
+                  >
+                    {pairCopied ? (
+                      <>
+                        <Check size={13} /> Copied
+                      </>
+                    ) : (
+                      <>
+                        <Copy size={13} /> Copy
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </details>
+
+            {armError && (
+              <div className="text-xs text-red-300">{armError}</div>
+            )}
+          </>
+        ) : (
+          <div className="text-text-secondary text-xs flex items-center gap-2">
+            <Lock size={12} /> Enable Phone Mirror first to pair the browser extension.
+          </div>
+        )}
+      </div>
 
       {error && (
         <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">

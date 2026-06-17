@@ -728,21 +728,29 @@ export class AppState {
           }
         } else if (actionId === 'general:capture-and-process') {
           // Single-trigger: capture current screen then immediately request AI analysis
-          const screenshotPath = await this.takeScreenshot(false);
-          const preview = await this.getImagePreview(screenshotPath);
-          // Ensure the window is visible so the user can see the response without stealing focus
-          this.showMainWindow(true);
-          // win.focus() can cause macOS to re-activate the app. Re-hide the dock
-          // if we are in undetectable mode.
-          if (process.platform === 'darwin' && this.isUndetectable) {
-            app.dock.hide();
+          await this.captureScreenAndProcess();
+
+        } else if (actionId === 'general:capture-dom') {
+          // One hotkey, the right capture: if the companion browser extension is
+          // connected, ask it to grab the active tab's page context (delivered to
+          // the overlay via /dom). If it isn't reachable — not in a browser, SW
+          // asleep, Phone Mirror off — fall back to a screenshot automatically so
+          // the gesture always does something. See natively-browser/README.md.
+          let captured = false;
+          try {
+            const svc = PhoneMirrorService.getInstance();
+            if (svc.isRunning() && svc.hasExtensionClient()) {
+              const result = await svc.requestDomCapture();
+              captured = result.ok;
+              if (!captured) {
+                console.log('[Main] DOM capture unavailable (', result.reason, ') — falling back to screenshot');
+              }
+            }
+          } catch (e: any) {
+            console.warn('[Main] DOM capture error — falling back to screenshot:', e?.message || e);
           }
-          const mainWindow = this.getMainWindow();
-          if (mainWindow) {
-            mainWindow.webContents.send("capture-and-process", {
-              path: screenshotPath,
-              preview
-            });
+          if (!captured) {
+            await this.captureScreenAndProcess();
           }
 
         // --- STEALTH SHORTCUTS: no focus, no show, pure IPC dispatch ---
@@ -4876,6 +4884,31 @@ export class AppState {
     return this.withScreenshotCaptureSession('full', restoreFocus, (session) =>
       this.screenshotHelper.takeScreenshot(this.getTargetDisplayForFullScreenshot(session))
     )
+  }
+
+  /**
+   * Capture the current screen and immediately request AI analysis (the
+   * "capture-and-process" single-trigger). Extracted so both the
+   * `general:capture-and-process` hotkey and the `general:capture-dom`
+   * screenshot fallback share one path.
+   */
+  private async captureScreenAndProcess(): Promise<void> {
+    const screenshotPath = await this.takeScreenshot(false);
+    const preview = await this.getImagePreview(screenshotPath);
+    // Ensure the window is visible so the user can see the response without stealing focus
+    this.showMainWindow(true);
+    // win.focus() can cause macOS to re-activate the app. Re-hide the dock
+    // if we are in undetectable mode.
+    if (process.platform === 'darwin' && this.isUndetectable) {
+      app.dock.hide();
+    }
+    const mainWindow = this.getMainWindow();
+    if (mainWindow) {
+      mainWindow.webContents.send("capture-and-process", {
+        path: screenshotPath,
+        preview
+      });
+    }
   }
 
   public async takeSelectiveScreenshot(restoreFocus: boolean = true): Promise<string> {

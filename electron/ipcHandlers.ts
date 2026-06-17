@@ -6841,6 +6841,18 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
+  // Captured DOM from the companion extension is only meaningful when an active
+  // session/overlay exists (the overlay window mounts NativelyInterface, which
+  // owns window.lastCapturedDOM). Point the service at the overlay so /dom
+  // delivers there — and returns 409 no_active_session when no overlay is live.
+  PhoneMirrorService.getInstance().setOverlayResolver(() => {
+    try {
+      return appState.getWindowHelper().getOverlayWindow();
+    } catch (_) {
+      return null;
+    }
+  });
+
   safeHandle('skills:list', () => {
     try {
       return SkillsManager.getInstance().listSkills();
@@ -6895,6 +6907,24 @@ export function initializeIpcHandlers(appState: AppState): void {
     } catch (e: any) {
       console.error('[IPC] phone-mirror:rotate-token error:', e);
       return { error: e?.message || 'failed to rotate token' };
+    }
+  });
+
+  // Open the 60s one-click pairing window for the companion browser extension.
+  // The user clicks "Connect browser extension" in Settings → this arms the
+  // /pair endpoint → the extension's "Connect to Natively" button fetches the
+  // token. Requires Phone Mirror to be running (the /pair route lives on its
+  // HTTP server).
+  safeHandle('phone-mirror:arm-extension', async () => {
+    try {
+      const svc = PhoneMirrorService.getInstance();
+      if (!svc.isRunning()) {
+        return { error: 'Enable Phone Mirror first' };
+      }
+      return svc.armExtensionPairing();
+    } catch (e: any) {
+      console.error('[IPC] phone-mirror:arm-extension error:', e);
+      return { error: e?.message || 'failed to arm extension pairing' };
     }
   });
 

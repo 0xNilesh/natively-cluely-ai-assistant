@@ -6,6 +6,7 @@ import QRCode from 'qrcode';
 import { URL } from 'url';
 import { WebSocket, WebSocketServer } from 'ws';
 import { SettingsManager } from './SettingsManager';
+import { CredentialsManager } from './CredentialsManager';
 import { PHONE_MIRROR_HTML } from './phoneMirrorClient';
 import { DOM_CONTEXT_MAX_CHARS } from '../config/constants';
 
@@ -37,6 +38,25 @@ export type PhoneCommand =
   | { type: 'action'; action: string }
   | { type: 'screenshot' };
 
+/**
+ * Metadata the companion extension sends alongside a captured DOM (drives the
+ * desktop "Page context" preview chip). All fields optional/best-effort.
+ */
+export interface DomCaptureMeta {
+  title?: string;
+  url?: string;
+  source?: string;
+  pageType?: string;
+  firstLine?: string;
+}
+
+/** A single open tab reported by the extension for the multi-tab picker. */
+export interface ExtensionTab {
+  id: number;
+  title: string;
+  url: string;
+}
+
 interface PersistedMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -53,6 +73,23 @@ const RATE_HTTP_LIMIT = 120;
 const TOKEN_BYTES = 24;
 const HANDSHAKE_TIMEOUT_MS = 5_000;
 const STATUS_LISTENERS_KEY = Symbol('phone-mirror-status-listeners');
+
+// One-click /pair: how long the "Connect browser extension" button keeps the
+// /pair endpoint open after the user clicks it. Single-use — burns on success.
+const PAIR_ARM_WINDOW_MS = 60_000;
+// Desktop → extension capture push default deadline. README: "short capture
+// timeout + screenshot fallback" — if the extension doesn't ack `done` in time,
+// the hotkey path falls back to a screenshot rather than silently no-op.
+const CAPTURE_TIMEOUT_MS = 2_500;
+const LIST_TABS_TIMEOUT_MS = 1_500;
+
+// The companion extension's pinned ID (deterministic via the manifest `key`).
+// The one-click /pair endpoint requires this EXACT origin (not the structural
+// [a-p]{32} check used by /dom). Contributors loading an unpacked build with a
+// different ID can override via NATIVELY_DOM_EXTENSION_ID. See natively-browser/README.md.
+const PINNED_EXTENSION_ID =
+  process.env.NATIVELY_DOM_EXTENSION_ID || 'macjecgdfliikhplbbdbpljomcigjnjg';
+const PINNED_EXTENSION_ORIGIN = `chrome-extension://${PINNED_EXTENSION_ID}`;
 
 type StatusListener = (info: PhoneMirrorInfo) => void;
 
@@ -76,6 +113,25 @@ export class PhoneMirrorService {
   private starting: Promise<PhoneMirrorInfo> | null = null;
   // Debounce rapid connect/disconnect status events to avoid redundant QR re-renders.
   private statusDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // ----- companion browser extension (v2) state -----
+  // Epoch (ms) until which the one-click /pair endpoint accepts a handshake.
+  // Set by armExtensionPairing(); burned to 0 on the first successful /pair.
+  private armedUntil = 0;
+  // WebSocket clients that announced `{type:'hello', role:'extension'}`. Tracked
+  // separately from phone clients so capture frames go only to the extension and
+  // StreamEvents (phone chat) never reach it.
+  private extClients = new Set<WebSocket>();
+  // Timestamp of the extension socket per most-recent browser activity, so when
+  // several browsers are paired the capture push targets the one in use.
+  private extActiveAt = new WeakMap<WebSocket, number>();
+  // In-flight desktop→extension requests keyed by reqId, resolved by the
+  // matching `capture-ack`/`tabs` control frame (or a timeout).
+  private pendingCaptures = new Map<string, { resolve: (r: { ok: boolean; reason?: string }) => void; timer: ReturnType<typeof setTimeout> }>();
+  private pendingTabs = new Map<string, { resolve: (tabs: ExtensionTab[]) => void; timer: ReturnType<typeof setTimeout> }>();
+  // Resolver for the window that should receive captured DOM (the overlay that
+  // mounts NativelyInterface). When it yields no live window, /dom returns 409.
+  private overlayResolver: (() => BrowserWindow | null) | null = null;
 
   static getInstance(): PhoneMirrorService {
     if (!PhoneMirrorService._instance) PhoneMirrorService._instance = new PhoneMirrorService();
@@ -131,6 +187,13 @@ export class PhoneMirrorService {
 
   async rotateToken(): Promise<PhoneMirrorInfo> {
     this.token = generateToken();
+    // Persist so the rotation survives a restart — this is the ONE deliberate
+    // action that forces the extension/phone to re-pair.
+    try {
+      CredentialsManager.getInstance().setPhoneMirrorToken(this.token);
+    } catch (_) {
+      /* credentials not ready — token still rotates for this session */
+    }
     this.invalidateQrCache();
     this.disconnectAllClients(4401, 'Token rotated');
     const info = await this.snapshot();
@@ -217,7 +280,7 @@ export class PhoneMirrorService {
 
   /** Returns true when at least one phone browser is connected. */
   hasClients(): boolean {
-    return !!this.wss && this.wss.clients.size > 0;
+    return this.phoneClientCount() > 0;
   }
 
   /**
@@ -227,6 +290,209 @@ export class PhoneMirrorService {
   onPhoneCommand(listener: (cmd: PhoneCommand) => void): () => void {
     this.phoneCommandListeners.add(listener);
     return () => this.phoneCommandListeners.delete(listener);
+  }
+
+  // ----- companion browser extension (v2) public API -----
+
+  /**
+   * Open the one-click /pair window for the companion extension. The user clicks
+   * "Connect browser extension" in Settings → this arms /pair for 60s; the next
+   * /pair POST from the pinned extension origin succeeds and burns the window.
+   */
+  armExtensionPairing(): { armedMs: number } {
+    this.armedUntil = Date.now() + PAIR_ARM_WINDOW_MS;
+    console.log('[PhoneMirror] extension pairing armed for', PAIR_ARM_WINDOW_MS, 'ms');
+    return { armedMs: PAIR_ARM_WINDOW_MS };
+  }
+
+  /** True while the /pair window is open (set by armExtensionPairing). */
+  private isArmed(): boolean {
+    return Date.now() < this.armedUntil;
+  }
+
+  /** True when at least one companion extension is connected over /ws. */
+  hasExtensionClient(): boolean {
+    for (const c of this.extClients) {
+      if (c.readyState === WebSocket.OPEN) return true;
+    }
+    return false;
+  }
+
+  /** Count of connected PHONE clients (excludes companion extension sockets). */
+  private phoneClientCount(): number {
+    if (!this.wss) return 0;
+    let n = 0;
+    for (const c of this.wss.clients) {
+      if (this.extClients.has(c)) continue;
+      n++;
+    }
+    return n;
+  }
+
+  /**
+   * Set the resolver for the window that should receive captured DOM. This is
+   * the overlay window that mounts NativelyInterface — captured page content is
+   * only meaningful when an active session/overlay exists. When the resolver
+   * returns no live window, /dom answers 409 no_active_session.
+   */
+  setOverlayResolver(fn: () => BrowserWindow | null): void {
+    this.overlayResolver = fn;
+  }
+
+  /**
+   * Ask the most-recently-active companion extension to capture the active tab
+   * (or `tabId`) and POST it to /dom. Resolves when the extension acks `done`,
+   * or `{ok:false}` on error/timeout/no-extension so the caller can fall back
+   * to a screenshot. The DOM itself flows over /dom, not this promise.
+   */
+  requestDomCapture(opts?: { tabId?: number; timeoutMs?: number }): Promise<{ ok: boolean; reason?: string }> {
+    const target = this.pickExtensionClient();
+    if (!target) return Promise.resolve({ ok: false, reason: 'no-extension' });
+    const reqId = generateToken();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingCaptures.delete(reqId);
+        resolve({ ok: false, reason: 'timeout' });
+      }, opts?.timeoutMs ?? CAPTURE_TIMEOUT_MS);
+      this.pendingCaptures.set(reqId, { resolve, timer });
+      try {
+        target.send(
+          JSON.stringify({ type: 'capture-dom', reqId, tabId: opts?.tabId }),
+        );
+      } catch (_) {
+        clearTimeout(timer);
+        this.pendingCaptures.delete(reqId);
+        resolve({ ok: false, reason: 'send-failed' });
+      }
+    });
+  }
+
+  /**
+   * Ask the active extension for its open-tab list (multi-tab picker). Resolves
+   * with [] on timeout / no extension. Plumbed now even before a UI consumes it.
+   */
+  listTabs(timeoutMs?: number): Promise<ExtensionTab[]> {
+    const target = this.pickExtensionClient();
+    if (!target) return Promise.resolve([]);
+    const reqId = generateToken();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingTabs.delete(reqId);
+        resolve([]);
+      }, timeoutMs ?? LIST_TABS_TIMEOUT_MS);
+      this.pendingTabs.set(reqId, { resolve, timer });
+      try {
+        target.send(JSON.stringify({ type: 'list-tabs', reqId }));
+      } catch (_) {
+        clearTimeout(timer);
+        this.pendingTabs.delete(reqId);
+        resolve([]);
+      }
+    });
+  }
+
+  /**
+   * Choose which extension socket to push to when several are connected: the one
+   * whose browser was most recently active (extActiveAt), else any open socket.
+   */
+  private pickExtensionClient(): WebSocket | null {
+    let best: WebSocket | null = null;
+    let bestAt = -1;
+    for (const c of this.extClients) {
+      if (c.readyState !== WebSocket.OPEN) continue;
+      const at = this.extActiveAt.get(c) ?? 0;
+      if (at >= bestAt) {
+        bestAt = at;
+        best = c;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * The live window that should receive captured DOM. Prefers the configured
+   * overlay resolver (the window mounting NativelyInterface); falls back to any
+   * live BrowserWindow only if no resolver is set (keeps standalone use working).
+   * Returns null when no live window exists → /dom answers 409.
+   */
+  private resolveDomTargetWindow(): BrowserWindow | null {
+    if (this.overlayResolver) {
+      try {
+        const win = this.overlayResolver();
+        if (win && !win.isDestroyed()) return win;
+        return null;
+      } catch (_) {
+        return null;
+      }
+    }
+    const fallback =
+      BrowserWindow.getFocusedWindow() ||
+      BrowserWindow.getAllWindows().find((w) => !w.isDestroyed()) ||
+      null;
+    return fallback && !fallback.isDestroyed() ? fallback : null;
+  }
+
+  /**
+   * Route an inbound control frame from a companion extension socket. Resolves
+   * pending requestDomCapture()/listTabs() promises and records browser activity
+   * for multi-browser arbitration. Returns true if the frame was an extension
+   * control frame (so the phone-command path is skipped).
+   */
+  private handleExtensionFrame(ws: WebSocket, msg: Record<string, unknown>): boolean {
+    switch (msg.type) {
+      case 'hello':
+        if (msg.role === 'extension') {
+          this.extClients.add(ws);
+          this.extActiveAt.set(ws, Date.now());
+          console.log('[PhoneMirror] companion extension connected');
+          return true;
+        }
+        return false;
+      case 'active':
+        if (this.extClients.has(ws)) this.extActiveAt.set(ws, Date.now());
+        return true;
+      case 'capture-ack': {
+        if (typeof msg.reqId !== 'string') return true;
+        this.extActiveAt.set(ws, Date.now());
+        const status = msg.status;
+        // 'started'/'posting' are progress — keep waiting. 'done'/'error' settle.
+        if (status === 'done' || status === 'error') {
+          const pending = this.pendingCaptures.get(msg.reqId);
+          if (pending) {
+            clearTimeout(pending.timer);
+            this.pendingCaptures.delete(msg.reqId);
+            pending.resolve(
+              status === 'done'
+                ? { ok: true }
+                : { ok: false, reason: typeof msg.error === 'string' ? msg.error : 'error' },
+            );
+          }
+        }
+        return true;
+      }
+      case 'tabs': {
+        if (typeof msg.reqId !== 'string') return true;
+        const pending = this.pendingTabs.get(msg.reqId);
+        if (pending) {
+          clearTimeout(pending.timer);
+          this.pendingTabs.delete(msg.reqId);
+          const tabs = Array.isArray(msg.tabs)
+            ? (msg.tabs as unknown[])
+                .map((t) => t as Record<string, unknown>)
+                .filter((t) => typeof t.id === 'number')
+                .map((t) => ({
+                  id: t.id as number,
+                  title: typeof t.title === 'string' ? t.title : '',
+                  url: typeof t.url === 'string' ? t.url : '',
+                }))
+            : [];
+          pending.resolve(tabs);
+        }
+        return true;
+      }
+      default:
+        return false;
+    }
   }
 
   // ----- snapshot / status -----
@@ -279,7 +545,7 @@ export class PhoneMirrorService {
       lanUrls,
       token: this.token,
       qrDataUrl,
-      clients: this.wss ? this.wss.clients.size : 0,
+      clients: this.phoneClientCount(),
     };
     this.cachedInfo = info;
     return info;
@@ -294,7 +560,10 @@ export class PhoneMirrorService {
 
   private async _start(exposeOnLan: boolean, persistEnabled: boolean): Promise<PhoneMirrorInfo> {
     this.exposeOnLan = exposeOnLan;
-    this.token = generateToken();
+    // Reuse the persisted token so the extension/phone pair ONCE (stable across
+    // restarts). Mint + persist only when there is none yet. A deliberate Rotate
+    // is the only thing that changes it (see rotateToken).
+    this.token = loadOrCreatePersistedToken();
     this.invalidateQrCache();
 
     const host = exposeOnLan ? '0.0.0.0' : '127.0.0.1';
@@ -344,6 +613,19 @@ export class PhoneMirrorService {
     this.token = '';
     this.livePartial = null;
     this.rateBuckets.clear();
+    this.armedUntil = 0;
+    this.extClients.clear();
+    // Settle any in-flight extension requests so callers don't hang on shutdown.
+    for (const { resolve, timer } of this.pendingCaptures.values()) {
+      clearTimeout(timer);
+      resolve({ ok: false, reason: 'shutting-down' });
+    }
+    this.pendingCaptures.clear();
+    for (const { resolve, timer } of this.pendingTabs.values()) {
+      clearTimeout(timer);
+      resolve([]);
+    }
+    this.pendingTabs.clear();
     if (wss) {
       for (const c of wss.clients) {
         try {
@@ -392,7 +674,7 @@ export class PhoneMirrorService {
     // Health endpoint — minimal info, never reveals token or DB paths.
     if (fullUrl.pathname === '/healthz') {
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-      res.end(JSON.stringify({ ok: true, clients: this.wss ? this.wss.clients.size : 0 }));
+      res.end(JSON.stringify({ ok: true, clients: this.phoneClientCount() }));
       return;
     }
 
@@ -433,14 +715,32 @@ export class PhoneMirrorService {
         try {
           const parsed = JSON.parse(body);
           if (parsed && typeof parsed.dom === 'string') {
-            const cappedDom = parsed.dom.substring(0, DOM_CONTEXT_MAX_CHARS);
-            const targetWin = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows().find((w: any) => !w.isDestroyed());
-            if (targetWin) {
-              targetWin.webContents.send('dom-context-received', cappedDom);
+            const jsonHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+            if (allowedOrigin) jsonHeaders['Access-Control-Allow-Origin'] = allowedOrigin;
+
+            // A probe is a liveness/auth check (connection status, manual-pair
+            // validation). It authenticated above, so answer 200 — but NEVER
+            // deliver it to the overlay, or a phantom "14 chars" page-context
+            // chip would appear on every status check.
+            if (parsed.probe === true) {
+              res.writeHead(200, jsonHeaders);
+              res.end(JSON.stringify({ success: true }));
+              return;
             }
-            const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-            if (allowedOrigin) headers['Access-Control-Allow-Origin'] = allowedOrigin;
-            res.writeHead(200, headers);
+
+            const cappedDom = parsed.dom.substring(0, DOM_CONTEXT_MAX_CHARS);
+            // Deliver to the overlay window (the one that mounts NativelyInterface).
+            // No live overlay → no active session to receive context → 409, so the
+            // extension can tell the user to start a Natively session first.
+            const targetWin = this.resolveDomTargetWindow();
+            if (!targetWin) {
+              res.writeHead(409, jsonHeaders);
+              res.end(JSON.stringify({ error: 'no_active_session' }));
+              return;
+            }
+            const meta = sanitizeCaptureMeta(parsed.meta);
+            targetWin.webContents.send('dom-context-received', cappedDom, meta);
+            res.writeHead(200, jsonHeaders);
             res.end(JSON.stringify({ success: true }));
             return;
           }
@@ -450,6 +750,50 @@ export class PhoneMirrorService {
         res.writeHead(400, headers);
         res.end('Bad Request');
       });
+      return;
+    }
+
+    // One-click pairing for the companion extension. Strictly gated:
+    //  - loopback caller only (never reachable off-box even with exposeOnLan),
+    //  - Origin must EXACTLY equal the pinned extension origin (not the structural
+    //    [a-p]{32} check /dom uses),
+    //  - must be armed (user clicked "Connect browser extension"); single-use.
+    if (fullUrl.pathname === '/pair') {
+      const pairOrigin = requestOrigin === PINNED_EXTENSION_ORIGIN ? requestOrigin : '';
+      if (req.method === 'OPTIONS') {
+        const headers: Record<string, string> = {
+          'Access-Control-Allow-Methods': 'POST, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type',
+        };
+        if (pairOrigin) headers['Access-Control-Allow-Origin'] = pairOrigin;
+        res.writeHead(204, headers);
+        res.end();
+        return;
+      }
+      const jsonHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (pairOrigin) jsonHeaders['Access-Control-Allow-Origin'] = pairOrigin;
+
+      if (req.method !== 'POST') {
+        res.writeHead(405, jsonHeaders);
+        res.end(JSON.stringify({ error: 'method_not_allowed' }));
+        return;
+      }
+      // Loopback-only: a phone on the LAN must never reach /pair.
+      if (!isLoopbackAddress(remote) || !pairOrigin) {
+        res.writeHead(403, jsonHeaders);
+        res.end(JSON.stringify({ error: 'forbidden' }));
+        return;
+      }
+      if (!this.isArmed()) {
+        res.writeHead(410, jsonHeaders);
+        res.end(JSON.stringify({ error: 'not_armed' }));
+        return;
+      }
+      // Burn the window — single-use.
+      this.armedUntil = 0;
+      console.log('[PhoneMirror] extension paired via one-click /pair');
+      res.writeHead(200, jsonHeaders);
+      res.end(JSON.stringify({ token: this.token, port: this.port }));
       return;
     }
 
@@ -572,13 +916,16 @@ export class PhoneMirrorService {
 
     ws.on('close', () => {
       clearInterval(ping);
+      // Drop any extension bookkeeping for this socket (no-op for phones).
+      this.extClients.delete(ws);
       this.emitStatusClientCount();
     });
     ws.on('error', () => {
       /* swallow — close fires next */
     });
 
-    // Parse and route commands from the phone browser.
+    // Parse and route commands. A socket is either a phone (chat/action/
+    // screenshot) or a companion extension (hello/capture-ack/tabs/active).
     ws.on('message', (data: any) => {
       try {
         const raw = typeof data === 'string' ? data : (data as Buffer).toString('utf8');
@@ -586,6 +933,11 @@ export class PhoneMirrorService {
         const cmd = JSON.parse(raw) as unknown;
         if (!cmd || typeof cmd !== 'object') return;
         const c = cmd as Record<string, unknown>;
+
+        // Companion-extension control frames are handled separately and must not
+        // fall through to the phone-command path. handleExtensionFrame returns
+        // true when it consumed the frame.
+        if (this.handleExtensionFrame(ws, c)) return;
 
         let validated: PhoneCommand | null = null;
         if (
@@ -626,6 +978,9 @@ export class PhoneMirrorService {
     const payload = JSON.stringify(event);
     for (const client of wss.clients) {
       if (client.readyState !== WebSocket.OPEN) continue;
+      // Phone StreamEvents (history/token/done/chat) are for phones only — never
+      // leak them to a companion extension socket.
+      if (this.extClients.has(client)) continue;
       // Backpressure guard: skip if buffered amount has run away (slow client).
       if ((client as any).bufferedAmount > 1_000_000) continue;
       try {
@@ -677,7 +1032,7 @@ export class PhoneMirrorService {
 
   private emitStatusClientCount(): void {
     if (this.statusListeners.size === 0) return;
-    const clients = this.wss ? this.wss.clients.size : 0;
+    const clients = this.phoneClientCount();
     if (this.cachedInfo && clients !== this.cachedInfo.clients) {
       const info = { ...this.cachedInfo, clients };
       this.cachedInfo = info;
@@ -721,6 +1076,59 @@ export class PhoneMirrorService {
 
 function generateToken(): string {
   return crypto.randomBytes(TOKEN_BYTES).toString('base64url');
+}
+
+/**
+ * Return the persisted Phone Mirror token, minting + persisting one on first use.
+ * Persisting makes the token stable across restarts so the extension/phone pair
+ * once; rotation (rotateToken) is the only thing that changes it. Falls back to
+ * an in-memory token if CredentialsManager isn't ready (token still works for
+ * this session, just not persisted).
+ */
+function loadOrCreatePersistedToken(): string {
+  try {
+    const cm = CredentialsManager.getInstance();
+    const existing = cm.getPhoneMirrorToken();
+    if (existing && /^[A-Za-z0-9_-]{16,}$/.test(existing)) return existing;
+    const fresh = generateToken();
+    cm.setPhoneMirrorToken(fresh);
+    return fresh;
+  } catch (_) {
+    return generateToken();
+  }
+}
+
+/** True for IPv4/IPv6 loopback remote addresses (gates the /pair endpoint). */
+function isLoopbackAddress(addr: string): boolean {
+  if (!addr) return false;
+  // Node may report IPv4-mapped IPv6 (::ffff:127.0.0.1) or bare ::1 / 127.x.
+  return (
+    addr === '::1' ||
+    addr === '::ffff:127.0.0.1' ||
+    addr.startsWith('127.') ||
+    addr.startsWith('::ffff:127.')
+  );
+}
+
+/**
+ * Validate + clamp the optional capture meta from the extension before it crosses
+ * the IPC boundary to the renderer's "Page context" chip. All fields optional;
+ * strings are length-capped; anything malformed is dropped.
+ */
+function sanitizeCaptureMeta(raw: unknown): DomCaptureMeta | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const m = raw as Record<string, unknown>;
+  const str = (v: unknown, max: number): string | undefined =>
+    typeof v === 'string' && v.length > 0 ? v.substring(0, max) : undefined;
+  const out: DomCaptureMeta = {
+    title: str(m.title, 300),
+    url: str(m.url, 2048),
+    source: str(m.source, 64),
+    pageType: str(m.pageType, 64),
+    firstLine: str(m.firstLine, 300),
+  };
+  // Drop the object entirely if nothing useful survived.
+  return Object.values(out).some((v) => v !== undefined) ? out : undefined;
 }
 
 function timingSafeEqualStr(a: string, b: string): boolean {

@@ -1,5 +1,17 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
+/**
+ * Metadata the companion extension sends with a captured page (drives the
+ * optional "Page context" chip). Mirrors DomCaptureMeta in PhoneMirrorService.
+ */
+interface DomCaptureMeta {
+  title?: string;
+  url?: string;
+  source?: string;
+  pageType?: string;
+  firstLine?: string;
+}
+
 // Types for the exposed Electron API
 interface ElectronAPI {
   updateContentDimensions: (dimensions: { width: number; height: number }) => Promise<void>;
@@ -861,7 +873,7 @@ interface ElectronAPI {
   // because a subsequent question's first token has to wait for the prior
   // response to drain through the supersession check.
   cancelChatStream: () => void;
-  onDomContextReceived: (callback: (dom: string) => void) => () => void;
+  onDomContextReceived: (callback: (dom: string, meta?: DomCaptureMeta) => void) => () => void;
 }
 
 export const PROCESSING_EVENTS = {
@@ -1086,6 +1098,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   phoneMirrorSetLan: (exposeOnLan: boolean) =>
     ipcRenderer.invoke('phone-mirror:set-lan', exposeOnLan),
   phoneMirrorRotateToken: () => ipcRenderer.invoke('phone-mirror:rotate-token'),
+  phoneMirrorArmExtension: () => ipcRenderer.invoke('phone-mirror:arm-extension'),
   phoneMirrorPushScreenshot: (screenshotPath?: string) =>
     ipcRenderer.invoke('phone-mirror:push-screenshot', screenshotPath),
   onPhoneMirrorStatus: (callback: (info: any) => void) => {
@@ -2204,8 +2217,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   cancelChatStream: () => {
     ipcRenderer.send('gemini-chat-stream-stop');
   },
-  onDomContextReceived: (callback: (dom: string) => void) => {
-    const subscription = (_: any, dom: string) => callback(dom);
+  onDomContextReceived: (callback: (dom: string, meta?: DomCaptureMeta) => void) => {
+    // The desktop sends (dom, meta?) — meta drives the optional "Page context"
+    // chip. Forwarding the extra arg is back-compatible: existing callers that
+    // only declare (dom) simply ignore it.
+    const subscription = (_: any, dom: string, meta?: DomCaptureMeta) => callback(dom, meta);
     ipcRenderer.on('dom-context-received', subscription);
     return () => {
       ipcRenderer.removeListener('dom-context-received', subscription);

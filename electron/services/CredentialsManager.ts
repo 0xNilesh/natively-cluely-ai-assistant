@@ -76,6 +76,14 @@ export interface StoredCredentials {
     trialExpiresAt?: string;   // ISO timestamp — local copy for startup check
     trialStartedAt?: string;   // ISO timestamp
     trialClaimed?: boolean;  // set true on first claim, never cleared — hides start card permanently
+    /**
+     * Phone Mirror / companion-extension pairing token. Persisted (encrypted at
+     * rest via safeStorage) so the token is STABLE across restarts — the browser
+     * extension and phone pair once, not every launch. Regenerated only on a
+     * deliberate "Rotate token". Shared by phone-mirror QR pairing and the
+     * extension /pair handshake. See PhoneMirrorService + natively-browser/CONTRACT.md.
+     */
+    phoneMirrorToken?: string;
 }
 
 export class CredentialsManager {
@@ -124,6 +132,11 @@ export class CredentialsManager {
 
     public getDeepseekApiKey(): string | undefined {
         return this.credentials.deepseekApiKey;
+    }
+
+    /** Persisted Phone Mirror / extension pairing token (stable across restarts). */
+    public getPhoneMirrorToken(): string | undefined {
+        return this.credentials.phoneMirrorToken;
     }
 
     public getLitellmApiKey(): string | undefined {
@@ -300,6 +313,17 @@ export class CredentialsManager {
         this.credentials.deepseekApiKey = trimmed || undefined;
         this.saveCredentials();
         console.log('[CredentialsManager] DeepSeek API Key updated');
+    }
+
+    /**
+     * Persist the Phone Mirror / extension pairing token. Pass an empty string
+     * to clear it (next start mints a fresh one). Only the PhoneMirrorService
+     * writes this — on first start (mint) and on Rotate token.
+     */
+    public setPhoneMirrorToken(token: string): void {
+        this.credentials.phoneMirrorToken = token || undefined;
+        this.saveCredentials();
+        console.log('[CredentialsManager] Phone Mirror token updated');
     }
 
     /**

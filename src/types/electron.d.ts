@@ -540,11 +540,25 @@ export interface ElectronAPI {
   phoneMirrorDisable: () => Promise<{ success: true }>;
   phoneMirrorSetLan: (exposeOnLan: boolean) => Promise<PhoneMirrorInfo | { error: string }>;
   phoneMirrorRotateToken: () => Promise<PhoneMirrorInfo | { error: string }>;
+  // Arm the 60s one-click pairing window for the companion browser extension.
+  phoneMirrorArmExtension: () => Promise<{ armedMs: number } | { error: string }>;
   onPhoneMirrorStatus: (callback: (info: PhoneMirrorInfo) => void) => () => void;
   onPhoneMirrorIncomingChat: (
     callback: (data: { message: string; streamId: string }) => void,
   ) => () => void;
-  onDomContextReceived: (callback: (dom: string) => void) => () => void;
+  onDomContextReceived: (callback: (dom: string, meta?: DomCaptureMeta) => void) => () => void;
+}
+
+/**
+ * Metadata sent by the companion extension with a captured page; drives the
+ * optional "Page context" chip. Mirrors DomCaptureMeta in PhoneMirrorService.
+ */
+export interface DomCaptureMeta {
+  title?: string;
+  url?: string;
+  source?: string;
+  pageType?: string;
+  firstLine?: string;
 }
 
 export interface SkillSummary {
