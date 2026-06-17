@@ -312,6 +312,7 @@ export function LocalWhisperModelPanel() {
                         const isDownloading = model.status === 'downloading' || downloadingSet.has(model.id);
                         const progress = downloadProgress[model.id] || 0;
                         const isAvailable = model.status === 'available';
+                        const isError = model.status === 'error';
                         const isRecommended = hardware?.recommendedModel === model.id;
                         
                         return (
@@ -358,7 +359,7 @@ export function LocalWhisperModelPanel() {
                                 </div>
                                 
                                 <div className="flex-shrink-0 flex items-center gap-2">
-                                    {!isAvailable && !isDownloading && (
+                                    {!isAvailable && !isDownloading && !isError && (
                                         <button
                                             onClick={() => handleDownload(model.id)}
                                             className="group/btn relative h-[34px] px-4 flex items-center gap-1.5 rounded-[10px] bg-accent-primary/10 hover:bg-accent-primary/20 text-accent-primary text-[13px] font-semibold transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] active:scale-[0.96] shadow-sm"

@@ -4149,7 +4149,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle('local-whisper-preload', async (_, modelId: string) => {
     if (process.platform === 'darwin') {
       const os = require('os') as typeof import('os');
-      const darwinMajor = parseInt(os.release().split('.')[0] || '0', 10);
+      const darwinMajor = parseInt(os.release().split('.')[0], 10);
       if (Number.isNaN(darwinMajor) || darwinMajor < 22) {
         return { success: false, error: 'Local Whisper models require macOS 13 Ventura or later.' };
       }
