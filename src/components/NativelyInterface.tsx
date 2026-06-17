@@ -1210,14 +1210,21 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // rate-limited channel during the tween); reportShellSize reads shellWidth.get()
   // so the height it reports always matches the panel's current width.
   const SHELL_WIDTH_COLLAPSED = 600;
-  const SHELL_WIDTH_EXPANDED = 780;
-  // The OS overlay window is a FIXED WIDTH for its entire visible lifetime, equal
-  // to the EXPANDED shell width. The window is created/shown at this width and
-  // never width-resized; the CSS panel animates 600↔780 centered inside it
-  // (mx-auto). This MUST match WindowHelper.OVERLAY_DEFAULT_WIDTH. Keeping the
-  // window width fixed means its X origin never moves, so the TopPill is
-  // pixel-stable and there is zero per-frame transparent-window re-raster.
-  const OVERLAY_WINDOW_WIDTH = SHELL_WIDTH_EXPANDED;
+  // The EXPANDED panel is intentionally NARROWER than the OS window (732 < 780).
+  // The window is fixed at 780 (OVERLAY_WINDOW_WIDTH below); decoupling the panel
+  // from it leaves a permanent ~24px gutter on each side even when expanded, which
+  // is the room the floating resize toggle needs to keep its corner gap in the
+  // expanded state (when the panel filled the window edge-to-edge there was no
+  // gutter, so the button was forced inward over the panel — the reported bug).
+  const SHELL_WIDTH_EXPANDED = 732;
+  // The OS overlay window is a FIXED WIDTH for its entire visible lifetime. The
+  // window is created/shown at this width and never width-resized; the CSS panel
+  // animates 600↔732 centered inside it (mx-auto). This MUST match
+  // WindowHelper.OVERLAY_DEFAULT_WIDTH. Keeping the window width fixed means its
+  // X origin never moves, so the TopPill is pixel-stable and there is zero
+  // per-frame transparent-window re-raster. It is INTENTIONALLY wider than
+  // SHELL_WIDTH_EXPANDED so a side gutter always exists for the resize toggle.
+  const OVERLAY_WINDOW_WIDTH = 780;
   const shellWidth = useMotionValue(SHELL_WIDTH_COLLAPSED);
   // Vertical budget cap for the chat scroll area. Default Infinity = "not yet
   // measured / unbounded", so the width-derived aesthetic max applies until we
@@ -1235,43 +1242,67 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // visible chat region tracks the panel size frame-for-frame. This is a motion
   // value bound to a style, so it updates without a React re-render.
   const scrollMaxH = useTransform([shellWidth, verticalCap], ([w, cap]: number[]) =>
-    Math.min(widthDerivedScrollMax(w), cap),
+    // Pass the real collapsed/expanded panel widths so the 320→560 scroll-height
+    // ramp reaches its max at the actual expanded width (732), not the default 780.
+    Math.min(
+      widthDerivedScrollMax(w, {
+        collapsedWidth: SHELL_WIDTH_COLLAPSED,
+        expandedWidth: SHELL_WIDTH_EXPANDED,
+      }),
+      cap,
+    ),
   );
-  // The floating resize toggle is CENTERED EXACTLY ON the panel's top-right
-  // CORNER POINT, and tracks that point live as the panel resizes. Centering a
-  // square on the corner means it straddles the corner symmetrically — equal
-  // overlap into the panel and into the side/top gutters — so its center rides
-  // the 45° bisector of the corner, which is the placement requested.
+  // The floating resize toggle rides the panel's top-right CORNER along that
+  // corner's 45° bisector, with a small gap from the body when there's room. Its
+  // center is offset from the corner point by the SAME distance `d` on BOTH axes,
+  // which is what keeps it exactly on the 45° diagonal in every state (an earlier
+  // version clamped only the horizontal when expanded → unequal offsets → off the
+  // diagonal, the reported bug).
   //
   // Corner point in viewport coords:
   //   • x: the panel is centered in the fixed-width OVERLAY_WINDOW_WIDTH window,
   //     so its right edge sits M = (OVERLAY_WINDOW_WIDTH - shellWidth) / 2 px from
-  //     the window right (M = 90 collapsed → 0 expanded). Tracked off the LIVE
-  //     `shellWidth`, so the button follows the corner every spring frame.
-  //   • y: the panel's measured top edge (panelTop), set by measureButtonTop().
+  //     the window right (M = 90 collapsed → 0 expanded). Off the LIVE shellWidth,
+  //     so the button follows the corner every spring frame.
+  //   • y: the panel's measured top edge (panelTop, via measureButtonTop()).
   //
-  // To center the 28 px button on the corner: pull its right edge BTN/2 inside
-  // the corner (right = M - BTN/2) and its top edge BTN/2 above the corner
-  // (top = panelTop - BTN/2). When expanded (M → 0) the corner coincides with the
-  // window's right edge; the right clamp keeps the button fully on-screen, parked
-  // on the corner, instead of half-clipping past the window edge.
+  // `d` = signed diagonal offset of the button CENTER from the corner, measured
+  // outward (toward the window's top-right corner = up-and-right):
+  //   • Desired: +GAP, so the button sits GAP px outside the corner in the gutter
+  //     — the space between body and button the user asked for.
+  //   • Constraint: the button must stay on-screen. The outward room to the right
+  //     is M (the gutter width); going further clips past the window edge. So we
+  //     cap d at (M - BTN/2 - EDGE_MARGIN). When expanded M→0 this cap is
+  //     NEGATIVE, so d flips negative and the button tucks INWARD along the SAME
+  //     diagonal (equal on both axes) — still on the 45° line, just inside the
+  //     corner instead of outside it.
+  // center-x from window right = M - d  → right = (M - d) - BTN/2
+  // center-y from window top   = panelTop - d → top = (panelTop - d) - BTN/2
   const RESIZE_BTN_SIZE = 28; // matches ResizeToggle's w-[28px]
-  const RESIZE_BTN_MIN_RIGHT = 2; // keep the button on-screen when expanded (M→0)
-  const buttonRight = useTransform(shellWidth, (w) =>
-    Math.max(
-      RESIZE_BTN_MIN_RIGHT,
-      (OVERLAY_WINDOW_WIDTH - w) / 2 - RESIZE_BTN_SIZE / 2,
-    ),
+  const RESIZE_BTN_DIAGONAL_GAP = 8; // outward gap from the corner when there's room
+  const RESIZE_BTN_EDGE_MARGIN = 2; // keep this much of the button on-screen when expanded
+  // Diagonal offset `d`, shared by both axes so the button is always on the 45°
+  // bisector. Capped by the available gutter so it never clips off the window.
+  const resizeBtnDiagonalOffset = useTransform(shellWidth, (w) => {
+    const m = (OVERLAY_WINDOW_WIDTH - w) / 2;
+    return Math.min(RESIZE_BTN_DIAGONAL_GAP, m - RESIZE_BTN_SIZE / 2 - RESIZE_BTN_EDGE_MARGIN);
+  });
+  const buttonRight = useTransform([shellWidth, resizeBtnDiagonalOffset], ([w, d]: number[]) =>
+    (OVERLAY_WINDOW_WIDTH - w) / 2 - d - RESIZE_BTN_SIZE / 2,
   );
-  // Vertical anchor: the button center sits on the panel's TOP edge line. The
-  // button is position:fixed (viewport-relative), but the panel card is NOT at
-  // the window top — it sits below the TopPill + an 8 px gap (plus any status
-  // pills / banners). measureButtonTop() measures the panel's real top edge and
-  // stores (panelTop - BTN/2) here so the button is vertically centered on the
-  // corner. The panel's TOP does not move during a width animation (only its
-  // width does), so a value refreshed on layout change — not per frame — is
-  // sufficient and cheap. Initial guess covers TopPill(~36) + gap(8) - BTN/2.
-  const buttonTop = useMotionValue(30);
+  // Vertical anchor. `panelTopMV` holds the panel card's measured top edge
+  // (viewport-relative), set by measureButtonTop(). The button is position:fixed,
+  // but the panel card is NOT at the window top — it sits below the TopPill + 8px
+  // gap (plus any status pills / banners) — so this offset is dynamic and measured
+  // from shellRef. The panel's TOP does not move during a width animation (only
+  // its width does), so refreshing on layout change — not per frame — is enough.
+  // Initial guess covers TopPill(~36) + gap(8). buttonTop applies the SAME
+  // diagonal offset `d` as buttonRight (subtracted, since up = toward the window
+  // top) so the button center stays on the corner's 45° bisector in every state.
+  const panelTopMV = useMotionValue(44);
+  const buttonTop = useTransform([panelTopMV, resizeBtnDiagonalOffset], ([top, d]: number[]) =>
+    top - d - RESIZE_BTN_SIZE / 2,
+  );
 
   // isExpanded mirror for closures inside refs/observers that must not
   // re-bind on every toggle.
@@ -1583,14 +1614,13 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     verticalCap.set(nextCap);
   }, [attachedContext.length, verticalCap]);
 
-  // Measure the panel card's top edge (viewport-relative) so the floating resize
-  // toggle can be CENTERED on the panel's TOP-RIGHT CORNER, not pinned to the
-  // window top. The panel sits below the TopPill + 8px gap (and any status pills /
-  // warning banners that push it further down), so this offset is dynamic. We
-  // read shellRef (the rounded panel card itself), not contentRef (the whole stack
-  // including the TopPill). Store (panelTop - BTN/2) so the button's CENTER lands
-  // on the panel's top edge line — combined with buttonRight (= M - BTN/2) the
-  // button straddles the exact corner point. getBoundingClientRect().top is
+  // Measure the panel card's top edge (viewport-relative) into panelTopMV so the
+  // floating resize toggle can ride the panel's TOP-RIGHT CORNER, not the window
+  // top. The panel sits below the TopPill + 8px gap (and any status pills /
+  // warning banners that push it further down), so this offset is dynamic. We read
+  // shellRef (the rounded panel card itself), not contentRef (the whole stack
+  // including the TopPill). We store the RAW top edge here; buttonTop applies the
+  // diagonal offset + BTN/2 centering. getBoundingClientRect().top is
   // viewport-relative, which is what position:fixed `top` wants. The panel's TOP
   // does not move during a width animation (only its width does), so measuring on
   // layout change — not per frame — is correct and cheap.
@@ -1598,8 +1628,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     const shellEl = shellRef.current;
     if (!shellEl) return;
     const top = shellEl.getBoundingClientRect().top;
-    if (top > 0) buttonTop.set(Math.round(top - RESIZE_BTN_SIZE / 2));
-  }, [buttonTop]);
+    if (top > 0) panelTopMV.set(Math.round(top));
+  }, [panelTopMV]);
 
   // NOTE: the old per-frame "chase" subscriber that pushed the live shell width
   // to setBounds every frame is GONE. The OS window is a fixed width (780) for

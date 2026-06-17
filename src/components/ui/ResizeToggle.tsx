@@ -56,6 +56,14 @@ const ResizeToggle = forwardRef<HTMLButtonElement, ResizeToggleProps>(
       <motion.button
         ref={ref}
         type="button"
+        // preventDefault on mousedown so clicking the button does NOT move DOM
+        // focus to it (or blur the chat input / the user's foreground app). The
+        // overlay is a nonactivating NSPanel; a plain <button> would still steal
+        // focus on press, dropping the caret out of the chat input mid-meeting.
+        // This is the standard "toolbar button keeps focus where it was" idiom —
+        // onClick still fires normally because only the default focus side-effect
+        // of mousedown is suppressed.
+        onMouseDown={(e) => e.preventDefault()}
         onClick={onToggle}
         onHoverStart={() => setHovered(true)}
         onHoverEnd={() => setHovered(false)}
