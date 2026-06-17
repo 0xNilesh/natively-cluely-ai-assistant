@@ -1953,7 +1953,11 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
       // GROQ FAST TEXT OVERRIDE (Text-Only) — gated on picked model so Gemini/Claude/OpenAI
       // selections aren't silently routed to Groq. See streamChat() for matching gate.
-      const fastModeAppliesNS = this.groqFastTextMode && !isMultimodal && (
+      // Exclude codex-cli:* selections: fast-mode's codex path uses the hardcoded fastModel
+      // (gpt-5.3-codex), overriding the sub-model the user explicitly chose. Fall through to
+      // the explicit codex block below which calls getSelectedCodexCliModel(false) and honours
+      // currentModelId (e.g. extracts "gpt-5.4" from "codex-cli:gpt-5.4"). (issue #315)
+      const fastModeAppliesNS = this.groqFastTextMode && !isMultimodal && !this.isCodexCliModel(this.currentModelId) && (
         this.codexCliConfig.enabled ||
         this.isGroqModel(this.currentModelId) ||
         this.currentModelId === 'natively'
@@ -4061,7 +4065,11 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     // Gate: only short-circuit to fast paths when the user's picked model is one of
     // the providers fast-mode actually routes to. Otherwise picking Gemini/Claude/OpenAI
     // in the UI is silently ignored because fast-mode returns before model routing runs.
-    const fastModeApplies = this.groqFastTextMode && !isMultimodal && (
+    // Exclude codex-cli:* selections: fast-mode's codex path uses the hardcoded fastModel
+    // (gpt-5.3-codex), overriding the sub-model the user explicitly chose. Fall through to
+    // the explicit codex block below which calls getSelectedCodexCliModel(false) and honours
+    // currentModelId (e.g. extracts "gpt-5.4" from "codex-cli:gpt-5.4"). (issue #315)
+    const fastModeApplies = this.groqFastTextMode && !isMultimodal && !this.isCodexCliModel(this.currentModelId) && (
       this.codexCliConfig.enabled ||
       this.isGroqModel(this.currentModelId) ||
       this.currentModelId === 'natively'
