@@ -21,6 +21,45 @@ import {
   mergeRollingTranscriptFinal,
   mergeRollingTranscriptPartial,
 } from '../../electron/utils/rollingTranscriptState';
+import { categorizeSttError } from '../lib/sttErrorMapper';
+
+import type { SkillSummary } from '../types/electron';
+
+function SkillPicker({
+  skills,
+  selectedIndex,
+  anchorEl,
+  onSelect,
+}: {
+  skills: SkillSummary[];
+  selectedIndex: number;
+  anchorEl: HTMLElement | null;
+  onSelect: (s: SkillSummary) => void;
+}) {
+  const rect = anchorEl?.getBoundingClientRect();
+  if (!rect) return null;
+  const style: React.CSSProperties = {
+    position: 'fixed',
+    left: rect.left,
+    bottom: window.innerHeight - rect.top + 6,
+    width: rect.width,
+    zIndex: 9999,
+  };
+  return (
+    <div style={style} className="rounded-xl border border-border-subtle bg-bg-card shadow-xl overflow-hidden max-h-48 overflow-y-auto">
+      {skills.map((skill, i) => (
+        <button
+          key={skill.id}
+          onMouseDown={(e) => { e.preventDefault(); onSelect(skill); }}
+          className={`w-full flex items-center gap-2.5 px-3 py-2 text-left transition-colors ${i === selectedIndex ? 'bg-accent-primary/15 text-text-primary' : 'hover:bg-bg-subtle/50 text-text-secondary'}`}
+        >
+          <span className="text-[11px] font-mono text-amber-400 shrink-0">/{skill.id}</span>
+          <span className="text-[11px] truncate flex-1">{skill.description}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
 
 /** Intents that show LLM answer content — pin chat panel on first stream token. */
 const ANSWER_PANEL_INTENTS = new Set([
@@ -80,6 +119,7 @@ import React, {
   useRef,
   useState,
 } from 'react';
+import { createPortal } from 'react-dom';
 import {
   collapseConsecutiveDuplicateSystemMessages,
   shouldDedupeOverlayAction,
@@ -577,6 +617,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const shellRef = React.useRef<HTMLDivElement>(null);
   const [isExpanded, setIsExpanded] = useState(true);
   const [inputValue, setInputValue] = useState('');
+  const [availableSkills, setAvailableSkills] = useState<SkillSummary[]>([]);
+  const [skillPickerIndex, setSkillPickerIndex] = useState(0);
   const { shortcuts, isShortcutPressed } = useShortcuts();
   const [messages, setMessages] = useState<Message[]>([]);
   // Keep chat history visible once an answer lands until explicit clear / session reset.
@@ -941,6 +983,12 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       },
     );
     return () => unsub?.();
+  }, []);
+
+  useEffect(() => {
+    window.electronAPI?.skillsRefresh?.()
+      .then((list: SkillSummary[]) => setAvailableSkills(Array.isArray(list) ? list : []))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -1369,7 +1417,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   useEffect(() => {
     // Fetch initial state
     if (window.electronAPI?.getUndetectable) {
-      window.electronAPI.getUndetectable().then(setIsUndetectable);
+      window.electronAPI.getUndetectable().then(setIsUndetectable).catch(() => {});
     }
 
     if (window.electronAPI?.onUndetectableChanged) {
@@ -3759,12 +3807,13 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 
         if (!question && currentAttachments.length === 0) {
           if (sttUserStatus === 'failed' && sttUserError) {
+            const errCat = categorizeSttError(sttUserError);
             setMessages((prev) => [
               ...prev,
               {
                 id: genMessageId(),
                 role: 'system',
-                text: `❌ STT Error: ${sttUserError}`,
+                text: `❌ ${errCat.title}: ${errCat.body}`,
               },
             ]);
           } else if (sttUserStatus === 'reconnecting') {
@@ -3903,6 +3952,13 @@ Provide only the answer, nothing else.`;
       }
     }
   };
+
+  const selectSkill = useCallback((skill: SkillSummary) => {
+    const prefix = inputValue.startsWith('$') ? '$' : '/';
+    setInputValue(`${prefix}${skill.id} `);
+    setSkillPickerIndex(0);
+    textInputRef.current?.focus();
+  }, [inputValue]);
 
   const handleManualSubmit = async () => {
     if (!inputValue.trim() && attachedContext.length === 0) return;
@@ -5293,7 +5349,6 @@ Provide only the answer, nothing else.`;
       window.electronAPI?.getArch?.().catch(() => 'unknown'),
       window.electronAPI?.getOsVersion?.().catch(() => 'unknown'),
     ]);
-    const { categorizeSttError } = await import('../lib/sttErrorMapper');
     const userCat = sttUserError ? categorizeSttError(sttUserError) : null;
     const interviewerCat = sttInterviewerError ? categorizeSttError(sttInterviewerError) : null;
     const report = [
@@ -5327,6 +5382,19 @@ Provide only the answer, nothing else.`;
       document.body.removeChild(ta);
     }
   };
+
+  // Skill picker: derived from inputValue — open when the user types / or $ followed
+  // only by word chars (no space yet). Closes automatically once a space is typed.
+  const skillPickerQuery = (() => {
+    const m = inputValue.match(/^[/$]([A-Za-z0-9_-]*)$/);
+    return m ? m[1].toLowerCase() : null;
+  })();
+  const filteredSkills = skillPickerQuery !== null
+    ? availableSkills.filter(
+        (s) => s.id.includes(skillPickerQuery) || s.name.toLowerCase().includes(skillPickerQuery),
+      )
+    : [];
+  const clampedPickerIndex = Math.min(skillPickerIndex, Math.max(0, filteredSkills.length - 1));
 
   return (
     <>
@@ -5941,8 +6009,30 @@ Provide only the answer, nothing else.`;
                     data-testid="overlay-chat-input"
                     type="text"
                     value={inputValue}
-                    onChange={(e) => setInputValue(e.target.value)}
+                    onChange={(e) => { setInputValue(e.target.value); setSkillPickerIndex(0); }}
                     onKeyDown={(e) => {
+                      if (filteredSkills.length > 0 && skillPickerQuery !== null) {
+                        if (e.key === 'ArrowUp') {
+                          e.preventDefault();
+                          setSkillPickerIndex((i) => Math.max(0, i - 1));
+                          return;
+                        }
+                        if (e.key === 'ArrowDown') {
+                          e.preventDefault();
+                          setSkillPickerIndex((i) => Math.min(filteredSkills.length - 1, i + 1));
+                          return;
+                        }
+                        if (e.key === 'Escape') {
+                          e.preventDefault();
+                          setInputValue('');
+                          return;
+                        }
+                        if (e.key === 'Tab' || (e.key === 'Enter' && !e.repeat)) {
+                          e.preventDefault();
+                          selectSkill(filteredSkills[clampedPickerIndex]);
+                          return;
+                        }
+                      }
                       if (e.key !== 'Enter' || e.repeat) return;
                       e.preventDefault();
                       handleManualSubmit();
@@ -5957,6 +6047,19 @@ Provide only the answer, nothing else.`;
                     className={`w-full border focus:ring-1 rounded-xl pl-3 pr-10 py-2.5 focus:outline-none transition-all duration-200 ease-sculpted text-[13px] leading-relaxed ${inputClass} ${stealthTapActive ? 'ring-2 ring-emerald-400/30 border-emerald-400/40 shadow-[0_0_12px_rgba(52,211,153,0.15)]' : ''}`}
                     style={appearance.inputStyle}
                   />
+
+                  {/* Skill picker — portal so it escapes the overflow-hidden shell */}
+                  {filteredSkills.length > 0 && skillPickerQuery !== null &&
+                    createPortal(
+                      <SkillPicker
+                        skills={filteredSkills}
+                        selectedIndex={clampedPickerIndex}
+                        anchorEl={textInputRef.current}
+                        onSelect={selectSkill}
+                      />,
+                      document.body,
+                    )
+                  }
 
                   {/* Custom Rich Placeholder */}
                   {!inputValue && (

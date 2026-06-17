@@ -640,6 +640,12 @@ impl MicrophoneCapture {
     }
 }
 
+impl Drop for MicrophoneCapture {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 // ============================================================================
 // DEVICE ENUMERATION
 // ============================================================================

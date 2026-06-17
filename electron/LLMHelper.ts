@@ -2659,7 +2659,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     if (imagePaths?.length) {
       const content: any[] = [{ type: "text", text: userMessage }];
       for (const p of imagePaths) {
-        const b64 = fs.readFileSync(p).toString("base64");
+        const b64 = (await fs.promises.readFile(p)).toString("base64");
         content.push({ type: "image_url", image_url: { url: `data:image/png;base64,${b64}` } });
       }
       messages.push({ role: "user", content });
@@ -4900,7 +4900,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     if (imagePaths?.length) {
       const content: any[] = [{ type: "text", text: userMessage }];
       for (const p of imagePaths) {
-        const b64 = fs.readFileSync(p).toString("base64");
+        const b64 = (await fs.promises.readFile(p)).toString("base64");
         content.push({ type: "image_url", image_url: { url: `data:image/png;base64,${b64}` } });
       }
       messages.push({ role: "user", content });

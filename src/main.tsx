@@ -22,7 +22,7 @@ if (window.electronAPI?.getThemeMode) {
   window.electronAPI.getThemeMode().then(({ resolved }) => {
     document.documentElement.setAttribute('data-theme', resolved);
     localStorage.setItem(THEME_CACHE_KEY, resolved);
-  });
+  }).catch(() => {});
 
   window.electronAPI?.onThemeChanged?.(({ resolved }) => {
     document.documentElement.setAttribute('data-theme', resolved);
