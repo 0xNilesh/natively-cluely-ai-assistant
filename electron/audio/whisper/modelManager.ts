@@ -244,6 +244,24 @@ export function isModelCached(modelId: WhisperModelId, dtype?: string | Record<s
  * cached — not just "any file in the directory".
  */
 export function getAvailableModels(): WhisperModelInfo[] {
+  // onnxruntime-node 1.22.0 links against libc++ symbols (std::to_chars for
+  // double) that are only exported on macOS 13 Ventura and later. On macOS 12
+  // (Monterey) and earlier the dylib load fails with "Symbol not found:
+  // __ZNSt3__18to_charsEPcS0_d". Surface a clear error so users don't waste
+  // time downloading models that will immediately crash.
+  if (process.platform === 'darwin') {
+    const release = (require('os') as typeof import('os')).release(); // e.g. "21.x.x" = macOS 12
+    const darwinMajor = parseInt(release.split('.')[0], 10);
+    // Darwin 22 = macOS 13 Ventura. Darwin 21 = macOS 12 Monterey.
+    if (Number.isNaN(darwinMajor) || darwinMajor < 22) {
+      return MODEL_CATALOG.map(m => ({
+        ...m,
+        status: 'error' as const,
+        errorMessage: 'Requires macOS 13 Ventura or later. Local models are not supported on macOS 12 (Monterey) or earlier.',
+      }));
+    }
+  }
+
   // Resolve the active dtype lazily — avoids importing inferenceConfig at
   // module top (which would break the modelPreloader → modelManager require
   // chain on platforms where process info isn't yet available).

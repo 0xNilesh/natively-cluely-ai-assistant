@@ -50,7 +50,7 @@ export const SkillsSettings: React.FC = () => {
                 <div>
                     <h3 className="text-lg font-bold text-text-primary mb-1">Skills</h3>
                     <p className="text-xs text-text-secondary">
-                        Local SKILL.md instructions that can be invoked from the overlay dropdown or by typing $skill-name or /skill-name.
+                        Local SKILL.md instructions. Invoke a skill in the overlay chat by typing /skill-name or $skill-name at the start of your message.
                     </p>
                 </div>
                 <button

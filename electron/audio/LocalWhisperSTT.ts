@@ -629,14 +629,30 @@ export class LocalWhisperSTT extends EventEmitter {
                     this.streamingNextDelayMs = this.streamingIntervalBaseMs;
                 }
                 if (msg.message.includes('Failed to load model')) {
+                    const isOnnxSymbolError = msg.message.includes('Symbol not found')
+                        || msg.message.includes('__ZNSt3__18to_charsEPcS0_d')
+                        || msg.message.includes('libonnxruntime');
                     this.emit('error', new Error(
-                        'Local Whisper model not found. Please download a model in Settings → Audio.'
+                        isOnnxSymbolError
+                            ? 'Local Whisper is not supported on macOS 12 (Monterey) or earlier. Please upgrade to macOS 13 Ventura or later, or use a cloud STT provider.'
+                            : 'Local Whisper model not found. Please download a model in Settings → Audio.'
                     ));
                 }
             }
         });
 
-        this.worker.on('error', (err) => this.emit('error', err));
+        this.worker.on('error', (err) => {
+            const isOnnxSymbolError = err.message.includes('Symbol not found')
+                || err.message.includes('to_chars')
+                || err.message.includes('libonnxruntime');
+            if (isOnnxSymbolError) {
+                this.emit('error', new Error(
+                    'Local Whisper is not supported on macOS 12 (Monterey) or earlier. Please upgrade to macOS 13 Ventura or later, or use a cloud STT provider.'
+                ));
+            } else {
+                this.emit('error', err);
+            }
+        });
     }
 
     private flushPending(): void {

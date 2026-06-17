@@ -474,7 +474,7 @@ function slugify(value: string): string {
   return value
     .trim()
     .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/[^a-z0-9_-]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 80);
 }
@@ -583,7 +583,13 @@ export class SkillsManager {
   public getSkill(id: string): SkillDetails | null {
     const wanted = slugify(id);
     if (!wanted) return null;
-    return this.loadSkills().find(skill => skill.id === wanted) ?? null;
+    const skills = this.loadSkills();
+    // Primary: match by name-derived id (e.g. "humanize-ai-text" from SKILL.md name field)
+    const byId = skills.find(skill => skill.id === wanted);
+    if (byId) return byId;
+    // Fallback: match by folder name slugified (e.g. "/humanize-text" finds the
+    // skill whose folder is humanize-text/ even if the SKILL.md name differs)
+    return skills.find(skill => skill.filePath && slugify(path.basename(path.dirname(skill.filePath))) === wanted) ?? null;
   }
 
   public buildPromptBlock(skill: SkillDetails): string {

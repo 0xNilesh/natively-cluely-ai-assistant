@@ -775,9 +775,21 @@ export function initializeIpcHandlers(appState: AppState): void {
               const strippedQuery = skillPrefixMatch[2].trim();
               message = strippedQuery || `Please help me with the ${skill.name} skill.`;
               console.log(`[IPC] Skill activated: ${skill.id}`);
+            } else {
+              const allSkills = SkillsManager.getInstance().listSkills();
+              const available = allSkills.length
+                ? allSkills.map(s => `/${s.id}`).join(', ')
+                : 'none registered';
+              event.sender.send(
+                'gemini-stream-error',
+                `Skill "/${candidateId}" not found. Available: ${available}`,
+              );
+              return;
             }
           } catch (skillErr: any) {
-            console.warn('[IPC] Skill lookup failed (non-fatal):', skillErr?.message || skillErr);
+            console.warn('[IPC] Skill lookup failed:', skillErr?.message || skillErr);
+            event.sender.send('gemini-stream-error', `Skill lookup failed: ${skillErr?.message || 'unknown error'}`);
+            return;
           }
         }
 
