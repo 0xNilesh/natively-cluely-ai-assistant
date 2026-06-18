@@ -742,7 +742,12 @@ export class AppState {
             if (svc.isRunning() && svc.hasExtensionClient()) {
               const result = await svc.requestDomCapture();
               captured = result.ok;
-              if (!captured) {
+              if (captured) {
+                // The extension only acks `done` after /dom returns 200, so by here
+                // the overlay has already received the page context (it surfaces a
+                // "Page context" pill and uses it on the next answer).
+                console.log('[Main] DOM capture delivered to overlay');
+              } else {
                 console.log('[Main] DOM capture unavailable (', result.reason, ') — falling back to screenshot');
               }
             }

@@ -5,6 +5,7 @@ import {
   Code,
   Copy,
   Check,
+  Globe,
   HelpCircle,
   Image,
   Lightbulb,
@@ -516,6 +517,17 @@ const getStatusToneClass = (tone: 'ok' | 'warn' | 'error'): string => {
   return 'text-emerald-600 dark:text-emerald-300 border-emerald-500/20 bg-emerald-500/10';
 };
 
+// Compact host label for the "Page context" pill (e.g. "example.com"), stripping
+// a leading www. Returns undefined for a missing/unparseable URL.
+const hostnameFromUrl = (url?: string): string | undefined => {
+  if (!url) return undefined;
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return undefined;
+  }
+};
+
 const subtleSurfaceClass = 'overlay-subtle-surface';
 
 const MessageRow = React.memo(
@@ -658,10 +670,21 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // Analytics State
   const requestStartTimeRef = useRef<number | null>(null);
 
+  // Captured browser page context (from the companion extension). Latent like
+  // attachedContext: armed for the NEXT answer and surfaced as a status pill so the
+  // capture is visible, then cleared on use / dismiss / timeout. Declared here —
+  // ahead of the DOM-bridge effects below that reference it.
+  const [pageContext, setPageContext] = useState<{
+    title: string;
+    url?: string;
+    chars: number;
+    at: number;
+  } | null>(null);
+
   /**
    * BROWSER DOM CONTEXT INTEGRATION
    * ═════════════════════════════════════════════════════════════════
-   * 
+   *
    * This property acts as a secure bridge between the companion browser
    * extension and the Natively LLM pipeline. The extension captures the
    * active browser tab's DOM structure and writes it to this property,
@@ -750,12 +773,23 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     };
   }, []);
 
-  // Listen to secure cross-process companion browser extension bridge events
+  // Listen to secure cross-process companion browser extension bridge events.
+  // The desktop delivers (dom, meta?) — store the DOM for the next answer AND
+  // surface a "Page context" status pill so the capture is visible to the user
+  // (otherwise the DOM sits invisibly on window.lastCapturedDOM until consumed).
   useEffect(() => {
     let unsubDom: (() => void) | undefined;
     try {
-      unsubDom = window.electronAPI?.onDomContextReceived?.((dom) => {
+      unsubDom = window.electronAPI?.onDomContextReceived?.((dom, meta) => {
         (window as any).lastCapturedDOM = dom;
+        if (typeof dom === 'string' && dom.trim().length > 0) {
+          setPageContext({
+            title: meta?.title?.trim() || hostnameFromUrl(meta?.url) || 'Captured page',
+            url: meta?.url,
+            chars: dom.length,
+            at: Date.now(),
+          });
+        }
       });
     } catch (e) {
       console.warn('[Security] Failed to register onDomContextReceived listener:', e);
@@ -769,6 +803,22 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       }
     };
   }, []);
+
+  // Auto-expire the captured page-context pill if it's never consumed. The DOM
+  // itself is cleared on use (handleWhatToSay) or dismiss; this just stops the
+  // pill from lingering indefinitely after a capture the user didn't end up using.
+  useEffect(() => {
+    if (!pageContext) return;
+    const timer = setTimeout(() => {
+      setPageContext(null);
+      try {
+        if (typeof (window as any).lastCapturedDOM === 'string') {
+          (window as any).lastCapturedDOM = '';
+        }
+      } catch (_) {}
+    }, 90_000);
+    return () => clearTimeout(timer);
+  }, [pageContext]);
 
   // Sync transcript setting
   useEffect(() => {
@@ -3291,6 +3341,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       if (typeof (window as any).lastCapturedDOM === 'string') {
         (window as any).lastCapturedDOM = '';
       }
+      // Retire the "Page context" pill the moment the context is actually consumed,
+      // so the lifecycle reads: capture → pill appears → answer → pill disappears.
+      if (domContext) setPageContext(null);
 
       if (domContext) {
         console.debug(`[DOM Context] Forwarding captured active-tab DOM structure (${domContext.length} chars)`);
@@ -5327,7 +5380,7 @@ Provide only the answer, nothing else.`;
   // Suppressed: mode label pill is not required in the UI.
   // Suppressed: LLM privacy label pill is not required in the UI.
   // Suppressed: vision pill ("Vision: provider") is not required in the UI.
-  const hasStatusPill = shouldShowSttSummaryPill;
+  const hasStatusPill = shouldShowSttSummaryPill || !!pageContext;
   const statusPillBaseClass = `flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-medium shadow-sm backdrop-blur-xl ${isLightTheme ? 'bg-white/55 border-black/10' : 'bg-black/20 border-white/10'}`;
 
   // Suppress the shell's scale/translate entry animation until it has rendered
@@ -5491,6 +5544,36 @@ Provide only the answer, nothing else.`;
                   >
                     <Mic className="h-3 w-3 opacity-70" />
                     <span>{sttSummary.label}</span>
+                  </div>
+                )}
+                {pageContext && (
+                  <div
+                    className={`${statusPillBaseClass} ${getStatusToneClass('ok')} pr-1.5`}
+                    title={
+                      pageContext.url
+                        ? `${pageContext.url} · ${pageContext.chars.toLocaleString()} chars · used on your next answer`
+                        : `${pageContext.chars.toLocaleString()} chars · used on your next answer`
+                    }
+                  >
+                    <Globe className="h-3 w-3 opacity-70" />
+                    <span className="max-w-[160px] truncate">
+                      {hostnameFromUrl(pageContext.url) || pageContext.title} · page ready
+                    </span>
+                    <button
+                      type="button"
+                      aria-label="Dismiss captured page context"
+                      className="ml-0.5 rounded-full p-0.5 opacity-60 hover:opacity-100 hover:bg-black/10 dark:hover:bg-white/10 transition-opacity"
+                      onClick={() => {
+                        setPageContext(null);
+                        try {
+                          if (typeof (window as any).lastCapturedDOM === 'string') {
+                            (window as any).lastCapturedDOM = '';
+                          }
+                        } catch (_) {}
+                      }}
+                    >
+                      <X className="h-2.5 w-2.5" />
+                    </button>
                   </div>
                 )}
               </div>
