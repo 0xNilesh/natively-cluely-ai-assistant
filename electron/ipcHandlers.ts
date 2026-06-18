@@ -6928,6 +6928,29 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
+  // Multi-tab picker: ask the connected extension for its open tabs so the overlay
+  // can let the user choose which one to capture.
+  safeHandle('phone-mirror:list-tabs', async () => {
+    try {
+      const tabs = await PhoneMirrorService.getInstance().listTabs();
+      return { tabs };
+    } catch (e: any) {
+      console.error('[IPC] phone-mirror:list-tabs error:', e);
+      return { tabs: [], error: e?.message || 'failed to list tabs' };
+    }
+  });
+
+  // Capture a specific tab the user picked from the multi-tab picker.
+  safeHandle('phone-mirror:capture-tab', async (_, tabId?: number) => {
+    try {
+      if (typeof tabId !== 'number') return { ok: false, reason: 'invalid tabId' };
+      return await PhoneMirrorService.getInstance().requestDomCapture({ tabId });
+    } catch (e: any) {
+      console.error('[IPC] phone-mirror:capture-tab error:', e);
+      return { ok: false, reason: e?.message || 'failed to capture tab' };
+    }
+  });
+
   // Stealth screenshot capture triggered from the phone UI.
   // Takes a screenshot on the PC (adding it to the screenshot queue so it can
   // be used in the next AI prompt), then broadcasts an ack so the phone shows

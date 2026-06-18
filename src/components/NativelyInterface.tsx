@@ -9,6 +9,7 @@ import {
   HelpCircle,
   Image,
   Lightbulb,
+  List,
   MessageSquare,
   Mic,
   Pencil,
@@ -680,6 +681,34 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     chars: number;
     at: number;
   } | null>(null);
+
+  // Multi-tab picker: when the user wants to choose which browser tab to capture
+  // (e.g. the auto-pick grabbed the wrong one), we ask the extension for its open
+  // tabs and show a compact list. null = closed; [] = loading/empty.
+  const [tabPicker, setTabPicker] = useState<Array<{ id: number; title: string; url: string }> | null>(null);
+  const [tabPickerLoading, setTabPickerLoading] = useState(false);
+
+  const openTabPicker = useCallback(async () => {
+    setTabPickerLoading(true);
+    setTabPicker([]);
+    try {
+      const res = await window.electronAPI?.phoneMirrorListTabs?.();
+      setTabPicker(res?.tabs ?? []);
+    } catch {
+      setTabPicker([]);
+    } finally {
+      setTabPickerLoading(false);
+    }
+  }, []);
+
+  const pickTab = useCallback(async (tabId: number) => {
+    setTabPicker(null);
+    try {
+      await window.electronAPI?.phoneMirrorCaptureTab?.(tabId);
+    } catch (_) {
+      /* the desktop logs the reason; the chip will appear on success */
+    }
+  }, []);
 
   /**
    * BROWSER DOM CONTEXT INTEGRATION
@@ -5561,6 +5590,15 @@ Provide only the answer, nothing else.`;
                     </span>
                     <button
                       type="button"
+                      aria-label="Pick a different browser tab"
+                      title="Capture a different tab"
+                      className="ml-0.5 rounded-full p-0.5 opacity-60 hover:opacity-100 hover:bg-black/10 dark:hover:bg-white/10 transition-opacity"
+                      onClick={() => { void openTabPicker(); }}
+                    >
+                      <List className="h-2.5 w-2.5" />
+                    </button>
+                    <button
+                      type="button"
                       aria-label="Dismiss captured page context"
                       className="ml-0.5 rounded-full p-0.5 opacity-60 hover:opacity-100 hover:bg-black/10 dark:hover:bg-white/10 transition-opacity"
                       onClick={() => {
@@ -5577,6 +5615,46 @@ Provide only the answer, nothing else.`;
                   </div>
                 )}
               </div>
+              )}
+
+              {/* Multi-tab picker — choose which open browser tab to capture. */}
+              {tabPicker !== null && (
+                <div className="relative no-drag mx-4 mt-1 mb-1 rounded-[12px] border border-white/10 bg-black/30 backdrop-blur-xl p-2 shadow-sm">
+                  <div className="flex items-center justify-between px-1 pb-1.5">
+                    <span className="text-[11px] font-medium overlay-text-primary">
+                      {tabPickerLoading ? 'Finding open tabs…' : 'Pick a tab to capture'}
+                    </span>
+                    <button
+                      type="button"
+                      aria-label="Close tab picker"
+                      className="rounded-full p-0.5 opacity-60 hover:opacity-100 hover:bg-white/10 transition-opacity"
+                      onClick={() => setTabPicker(null)}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                  {!tabPickerLoading && tabPicker.length === 0 && (
+                    <div className="px-1 py-1 text-[10px] overlay-text-muted">
+                      No capturable tabs — is the browser open and the extension connected?
+                    </div>
+                  )}
+                  <div className="flex flex-col gap-0.5 max-h-44 overflow-y-auto">
+                    {tabPicker.map((t) => (
+                      <button
+                        key={t.id}
+                        type="button"
+                        onClick={() => { void pickTab(t.id); }}
+                        className="text-left px-2 py-1.5 rounded-md text-[11px] overlay-text-primary hover:bg-white/10 transition-colors"
+                        title={t.url}
+                      >
+                        <span className="block truncate">{t.title || t.url}</span>
+                        <span className="block truncate text-[9px] overlay-text-muted">
+                          {hostnameFromUrl(t.url) || t.url}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
               )}
 
               {/* System Audio / Screen Recording Warning Banner */}

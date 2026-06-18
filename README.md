@@ -183,6 +183,11 @@ This demo shows **a complete live meeting scenario**:
 | **Speaker Diarization**   | ✅ Yes                     | ❌                   | ❌         | ❌               | ❌                     |
 | **Codex CLI Integration** | ✅ Yes                     | ❌                   | ❌         | ❌               | ❌                     |
 | **Offline SLM Mode**      | ✅ Yes                     | ❌                   | ❌         | ❌               | ❌                     |
+| **Stateful Intelligence OS** | ✅ Yes                    | ❌                   | ❌         | ❌               | ❌                     |
+| **Spoken Answer Humanizer** | ✅ Yes                     | ❌                   | ❌         | ❌               | ❌                     |
+| **Sandboxed Code Verification** | ✅ Yes                  | ❌                   | ❌         | ❌               | ❌                     |
+| **Hindsight LTM Vector DB** | ✅ Yes                    | ❌                   | ❌         | ❌               | ❌                     |
+| **Regional STT Relay**    | ✅ Yes                     | ❌                   | ❌         | ❌               | ❌                     |
 | **Data breach history**   | ✅ None                    | ❌ 83k users exposed | ✅ None    | ✅ None          | ✅ None                |
 
 > **Legend:** ✅ Full support · ⚠️ Partial or limited · ❌ Not available
@@ -378,6 +383,10 @@ We've launched the official **$NAT token** on Printr! Holders who maintain a spe
 | **Screenshot & Slide OCR Analysis**                 |      ✅       |      ✅      |
 | **Undetectable & Stealth Modes**                    |      ✅       |      ✅      |
 | **Meeting Dashboard & Offline RAG History**         |      ✅       |      ✅      |
+| **Stateful "Intelligence OS"**                     |      ✅       |      ✅      |
+| **Spoken Answer Humanizer**                         |      ✅       |      ✅      |
+| **Sandboxed Code Verification**                     |      ✅       |      ✅      |
+| **Hindsight Long-Term Memory (LTM)**                |      ❌       |      ✅      |
 | **Job Description (JD) & Resume Context Awareness** |      ❌       |      ✅      |
 | **Automated Company Research & Dossiers**           |      ❌       |      ✅      |
 | **Live Salary & Offer Negotiation Copilot**         |      ❌       |      ✅      |
@@ -398,16 +407,16 @@ We've launched the official **$NAT token** on Printr! Holders who maintain a spe
   </a>
 </p>
 
-### What's New in v2.7.0 (Latest Release)
+### What's New in v2.8.0 (Latest Release)
 
-Version 2.7.0 introduces advanced Profile Intelligence Routing, Live Follow-up resolution, eager Code UI expansion, and robust latency tracing tools:
+Version 2.8.0 introduces the stateful "Intelligence OS" control plane, Hindsight long-term memory, deterministic answer humanization, sandboxed local code execution, and low-latency regional STT relay migration:
 
-- **Profile Intelligence Router (v2)**: Automatically parses user queries into target domains (Coding, System Design, Behavioral, Negotiation) and propagates custom answer-type constraints straight to the LLM streaming pipeline.
-- **Answer-Type Constraints & Follow-Up Resolver**: Retains deep conversation histories to resolve follow-up queries contextually, and enforces precise layout constraints (e.g. short, detailed, code-only, bulleted).
-- **Eager Code UI Expansion & Smooth Transitions**: Growth-holds CSS elements to eagerly size the overlay *before* React mounts raw code blocks, preventing annoying visual layout jumps with hardware-accelerated tweens.
-- **Audio Stack Deadlock Protections**: Hardened credentials management by eliminating racing set-provider IPCs to prevent native audio pipeline lockups on Windows and macOS after saving API keys.
-- **Evidence Validator & Live Deadlines**: Cross-validates claims made during meetings and handles real-time countdowns for strict, live coding assessment deadlines.
-- **PI Latency Tracer (PiLatencyTracer)**: Continuous latency profiling mapping exact durations of LLM reasoning, schema validation, and routing tasks to ensure sub-500ms responsiveness.
+- **Stateful "Intelligence OS"**: Transitioned to a stateful control plane with mode-aware priors (Sales, Technical, Lecture) that automatically route queries and filter context based on your active task.
+- **Hindsight Long-Term Memory (LTM)**: Integrates a secure local sidecar vector database that indexes past meetings, custom profiles, and documents, retrieving relevant semantic matches dynamically.
+- **Spoken Answer Humanizer**: Deterministically rewrites raw LLM outputs to strip corporate jargon, filter out structure bugs (em-dashes, empty bullets), and optimize prose for natural spoken flow.
+- **Sandboxed Code Verification**: Automatically extracts and executes Python, JS, and SQLite code in isolated local subprocesses, verifying correctness and auto-correcting errors before displaying a verified badge.
+- **Regional STT-Relay Migration**: Migrated realtime audio transcription to low-latency regional VPS hosts with transaction-scoped quota advisory locks to prevent double-billing.
+- **macOS 12 (Monterey) Compatibility Guard**: Added safety checks to prevent runtime crashes during Whisper local speech-to-text initialization on older macOS versions.
 
 ## Table of Contents
 
@@ -420,7 +429,7 @@ Version 2.7.0 introduces advanced Profile Intelligence Routing, Live Follow-up r
 - [Why Natively wins](#why-natively-wins)
 - [AI Coding Assistant](#free-ai-coding-interview-assistant-undetectable-on-leetcode-hackerrank--coderpad)
 - [Natively Pro](#natively-pro)
-- [What's New in v2.6.0](#whats-new-in-v260)
+- [What's New in v2.8.0](#whats-new-in-v280-latest-release)
 - [Privacy & Security](#privacy--security-core-design-principle)
 - [Installation](#installation-developers--contributors)
 - [AI Providers](#ai-providers)

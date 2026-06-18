@@ -542,6 +542,8 @@ export interface ElectronAPI {
   phoneMirrorRotateToken: () => Promise<PhoneMirrorInfo | { error: string }>;
   // Arm the 60s one-click pairing window for the companion browser extension.
   phoneMirrorArmExtension: () => Promise<{ armedMs: number } | { error: string }>;
+  phoneMirrorListTabs: () => Promise<{ tabs: Array<{ id: number; title: string; url: string }>; error?: string }>;
+  phoneMirrorCaptureTab: (tabId: number) => Promise<{ ok: boolean; reason?: string }>;
   onPhoneMirrorStatus: (callback: (info: PhoneMirrorInfo) => void) => () => void;
   onPhoneMirrorIncomingChat: (
     callback: (data: { message: string; streamId: string }) => void,
@@ -582,6 +584,7 @@ export interface PhoneMirrorInfo {
   extToken: string | null;
   qrDataUrl: string | null;
   clients: number;
+  extensionConnected: boolean;
 }
 
 declare global {

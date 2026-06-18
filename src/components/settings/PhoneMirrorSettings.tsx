@@ -15,6 +15,7 @@ const EMPTY_INFO: PhoneMirrorInfo = {
   extToken: null,
   qrDataUrl: null,
   clients: 0,
+  extensionConnected: false,
 };
 
 export const PhoneMirrorSettings: React.FC = () => {
@@ -52,7 +53,8 @@ export const PhoneMirrorSettings: React.FC = () => {
           prev.token === n.token &&
           prev.extToken === n.extToken &&
           prev.running === n.running &&
-          prev.clients === n.clients
+          prev.clients === n.clients &&
+          prev.extensionConnected === n.extensionConnected
         ) {
           return prev;
         }
@@ -373,8 +375,24 @@ export const PhoneMirrorSettings: React.FC = () => {
           <div className="rounded-lg bg-bg-main p-2 border border-border-subtle flex-shrink-0">
             <Puzzle size={16} className="text-indigo-400" />
           </div>
-          <div className="min-w-0">
-            <div className="text-text-primary font-medium text-sm">Browser Extension</div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-text-primary font-medium text-sm">Browser Extension</div>
+              {/* Live connection indicator: green = extension connected over the
+                  capture WebSocket; grey = paired/installed but not connected. */}
+              {info.running && (
+                <span className="flex items-center gap-1.5 flex-shrink-0">
+                  <span
+                    className={`w-2 h-2 rounded-full ${
+                      info.extensionConnected ? 'bg-green-500' : 'bg-text-secondary/40'
+                    }`}
+                  />
+                  <span className="text-[11px] text-text-secondary">
+                    {info.extensionConnected ? 'Connected' : 'Not connected'}
+                  </span>
+                </span>
+              )}
+            </div>
             <div className="text-text-secondary text-xs mt-1 leading-relaxed">
               Pair the Natively companion extension to send the active tab's page content
               to the desktop. Press{' '}

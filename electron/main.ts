@@ -739,7 +739,14 @@ export class AppState {
           let captured = false;
           try {
             const svc = PhoneMirrorService.getInstance();
-            if (svc.isRunning() && svc.hasExtensionClient()) {
+            // MV3 race fix: the extension's service worker may have been idle-killed
+            // and is only just reconnecting (its wake-on-interaction handlers fire as
+            // the user touches the browser right before capturing). Poll briefly for
+            // an extension to connect before deciding — otherwise a just-woken SW
+            // would fall straight through to a screenshot. waitForExtension resolves
+            // immediately when one is already connected.
+            const extReady = svc.isRunning() && (await svc.waitForExtension());
+            if (extReady) {
               const result = await svc.requestDomCapture();
               captured = result.ok;
               if (captured) {

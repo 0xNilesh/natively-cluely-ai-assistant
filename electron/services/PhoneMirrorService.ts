@@ -24,6 +24,8 @@ export interface PhoneMirrorInfo {
   extToken: string | null;
   qrDataUrl: string | null;
   clients: number;
+  /** True when a companion browser extension is connected over /ws (capture-ready). */
+  extensionConnected: boolean;
 }
 
 export type StreamEvent =
@@ -85,6 +87,12 @@ const PAIR_ARM_WINDOW_MS = 60_000;
 // the hotkey path falls back to a screenshot rather than silently no-op.
 const CAPTURE_TIMEOUT_MS = 2_500;
 const LIST_TABS_TIMEOUT_MS = 1_500;
+// Application-level keepalive cadence to extension clients (under Chrome's ~30s MV3
+// idle-kill). Each `ka` frame runs the SW onmessage handler → resets its idle timer.
+const EXT_KEEPALIVE_MS = 20_000;
+// Default poll window for waitForExtension() — covers a just-woken MV3 service
+// worker reconnecting right after the user presses the capture hotkey.
+const WAIT_FOR_EXTENSION_MS = 1_200;
 
 // Companion extension IDs the one-click /pair endpoint accepts. /pair requires an
 // EXACT origin match (not the structural [a-p]{32} check /dom uses), so it must
@@ -148,10 +156,30 @@ export class PhoneMirrorService {
   // Timestamp of the extension socket per most-recent browser activity, so when
   // several browsers are paired the capture push targets the one in use.
   private extActiveAt = new WeakMap<WebSocket, number>();
+  // Timestamp the extension socket announced `hello` — the tie-break for picking a
+  // target when no browser has reported activity yet (most-recently-connected wins).
+  private extConnectedAt = new WeakMap<WebSocket, number>();
   // In-flight desktop→extension requests keyed by reqId, resolved by the
   // matching `capture-ack`/`tabs` control frame (or a timeout).
   private pendingCaptures = new Map<string, { resolve: (r: { ok: boolean; reason?: string }) => void; timer: ReturnType<typeof setTimeout> }>();
   private pendingTabs = new Map<string, { resolve: (tabs: ExtensionTab[]) => void; timer: ReturnType<typeof setTimeout> }>();
+  // reqIds the desktop issued for capture-dom and is still waiting to receive over
+  // /dom. The FIRST matching /dom POST consumes its reqId and delivers to the
+  // overlay; a later/duplicate POST for the same reqId (a 2nd browser that also
+  // captured) finds no entry → answered 200 {duplicate:true} but NOT delivered, so
+  // it cannot clobber the winner's "Page context" chip. reqId-less v1 POSTs (popup
+  // capture) always deliver. See dom_capture_window_targeting memory (multibrowser).
+  private openCaptureReqIds = new Set<string>();
+  // Application-level keepalive to extension clients. An incoming WS frame runs the
+  // MV3 service worker's onmessage handler → resets its idle-death timer, keeping the
+  // capture channel warm while the desktop is up. The protocol ping (15s) keeps the
+  // SOCKET alive but does not run SW JS; this `ka` frame does. The extension ignores
+  // unknown frame types, so `ka` is harmless to it. See CONTRACT.md MV3 lifecycle.
+  private extKeepaliveTimer: ReturnType<typeof setInterval> | null = null;
+  // Resolvers waiting on waitForExtension() — settled the instant an extension
+  // announces `hello`, so a just-woken MV3 service worker that connects right after
+  // the hotkey press is used instead of falling back to a screenshot.
+  private extWaiters = new Set<() => void>();
   // Resolver for the window that should receive captured DOM (the overlay that
   // mounts NativelyInterface). When it yields no live window, /dom returns 409.
   private overlayResolver: (() => BrowserWindow | null) | null = null;
@@ -344,6 +372,35 @@ export class PhoneMirrorService {
     return false;
   }
 
+  /**
+   * Resolve true once an extension is connected, waiting up to `timeoutMs` for one
+   * to appear. The MV3 race fix: when the capture hotkey fires, the extension's
+   * service worker may have been idle-killed and is only just reconnecting (its
+   * wake-on-interaction / alarm handlers re-open the WS). Without this poll a
+   * just-woken SW means an instant screenshot fallback instead of the page capture
+   * the user wanted. Resolves immediately if already connected, or the moment a
+   * `hello` arrives mid-wait, else false on timeout. See CONTRACT.md MV3 lifecycle.
+   */
+  waitForExtension(timeoutMs: number = WAIT_FOR_EXTENSION_MS): Promise<boolean> {
+    if (this.hasExtensionClient()) return Promise.resolve(true);
+    if (!this.isRunning()) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.extWaiters.delete(waiter);
+        resolve(ok);
+      };
+      // Re-check on wake rather than assuming true: a teardown also fires waiters
+      // (after clearing extClients), and that must resolve false → screenshot.
+      const waiter = () => finish(this.hasExtensionClient());
+      const timer = setTimeout(() => finish(false), Math.max(0, timeoutMs));
+      this.extWaiters.add(waiter);
+    });
+  }
+
   /** Count of connected PHONE clients (excludes companion extension sockets). */
   private phoneClientCount(): number {
     if (!this.wss) return 0;
@@ -375,12 +432,20 @@ export class PhoneMirrorService {
     const target = this.pickExtensionClient();
     if (!target) return Promise.resolve({ ok: false, reason: 'no-extension' });
     const reqId = generateToken();
+    // Register the reqId so the FIRST matching /dom POST delivers to the overlay and
+    // any later duplicate (a 2nd browser that also captured) is gated out. The entry
+    // is consumed on first /dom POST or cleared on settle below.
+    this.openCaptureReqIds.add(reqId);
     return new Promise((resolve) => {
+      const settle = (r: { ok: boolean; reason?: string }) => {
+        this.openCaptureReqIds.delete(reqId);
+        resolve(r);
+      };
       const timer = setTimeout(() => {
         this.pendingCaptures.delete(reqId);
-        resolve({ ok: false, reason: 'timeout' });
+        settle({ ok: false, reason: 'timeout' });
       }, opts?.timeoutMs ?? CAPTURE_TIMEOUT_MS);
-      this.pendingCaptures.set(reqId, { resolve, timer });
+      this.pendingCaptures.set(reqId, { resolve: settle, timer });
       try {
         target.send(
           JSON.stringify({ type: 'capture-dom', reqId, tabId: opts?.tabId }),
@@ -388,7 +453,7 @@ export class PhoneMirrorService {
       } catch (_) {
         clearTimeout(timer);
         this.pendingCaptures.delete(reqId);
-        resolve({ ok: false, reason: 'send-failed' });
+        settle({ ok: false, reason: 'send-failed' });
       }
     });
   }
@@ -418,21 +483,74 @@ export class PhoneMirrorService {
   }
 
   /**
-   * Choose which extension socket to push to when several are connected: the one
-   * whose browser was most recently active (extActiveAt), else any open socket.
+   * Choose which single extension socket to push to when several browsers are
+   * paired. We send to exactly ONE (never broadcast) so several browsers can't race
+   * N captures into /dom and clobber each other's overlay chip. The pick is the
+   * browser most-recently-active (the `{type:'active'}` focus signal → extActiveAt),
+   * tie-broken by most-recently-connected (extConnectedAt). Arbitration lives in the
+   * pure pickTargetExtensionIndex() helper so it is unit-testable.
    */
   private pickExtensionClient(): WebSocket | null {
-    let best: WebSocket | null = null;
-    let bestAt = -1;
+    const open: WebSocket[] = [];
     for (const c of this.extClients) {
-      if (c.readyState !== WebSocket.OPEN) continue;
-      const at = this.extActiveAt.get(c) ?? 0;
-      if (at >= bestAt) {
-        bestAt = at;
-        best = c;
+      if (c.readyState === WebSocket.OPEN) open.push(c);
+    }
+    if (open.length === 0) return null;
+    const idx = pickTargetExtensionIndex(
+      open.map((c) => ({
+        activeAt: this.extActiveAt.get(c) ?? 0,
+        connectedAt: this.extConnectedAt.get(c) ?? 0,
+      })),
+    );
+    return open[idx] ?? null;
+  }
+
+  /** Release everyone parked in waitForExtension() (an extension just connected). */
+  private notifyExtensionWaiters(): void {
+    if (this.extWaiters.size === 0) return;
+    // Copy first — each waiter removes itself from the set as it settles.
+    for (const w of [...this.extWaiters]) {
+      try {
+        w();
+      } catch (_) {
+        /* noop */
       }
     }
-    return best;
+  }
+
+  /**
+   * Start the application-level keepalive that pings extension clients with a
+   * `{type:'ka'}` frame every ~20s. An incoming WS frame runs the MV3 service
+   * worker's onmessage handler, resetting its idle-death timer so the capture
+   * channel stays warm while the desktop is up. No-op if already running or if no
+   * extension is connected; stopped in _teardown.
+   */
+  private ensureExtensionKeepalive(): void {
+    if (this.extKeepaliveTimer !== null) return;
+    this.extKeepaliveTimer = setInterval(() => {
+      let sent = 0;
+      const frame = JSON.stringify({ type: 'ka', ts: Date.now() });
+      for (const c of this.extClients) {
+        if (c.readyState !== WebSocket.OPEN) continue;
+        try {
+          c.send(frame);
+          sent++;
+        } catch (_) {
+          /* socket gone — close handler cleans up */
+        }
+      }
+      // Nothing left to keep warm → stop the timer until the next extension connects.
+      if (sent === 0) this.stopExtensionKeepalive();
+    }, EXT_KEEPALIVE_MS);
+    // Don't let the keepalive hold the event loop open on shutdown.
+    (this.extKeepaliveTimer as any)?.unref?.();
+  }
+
+  private stopExtensionKeepalive(): void {
+    if (this.extKeepaliveTimer !== null) {
+      clearInterval(this.extKeepaliveTimer);
+      this.extKeepaliveTimer = null;
+    }
   }
 
   /**
@@ -468,9 +586,14 @@ export class PhoneMirrorService {
     switch (msg.type) {
       case 'hello':
         if (msg.role === 'extension') {
+          const now = Date.now();
           this.extClients.add(ws);
-          this.extActiveAt.set(ws, Date.now());
-          console.log('[PhoneMirror] companion extension connected');
+          this.extActiveAt.set(ws, now);
+          this.extConnectedAt.set(ws, now);
+          console.log('[PhoneMirror] companion extension connected (capture channel ready)');
+          // Begin keeping the MV3 service worker warm and release any hotkey waiters.
+          this.ensureExtensionKeepalive();
+          this.notifyExtensionWaiters();
           return true;
         }
         return false;
@@ -481,8 +604,8 @@ export class PhoneMirrorService {
         if (typeof msg.reqId !== 'string') return true;
         this.extActiveAt.set(ws, Date.now());
         const status = msg.status;
-        // 'started'/'posting' are progress — keep waiting. 'done'/'error' settle.
         if (status === 'done' || status === 'error') {
+          // Terminal — settle the pending capture.
           const pending = this.pendingCaptures.get(msg.reqId);
           if (pending) {
             clearTimeout(pending.timer);
@@ -492,6 +615,25 @@ export class PhoneMirrorService {
                 ? { ok: true }
                 : { ok: false, reason: typeof msg.error === 'string' ? msg.error : 'error' },
             );
+          }
+        } else if (status === 'started' || status === 'posting') {
+          // Progress: the extension is alive and actively working (injecting the
+          // content script, extracting, POSTing). Extend the deadline once so a slow
+          // page (big DOM, multi-port /healthz discovery) doesn't trip the 2.5s
+          // timeout and fall back to a screenshot while a real capture is in flight.
+          // This is what CONTRACT.md means by "`started` extends the desktop deadline".
+          const reqId = msg.reqId;
+          const pending = this.pendingCaptures.get(reqId);
+          if (pending) {
+            clearTimeout(pending.timer);
+            const timer = setTimeout(() => {
+              // pending.resolve is the settle() closure from requestDomCapture — it
+              // clears openCaptureReqIds and resolves. Delete the in-flight entry too.
+              this.pendingCaptures.delete(reqId);
+              pending.resolve({ ok: false, reason: 'timeout' });
+            }, CAPTURE_TIMEOUT_MS);
+            (timer as any)?.unref?.();
+            pending.timer = timer;
           }
         }
         return true;
@@ -538,6 +680,7 @@ export class PhoneMirrorService {
         extToken: null,
         qrDataUrl: null,
         clients: 0,
+        extensionConnected: false,
       };
       this.cachedInfo = info;
       return info;
@@ -574,6 +717,7 @@ export class PhoneMirrorService {
       extToken: this.extToken,
       qrDataUrl,
       clients: this.phoneClientCount(),
+      extensionConnected: this.hasExtensionClient(),
     };
     this.cachedInfo = info;
     return info;
@@ -647,6 +791,18 @@ export class PhoneMirrorService {
     this.rateBuckets.clear();
     this.armedUntil = 0;
     this.extClients.clear();
+    this.openCaptureReqIds.clear();
+    this.stopExtensionKeepalive();
+    // Release any waitForExtension() callers so the capture path doesn't hang on
+    // shutdown — they resolve false (no extension) and fall back to a screenshot.
+    for (const w of [...this.extWaiters]) {
+      try {
+        w();
+      } catch (_) {
+        /* noop */
+      }
+    }
+    this.extWaiters.clear();
     // Settle any in-flight extension requests so callers don't hang on shutdown.
     for (const { resolve, timer } of this.pendingCaptures.values()) {
       clearTimeout(timer);
@@ -762,6 +918,22 @@ export class PhoneMirrorService {
               res.writeHead(200, jsonHeaders);
               res.end(JSON.stringify({ success: true }));
               return;
+            }
+
+            // Anti-clobber gate (multi-browser): a desktop-pull capture stamps a
+            // reqId. The FIRST /dom POST carrying that reqId is the winner and
+            // delivers to the overlay; consuming the reqId here. A later POST for the
+            // SAME reqId (a 2nd browser — Chrome+Edge+Arc — that also captured, or a
+            // retry) finds no open reqId → authenticated 200 {duplicate:true} but is
+            // NOT delivered, so it can't overwrite the winner's "Page context" chip.
+            // reqId-less POSTs (v1 popup "Capture") always deliver.
+            if (typeof parsed.reqId === 'string') {
+              if (!this.openCaptureReqIds.has(parsed.reqId)) {
+                res.writeHead(200, jsonHeaders);
+                res.end(JSON.stringify({ success: true, duplicate: true }));
+                return;
+              }
+              this.openCaptureReqIds.delete(parsed.reqId);
             }
 
             const cappedDom = parsed.dom.substring(0, DOM_CONTEXT_MAX_CHARS);
@@ -960,7 +1132,11 @@ export class PhoneMirrorService {
     ws.on('close', () => {
       clearInterval(ping);
       // Drop any extension bookkeeping for this socket (no-op for phones).
-      this.extClients.delete(ws);
+      const wasExtension = this.extClients.delete(ws);
+      // Stop the keepalive once the last extension is gone (it restarts on the next
+      // `hello`). With no extension connected, any in-flight capture can't be served
+      // here — let it time out to the screenshot fallback as designed.
+      if (wasExtension && !this.hasExtensionClient()) this.stopExtensionKeepalive();
       this.emitStatusClientCount();
     });
     ws.on('error', () => {
@@ -1076,8 +1252,15 @@ export class PhoneMirrorService {
   private emitStatusClientCount(): void {
     if (this.statusListeners.size === 0) return;
     const clients = this.phoneClientCount();
-    if (this.cachedInfo && clients !== this.cachedInfo.clients) {
-      const info = { ...this.cachedInfo, clients };
+    const extensionConnected = this.hasExtensionClient();
+    // Emit on a change to EITHER the phone-client count OR the extension-connected
+    // flag. The flag flips on the extension's `hello`/disconnect WITHOUT changing
+    // the phone count, so the Settings/popup indicator must react to it too.
+    if (
+      this.cachedInfo &&
+      (clients !== this.cachedInfo.clients || extensionConnected !== this.cachedInfo.extensionConnected)
+    ) {
+      const info = { ...this.cachedInfo, clients, extensionConnected };
       this.cachedInfo = info;
       this.emitStatus(info);
       return;
@@ -1139,6 +1322,33 @@ function loadOrCreatePersistedExtToken(): string {
   } catch (_) {
     return generateToken();
   }
+}
+
+/**
+ * Pure single-target arbitration for multi-browser capture. Given each connected
+ * extension's `activeAt` (last `{type:'active'}` focus signal) and `connectedAt`
+ * (its `hello` time), return the index of the one to push `capture-dom` to:
+ *   - highest `activeAt` wins (the browser the user most recently focused),
+ *   - ties broken by highest `connectedAt` (most-recently-connected),
+ *   - empty input → 0 (caller guards against an empty list).
+ * Sending to exactly ONE extension is what stops Chrome+Edge+Arc from racing N
+ * captures into /dom and clobbering each other's overlay chip.
+ */
+export function pickTargetExtensionIndex(
+  clients: ReadonlyArray<{ activeAt: number; connectedAt: number }>,
+): number {
+  let best = 0;
+  for (let i = 1; i < clients.length; i++) {
+    const c = clients[i];
+    const b = clients[best];
+    if (
+      c.activeAt > b.activeAt ||
+      (c.activeAt === b.activeAt && c.connectedAt > b.connectedAt)
+    ) {
+      best = i;
+    }
+  }
+  return best;
 }
 
 /** True for IPv4/IPv6 loopback remote addresses (gates the /pair endpoint). */

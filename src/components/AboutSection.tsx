@@ -64,78 +64,78 @@ export const AboutSection: React.FC<AboutSectionProps> = () => {
 
             {/* What's New Section */}
             <div>
-                <h4 className="text-xs font-bold text-text-tertiary uppercase tracking-wider mb-2 px-1">What's New in v2.7</h4>
+                <h4 className="text-xs font-bold text-text-tertiary uppercase tracking-wider mb-2 px-1">What's New in v2.8</h4>
                 <div className="bg-bg-item-surface rounded-xl border border-border-subtle overflow-hidden">
-                    {/* 1. Two New Meeting UI Styles */}
+                    {/* 1. Stateful "Intelligence OS" */}
                     <div className="p-3 border-b border-border-subtle bg-bg-card/50">
                         <div className="flex items-start gap-4">
                             <div className="w-10 h-10 rounded-lg bg-indigo-500/10 flex items-center justify-center text-indigo-400 shrink-0">
-                                <LayoutGrid size={20} />
-                            </div>
-                            <div>
-                                <h5 className="text-sm font-bold text-text-primary mb-1">Two New Meeting UI Styles</h5>
-                                <p className="text-xs text-text-secondary leading-relaxed">
-                                    Introduced two gorgeous, immersive interface themes, Liquid Glass and Modern Dark, to completely redefine your real-time overlay experience.
-                                </p>
-                            </div>
-                        </div>
-                    </div>
-
-                    {/* 2. DeepSeek AI Integrated */}
-                    <div className="p-3 border-b border-border-subtle bg-bg-card/50">
-                        <div className="flex items-start gap-4">
-                            <div className="w-10 h-10 rounded-lg bg-blue-500/10 flex items-center justify-center text-blue-400 shrink-0">
                                 <Cpu size={20} />
                             </div>
                             <div>
-                                <h5 className="text-sm font-bold text-text-primary mb-1">DeepSeek AI Integrated</h5>
+                                <h5 className="text-sm font-bold text-text-primary mb-1">Stateful "Intelligence OS"</h5>
                                 <p className="text-xs text-text-secondary leading-relaxed">
-                                    Full support for DeepSeek's advanced reasoning models, delivering ultra-smart and cost-effective chat replies.
+                                    Transitioned to a stateful control plane with mode-aware priors (Sales, Technical, Lecture) that automatically route queries and filter context based on your active task.
                                 </p>
                             </div>
                         </div>
                     </div>
 
-                    {/* 3. Audio & TCC Resolved */}
+                    {/* 2. Hindsight Long-Term Memory */}
+                    <div className="p-3 border-b border-border-subtle bg-bg-card/50">
+                        <div className="flex items-start gap-4">
+                            <div className="w-10 h-10 rounded-lg bg-blue-500/10 flex items-center justify-center text-blue-400 shrink-0">
+                                <Database size={20} />
+                            </div>
+                            <div>
+                                <h5 className="text-sm font-bold text-text-primary mb-1">Hindsight Long-Term Memory</h5>
+                                <p className="text-xs text-text-secondary leading-relaxed">
+                                    Integrates a secure local sidecar vector database that indexes past meetings, custom profiles, and documents, retrieving relevant semantic matches dynamically.
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* 3. Spoken Answer Humanizer */}
                     <div className="p-3 border-b border-border-subtle bg-bg-card/50">
                         <div className="flex items-start gap-4">
                             <div className="w-10 h-10 rounded-lg bg-red-500/10 flex items-center justify-center text-red-400 shrink-0">
-                                <Volume2 size={20} />
+                                <MessageSquare size={20} />
                             </div>
                             <div>
-                                <h5 className="text-sm font-bold text-text-primary mb-1">Audio &amp; TCC Resolved</h5>
+                                <h5 className="text-sm font-bold text-text-primary mb-1">Spoken Answer Humanizer</h5>
                                 <p className="text-xs text-text-secondary leading-relaxed">
-                                    Hardened macOS system audio process tapping and security permission gates to guarantee robust capture streams.
+                                    Deterministically rewrites raw LLM outputs to strip corporate jargon, filter out structure bugs (em-dashes, empty bullets), and optimize prose for natural spoken flow.
                                 </p>
                             </div>
                         </div>
                     </div>
 
-                    {/* 4. Optimized Modes Manager */}
+                    {/* 4. Sandboxed Code Verification */}
                     <div className="p-3 border-b border-border-subtle bg-bg-card/50">
                         <div className="flex items-start gap-4">
                             <div className="w-10 h-10 rounded-lg bg-purple-500/10 flex items-center justify-center text-purple-400 shrink-0">
-                                <Activity size={20} />
+                                <Zap size={20} />
                             </div>
                             <div>
-                                <h5 className="text-sm font-bold text-text-primary mb-1">Optimized Modes Manager</h5>
+                                <h5 className="text-sm font-bold text-text-primary mb-1">Sandboxed Code Verification</h5>
                                 <p className="text-xs text-text-secondary leading-relaxed">
-                                    The Profile Intelligence matrix and Modes Manager have been optimized like crazy for responsive, ultra-low latency context processing.
+                                    Automatically executes Python, JS, and SQLite code in isolated local subprocesses, verifying correctness and auto-correcting errors before displaying a verified badge.
                                 </p>
                             </div>
                         </div>
                     </div>
 
-                    {/* 5. In-App Updates */}
+                    {/* 5. Regional STT-Relay Migration */}
                     <div className="p-3 bg-bg-card/50">
                         <div className="flex items-start gap-4">
                             <div className="w-10 h-10 rounded-lg bg-amber-500/10 flex items-center justify-center text-amber-400 shrink-0">
-                                <Zap size={20} />
+                                <Globe size={20} />
                             </div>
                             <div>
-                                <h5 className="text-sm font-bold text-text-primary mb-1">In-App Updates</h5>
+                                <h5 className="text-sm font-bold text-text-primary mb-1">Regional STT-Relay Migration</h5>
                                 <p className="text-xs text-text-secondary leading-relaxed">
-                                    Enjoy seamless, single-click updates directly inside the desktop app with zero manual installation loops.
+                                    Migrated realtime audio transcription to low-latency regional VPS hosts with transaction-scoped quota advisory locks to prevent double-billing.
                                 </p>
                             </div>
                         </div>
@@ -153,9 +153,9 @@ export const AboutSection: React.FC<AboutSectionProps> = () => {
                                 <Cpu size={20} />
                             </div>
                             <div>
-                                <h5 className="text-sm font-bold text-text-primary mb-1">Hybrid Intelligence</h5>
+                                <h5 className="text-sm font-bold text-text-primary mb-1">Stateful Intelligence OS</h5>
                                 <p className="text-xs text-text-secondary leading-relaxed">
-                                    Seamlessly routes queries between ultra-fast models for instant speed and reasoning models (Gemini, OpenAI, Claude) for complex tasks. Powered by enterprise-grade speech recognition from 7+ providers.
+                                    Acts as a persistent control plane using mode-aware priors (Sales, Technical, Lecture) to dynamically filter context and direct queries to the optimal reasoning engine.
                                 </p>
                             </div>
                         </div>
@@ -167,9 +167,9 @@ export const AboutSection: React.FC<AboutSectionProps> = () => {
                                 <Database size={20} />
                             </div>
                             <div>
-                                <h5 className="text-sm font-bold text-text-primary mb-1">Local RAG & Memory</h5>
+                                <h5 className="text-sm font-bold text-text-primary mb-1">Hindsight LTM & Session Memory</h5>
                                 <p className="text-xs text-text-secondary leading-relaxed">
-                                    A purely local vector memory system allows Natively to recall details from past meetings. Embeddings and retrieval happen on-device via SQLite for maximum privacy.
+                                    Combines a secure local sidecar vector database for document indexing with a time-decayed sliding transcript memory to retrieve relevant semantic context on-demand.
                                 </p>
                             </div>
                         </div>
