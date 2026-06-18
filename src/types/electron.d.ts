@@ -576,7 +576,10 @@ export interface PhoneMirrorInfo {
   loopbackUrl: string | null;
   primaryUrl: string | null;
   lanUrls: string[];
+  /** Phone (LAN) token — embedded in the QR/pairing URL. Not the extension token. */
   token: string | null;
+  /** Loopback-scoped extension token — used for the manual `port:extToken` pairing string. */
+  extToken: string | null;
   qrDataUrl: string | null;
   clients: number;
 }

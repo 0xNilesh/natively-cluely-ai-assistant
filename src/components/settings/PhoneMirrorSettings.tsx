@@ -12,6 +12,7 @@ const EMPTY_INFO: PhoneMirrorInfo = {
   primaryUrl: null,
   lanUrls: [],
   token: null,
+  extToken: null,
   qrDataUrl: null,
   clients: 0,
 };
@@ -49,6 +50,7 @@ export const PhoneMirrorSettings: React.FC = () => {
           prev.qrDataUrl === n.qrDataUrl &&
           prev.primaryUrl === n.primaryUrl &&
           prev.token === n.token &&
+          prev.extToken === n.extToken &&
           prev.running === n.running &&
           prev.clients === n.clients
         ) {
@@ -151,17 +153,19 @@ export const PhoneMirrorSettings: React.FC = () => {
   }, []);
 
   // Manual fallback: copy the raw `port:token` pairing string for the extension's
-  // "Pair manually instead" field. Only shown after the user expands it.
+  // "Pair manually instead" field. Only shown after the user expands it. Uses the
+  // EXTENSION token (loopback-scoped), not the phone token — this string pairs the
+  // browser extension.
   const onCopyPairString = useCallback(async () => {
-    if (!info.port || !info.token) return;
+    if (!info.port || !info.extToken) return;
     try {
-      await navigator.clipboard.writeText(`${info.port}:${info.token}`);
+      await navigator.clipboard.writeText(`${info.port}:${info.extToken}`);
       setPairCopied(true);
       setTimeout(() => setPairCopied(false), 1200);
     } catch (_) {
       /* noop */
     }
-  }, [info.port, info.token]);
+  }, [info.port, info.extToken]);
 
   const lanWarning = info.running && info.exposeOnLan;
   const showQr = info.running && info.qrDataUrl;
@@ -423,12 +427,12 @@ export const PhoneMirrorSettings: React.FC = () => {
                 </div>
                 <div className="flex items-center gap-2">
                   <code className="flex-1 min-w-0 truncate font-mono text-xs px-2.5 py-2 rounded-md bg-bg-main border border-border-subtle text-text-primary">
-                    {info.port && info.token ? `${info.port}:${info.token}` : '—'}
+                    {info.port && info.extToken ? `${info.port}:${info.extToken}` : '—'}
                   </code>
                   <button
                     type="button"
                     onClick={onCopyPairString}
-                    disabled={!info.port || !info.token}
+                    disabled={!info.port || !info.extToken}
                     className="flex-shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-md text-xs font-medium bg-bg-item-active text-text-primary hover:bg-bg-item-active/70 disabled:opacity-50 transition-colors"
                   >
                     {pairCopied ? (

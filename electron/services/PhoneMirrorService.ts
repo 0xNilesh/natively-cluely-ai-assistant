@@ -18,7 +18,10 @@ export interface PhoneMirrorInfo {
   loopbackUrl: string | null;
   primaryUrl: string | null;
   lanUrls: string[];
+  /** Phone (LAN) token — embedded in loopbackUrl/lanUrls/QR. NOT the extension token. */
   token: string | null;
+  /** Loopback-scoped extension token — used for the manual `port:extToken` pairing string. */
+  extToken: string | null;
   qrDataUrl: string | null;
   clients: number;
 }
@@ -110,7 +113,16 @@ export class PhoneMirrorService {
   private server: http.Server | null = null;
   private wss: WebSocketServer | null = null;
   private port = 0;
+  // Phone token: LAN-scoped. Serves the phone HTML page (`/`) and authenticates
+  // phone WebSocket clients. Embedded in the QR/pairing URL, which travels over
+  // plaintext HTTP on the LAN when exposeOnLan is on — so it is per-session (NOT
+  // persisted) and "Rotate token" cycles it.
   private token = '';
+  // Extension token: loopback-scoped. Issued by /pair and required by /dom (the
+  // capture capability) + extension WebSocket clients. Persisted (encrypted) so
+  // the extension pairs once. Kept separate from the phone token so a sniffed LAN
+  // phone token can never reach /dom. See the token-split rationale in CredentialsManager.
+  private extToken = '';
   private exposeOnLan = false;
   private history: PersistedMessage[] = [];
   // Single string instead of token array: O(1) append, O(1) replay (one WS frame).
@@ -197,11 +209,14 @@ export class PhoneMirrorService {
   }
 
   async rotateToken(): Promise<PhoneMirrorInfo> {
+    // Rotate BOTH secrets — the "Rotate token" button is the single deliberate
+    // reset for every paired surface. The phone token is per-session anyway; the
+    // extension token is persisted, so rotating it (and saving) is the one thing
+    // that forces a deliberate extension re-pair, as documented in CONTRACT.md.
     this.token = generateToken();
-    // Persist so the rotation survives a restart — this is the ONE deliberate
-    // action that forces the extension/phone to re-pair.
+    this.extToken = generateToken();
     try {
-      CredentialsManager.getInstance().setPhoneMirrorToken(this.token);
+      CredentialsManager.getInstance().setPhoneMirrorToken(this.extToken);
     } catch (_) {
       /* credentials not ready — token still rotates for this session */
     }
@@ -520,6 +535,7 @@ export class PhoneMirrorService {
         primaryUrl: null,
         lanUrls: [],
         token: null,
+        extToken: null,
         qrDataUrl: null,
         clients: 0,
       };
@@ -555,6 +571,7 @@ export class PhoneMirrorService {
       primaryUrl,
       lanUrls,
       token: this.token,
+      extToken: this.extToken,
       qrDataUrl,
       clients: this.phoneClientCount(),
     };
@@ -571,10 +588,13 @@ export class PhoneMirrorService {
 
   private async _start(exposeOnLan: boolean, persistEnabled: boolean): Promise<PhoneMirrorInfo> {
     this.exposeOnLan = exposeOnLan;
-    // Reuse the persisted token so the extension/phone pair ONCE (stable across
-    // restarts). Mint + persist only when there is none yet. A deliberate Rotate
-    // is the only thing that changes it (see rotateToken).
-    this.token = loadOrCreatePersistedToken();
+    // Phone token: fresh per session. It rides the LAN in a plaintext QR URL, so a
+    // short-lived secret is the safer default — the phone re-scans each session.
+    this.token = generateToken();
+    // Extension token: reuse the persisted value so the extension pairs ONCE and
+    // survives restarts; mint + persist only when there is none yet. Only a
+    // deliberate Rotate changes it (see rotateToken).
+    this.extToken = loadOrCreatePersistedExtToken();
     this.invalidateQrCache();
 
     const host = exposeOnLan ? '0.0.0.0' : '127.0.0.1';
@@ -622,6 +642,7 @@ export class PhoneMirrorService {
     this.server = null;
     this.port = 0;
     this.token = '';
+    this.extToken = '';
     this.livePartial = null;
     this.rateBuckets.clear();
     this.armedUntil = 0;
@@ -689,7 +710,11 @@ export class PhoneMirrorService {
       return;
     }
 
-    // Cross-process companion extension DOM context bridge
+    // Cross-process companion extension DOM context bridge.
+    // Gated by the EXTENSION token (loopback-scoped), NOT the phone token — a
+    // phone token sniffed off the plaintext LAN QR must never reach this capture
+    // capability. Only the extension, which paired over the exact-origin /pair
+    // gate, holds extToken.
     if (fullUrl.pathname === '/dom') {
       if (req.method !== 'POST') {
         const headers: Record<string, string> = { 'Content-Type': 'text/plain' };
@@ -699,7 +724,7 @@ export class PhoneMirrorService {
         return;
       }
 
-      if (!provided || !timingSafeEqualStr(provided, this.token)) {
+      if (!provided || !timingSafeEqualStr(provided, this.extToken)) {
         const headers: Record<string, string> = { 'Content-Type': 'text/plain' };
         if (allowedOrigin) headers['Access-Control-Allow-Origin'] = allowedOrigin;
         res.writeHead(401, headers);
@@ -804,7 +829,8 @@ export class PhoneMirrorService {
       this.armedUntil = 0;
       console.log('[PhoneMirror] extension paired via one-click /pair');
       res.writeHead(200, jsonHeaders);
-      res.end(JSON.stringify({ token: this.token, port: this.port }));
+      // Hand out the EXTENSION token (loopback-scoped), not the phone token.
+      res.end(JSON.stringify({ token: this.extToken, port: this.port }));
       return;
     }
 
@@ -861,8 +887,14 @@ export class PhoneMirrorService {
       return;
     }
 
+    // The WS carries both client roles: phones authenticate with the phone token,
+    // the extension with the loopback extension token. Accept EITHER (constant-time
+    // against both; role is later self-declared via the `hello` frame).
     const provided = url.searchParams.get('t') || '';
-    if (!timingSafeEqualStr(provided, this.token)) {
+    const wsTokenOk =
+      (this.token && timingSafeEqualStr(provided, this.token)) ||
+      (this.extToken && timingSafeEqualStr(provided, this.extToken));
+    if (!wsTokenOk) {
       // Custom 4401 close code signals "auth failed" to the client (won't reconnect).
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
@@ -1090,13 +1122,13 @@ function generateToken(): string {
 }
 
 /**
- * Return the persisted Phone Mirror token, minting + persisting one on first use.
- * Persisting makes the token stable across restarts so the extension/phone pair
- * once; rotation (rotateToken) is the only thing that changes it. Falls back to
- * an in-memory token if CredentialsManager isn't ready (token still works for
- * this session, just not persisted).
+ * Return the persisted loopback-scoped EXTENSION token, minting + persisting one
+ * on first use. Persisting makes it stable across restarts so the extension pairs
+ * once; rotation (rotateToken) is the only thing that changes it. Falls back to an
+ * in-memory token if CredentialsManager isn't ready (works for this session, just
+ * not persisted). The phone token is separate and per-session — never persisted here.
  */
-function loadOrCreatePersistedToken(): string {
+function loadOrCreatePersistedExtToken(): string {
   try {
     const cm = CredentialsManager.getInstance();
     const existing = cm.getPhoneMirrorToken();
