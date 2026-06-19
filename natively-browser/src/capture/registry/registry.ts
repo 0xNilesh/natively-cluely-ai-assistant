@@ -194,6 +194,38 @@ export function findCategory(
   return registry.categories.find((c) => c.id === id) ?? null;
 }
 
+// Categories matchable by a host/URL category rule (no specific platform needed).
+// Deliberately EXCLUDES the coding categories: an unknown coding-like host must
+// NOT be auto-classified as coding from a bare URL token like "/challenge" — that
+// stays platform-gated (a known coding platform) or goes through the AI
+// classifier. Also excludes sensitive (handled by the blocked floor), docs/notes
+// (manual-first), article, and unknown.
+const HOST_URL_MATCHABLE_CATEGORIES: ReadonlySet<string> = new Set([
+  'job_description',
+  'developer_docs',
+]);
+
+/**
+ * Match a non-coding opt-in category rule (job_description / developer_docs) by
+ * host/URL when no specific platform rule applies. A host match OR a URL-pattern
+ * match counts. Returns the first matching rule, or null. Coding categories are
+ * intentionally not matchable here (they require a known platform or the AI
+ * classifier) so a bare "/challenge"-style URL on an unknown host stays unknown.
+ */
+export function findCategoryByHostUrl(
+  registry: CaptureRegistry,
+  host: string,
+  url: string,
+): CategoryRule | null {
+  for (const c of registry.categories) {
+    if (!HOST_URL_MATCHABLE_CATEGORIES.has(c.id)) continue;
+    if (hostMatchesAny(host, c.hostPatterns) || urlMatchesAny(url, c.urlPatterns)) {
+      return c;
+    }
+  }
+  return null;
+}
+
 /** All optional origins across coding-capable platforms (for permission asks). */
 export function codingOptionalOrigins(registry: CaptureRegistry): string[] {
   const out = new Set<string>();

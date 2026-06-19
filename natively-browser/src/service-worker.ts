@@ -485,27 +485,71 @@ interface SmartExtractResult {
   envelope: unknown | null;
   dom: string;
   blocked: boolean;
+  /** Sanitized metadata for the desktop AI classifier (no body/secrets). */
+  safeMetadata?: unknown;
+}
+
+interface SmartExtractOpts {
+  contextId: string;
+  capturedAt: number;
+  mode: 'auto' | 'manual';
+  fullPage?: boolean;
+  classifyOnly?: boolean;
+  extraCategories?: string[];
+  aiApproved?: boolean;
 }
 
 /** Run the content script's smart-extract path (classify + structured extract). */
-async function smartExtractFromTab(
-  tabId: number,
-  contextId: string,
-  capturedAt: number,
-  mode: 'auto' | 'manual',
-  fullPage = false,
-): Promise<SmartExtractResult> {
+async function smartExtractFromTab(tabId: number, opts: SmartExtractOpts): Promise<SmartExtractResult> {
   await chrome.scripting.executeScript({ target: { tabId }, files: ['content-script.js'] });
   const response = (await chrome.tabs.sendMessage(tabId, {
     type: 'natively:smart-extract',
-    contextId,
-    capturedAt,
-    mode,
-    fullPage,
+    contextId: opts.contextId,
+    capturedAt: opts.capturedAt,
+    mode: opts.mode,
+    fullPage: opts.fullPage === true,
+    classifyOnly: opts.classifyOnly === true,
+    extraCategories: opts.extraCategories,
+    aiApproved: opts.aiApproved === true,
   })) as { ok: true; smart: SmartExtractResult } | { ok: false; error: string } | undefined;
   if (!response) throw new Error('No response from page');
   if (!response.ok) throw new Error(response.error || 'Smart extraction failed');
   return response.smart;
+}
+
+/** Desktop AI metadata classifier verdict (relayed over /classify). */
+interface ClassifyVerdict {
+  autoPolicy: 'auto' | 'auto_if_high_confidence' | 'ask' | 'manual' | 'blocked';
+  category?: string;
+}
+
+/**
+ * Ask the DESKTOP to AI-classify sanitized page metadata (never page content).
+ * Returns the desktop's hard-policy verdict, or null if classification isn't
+ * available (no provider, disabled, error, timeout). POSTs to /classify with the
+ * extension token, exactly like /dom.
+ */
+async function classifyMetaWithDesktop(
+  token: string,
+  port: number,
+  safeMetadata: unknown,
+): Promise<ClassifyVerdict | null> {
+  if (!safeMetadata) return null;
+  const livePort = await resolveLivePort(fetch, port);
+  if (livePort == null) return null;
+  try {
+    const res = await fetch(`http://127.0.0.1:${livePort}/classify?t=${encodeURIComponent(token)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ meta: safeMetadata }),
+    });
+    if (res.status !== 200) return null;
+    const body = (await res.json()) as { autoPolicy?: string; category?: string };
+    if (!body || typeof body.autoPolicy !== 'string') return null;
+    return { autoPolicy: body.autoPolicy as ClassifyVerdict['autoPolicy'], category: body.category };
+  } catch {
+    return null;
+  }
 }
 
 /** Outcome of an auto-context request (desktop pull just before an answer). */
@@ -515,42 +559,25 @@ export type AutoContextOutcome =
   | { kind: 'sent'; chars: number; category?: string }
   | DomPostOutcome;
 
-/**
- * Just-in-time auto-context capture. Picks the best tab, classifies it IN the
- * page, and only posts when the local policy permits auto-attach (high-confidence
- * coding). Sensitive pages return `blocked` and capture nothing. This is the path
- * the desktop calls right before generating an answer.
- */
-async function captureAutoContext(reqId: string, fullPage = false): Promise<AutoContextOutcome> {
-  const pairing = await getPairing();
-  if (!pairing) return { kind: 'unauthorized' };
+/** Options for the desktop-pull auto-context capture (from the WS frame). */
+interface AutoContextOpts {
+  fullPage?: boolean;
+  /** The desktop AI metadata classifier is enabled (opt-in). */
+  aiClassify?: boolean;
+  /** Extra opted-in categories (e.g. job_description, developer_docs). */
+  extraCategories?: string[];
+}
 
-  const tab = await resolveCaptureTab();
-  if (!tab || tab.id == null || !isCapturable(tab)) {
-    return { kind: 'none', reason: 'no capturable tab' };
-  }
+/** AI policies that mean "capture this page". */
+const AI_ELIGIBLE_POLICIES = new Set(['auto', 'auto_if_high_confidence', 'ask']);
 
-  const contextId = `auto-${reqId}`;
-  let smart: SmartExtractResult;
-  try {
-    smart = await smartExtractFromTab(tab.id, contextId, Date.now(), 'auto', fullPage);
-  } catch (err) {
-    return { kind: 'none', reason: err instanceof Error ? err.message : String(err) };
-  }
-
-  if (smart.blocked) return { kind: 'blocked' };
-  // Only AUTO-attach when the local policy says auto / auto_if_high_confidence
-  // AND we actually extracted something. Everything else is left for a manual
-  // user action (the chip's "attach" affordance), so auto never surprises.
-  // EXPERIMENTAL full-page mode relaxes the coding-only gate: any non-blocked
-  // page is eligible (sensitive pages already returned `blocked` above, so by
-  // this point the page is non-sensitive). We still require non-empty content.
-  const policy = smart.candidate.autoPolicy;
-  const eligible = fullPage || policy === 'auto' || policy === 'auto_if_high_confidence';
-  if (!eligible || !smart.dom) {
-    return { kind: 'none', reason: `policy=${policy}` };
-  }
-
+/** Post a captured smart-extract result to /dom. */
+async function postSmartCapture(
+  pairing: Pairing,
+  reqId: string,
+  tab: chrome.tabs.Tab,
+  smart: SmartExtractResult,
+): Promise<AutoContextOutcome> {
   const meta: CaptureMeta = {
     title: tab.title || '',
     url: tab.url || '',
@@ -566,6 +593,77 @@ async function captureAutoContext(reqId: string, fullPage = false): Promise<Auto
     return { kind: 'sent', chars: smart.dom.length, category: smart.candidate.matchedCategory };
   }
   return outcome;
+}
+
+/**
+ * Just-in-time auto-context capture. Picks the best tab, classifies it IN the
+ * page, and only posts when the page is auto-eligible:
+ *   - local high-confidence coding (auto / auto_if_high_confidence), OR
+ *   - an opted-in extra category (job_description / developer_docs), OR
+ *   - EXPERIMENTAL full-page mode (any non-sensitive page), OR
+ *   - the DESKTOP AI metadata classifier approves it (opt-in).
+ * Sensitive pages return `blocked` and capture NOTHING in every path. The body is
+ * never read until the page is approved — the AI round-trip classifies sanitized
+ * metadata first (classify-only, no body), then re-extracts only if approved.
+ */
+async function captureAutoContext(reqId: string, opts: AutoContextOpts = {}): Promise<AutoContextOutcome> {
+  const pairing = await getPairing();
+  if (!pairing) return { kind: 'unauthorized' };
+
+  const tab = await resolveCaptureTab();
+  if (!tab || tab.id == null || !isCapturable(tab)) {
+    return { kind: 'none', reason: 'no capturable tab' };
+  }
+
+  const contextId = `auto-${reqId}`;
+  const extraCategories = opts.extraCategories;
+
+  // Pass 1: classify + extract whatever is LOCALLY eligible (coding / opted-in
+  // categories / full-page). For a non-eligible page this reads no body (the
+  // content script skips extraction) but still returns the candidate + metadata.
+  let smart: SmartExtractResult;
+  try {
+    smart = await smartExtractFromTab(tab.id, {
+      contextId,
+      capturedAt: Date.now(),
+      mode: 'auto',
+      fullPage: opts.fullPage,
+      extraCategories,
+    });
+  } catch (err) {
+    return { kind: 'none', reason: err instanceof Error ? err.message : String(err) };
+  }
+
+  // SENSITIVE FLOOR — never captured, never AI-classified.
+  if (smart.blocked) return { kind: 'blocked' };
+
+  // Locally eligible and we got content → post it.
+  if (smart.dom) {
+    return postSmartCapture(pairing, reqId, tab, smart);
+  }
+
+  // Not locally eligible. If the AI classifier is enabled, ask the DESKTOP to
+  // classify the SANITIZED METADATA (never page content). If it approves, do a
+  // second pass that actually extracts the page (aiApproved relaxes the gate).
+  if (opts.aiClassify && smart.safeMetadata) {
+    const verdict = await classifyMetaWithDesktop(pairing.token, pairing.port, smart.safeMetadata);
+    if (verdict && verdict.autoPolicy !== 'blocked' && AI_ELIGIBLE_POLICIES.has(verdict.autoPolicy)) {
+      try {
+        const approved = await smartExtractFromTab(tab.id, {
+          contextId,
+          capturedAt: Date.now(),
+          mode: 'auto',
+          aiApproved: true,
+        });
+        if (approved.blocked) return { kind: 'blocked' }; // floor re-checked
+        if (approved.dom) return postSmartCapture(pairing, reqId, tab, approved);
+      } catch (err) {
+        return { kind: 'none', reason: err instanceof Error ? err.message : String(err) };
+      }
+    }
+  }
+
+  return { kind: 'none', reason: `policy=${smart.candidate.autoPolicy}` };
 }
 
 /** Validate a pasted pairing by sending a tiny probe POST (manual fallback). */
@@ -645,10 +743,10 @@ async function handleCaptureDom(reqId: string, tabId?: number): Promise<void> {
  * the desktop proceeds without browser context), `error` on failure. Sensitive
  * pages ack `none` (deliberately not captured).
  */
-async function handleRequestAutoContext(reqId: string, fullPage = false): Promise<void> {
+async function handleRequestAutoContext(reqId: string, opts: AutoContextOpts = {}): Promise<void> {
   wsSend({ type: 'capture-ack', reqId, status: 'started' });
   try {
-    const result = await captureAutoContext(reqId, fullPage);
+    const result = await captureAutoContext(reqId, opts);
     if (result.kind === 'sent') {
       wsSend({ type: 'capture-ack', reqId, status: 'done', category: result.category });
     } else if (result.kind === 'none' || result.kind === 'blocked') {
@@ -698,7 +796,13 @@ async function ensureWsConnected(): Promise<void> {
       if (msg.type === 'capture-dom' && typeof msg.reqId === 'string') {
         void handleCaptureDom(msg.reqId, typeof msg.tabId === 'number' ? msg.tabId : undefined);
       } else if (msg.type === 'request-auto-context' && typeof msg.reqId === 'string') {
-        void handleRequestAutoContext(msg.reqId, msg.fullPage === true);
+        void handleRequestAutoContext(msg.reqId, {
+          fullPage: msg.fullPage === true,
+          aiClassify: msg.aiClassify === true,
+          extraCategories: Array.isArray(msg.extraCategories)
+            ? (msg.extraCategories as unknown[]).filter((x): x is string => typeof x === 'string')
+            : undefined,
+        });
       } else if (msg.type === 'list-tabs' && typeof msg.reqId === 'string') {
         void handleListTabs(msg.reqId);
       }

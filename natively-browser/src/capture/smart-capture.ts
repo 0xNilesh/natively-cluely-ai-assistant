@@ -14,10 +14,10 @@
 
 import { DEFAULT_REGISTRY, findPlatform, normalizeHost } from './registry/registry';
 import type { CaptureRegistry } from './registry/registry-types';
-import { classifyTab } from './classifier/tab-classifier';
+import { buildSafeMetadata, classifyTab } from './classifier/tab-classifier';
 import { gatherPageSignals } from './page-signals';
 import { runExtractor } from './extractors';
-import type { CaptureMode, ContextEnvelope, TabCandidate } from './types';
+import type { BrowserContextCategory, CaptureMode, ContextEnvelope, SafeWebsiteMetadata, TabCandidate } from './types';
 
 export interface SmartCaptureDeps {
   document: Document;
@@ -46,6 +46,27 @@ export interface SmartCaptureDeps {
    * is never bypassed.
    */
   fullPageMode?: boolean;
+  /**
+   * Extra categories the user opted into auto-detecting (e.g. 'job_description',
+   * 'developer_docs'). A page whose LOCAL category is one of these is treated as
+   * auto-eligible even though its registry policy is 'ask'. Sensitive categories
+   * can never be added here — the blocked floor runs first.
+   */
+  extraEligibleCategories?: ReadonlySet<BrowserContextCategory>;
+  /**
+   * The desktop AI metadata classifier approved this page (after the round-trip).
+   * When true, the page is auto-eligible regardless of local policy — BUT only
+   * because the desktop already ran it through the hard policy engine, which
+   * forces sensitive categories to 'blocked'. The extension's own blocked floor
+   * still runs first as defense-in-depth.
+   */
+  aiApproved?: boolean;
+  /**
+   * Classify-only mode: build the candidate + sanitized metadata but DO NOT read
+   * the page body / run the extractor. Used for the first leg of the AI round-trip
+   * (the desktop classifies sanitized metadata before any content is captured).
+   */
+  classifyOnly?: boolean;
 }
 
 /** Policies that may auto-attach without an explicit user action. */
@@ -54,12 +75,19 @@ const AUTO_ELIGIBLE = new Set(['auto', 'auto_if_high_confidence']);
 export interface SmartCaptureResult {
   /** Local classification of the page. */
   candidate: TabCandidate;
-  /** Structured capture (null for blocked/sensitive pages). */
+  /** Structured capture (null for blocked/sensitive pages or classify-only). */
   envelope: ContextEnvelope | null;
-  /** Legacy plain-string DOM ('' for blocked). */
+  /** Legacy plain-string DOM ('' for blocked / not-extracted). */
   dom: string;
   /** True when the page was blocked (sensitive) and nothing was captured. */
   blocked: boolean;
+  /**
+   * Sanitized metadata for the desktop AI classifier (coarse tokens + host +
+   * sanitized URL + booleans — never page body/code/secrets). Always present for
+   * a non-blocked page; undefined when blocked (we never describe a sensitive
+   * page to the AI either).
+   */
+  safeMetadata?: SafeWebsiteMetadata;
 }
 
 /** A short, lowercased visible-text sample for keyword signals (not transmitted). */
@@ -97,16 +125,46 @@ export function smartCapture(deps: SmartCaptureDeps): SmartCaptureResult {
   candidate.url = url;
   candidate.host = host;
 
+  // SENSITIVE FLOOR — runs before anything else and is never bypassed. We never
+  // extract a sensitive page AND never describe it to the AI classifier.
   if (candidate.autoPolicy === 'blocked') {
     return { candidate, envelope: null, dom: '', blocked: true };
   }
 
+  // Sanitized metadata for the desktop AI round-trip. Built for every non-blocked
+  // page; contains coarse tokens + host + a sanitized URL + booleans only.
+  const safeMetadata = buildSafeMetadata({
+    registry,
+    host,
+    url,
+    title: deps.title ?? deps.document.title,
+    signals,
+  });
+
+  // Classify-only: the first leg of the AI round-trip wants the candidate +
+  // metadata WITHOUT reading the page body. No extraction here.
+  if (deps.classifyOnly) {
+    return { candidate, envelope: null, dom: '', blocked: false, safeMetadata };
+  }
+
   // Auto path: skip extraction entirely for non-auto-eligible pages so we never
   // read a non-coding page's body just to discard it. Manual captures extract
-  // regardless (the user explicitly asked). EXPERIMENTAL full-page mode also
-  // extracts every (non-sensitive) page — the sensitive floor above already ran.
-  if (deps.autoEligibleOnly && !deps.fullPageMode && !AUTO_ELIGIBLE.has(candidate.autoPolicy)) {
-    return { candidate, envelope: null, dom: '', blocked: false };
+  // regardless (the user explicitly asked). A page is auto-eligible when:
+  //   - its registry policy is auto/auto_if_high_confidence (high-confidence coding), OR
+  //   - its local category is one the user opted into (extraEligibleCategories: JD/docs), OR
+  //   - the desktop AI classifier approved it (aiApproved), OR
+  //   - EXPERIMENTAL full-page mode is on (any non-sensitive page).
+  // The sensitive floor above already ran, so none of these can capture a
+  // sensitive page.
+  const localCategory = candidate.matchedCategory;
+  const extraEligible = Boolean(localCategory && deps.extraEligibleCategories?.has(localCategory));
+  const eligible =
+    deps.fullPageMode ||
+    deps.aiApproved ||
+    extraEligible ||
+    AUTO_ELIGIBLE.has(candidate.autoPolicy);
+  if (deps.autoEligibleOnly && !eligible) {
+    return { candidate, envelope: null, dom: '', blocked: false, safeMetadata };
   }
 
   const platform = findPlatform(registry, host, url);
@@ -119,10 +177,12 @@ export function smartCapture(deps: SmartCaptureDeps): SmartCaptureResult {
     candidate,
     platform,
     captureMode: deps.captureMode,
-    // Full-page mode upgrades the unknown-category `selectionOnly` extractor to
-    // the full-text article extractor so the model sees the whole page.
-    fullPage: deps.fullPageMode,
+    // Upgrade the unknown-category `selectionOnly` extractor to the full-text
+    // article extractor so the model sees the whole readable page. This applies
+    // for EXPERIMENTAL full-page mode and for an AI-approved unknown page (the
+    // desktop AI judged it worth capturing, so a bare selection is not enough).
+    fullPage: deps.fullPageMode || (deps.aiApproved && candidate.matchedCategory === 'unknown'),
   });
 
-  return { candidate, envelope, dom, blocked: false };
+  return { candidate, envelope, dom, blocked: false, safeMetadata };
 }

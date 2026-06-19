@@ -19,7 +19,7 @@ import type {
   TabCandidate,
 } from '../types';
 import type { CaptureRegistry } from '../registry/registry-types';
-import { findCategory, findPlatform, normalizeHost } from '../registry/registry';
+import { findCategory, findCategoryByHostUrl, findPlatform, normalizeHost } from '../registry/registry';
 import { detectSensitive, type PageSignals } from './sensitive-page-detector';
 import { scoreSignals, type ScoreSignals } from './signal-scorer';
 
@@ -234,10 +234,20 @@ export function classifyTab(input: ClassifyInput): TabCandidate {
     };
   }
 
-  // 2. Registry platform → category.
+  // 2. Registry platform → category. When no specific platform matches, fall
+  // back to a category rule keyed by host/URL (covers job_description /
+  // developer_docs pages on generic hosts, e.g. linkedin.com/jobs).
   const platform = findPlatform(input.registry, host, url);
-  const category: BrowserContextCategory = platform?.category ?? 'unknown';
-  if (platform) reasons.push(`platform: ${platform.id} (${category})`);
+  let category: BrowserContextCategory = platform?.category ?? 'unknown';
+  if (platform) {
+    reasons.push(`platform: ${platform.id} (${category})`);
+  } else {
+    const catRule = findCategoryByHostUrl(input.registry, host, url);
+    if (catRule) {
+      category = catRule.id;
+      reasons.push(`category rule: ${catRule.id}`);
+    }
+  }
 
   // 3. Build score signals from metadata + optional JIT page signals.
   const titleLower = title.toLowerCase();

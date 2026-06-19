@@ -574,30 +574,23 @@ export const PhoneMirrorSettings: React.FC = () => {
           checked={ctx.askBeforeUnknown}
           onChange={() => onToggleCtx('askBeforeUnknown', 'browserAskBeforeUnknown')}
         />
-        {/* The AI metadata classifier + JD/dev-docs auto-detect are built and
-            tested but not yet wired into the live auto-context path, so they are
-            shown disabled ("Coming soon") rather than as live controls that do
-            nothing. Wiring is a tracked follow-up. */}
         <CtxToggle
           label="AI page classifier (opt-in)"
           desc="For unknown pages, send sanitized metadata only (host + keywords, never page content) to your configured AI provider to classify the page. Off by default."
           checked={ctx.aiClassifierEnabled}
           onChange={() => onToggleCtx('aiClassifierEnabled', 'browserAiClassifierEnabled')}
-          comingSoon
         />
         <CtxToggle
           label="Auto-detect job descriptions"
           desc="Optional. Recognize job-posting pages so you can attach them when answering."
           checked={ctx.autoDetectJobDescriptions}
           onChange={() => onToggleCtx('autoDetectJobDescriptions', 'browserAutoDetectJobDescriptions')}
-          comingSoon
         />
         <CtxToggle
           label="Auto-detect developer docs"
           desc="Optional. Recognize documentation pages so you can attach them when answering."
           checked={ctx.autoDetectDeveloperDocs}
           onChange={() => onToggleCtx('autoDetectDeveloperDocs', 'browserAutoDetectDeveloperDocs')}
-          comingSoon
         />
 
         {/* EXPERIMENTAL: full-page capture. Relaxes the coding-only auto gate but

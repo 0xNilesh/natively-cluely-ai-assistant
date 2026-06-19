@@ -224,3 +224,84 @@ describe('smart-capture — EXPERIMENTAL full-page mode', () => {
     assert.equal(r.dom, '');
   });
 });
+
+describe('smart-capture — AI round-trip + extra categories', () => {
+  const longBody = () =>
+    el('article', {
+      children: [
+        el('h1', { text: 'Some Heading' }),
+        el('p', { text: 'A reasonably long body of readable text for extraction. '.repeat(8) }),
+      ],
+    });
+
+  test('classifyOnly → builds safeMetadata, reads NO body (envelope null, dom empty)', () => {
+    const doc = makeDoc([longBody()], 'Some Page');
+    const r = sc.smartCapture({
+      ...base(doc, 'wiki.example', 'https://wiki.example/page'),
+      autoEligibleOnly: true,
+      classifyOnly: true,
+    });
+    assert.equal(r.blocked, false);
+    assert.equal(r.envelope, null);
+    assert.equal(r.dom, '');
+    assert.ok(r.safeMetadata, 'safeMetadata must be present for the AI round-trip');
+    assert.equal(r.safeMetadata.host, 'wiki.example');
+  });
+
+  test('classifyOnly on Gmail → blocked, NO safeMetadata (never describe a sensitive page)', () => {
+    const doc = makeDoc([el('div', { text: 'inbox' })], 'Gmail');
+    const r = sc.smartCapture({
+      ...base(doc, 'mail.google.com', 'https://mail.google.com/'),
+      autoEligibleOnly: true,
+      classifyOnly: true,
+    });
+    assert.equal(r.blocked, true);
+    assert.equal(r.safeMetadata, undefined);
+  });
+
+  test('aiApproved → an otherwise-ineligible page gets extracted', () => {
+    const doc = makeDoc([longBody()], 'Some Page');
+    const r = sc.smartCapture({
+      ...base(doc, 'wiki.example', 'https://wiki.example/page'),
+      autoEligibleOnly: true,
+      aiApproved: true,
+    });
+    assert.equal(r.blocked, false);
+    assert.ok(r.envelope, 'aiApproved should make the page eligible for extraction');
+    assert.ok(r.dom.length > 0);
+  });
+
+  test('PRIVACY FLOOR: aiApproved CANNOT override the sensitive block', () => {
+    const doc = makeDoc([el('div', { text: 'inbox' })], 'Gmail');
+    const r = sc.smartCapture({
+      ...base(doc, 'mail.google.com', 'https://mail.google.com/'),
+      autoEligibleOnly: true,
+      aiApproved: true,
+    });
+    assert.equal(r.blocked, true);
+    assert.equal(r.envelope, null);
+    assert.equal(r.dom, '');
+  });
+
+  test('extraEligibleCategories makes a job-description page auto-eligible', () => {
+    // A LinkedIn job page → local category job_description (registry policy 'ask').
+    const doc = makeDoc(
+      [el('article', { children: [el('p', { text: 'Responsibilities: build things. Requirements: experience. '.repeat(6) })] })],
+      'Senior Engineer - Jobs',
+    );
+    const withoutOptIn = sc.smartCapture({
+      ...base(doc, 'linkedin.com', 'https://www.linkedin.com/jobs/view/123'),
+      autoEligibleOnly: true,
+    });
+    // Without the opt-in, a JD page is NOT auto-eligible → nothing captured.
+    assert.equal(withoutOptIn.dom, '');
+
+    const withOptIn = sc.smartCapture({
+      ...base(doc, 'linkedin.com', 'https://www.linkedin.com/jobs/view/123'),
+      autoEligibleOnly: true,
+      extraEligibleCategories: new Set(['job_description']),
+    });
+    assert.equal(withOptIn.candidate.matchedCategory, 'job_description');
+    assert.ok(withOptIn.dom.length > 0, 'opt-in JD page should be captured');
+  });
+});

@@ -87,6 +87,11 @@ const PAIR_ARM_WINDOW_MS = 60_000;
 // timeout + screenshot fallback" — if the extension doesn't ack `done` in time,
 // the hotkey path falls back to a screenshot rather than silently no-op.
 const CAPTURE_TIMEOUT_MS = 2_500;
+// Auto-context deadline when the opt-in AI metadata classifier is on: the
+// extension does an extra /classify round-trip + a second extract, so it needs
+// more headroom than the snappy non-AI default. Still bounded so a slow/missing
+// provider degrades to "no browser context" rather than hanging the answer.
+const AUTO_CONTEXT_AI_TIMEOUT_MS = 6_000;
 const LIST_TABS_TIMEOUT_MS = 1_500;
 // Application-level keepalive cadence to extension clients (under Chrome's ~30s MV3
 // idle-kill). Each `ka` frame runs the SW onmessage handler → resets its idle timer.
@@ -184,6 +189,13 @@ export class PhoneMirrorService {
   // Resolver for the window that should receive captured DOM (the overlay that
   // mounts NativelyInterface). When it yields no live window, /dom returns 409.
   private overlayResolver: (() => BrowserWindow | null) | null = null;
+  // Smart Browser Context v2 — injected AI metadata classifier (opt-in). When set,
+  // the /classify endpoint routes sanitized page metadata through it (which uses
+  // the existing provider stack + hard policy engine). Null → /classify is a no-op
+  // (404) and the extension proceeds without AI classification.
+  private metadataClassifier:
+    | ((meta: unknown) => Promise<{ autoPolicy: string; category?: string }>)
+    | null = null;
 
   static getInstance(): PhoneMirrorService {
     if (!PhoneMirrorService._instance) PhoneMirrorService._instance = new PhoneMirrorService();
@@ -424,6 +436,18 @@ export class PhoneMirrorService {
   }
 
   /**
+   * Inject the AI metadata classifier (opt-in). The function receives SANITIZED
+   * metadata only (the extension's buildSafeMetadata output) and returns the hard
+   * policy verdict. Pass null to disable the /classify endpoint. Wired from
+   * ipcHandlers with a BrowserMetadataClassifierService bound to the live LLMHelper.
+   */
+  setMetadataClassifier(
+    fn: ((meta: unknown) => Promise<{ autoPolicy: string; category?: string }>) | null,
+  ): void {
+    this.metadataClassifier = fn;
+  }
+
+  /**
    * Ask the most-recently-active companion extension to capture the active tab
    * (or `tabId`) and POST it to /dom. Resolves when the extension acks `done`,
    * or `{ok:false}` on error/timeout/no-extension so the caller can fall back
@@ -470,11 +494,23 @@ export class PhoneMirrorService {
    *     the caller proceeds WITHOUT browser context.
    * Mirrors requestDomCapture's reqId anti-clobber + timeout machinery.
    */
-  requestAutoContext(opts?: { timeoutMs?: number; fullPage?: boolean }): Promise<{ attached: boolean; reason?: string; category?: string }> {
+  requestAutoContext(opts?: {
+    timeoutMs?: number;
+    fullPage?: boolean;
+    /** Tell the extension the AI metadata classifier is enabled (opt-in). */
+    aiClassify?: boolean;
+    /** Opted-in extra categories treated as auto-eligible (e.g. job_description). */
+    extraCategories?: string[];
+  }): Promise<{ attached: boolean; reason?: string; category?: string }> {
     const target = this.pickExtensionClient();
     if (!target) return Promise.resolve({ attached: false, reason: 'no-extension' });
     const reqId = generateToken();
     const fullPage = opts?.fullPage === true;
+    const aiClassify = opts?.aiClassify === true;
+    // The AI path does an extra /classify round-trip + a second extract, so allow
+    // a longer deadline when it's enabled (still bounded; the `started` ack also
+    // extends once). Non-AI captures keep the snappy default.
+    const defaultTimeout = aiClassify ? AUTO_CONTEXT_AI_TIMEOUT_MS : CAPTURE_TIMEOUT_MS;
     this.openCaptureReqIds.add(reqId);
     return new Promise((resolve) => {
       const settle = (r: { ok: boolean; reason?: string; category?: string }) => {
@@ -488,10 +524,18 @@ export class PhoneMirrorService {
       const timer = setTimeout(() => {
         this.pendingCaptures.delete(reqId);
         settle({ ok: false, reason: 'timeout' });
-      }, opts?.timeoutMs ?? CAPTURE_TIMEOUT_MS);
+      }, opts?.timeoutMs ?? defaultTimeout);
       this.pendingCaptures.set(reqId, { resolve: settle, timer });
       try {
-        target.send(JSON.stringify({ type: 'request-auto-context', reqId, fullPage }));
+        target.send(
+          JSON.stringify({
+            type: 'request-auto-context',
+            reqId,
+            fullPage,
+            aiClassify,
+            extraCategories: opts?.extraCategories,
+          }),
+        );
       } catch (_) {
         clearTimeout(timer);
         this.pendingCaptures.delete(reqId);
@@ -1011,6 +1055,89 @@ export class PhoneMirrorService {
         if (allowedOrigin) headers['Access-Control-Allow-Origin'] = allowedOrigin;
         res.writeHead(400, headers);
         res.end('Bad Request');
+      });
+      return;
+    }
+
+    // Smart Browser Context v2 — AI metadata classification (opt-in). The
+    // extension POSTs SANITIZED METADATA ONLY (no page body/code/secrets) and
+    // gets back the hard-policy verdict. Same extToken auth + extension-origin
+    // CORS as /dom; a small body cap (metadata is tiny). 404 when no classifier
+    // is injected (feature off) so the extension proceeds without AI.
+    if (fullUrl.pathname === '/classify') {
+      const jsonHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (allowedOrigin) jsonHeaders['Access-Control-Allow-Origin'] = allowedOrigin;
+      if (req.method === 'OPTIONS') {
+        const h: Record<string, string> = {
+          'Access-Control-Allow-Methods': 'POST, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+        };
+        if (allowedOrigin) h['Access-Control-Allow-Origin'] = allowedOrigin;
+        res.writeHead(204, h);
+        res.end();
+        return;
+      }
+      if (req.method !== 'POST') {
+        res.writeHead(405, jsonHeaders);
+        res.end(JSON.stringify({ error: 'method_not_allowed' }));
+        return;
+      }
+      if (!provided || !timingSafeEqualStr(provided, this.extToken)) {
+        res.writeHead(401, jsonHeaders);
+        res.end(JSON.stringify({ error: 'unauthorized' }));
+        return;
+      }
+      if (!this.metadataClassifier) {
+        // Feature off / no provider wired — tell the extension to skip AI.
+        res.writeHead(404, jsonHeaders);
+        res.end(JSON.stringify({ error: 'classifier_unavailable' }));
+        return;
+      }
+      let body = '';
+      let tooLarge = false;
+      req.on('data', (chunk) => {
+        if (tooLarge) return;
+        body += chunk;
+        // Sanitized metadata is small; a generous 32 KB cap rejects abuse.
+        if (body.length > 32_768) {
+          tooLarge = true;
+          res.writeHead(413, jsonHeaders);
+          res.end(JSON.stringify({ error: 'payload_too_large' }));
+          req.socket.destroy();
+        }
+      });
+      req.on('end', () => {
+        if (tooLarge) return;
+        let meta: unknown;
+        try {
+          const parsed = JSON.parse(body);
+          meta = parsed && typeof parsed === 'object' ? (parsed as { meta?: unknown }).meta : undefined;
+        } catch {
+          res.writeHead(400, jsonHeaders);
+          res.end(JSON.stringify({ error: 'bad_request' }));
+          return;
+        }
+        if (!meta || typeof meta !== 'object') {
+          res.writeHead(400, jsonHeaders);
+          res.end(JSON.stringify({ error: 'bad_request' }));
+          return;
+        }
+        // Route through the injected classifier (existing provider stack + hard
+        // policy engine). Any failure → conservative manual verdict, never a 500.
+        this.metadataClassifier!(meta)
+          .then((verdict) => {
+            res.writeHead(200, jsonHeaders);
+            res.end(
+              JSON.stringify({
+                autoPolicy: verdict?.autoPolicy || 'manual',
+                category: verdict?.category,
+              }),
+            );
+          })
+          .catch(() => {
+            res.writeHead(200, jsonHeaders);
+            res.end(JSON.stringify({ autoPolicy: 'manual' }));
+          });
       });
       return;
     }

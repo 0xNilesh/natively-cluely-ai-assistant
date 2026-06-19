@@ -14,7 +14,21 @@
 import { Readability } from '@mozilla/readability';
 import { extractPageContent, type ExtractResult } from './extract';
 import { smartCapture, type SmartCaptureResult } from './capture/smart-capture';
-import type { CaptureMode } from './capture/types';
+import type { BrowserContextCategory, CaptureMode } from './capture/types';
+
+export interface SmartExtractOpts {
+  contextId: string;
+  capturedAt: number;
+  mode?: CaptureMode;
+  /** EXPERIMENTAL: attach the full readable text of any non-sensitive page. */
+  fullPage?: boolean;
+  /** Classify + build sanitized metadata only; do NOT read the page body. */
+  classifyOnly?: boolean;
+  /** Extra opted-in categories treated as auto-eligible (e.g. job_description). */
+  extraCategories?: BrowserContextCategory[];
+  /** The desktop AI classifier approved this page → auto-eligible. */
+  aiApproved?: boolean;
+}
 
 export type CaptureRequest =
   | { type: 'natively:extract' }
@@ -22,7 +36,8 @@ export type CaptureRequest =
   // `mode` lets the SW distinguish manual vs auto captures for the envelope.
   // `fullPage` (experimental) attaches the full readable text of any non-sensitive
   // page in auto mode — sensitive pages are still hard-blocked downstream.
-  | { type: 'natively:smart-extract'; contextId: string; capturedAt: number; mode?: CaptureMode; fullPage?: boolean };
+  // `classifyOnly`/`extraCategories`/`aiApproved` drive the AI-classifier round-trip.
+  | ({ type: 'natively:smart-extract' } & SmartExtractOpts);
 export type CaptureResponse =
   | { ok: true; result: ExtractResult }
   | { ok: true; smart: SmartCaptureResult }
@@ -46,7 +61,8 @@ function runExtraction(): ExtractResult {
   });
 }
 
-function runSmartCapture(contextId: string, capturedAt: number, mode: CaptureMode, fullPage = false): SmartCaptureResult {
+function runSmartCapture(opts: SmartExtractOpts): SmartCaptureResult {
+  const mode = opts.mode || 'auto';
   return smartCapture({
     document,
     host: location.hostname,
@@ -54,15 +70,21 @@ function runSmartCapture(contextId: string, capturedAt: number, mode: CaptureMod
     title: document.title,
     getSelection: pageSelection,
     readabilityFactory: (doc) => new Readability(doc),
-    contextId,
-    capturedAt,
+    contextId: opts.contextId,
+    capturedAt: opts.capturedAt,
     captureMode: mode,
     // Auto captures (pre-answer pull) only extract auto-eligible coding pages;
     // a manual capture extracts whatever the user is on.
     autoEligibleOnly: mode === 'auto',
     // EXPERIMENTAL: relax the coding-only auto gate and capture the full page
     // text for any non-sensitive page. Sensitive pages stay blocked.
-    fullPageMode: fullPage,
+    fullPageMode: opts.fullPage === true,
+    // Classify-only first leg of the AI round-trip: build metadata, read no body.
+    classifyOnly: opts.classifyOnly === true,
+    // Opted-in extra categories (JD / dev-docs) treated as auto-eligible.
+    extraEligibleCategories: opts.extraCategories ? new Set(opts.extraCategories) : undefined,
+    // Desktop AI classifier already approved this page (after the round-trip).
+    aiApproved: opts.aiApproved === true,
   });
 }
 
@@ -78,12 +100,7 @@ if (!w[GUARD]) {
           return undefined;
         }
         if (message.type === 'natively:smart-extract') {
-          const smart = runSmartCapture(
-            message.contextId,
-            message.capturedAt,
-            message.mode || 'auto',
-            message.fullPage === true,
-          );
+          const smart = runSmartCapture(message);
           sendResponse({ ok: true, smart });
           return undefined;
         }

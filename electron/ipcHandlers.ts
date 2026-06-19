@@ -12,6 +12,8 @@ import { CodexCliService } from './services/CodexCliService';
 import { PhoneMirrorService } from './services/PhoneMirrorService';
 import { sanitizeContextEnvelope } from './services/browser-context/sanitize';
 import { formatEnvelopeForPrompt } from './services/browser-context/formatEnvelopeForPrompt';
+import { BrowserMetadataClassifierService } from './services/browser-context/BrowserMetadataClassifierService';
+import type { BrowserContextCategory, SafeWebsiteMetadata } from './services/browser-context/types';
 import { SettingsManager } from './services/SettingsManager';
 import { SkillsManager } from './services/SkillsManager';
 
@@ -6879,6 +6881,34 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
+  // Smart Browser Context v2 — inject the AI metadata classifier so the /classify
+  // endpoint can route SANITIZED page metadata through the existing provider stack
+  // (LLMHelper.generateContentStructured) + the hard policy engine. The classifier
+  // is created lazily per call so it always binds the CURRENT LLMHelper (provider
+  // selection can change at runtime). Sensitive categories are forced to 'blocked'
+  // by the policy engine regardless of the AI verdict.
+  {
+    let browserMetaClassifier: BrowserMetadataClassifierService | null = null;
+    PhoneMirrorService.getInstance().setMetadataClassifier(async (meta: unknown) => {
+      const llmHelper = appState.processingHelper?.getLLMHelper?.() || null;
+      // Re-instantiate when the helper instance changes so the cache rides along
+      // with a stable helper but a provider switch is still picked up.
+      if (!browserMetaClassifier) {
+        browserMetaClassifier = new BrowserMetadataClassifierService(llmHelper);
+      }
+      // The sanitized metadata carries a hasSensitiveSignals flag from the
+      // extension's local sensitive-page detector — feed it in so the policy
+      // engine hard-blocks even if the AI misclassifies (defense-in-depth on top
+      // of the extension's own blocked floor, which already runs first).
+      const safeMeta = meta as SafeWebsiteMetadata;
+      const { decision } = await browserMetaClassifier.classifyAndDecide(
+        safeMeta,
+        safeMeta?.hasSensitiveSignals === true,
+      );
+      return { autoPolicy: decision.autoPolicy, category: decision.category };
+    });
+  }
+
   safeHandle('skills:list', () => {
     try {
       return SkillsManager.getInstance().listSkills();
@@ -6984,14 +7014,29 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle('phone-mirror:request-auto-context', async () => {
     try {
       const settings = SettingsManager.getInstance().getBrowserContextSettings();
-      // Proceed when coding auto-attach OR experimental full-page mode is on.
-      // Full-page mode relaxes the coding-only gate but NEVER the sensitive
-      // floor (email/chat/banking/auth stay blocked in the extension).
-      if (!settings.autoAttachCoding && !settings.experimentalFullPageCapture) {
+      // Opted-in extra categories that should auto-attach beyond coding (their
+      // registry policy is 'ask'). The extension treats these as eligible locally
+      // (no AI needed) when their toggle is on.
+      const extraCategories: BrowserContextCategory[] = [];
+      if (settings.autoDetectJobDescriptions) extraCategories.push('job_description');
+      if (settings.autoDetectDeveloperDocs) extraCategories.push('developer_docs');
+
+      // Proceed when ANY auto path is enabled: coding auto-attach, an extra
+      // category, the opt-in AI classifier, or experimental full-page mode. All
+      // of them relax only the coding-only gate — NEVER the sensitive floor
+      // (email/chat/banking/auth stay blocked in the extension).
+      const anyEnabled =
+        settings.autoAttachCoding ||
+        settings.experimentalFullPageCapture ||
+        settings.aiClassifierEnabled ||
+        extraCategories.length > 0;
+      if (!anyEnabled) {
         return { attached: false, reason: 'disabled' };
       }
       return await PhoneMirrorService.getInstance().requestAutoContext({
         fullPage: settings.experimentalFullPageCapture,
+        aiClassify: settings.aiClassifierEnabled,
+        extraCategories: extraCategories.length ? extraCategories : undefined,
       });
     } catch (e: any) {
       console.error('[IPC] phone-mirror:request-auto-context error:', e);

@@ -223,4 +223,95 @@ describe('Smart Browser Context v2 — request-auto-context round-trip', () => {
     ws.close();
     await svc.stop({ persist: false });
   });
+
+  test('request-auto-context frame carries aiClassify + extraCategories', async () => {
+    const { svc, info } = await freshService();
+    const { ws, frames } = await connectExtension(info.port, info.extToken);
+    const p = svc.requestAutoContext({ timeoutMs: 1000, aiClassify: true, extraCategories: ['job_description'] });
+    await new Promise((r) => setTimeout(r, 80));
+    const req = frames.find((f) => f.type === 'request-auto-context');
+    assert.ok(req);
+    assert.equal(req.aiClassify, true);
+    assert.deepEqual(req.extraCategories, ['job_description']);
+    ws.send(JSON.stringify({ type: 'capture-ack', reqId: req.reqId, status: 'none', reason: 'x' }));
+    await p;
+    ws.close();
+    await svc.stop({ persist: false });
+  });
+});
+
+async function postClassify(port, token, body, origin) {
+  const res = await fetch(`http://127.0.0.1:${port}/classify?t=${encodeURIComponent(token)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(origin ? { Origin: origin } : {}) },
+    body: JSON.stringify(body),
+  });
+  let json = null;
+  try { json = await res.json(); } catch {}
+  return { status: res.status, json };
+}
+
+const SAFE_META = {
+  host: 'assess.acme.com',
+  sanitizedUrl: 'https://assess.acme.com/challenge/42',
+  pathTokens: ['challenge', '42'],
+  titleTokens: ['coding', 'challenge'],
+  hasCodeEditorSignal: true,
+};
+
+describe('Smart Browser Context v2 — /classify endpoint', () => {
+  test('404 when no classifier is injected (feature off)', async () => {
+    const { svc, info } = await freshService();
+    svc.setMetadataClassifier(null);
+    const r = await postClassify(info.port, info.extToken, { meta: SAFE_META }, EXT_ORIGIN);
+    assert.equal(r.status, 404);
+    assert.equal(r.json.error, 'classifier_unavailable');
+    await svc.stop({ persist: false });
+  });
+
+  test('401 without the extension token', async () => {
+    const { svc, info } = await freshService();
+    svc.setMetadataClassifier(async () => ({ autoPolicy: 'auto', category: 'coding_problem' }));
+    const r = await postClassify(info.port, 'wrong-token', { meta: SAFE_META }, EXT_ORIGIN);
+    assert.equal(r.status, 401);
+    svc.setMetadataClassifier(null);
+    await svc.stop({ persist: false });
+  });
+
+  test('routes sanitized metadata through the injected classifier and returns its verdict', async () => {
+    const { svc, info } = await freshService();
+    let received = null;
+    svc.setMetadataClassifier(async (meta) => {
+      received = meta;
+      return { autoPolicy: 'auto', category: 'coding_problem' };
+    });
+    const r = await postClassify(info.port, info.extToken, { meta: SAFE_META }, EXT_ORIGIN);
+    assert.equal(r.status, 200);
+    assert.equal(r.json.autoPolicy, 'auto');
+    assert.equal(r.json.category, 'coding_problem');
+    // The classifier received the sanitized metadata (host present, no raw URL).
+    assert.equal(received.host, 'assess.acme.com');
+    assert.ok(!JSON.stringify(received).includes('?'), 'no raw query string in classified metadata');
+    svc.setMetadataClassifier(null);
+    await svc.stop({ persist: false });
+  });
+
+  test('classifier throw → conservative manual verdict (never a 500)', async () => {
+    const { svc, info } = await freshService();
+    svc.setMetadataClassifier(async () => { throw new Error('provider down'); });
+    const r = await postClassify(info.port, info.extToken, { meta: SAFE_META }, EXT_ORIGIN);
+    assert.equal(r.status, 200);
+    assert.equal(r.json.autoPolicy, 'manual');
+    svc.setMetadataClassifier(null);
+    await svc.stop({ persist: false });
+  });
+
+  test('400 on a missing meta field', async () => {
+    const { svc, info } = await freshService();
+    svc.setMetadataClassifier(async () => ({ autoPolicy: 'auto' }));
+    const r = await postClassify(info.port, info.extToken, { notMeta: true }, EXT_ORIGIN);
+    assert.equal(r.status, 400);
+    svc.setMetadataClassifier(null);
+    await svc.stop({ persist: false });
+  });
 });
