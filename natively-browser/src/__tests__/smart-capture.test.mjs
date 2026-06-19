@@ -305,3 +305,64 @@ describe('smart-capture — AI round-trip + extra categories', () => {
     assert.ok(withOptIn.dom.length > 0, 'opt-in JD page should be captured');
   });
 });
+
+describe('smart-capture — FINAL-REVIEW MEDIUM fixes', () => {
+  test('codingEnabled:false drops the coding branch — a LeetCode page is NOT captured', () => {
+    const lines = ['def f(): pass'].map((t) => el('div', { className: 'view-line', text: t }));
+    const editor = el('div', { className: 'monaco-editor', children: [el('div', { className: 'view-lines', children: lines })] });
+    const stmt = el('div', { className: 'elfjS', text: 'Given...\nConstraints:\n1' });
+    const doc = makeDoc([stmt, editor], 'Two Sum - LeetCode');
+
+    // Coding ON (default) → captured.
+    const on = sc.smartCapture({ ...base(doc, 'leetcode.com', 'https://leetcode.com/problems/two-sum/'), autoEligibleOnly: true });
+    assert.ok(on.dom.length > 0);
+
+    // Coding OFF → the high-confidence coding page is NOT eligible → nothing captured.
+    const off = sc.smartCapture({ ...base(doc, 'leetcode.com', 'https://leetcode.com/problems/two-sum/'), autoEligibleOnly: true, codingEnabled: false });
+    assert.equal(off.blocked, false);
+    assert.equal(off.dom, '');
+    assert.equal(off.envelope, null);
+  });
+
+  test('codingEnabled:false still lets an opted-in JD page through (other paths unaffected)', () => {
+    const doc = makeDoc(
+      [el('article', { children: [el('p', { text: 'Responsibilities: build. Requirements: experience. '.repeat(6) })] })],
+      'Engineer - Jobs',
+    );
+    const r = sc.smartCapture({
+      ...base(doc, 'linkedin.com', 'https://www.linkedin.com/jobs/view/123'),
+      autoEligibleOnly: true,
+      codingEnabled: false,
+      extraEligibleCategories: new Set(['job_description']),
+    });
+    assert.equal(r.candidate.matchedCategory, 'job_description');
+    assert.ok(r.dom.length > 0);
+  });
+
+  test('dev-docs over-match fix: an internal /api page on an unknown host is NOT classified developer_docs', () => {
+    // internal.corp.com/api/patients — only "doc-like" feature is the /api token.
+    const doc = makeDoc([el('div', { text: 'patient records' })], 'Patients');
+    const r = sc.smartCapture({
+      ...base(doc, 'internal.corp.com', 'https://internal.corp.com/api/patients'),
+      autoEligibleOnly: true,
+      extraEligibleCategories: new Set(['developer_docs']),
+    });
+    // Must NOT become developer_docs (host not in the registry) → not captured.
+    assert.notEqual(r.candidate.matchedCategory, 'developer_docs');
+    assert.equal(r.dom, '');
+  });
+
+  test('dev-docs still works on a known docs HOST (MDN)', () => {
+    const doc = makeDoc(
+      [el('article', { children: [el('p', { text: 'The fetch() method... parameters... returns... '.repeat(6) })] })],
+      'fetch - MDN',
+    );
+    const r = sc.smartCapture({
+      ...base(doc, 'developer.mozilla.org', 'https://developer.mozilla.org/en-US/docs/Web/API/fetch'),
+      autoEligibleOnly: true,
+      extraEligibleCategories: new Set(['developer_docs']),
+    });
+    assert.equal(r.candidate.matchedCategory, 'developer_docs');
+    assert.ok(r.dom.length > 0);
+  });
+});

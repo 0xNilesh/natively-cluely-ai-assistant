@@ -700,7 +700,6 @@ export interface BrowserContextSettings {
   autoDetectJobDescriptions: boolean;
   autoDetectDeveloperDocs: boolean;
   experimentalFullPageCapture: boolean;
-  siteOverrides: Record<string, 'auto_off' | 'always_ask'>;
 }
 
 export interface SkillSummary {

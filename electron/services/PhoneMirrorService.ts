@@ -501,12 +501,22 @@ export class PhoneMirrorService {
     aiClassify?: boolean;
     /** Opted-in extra categories treated as auto-eligible (e.g. job_description). */
     extraCategories?: string[];
+    /**
+     * Whether high-confidence coding pages should auto-attach. Defaults to true
+     * (back-compat); when the caller passes false, the extension drops the
+     * coding eligibility branch so a coding page is NOT captured even if another
+     * auto path is enabled.
+     */
+    codingEnabled?: boolean;
   }): Promise<{ attached: boolean; reason?: string; category?: string }> {
     const target = this.pickExtensionClient();
     if (!target) return Promise.resolve({ attached: false, reason: 'no-extension' });
     const reqId = generateToken();
     const fullPage = opts?.fullPage === true;
     const aiClassify = opts?.aiClassify === true;
+    // Default true so existing callers (and the back-compat tests) keep coding
+    // auto-attach; only an explicit false disables the coding branch.
+    const codingEnabled = opts?.codingEnabled !== false;
     // The AI path does an extra /classify round-trip + a second extract, so allow
     // a longer deadline when it's enabled (still bounded; the `started` ack also
     // extends once). Non-AI captures keep the snappy default.
@@ -533,6 +543,7 @@ export class PhoneMirrorService {
             reqId,
             fullPage,
             aiClassify,
+            codingEnabled,
             extraCategories: opts?.extraCategories,
           }),
         );

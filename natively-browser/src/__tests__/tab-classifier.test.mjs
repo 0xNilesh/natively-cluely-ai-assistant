@@ -203,18 +203,38 @@ describe('sanitizeUrl — host+path kept, secrets dropped', () => {
     assert.equal(cls.sanitizeUrl('https://x.com/s/AbCdEf0123456789ghIjKlMnOp'), 'https://x.com/s/:token');
   });
 
-  test('redacts an ALL-ALPHA long token (no digit) — review gap fix', () => {
+  test('redacts an ALL-ALPHA opaque run >20 chars (no digit) — review gap fix', () => {
     assert.equal(cls.sanitizeUrl('https://x.com/s/abcdefghijklmnopqrstuvwxyz'), 'https://x.com/s/:token');
   });
 
-  test('redacts a JWT-shaped path segment', () => {
-    assert.equal(cls.sanitizeUrl('https://x.com/auth/aaaaaaaa.bbbbbbbb.cccccccc'), 'https://x.com/auth/:token');
+  test('redacts a realistic JWT (mixed-case base64url parts ≥16)', () => {
+    assert.equal(
+      cls.sanitizeUrl('https://x.com/auth/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0AbCdEf.s5kT9QabcdefGhIJ'),
+      'https://x.com/auth/:token',
+    );
   });
 
-  test('keeps descriptive slugs (not redacted)', () => {
+  test('FINAL-REVIEW HIGH: redacts a SHORT token (16-19 chars) embedded in a slug-shaped segment', () => {
+    // 18-char reset token after a hyphen — the old 20-char/slug-whitelist logic let this through.
+    assert.equal(cls.sanitizeUrl('https://app.acme.com/reset/AbCdEfGhIjKlMnOpQr'), 'https://app.acme.com/reset/:token');
+  });
+
+  test('FINAL-REVIEW HIGH: redacts an underscore-separated key (sk_live_...)', () => {
+    assert.equal(cls.sanitizeUrl('https://acme.com/p/sk_live_51HxYzAbCdEfGhIj'), 'https://acme.com/p/:token');
+  });
+
+  test('FINAL-REVIEW HIGH: redacts an opaque SUBDOMAIN label but keeps the registrable domain', () => {
+    assert.equal(cls.sanitizeUrl('https://s3cr3tt0ken1234abcd.acme.com/dashboard'), 'https://:sub.acme.com/dashboard');
+  });
+
+  test('keeps descriptive slugs + readable subdomains (not redacted)', () => {
     assert.equal(cls.sanitizeUrl('https://x.com/problems/two-sum'), 'https://x.com/problems/two-sum');
     // a short multi-word hyphenated slug stays even though it's long overall
     assert.equal(cls.sanitizeUrl('https://x.com/longest-substring-without-repeating'), 'https://x.com/longest-substring-without-repeating');
+    // a long all-lowercase WORD (≤20) stays
+    assert.equal(cls.sanitizeUrl('https://x.com/internationalization'), 'https://x.com/internationalization');
+    // readable subdomains kept
+    assert.equal(cls.sanitizeUrl('https://app.leetcode.com/problems/x'), 'https://app.leetcode.com/problems/x');
   });
 
   test('downgrades non-http(s) schemes and returns "" for junk', () => {

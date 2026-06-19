@@ -11,7 +11,6 @@ const EMPTY_BROWSER_CTX: BrowserContextSettings = {
   autoDetectJobDescriptions: false,
   autoDetectDeveloperDocs: false,
   experimentalFullPageCapture: false,
-  siteOverrides: {},
 };
 
 const EMPTY_INFO: PhoneMirrorInfo = {
@@ -98,7 +97,7 @@ export const PhoneMirrorSettings: React.FC = () => {
   // BrowserContextSettings fields → the IPC's browser* setting keys.
   const onToggleCtx = useCallback(
     async (
-      field: keyof Omit<BrowserContextSettings, 'siteOverrides'>,
+      field: keyof BrowserContextSettings,
       ipcKey:
         | 'browserAutoDetectCoding'
         | 'browserAutoAttachCoding'

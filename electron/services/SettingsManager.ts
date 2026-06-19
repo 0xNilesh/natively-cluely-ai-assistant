@@ -50,9 +50,6 @@ export interface AppSettings {
     // (email/chat/banking/auth) are STILL hard-blocked; this only relaxes the
     // coding-only / high-confidence-only gate, never the sensitive floor.
     browserExperimentalFullPageCapture?: boolean; // default false (experimental)
-    // Per-site overrides keyed by registered host: 'auto_off' suppresses
-    // auto-attach for that site; 'always_ask' forces the ask path.
-    browserSiteOverrides?: Record<string, 'auto_off' | 'always_ask'>;
     localWhisperModel?: string;
     // Per-channel model overrides for local Whisper. When
     // localWhisperPerChannelEnabled is true, the two LocalWhisperSTT instances
@@ -223,7 +220,6 @@ export class SettingsManager {
         autoDetectJobDescriptions: boolean;
         autoDetectDeveloperDocs: boolean;
         experimentalFullPageCapture: boolean;
-        siteOverrides: Record<string, 'auto_off' | 'always_ask'>;
     } {
         const s = this.settings;
         return {
@@ -234,7 +230,6 @@ export class SettingsManager {
             autoDetectJobDescriptions: s.browserAutoDetectJobDescriptions === true, // default false
             autoDetectDeveloperDocs: s.browserAutoDetectDeveloperDocs === true, // default false
             experimentalFullPageCapture: s.browserExperimentalFullPageCapture === true, // default false (experimental)
-            siteOverrides: s.browserSiteOverrides ?? {},
         };
     }
 

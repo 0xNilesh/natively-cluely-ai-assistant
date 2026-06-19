@@ -497,6 +497,8 @@ interface SmartExtractOpts {
   classifyOnly?: boolean;
   extraCategories?: string[];
   aiApproved?: boolean;
+  /** Defaults true; false drops the coding eligibility branch in smartCapture. */
+  codingEnabled?: boolean;
 }
 
 /** Run the content script's smart-extract path (classify + structured extract). */
@@ -511,6 +513,9 @@ async function smartExtractFromTab(tabId: number, opts: SmartExtractOpts): Promi
     classifyOnly: opts.classifyOnly === true,
     extraCategories: opts.extraCategories,
     aiApproved: opts.aiApproved === true,
+    // Only send the flag when explicitly disabling coding (false); omitting it
+    // keeps the content-script default of coding-enabled.
+    codingEnabled: opts.codingEnabled,
   })) as { ok: true; smart: SmartExtractResult } | { ok: false; error: string } | undefined;
   if (!response) throw new Error('No response from page');
   if (!response.ok) throw new Error(response.error || 'Smart extraction failed');
@@ -566,6 +571,12 @@ interface AutoContextOpts {
   aiClassify?: boolean;
   /** Extra opted-in categories (e.g. job_description, developer_docs). */
   extraCategories?: string[];
+  /**
+   * Whether high-confidence coding pages auto-attach. Defaults true; when the
+   * desktop sends false ("auto-attach coding" off) the extension must NOT capture
+   * a coding page even if another auto path is on.
+   */
+  codingEnabled?: boolean;
 }
 
 /** AI policies that mean "capture this page". */
@@ -629,6 +640,7 @@ async function captureAutoContext(reqId: string, opts: AutoContextOpts = {}): Pr
       mode: 'auto',
       fullPage: opts.fullPage,
       extraCategories,
+      codingEnabled: opts.codingEnabled,
     });
   } catch (err) {
     return { kind: 'none', reason: err instanceof Error ? err.message : String(err) };
@@ -799,6 +811,8 @@ async function ensureWsConnected(): Promise<void> {
         void handleRequestAutoContext(msg.reqId, {
           fullPage: msg.fullPage === true,
           aiClassify: msg.aiClassify === true,
+          // Defaults true; only an explicit false from the desktop disables coding.
+          codingEnabled: msg.codingEnabled !== false,
           extraCategories: Array.isArray(msg.extraCategories)
             ? (msg.extraCategories as unknown[]).filter((x): x is string => typeof x === 'string')
             : undefined,

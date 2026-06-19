@@ -28,6 +28,8 @@ export interface SmartExtractOpts {
   extraCategories?: BrowserContextCategory[];
   /** The desktop AI classifier approved this page → auto-eligible. */
   aiApproved?: boolean;
+  /** Defaults true; false drops the coding eligibility branch. */
+  codingEnabled?: boolean;
 }
 
 export type CaptureRequest =
@@ -85,6 +87,8 @@ function runSmartCapture(opts: SmartExtractOpts): SmartCaptureResult {
     extraEligibleCategories: opts.extraCategories ? new Set(opts.extraCategories) : undefined,
     // Desktop AI classifier already approved this page (after the round-trip).
     aiApproved: opts.aiApproved === true,
+    // Defaults true; false drops the coding eligibility branch.
+    codingEnabled: opts.codingEnabled !== false,
   });
 }
 

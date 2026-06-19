@@ -7034,6 +7034,11 @@ export function initializeIpcHandlers(appState: AppState): void {
         return { attached: false, reason: 'disabled' };
       }
       return await PhoneMirrorService.getInstance().requestAutoContext({
+        // When "auto-attach coding" is OFF, tell the extension to NOT treat a
+        // high-confidence coding page as eligible — otherwise a coding page would
+        // still be captured whenever any OTHER auto path (JD/docs/AI/full-page) is
+        // on. The other paths are independent and unaffected.
+        codingEnabled: settings.autoAttachCoding,
         fullPage: settings.experimentalFullPageCapture,
         aiClassify: settings.aiClassifierEnabled,
         extraCategories: extraCategories.length ? extraCategories : undefined,

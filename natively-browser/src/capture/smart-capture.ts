@@ -67,6 +67,13 @@ export interface SmartCaptureDeps {
    * (the desktop classifies sanitized metadata before any content is captured).
    */
   classifyOnly?: boolean;
+  /**
+   * Whether high-confidence coding pages count as auto-eligible. Defaults true.
+   * When false ("auto-attach coding" off), the coding branch is dropped so a
+   * coding page is NOT captured even if another auto path (JD/docs/AI/full-page)
+   * made the request. The other paths are unaffected.
+   */
+  codingEnabled?: boolean;
 }
 
 /** Policies that may auto-attach without an explicit user action. */
@@ -150,7 +157,8 @@ export function smartCapture(deps: SmartCaptureDeps): SmartCaptureResult {
   // Auto path: skip extraction entirely for non-auto-eligible pages so we never
   // read a non-coding page's body just to discard it. Manual captures extract
   // regardless (the user explicitly asked). A page is auto-eligible when:
-  //   - its registry policy is auto/auto_if_high_confidence (high-confidence coding), OR
+  //   - high-confidence coding (registry policy auto/auto_if_high_confidence) AND
+  //     coding auto-attach is enabled, OR
   //   - its local category is one the user opted into (extraEligibleCategories: JD/docs), OR
   //   - the desktop AI classifier approved it (aiApproved), OR
   //   - EXPERIMENTAL full-page mode is on (any non-sensitive page).
@@ -158,11 +166,13 @@ export function smartCapture(deps: SmartCaptureDeps): SmartCaptureResult {
   // sensitive page.
   const localCategory = candidate.matchedCategory;
   const extraEligible = Boolean(localCategory && deps.extraEligibleCategories?.has(localCategory));
+  // codingEnabled defaults true; only an explicit false drops the coding branch.
+  const codingEligible = deps.codingEnabled !== false && AUTO_ELIGIBLE.has(candidate.autoPolicy);
   const eligible =
     deps.fullPageMode ||
     deps.aiApproved ||
     extraEligible ||
-    AUTO_ELIGIBLE.has(candidate.autoPolicy);
+    codingEligible;
   if (deps.autoEligibleOnly && !eligible) {
     return { candidate, envelope: null, dom: '', blocked: false, safeMetadata };
   }

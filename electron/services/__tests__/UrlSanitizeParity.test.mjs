@@ -42,7 +42,12 @@ const FIXTURES = [
   'https://x.com/u/me@example.com',
   'https://x.com/s/AbCdEf0123456789ghIjKlMnOp',     // long opaque w/ digits
   'https://x.com/s/abcdefghijklmnopqrstuvwxyz',      // long opaque ALL-ALPHA (the gap fix)
-  'https://x.com/auth/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiОiJ4In0.s5kT9Qabcdef',  // JWT-ish in one segment
+  'https://x.com/auth/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0AbCdEf.s5kT9QabcdefGhIJ', // realistic JWT
+  'https://app.acme.com/reset/AbCdEfGhIjKlMnOpQr',  // short (18) embedded token — final-review HIGH
+  'https://acme.com/p/sk_live_51HxYzAbCdEfGhIj',     // underscore key — final-review HIGH
+  'https://s3cr3tt0ken1234abcd.acme.com/dashboard',  // opaque subdomain label — final-review HIGH
+  'https://app.leetcode.com/problems/x',             // readable subdomain — keep
+  'https://x.com/internationalization',              // long all-lower WORD — keep
   'https://x.com/problems/two-sum',                  // descriptive — keep
   'https://WWW.Example.com/Docs/API/fetch',          // host normalize + keep
   'javascript://evil/x',                             // scheme downgrade
@@ -69,9 +74,14 @@ describe('URL sanitizer parity — extension sanitizeUrl === desktop reSanitizeU
     assert.equal(sanitizeUrl('https://x.com/s/abcdefghijklmnopqrstuvwxyz'), 'https://x.com/s/:token');
   });
 
-  test('a JWT-shaped path segment IS redacted', () => {
-    const u = 'https://x.com/auth/aaaaaaaa.bbbbbbbb.cccccccc';
-    assert.equal(reSanitizeUrl(u), 'https://x.com/auth/:token');
-    assert.equal(sanitizeUrl(u), 'https://x.com/auth/:token');
+  test('FINAL-REVIEW HIGH: short embedded token + underscore key + opaque subdomain are redacted in BOTH copies', () => {
+    for (const [input, expected] of [
+      ['https://app.acme.com/reset/AbCdEfGhIjKlMnOpQr', 'https://app.acme.com/reset/:token'],
+      ['https://acme.com/p/sk_live_51HxYzAbCdEfGhIj', 'https://acme.com/p/:token'],
+      ['https://s3cr3tt0ken1234abcd.acme.com/dashboard', 'https://:sub.acme.com/dashboard'],
+    ]) {
+      assert.equal(reSanitizeUrl(input), expected, `desktop: ${input}`);
+      assert.equal(sanitizeUrl(input), expected, `extension: ${input}`);
+    }
   });
 });

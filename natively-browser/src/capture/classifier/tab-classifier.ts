@@ -86,38 +86,66 @@ export function hashHost(host: string): string {
   return h.toString(16);
 }
 
-// A path segment is redacted when it looks like an opaque identifier or PII —
-// keeping descriptive slugs (problems, two-sum, challenge) but dropping the
+// A path/host segment is redacted when it looks like an opaque identifier or PII
+// — keeping descriptive slugs (problems, two-sum, challenge) but dropping the
 // genuinely-sensitive bits so the sanitized URL is safe to show the AI.
 //
-// Keep this redaction logic IDENTICAL to reSanitizeUrl() in
+// Keep this redaction logic IDENTICAL to the copy in reSanitizeUrl() in
 // electron/services/browser-context/BrowserMetadataClassifierService.ts — they
 // are the extension-primary + desktop-defense-in-depth copies of the same guard.
 // A parity test feeds the same fixtures through both and asserts equal output.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LONG_NUMERIC_RE = /^\d{6,}$/; // long numeric ids
-// JWT-shaped segment: base64url.base64url.base64url (a token embedded in one
-// path part). The `.` keeps it out of OPAQUE_RUN_RE, so match it explicitly.
-const JWT_RE = /^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$/;
-// A single continuous 20+ char run of token chars WITH NO `-`/`_` separator:
-// session ids, API keys, hashes, base64 blobs. A descriptive slug like
-// `longest-substring-without-repeating` is hyphen-separated words, so it is NOT a
-// continuous run and survives. An all-letter or mixed continuous run of this
-// length is opaque, not a word — redact it. (No digit requirement, fixing the
-// review gap where all-alpha tokens slipped through.)
-const OPAQUE_RUN_RE = /^[A-Za-z0-9]{20,}$/;
-// Looks like a slug: hyphen/underscore-separated lowercase-ish words. Kept verbatim.
-const SLUG_RE = /^[a-z0-9]+(?:[-_][a-z0-9]+)+$/i;
+// A single continuous run that looks like a secret: 16+ chars of token alphabet
+// (letters/digits) that is NOT a plain dictionary-ish word. We treat a run as
+// opaque when it is long AND (mixes letter case, or contains a digit) — real
+// words are lowercase and digit-free, secrets/keys/hashes are not. The 16-char
+// floor catches short reset tokens; the entropy heuristic keeps long all-lower
+// words like "internationalization" readable.
+const OPAQUE_RUN_RE = /[A-Za-z0-9]{16,}/g;
+function looksOpaque(run: string): boolean {
+  if (run.length < 16) return false;
+  const hasDigit = /\d/.test(run);
+  const hasUpper = /[A-Z]/.test(run);
+  const hasLower = /[a-z]/.test(run);
+  // A digit or mixed case → opaque (keys/hashes/session ids). A run of ONLY
+  // lowercase letters (no digit) is treated as a word and kept UNLESS it is
+  // unusually long (>20), which is far more likely a base32-ish token than a
+  // real word (`internationalization` is 20). All-UPPER no-digit is treated the
+  // same as all-lower.
+  if (hasDigit) return true;
+  if (hasUpper && hasLower) return true;
+  return run.length > 20; // all-one-case, no digit: word unless very long
+}
+/**
+ * Redact a single URL path/host segment. Splits on `-`/`_`/`.` so a secret
+ * EMBEDDED in an otherwise-slug-shaped segment (e.g. `sk_live_51HxYz…`,
+ * `reset-AbCdEf0123456789`) is caught — if ANY sub-run looks opaque, the whole
+ * segment is redacted. Plain descriptive slugs (short words) are kept.
+ */
 function redactSegment(seg: string): string {
   if (!seg) return seg;
   if (seg.includes('@') && seg.includes('.')) return ':email';
   if (UUID_RE.test(seg)) return ':id';
   if (LONG_NUMERIC_RE.test(seg)) return ':id';
-  if (JWT_RE.test(seg)) return ':token';
-  // A long CONTINUOUS run (no word separators) is an opaque token; a hyphen/
-  // underscore slug of the same length is descriptive and kept.
-  if (OPAQUE_RUN_RE.test(seg) && !SLUG_RE.test(seg)) return ':token';
+  // Any opaque-looking sub-run (after splitting on -, _, .) → redact the segment.
+  const matches = seg.match(OPAQUE_RUN_RE);
+  if (matches && matches.some(looksOpaque)) return ':token';
   return seg;
+}
+/** Redact opaque host LABELS (e.g. a token used as a subdomain) but keep the
+ *  registrable domain readable so the AI still recognizes the site. */
+function redactHost(host: string): string {
+  const labels = host.split('.');
+  // Keep the last two labels (registrable domain + TLD) verbatim; scrub opaque
+  // subdomain labels above them.
+  return labels
+    .map((label, i) => {
+      if (i >= labels.length - 2) return label; // domain + TLD
+      const m = label.match(OPAQUE_RUN_RE);
+      return m && m.some(looksOpaque) ? ':sub' : label;
+    })
+    .join('.');
 }
 
 /**
@@ -147,13 +175,14 @@ export function sanitizeUrl(url: string | undefined): string {
   }
   if (!host) return '';
   if (scheme !== 'http' && scheme !== 'https') scheme = 'https';
+  const cleanHost = redactHost(host);
   const cleanPath =
     path
       .split('/')
       .map(redactSegment)
       .join('/')
       .replace(/\/{2,}/g, '/') || '';
-  return `${scheme}://${host}${cleanPath}`;
+  return `${scheme}://${cleanHost}${cleanPath}`;
 }
 
 /* ─────────────────────── safe metadata builder ─────────────────────── */

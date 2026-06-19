@@ -26,6 +26,7 @@ const {
   findPlatform,
   findBlocked,
   findCategory,
+  findCategoryByHostUrl,
   codingOptionalOrigins,
 } = await import(pathToFileURL(modPath).href);
 
@@ -186,5 +187,28 @@ describe('registry — lookups', () => {
     const origins = codingOptionalOrigins(DEFAULT_REGISTRY);
     assert.ok(origins.some((o) => o.includes('leetcode.com')));
     assert.ok(!origins.some((o) => o.includes('mail.google.com')));
+  });
+
+  test('findCategoryByHostUrl: job_description matches by host OR url', () => {
+    const byHost = findCategoryByHostUrl(DEFAULT_REGISTRY, 'linkedin.com', 'https://www.linkedin.com/jobs/view/1');
+    assert.ok(byHost && byHost.id === 'job_description');
+    const byUrl = findCategoryByHostUrl(DEFAULT_REGISTRY, 'careers.acme.com', 'https://careers.acme.com/careers/eng');
+    assert.ok(byUrl && byUrl.id === 'job_description');
+  });
+
+  test('FINAL-REVIEW MEDIUM: developer_docs requires a HOST match (broad /api,/docs url tokens alone do NOT match)', () => {
+    // A bare /api token on an unknown host must NOT classify as developer_docs.
+    assert.equal(findCategoryByHostUrl(DEFAULT_REGISTRY, 'internal.corp.com', 'https://internal.corp.com/api/patients'), null);
+    assert.equal(findCategoryByHostUrl(DEFAULT_REGISTRY, 'admin.shop.com', 'https://admin.shop.com/docs/orders'), null);
+    // A KNOWN docs host still matches.
+    const mdn = findCategoryByHostUrl(DEFAULT_REGISTRY, 'developer.mozilla.org', 'https://developer.mozilla.org/en-US/docs/Web/API/fetch');
+    assert.ok(mdn && mdn.id === 'developer_docs');
+  });
+
+  test('findCategoryByHostUrl never returns a coding or sensitive category', () => {
+    // coding-like url on an unknown host → not matched here (stays platform-gated/AI)
+    assert.equal(findCategoryByHostUrl(DEFAULT_REGISTRY, 'assess.acme.com', 'https://assess.acme.com/challenge/42'), null);
+    // a Gmail-ish url → not matched here (handled by the blocked floor)
+    assert.equal(findCategoryByHostUrl(DEFAULT_REGISTRY, 'mail.google.com', 'https://mail.google.com/'), null);
   });
 });

@@ -194,23 +194,30 @@ export function findCategory(
   return registry.categories.find((c) => c.id === id) ?? null;
 }
 
-// Categories matchable by a host/URL category rule (no specific platform needed).
-// Deliberately EXCLUDES the coding categories: an unknown coding-like host must
-// NOT be auto-classified as coding from a bare URL token like "/challenge" — that
-// stays platform-gated (a known coding platform) or goes through the AI
+// Categories matchable by a host/URL category rule (no specific platform needed),
+// mapped to how strictly they match. Deliberately EXCLUDES the coding categories:
+// an unknown coding-like host must NOT be auto-classified as coding from a bare
+// URL token like "/challenge" — that stays platform-gated or goes through the AI
 // classifier. Also excludes sensitive (handled by the blocked floor), docs/notes
 // (manual-first), article, and unknown.
-const HOST_URL_MATCHABLE_CATEGORIES: ReadonlySet<string> = new Set([
-  'job_description',
-  'developer_docs',
+//
+//   'host_or_url' — a host match OR a url-pattern match (job_description: its
+//                   hosts + tokens like /jobs,/careers are specific, and JD pages
+//                   are low-sensitivity).
+//   'host_only'   — a HOST match is REQUIRED (developer_docs: its url tokens
+//                   /api,/docs,/reference are far too broad to act on alone — they
+//                   would mislabel internal admin pages like /api/patients. A
+//                   known docs HOST, e.g. MDN, is the trustworthy signal).
+const HOST_URL_MATCHABLE_CATEGORIES: ReadonlyMap<string, 'host_or_url' | 'host_only'> = new Map([
+  ['job_description', 'host_or_url'],
+  ['developer_docs', 'host_only'],
 ]);
 
 /**
  * Match a non-coding opt-in category rule (job_description / developer_docs) by
- * host/URL when no specific platform rule applies. A host match OR a URL-pattern
- * match counts. Returns the first matching rule, or null. Coding categories are
- * intentionally not matchable here (they require a known platform or the AI
- * classifier) so a bare "/challenge"-style URL on an unknown host stays unknown.
+ * host/URL when no specific platform rule applies. developer_docs requires a HOST
+ * match (its url tokens are too broad); job_description accepts host OR url.
+ * Coding categories are intentionally not matchable here.
  */
 export function findCategoryByHostUrl(
   registry: CaptureRegistry,
@@ -218,8 +225,11 @@ export function findCategoryByHostUrl(
   url: string,
 ): CategoryRule | null {
   for (const c of registry.categories) {
-    if (!HOST_URL_MATCHABLE_CATEGORIES.has(c.id)) continue;
-    if (hostMatchesAny(host, c.hostPatterns) || urlMatchesAny(url, c.urlPatterns)) {
+    const mode = HOST_URL_MATCHABLE_CATEGORIES.get(c.id);
+    if (!mode) continue;
+    const hostMatch = hostMatchesAny(host, c.hostPatterns);
+    const matched = mode === 'host_only' ? hostMatch : hostMatch || urlMatchesAny(url, c.urlPatterns);
+    if (matched) {
       return c;
     }
   }

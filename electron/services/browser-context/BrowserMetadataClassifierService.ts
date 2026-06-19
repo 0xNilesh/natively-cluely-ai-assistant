@@ -259,21 +259,48 @@ export class BrowserMetadataClassifierService {
   }
 }
 
-// Keep these IDENTICAL to redactSegment() in the extension's tab-classifier.ts.
-// A parity test (UrlSanitizeParity.test.mjs) feeds the same fixtures through both
-// and asserts equal output so the two copies of this privacy guard can't diverge.
+// Keep this redaction logic IDENTICAL to redactSegment()/redactHost() in the
+// extension's tab-classifier.ts. A parity test (UrlSanitizeParity.test.mjs) feeds
+// the same fixtures through both and asserts equal output so the two copies of
+// this privacy guard can't diverge.
 const URL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const URL_LONG_NUMERIC_RE = /^\d{6,}$/;
-const URL_JWT_RE = /^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$/;
-const URL_OPAQUE_RUN_RE = /^[A-Za-z0-9]{20,}$/;
-const URL_SLUG_RE = /^[a-z0-9]+(?:[-_][a-z0-9]+)+$/i;
+const URL_OPAQUE_RUN_RE = /[A-Za-z0-9]{16,}/g;
+function urlLooksOpaque(run: string): boolean {
+  if (run.length < 16) return false;
+  const hasDigit = /\d/.test(run);
+  const hasUpper = /[A-Z]/.test(run);
+  const hasLower = /[a-z]/.test(run);
+  if (hasDigit) return true;
+  if (hasUpper && hasLower) return true;
+  return run.length > 20;
+}
+function urlRedactSegment(seg: string): string {
+  if (!seg) return seg;
+  if (seg.includes('@') && seg.includes('.')) return ':email';
+  if (URL_UUID_RE.test(seg)) return ':id';
+  if (URL_LONG_NUMERIC_RE.test(seg)) return ':id';
+  const m = seg.match(URL_OPAQUE_RUN_RE);
+  if (m && m.some(urlLooksOpaque)) return ':token';
+  return seg;
+}
+function urlRedactHost(host: string): string {
+  const labels = host.split('.');
+  return labels
+    .map((label, i) => {
+      if (i >= labels.length - 2) return label;
+      const m = label.match(URL_OPAQUE_RUN_RE);
+      return m && m.some(urlLooksOpaque) ? ':sub' : label;
+    })
+    .join('.');
+}
 
 /**
  * Defense-in-depth URL re-sanitizer (desktop-side). Mirrors the extension's
  * sanitizeUrl: keep scheme://host/path, DROP query string + fragment, redact
- * secret-looking path segments. Runs on whatever the extension sent so a raw URL
- * (or a query string) can never reach the AI prompt even if the upstream
- * sanitizer is bypassed. Returns undefined for empty/invalid input.
+ * secret-looking host labels + path segments. Runs on whatever the extension sent
+ * so a raw URL (or a query string / embedded secret) can never reach the AI
+ * prompt even if the upstream sanitizer is bypassed. Returns undefined on bad input.
  */
 export function reSanitizeUrl(value: string | undefined): string | undefined {
   if (!value || typeof value !== 'string') return undefined;
@@ -294,18 +321,11 @@ export function reSanitizeUrl(value: string | undefined): string | undefined {
   }
   if (!host) return undefined;
   if (scheme !== 'http' && scheme !== 'https') scheme = 'https';
+  const cleanHost = urlRedactHost(host);
   const cleanPath = path
     .split('/')
-    .map((seg) => {
-      if (!seg) return seg;
-      if (seg.includes('@') && seg.includes('.')) return ':email';
-      if (URL_UUID_RE.test(seg)) return ':id';
-      if (URL_LONG_NUMERIC_RE.test(seg)) return ':id';
-      if (URL_JWT_RE.test(seg)) return ':token';
-      if (URL_OPAQUE_RUN_RE.test(seg) && !URL_SLUG_RE.test(seg)) return ':token';
-      return seg;
-    })
+    .map(urlRedactSegment)
     .join('/')
     .replace(/\/{2,}/g, '/');
-  return `${scheme}://${host}${cleanPath}`;
+  return `${scheme}://${cleanHost}${cleanPath}`;
 }
