@@ -1,7 +1,18 @@
-import { Check, Copy, Lock, Puzzle, RefreshCw, ShieldAlert, Smartphone, Wifi, Zap } from 'lucide-react';
+import { Check, Copy, Lock, Puzzle, RefreshCw, ShieldAlert, ShieldCheck, Smartphone, Wifi, Zap } from 'lucide-react';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import type { PhoneMirrorInfo } from '../../types/electron';
+import type { BrowserContextSettings, PhoneMirrorInfo } from '../../types/electron';
 import { isMac } from '../../utils/platformUtils';
+
+const EMPTY_BROWSER_CTX: BrowserContextSettings = {
+  autoDetectCoding: true,
+  autoAttachCoding: true,
+  askBeforeUnknown: true,
+  aiClassifierEnabled: false,
+  autoDetectJobDescriptions: false,
+  autoDetectDeveloperDocs: false,
+  experimentalFullPageCapture: false,
+  siteOverrides: {},
+};
 
 const EMPTY_INFO: PhoneMirrorInfo = {
   running: false,
@@ -30,6 +41,9 @@ export const PhoneMirrorSettings: React.FC = () => {
   const [pairCopied, setPairCopied] = useState(false);
   const [showManualPair, setShowManualPair] = useState(false);
   const armTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Smart Browser Context v2 — auto-capture settings.
+  const [ctx, setCtx] = useState<BrowserContextSettings>(EMPTY_BROWSER_CTX);
 
   const refresh = useCallback(async () => {
     try {
@@ -65,6 +79,50 @@ export const PhoneMirrorSettings: React.FC = () => {
       off?.();
     };
   }, [refresh]);
+
+  // Load Smart Browser Context settings once.
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await window.electronAPI.browserContextGetSettings?.();
+        if (res && typeof res === 'object' && !('error' in res)) {
+          setCtx(res as BrowserContextSettings);
+        }
+      } catch {
+        /* keep documented defaults */
+      }
+    })();
+  }, []);
+
+  // Toggle one auto-capture setting and persist it. Keys map 1:1 to the resolved
+  // BrowserContextSettings fields → the IPC's browser* setting keys.
+  const onToggleCtx = useCallback(
+    async (
+      field: keyof Omit<BrowserContextSettings, 'siteOverrides'>,
+      ipcKey:
+        | 'browserAutoDetectCoding'
+        | 'browserAutoAttachCoding'
+        | 'browserAskBeforeUnknown'
+        | 'browserAiClassifierEnabled'
+        | 'browserAutoDetectJobDescriptions'
+        | 'browserAutoDetectDeveloperDocs'
+        | 'browserExperimentalFullPageCapture',
+    ) => {
+      const next = !ctx[field];
+      // Optimistic update; reconcile with the persisted resolved settings.
+      setCtx((prev) => ({ ...prev, [field]: next }));
+      try {
+        const res = await window.electronAPI.browserContextSetSettings?.({ [ipcKey]: next });
+        if (res && typeof res === 'object' && !('error' in res)) {
+          setCtx(res as BrowserContextSettings);
+        }
+      } catch (e: any) {
+        setError(e?.message || 'Failed to save browser context setting');
+        setCtx((prev) => ({ ...prev, [field]: !next })); // revert
+      }
+    },
+    [ctx],
+  );
 
   const apply = useCallback(
     async (key: 'enable' | 'disable' | 'lan' | 'rotate', fn: () => Promise<any>) => {
@@ -478,6 +536,98 @@ export const PhoneMirrorSettings: React.FC = () => {
         )}
       </div>
 
+      {/* Smart Browser Context — automatic coding/interview capture. Manual
+          capture (the hotkey + popup) always works and is intentionally not a
+          toggle here. Sensitive pages (email/chat/banking/auth) are ALWAYS
+          blocked — that floor is enforced in the desktop policy engine and has
+          no off switch. */}
+      <div className="bg-bg-item-surface rounded-xl border border-border-subtle p-5 space-y-4">
+        <div className="flex items-start gap-3">
+          <div className="rounded-lg bg-bg-main p-2 border border-border-subtle flex-shrink-0">
+            <ShieldCheck size={16} className="text-emerald-400" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="text-text-primary font-medium text-sm">Smart Browser Context</div>
+            <div className="text-text-secondary text-xs mt-1 leading-relaxed">
+              Automatically detect coding/interview pages (LeetCode, HackerRank, CoderPad, and
+              more) and attach the problem context when you ask for an answer. Manual capture
+              always works regardless of these settings.
+            </div>
+          </div>
+        </div>
+
+        <CtxToggle
+          label="Auto-detect coding problems"
+          desc="Recognize high-confidence coding/interview pages locally (no page content is read in the background)."
+          checked={ctx.autoDetectCoding}
+          onChange={() => onToggleCtx('autoDetectCoding', 'browserAutoDetectCoding')}
+        />
+        <CtxToggle
+          label="Auto-attach coding context when answering"
+          desc="When you ask for an answer on a high-confidence coding page, capture and attach it just-in-time."
+          checked={ctx.autoAttachCoding}
+          onChange={() => onToggleCtx('autoAttachCoding', 'browserAutoAttachCoding')}
+        />
+        <CtxToggle
+          label="Ask before attaching unknown pages"
+          desc="For pages we can't classify confidently, ask first instead of attaching automatically."
+          checked={ctx.askBeforeUnknown}
+          onChange={() => onToggleCtx('askBeforeUnknown', 'browserAskBeforeUnknown')}
+        />
+        {/* The AI metadata classifier + JD/dev-docs auto-detect are built and
+            tested but not yet wired into the live auto-context path, so they are
+            shown disabled ("Coming soon") rather than as live controls that do
+            nothing. Wiring is a tracked follow-up. */}
+        <CtxToggle
+          label="AI page classifier (opt-in)"
+          desc="For unknown pages, send sanitized metadata only (host + keywords, never page content) to your configured AI provider to classify the page. Off by default."
+          checked={ctx.aiClassifierEnabled}
+          onChange={() => onToggleCtx('aiClassifierEnabled', 'browserAiClassifierEnabled')}
+          comingSoon
+        />
+        <CtxToggle
+          label="Auto-detect job descriptions"
+          desc="Optional. Recognize job-posting pages so you can attach them when answering."
+          checked={ctx.autoDetectJobDescriptions}
+          onChange={() => onToggleCtx('autoDetectJobDescriptions', 'browserAutoDetectJobDescriptions')}
+          comingSoon
+        />
+        <CtxToggle
+          label="Auto-detect developer docs"
+          desc="Optional. Recognize documentation pages so you can attach them when answering."
+          checked={ctx.autoDetectDeveloperDocs}
+          onChange={() => onToggleCtx('autoDetectDeveloperDocs', 'browserAutoDetectDeveloperDocs')}
+          comingSoon
+        />
+
+        {/* EXPERIMENTAL: full-page capture. Relaxes the coding-only auto gate but
+            NEVER the sensitive floor below — email/chat/banking/auth stay blocked. */}
+        <CtxToggle
+          label="Experimental: send full page to AI"
+          desc="When on, attach the FULL page content (not just coding problems) when you ask for an answer, and let the AI pick what's relevant. Email, chat, banking, and auth pages are still never captured."
+          checked={ctx.experimentalFullPageCapture}
+          onChange={() => onToggleCtx('experimentalFullPageCapture', 'browserExperimentalFullPageCapture')}
+          experimental
+        />
+
+        {/* The non-negotiable privacy floor — shown as a locked, always-on row. */}
+        <div className="flex items-start justify-between gap-3 pt-1">
+          <div className="min-w-0">
+            <div className="text-text-primary text-sm flex items-center gap-1.5">
+              <Lock size={12} className="text-text-secondary" />
+              Never capture email, chat, banking, or auth pages
+            </div>
+            <div className="text-text-secondary text-xs mt-0.5 leading-relaxed">
+              Always on. Sensitive pages are never auto-captured and are never sent to the AI
+              classifier, even if a page looks like a coding problem.
+            </div>
+          </div>
+          <span className="flex-shrink-0 text-[11px] text-emerald-400 font-medium mt-0.5">
+            Enforced
+          </span>
+        </div>
+      </div>
+
       {error && (
         <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
           {error}
@@ -492,3 +642,57 @@ export const PhoneMirrorSettings: React.FC = () => {
     </div>
   );
 };
+
+/** A single labelled on/off row for the Smart Browser Context settings group. */
+const CtxToggle: React.FC<{
+  label: string;
+  desc: string;
+  checked: boolean;
+  onChange: () => void;
+  /** Show a subtle amber "Experimental" chip next to the label. */
+  experimental?: boolean;
+  /**
+   * Mark the control as scaffolding for a not-yet-wired feature: shows a "Coming
+   * soon" chip, dims the row, and disables the switch so it can't promise
+   * behavior that doesn't exist yet. (The AI metadata classifier + JD/dev-docs
+   * auto-detect are built + tested but not yet wired into the live auto-context
+   * path — tracked as a follow-up.)
+   */
+  comingSoon?: boolean;
+}> = ({ label, desc, checked, onChange, experimental, comingSoon }) => (
+  <div className={`flex items-start justify-between gap-3 ${comingSoon ? 'opacity-55' : ''}`}>
+    <div className="min-w-0">
+      <div className="text-text-primary text-sm flex items-center gap-2">
+        {label}
+        {experimental && (
+          <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-[0.08em] bg-amber-500/15 text-amber-400 border border-amber-500/30">
+            Experimental
+          </span>
+        )}
+        {comingSoon && (
+          <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-[0.08em] bg-text-secondary/15 text-text-secondary border border-border-subtle">
+            Coming soon
+          </span>
+        )}
+      </div>
+      <div className="text-text-secondary text-xs mt-0.5 leading-relaxed">{desc}</div>
+    </div>
+    <button
+      type="button"
+      role="switch"
+      aria-checked={comingSoon ? false : checked}
+      aria-label={label}
+      disabled={comingSoon}
+      onClick={comingSoon ? undefined : onChange}
+      className={`flex-shrink-0 mt-0.5 relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+        comingSoon ? 'cursor-not-allowed bg-bg-item-active' : checked ? 'bg-blue-500' : 'bg-bg-item-active'
+      }`}
+    >
+      <span
+        className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+          !comingSoon && checked ? 'translate-x-4' : 'translate-x-0.5'
+        }`}
+      />
+    </button>
+  </div>
+);

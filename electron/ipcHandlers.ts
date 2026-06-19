@@ -10,6 +10,8 @@ import { DatabaseManager } from './db/DatabaseManager'; // Import Database Manag
 import { AppState } from './main';
 import { CodexCliService } from './services/CodexCliService';
 import { PhoneMirrorService } from './services/PhoneMirrorService';
+import { sanitizeContextEnvelope } from './services/browser-context/sanitize';
+import { formatEnvelopeForPrompt } from './services/browser-context/formatEnvelopeForPrompt';
 import { SettingsManager } from './services/SettingsManager';
 import { SkillsManager } from './services/SkillsManager';
 
@@ -4910,7 +4912,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       _,
       question?: string,
       imagePaths?: string[],
-      options?: { promptInstruction?: string; domContext?: string },
+      options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: unknown },
     ) => {
       try {
         let screenContext: any;
@@ -5017,6 +5019,33 @@ export function initializeIpcHandlers(appState: AppState): void {
         }
 
         const intelligenceManager = appState.getIntelligenceManager();
+
+        // Smart Browser Context v2 — when a structured envelope (coding problem/
+        // editor) accompanied the capture, format it into a BROWSER_CONTEXT_KIND
+        // header and PREPEND it to the legacy domContext string. This rides the
+        // SAME proven domContext seam (no new prompt path / no WTA signature
+        // change). Flag-gated via NATIVELY_BROWSER_ENVELOPE_PROMPT (default ON);
+        // set to 'off' to fall back to the plain-string behaviour. When there is
+        // no envelope, domContext is byte-identical to before.
+        let effectiveDomContext =
+          typeof options?.domContext === 'string'
+            ? options.domContext.substring(0, DOM_CONTEXT_MAX_CHARS)
+            : undefined;
+        if (options?.domContextEnvelope && process.env.NATIVELY_BROWSER_ENVELOPE_PROMPT !== 'off') {
+          try {
+            const envelope = sanitizeContextEnvelope(options.domContextEnvelope);
+            const header = formatEnvelopeForPrompt(envelope);
+            if (header) {
+              effectiveDomContext = `${header}\n\n---\n\n${effectiveDomContext || ''}`.substring(
+                0,
+                DOM_CONTEXT_MAX_CHARS,
+              );
+            }
+          } catch (e) {
+            console.warn('[browser-context] envelope prompt formatting failed:', e);
+          }
+        }
+
         // Question and imagePaths are now optional - IntelligenceManager infers from transcript
         const answer = await intelligenceManager.runWhatShouldISay(
           question,
@@ -5035,10 +5064,7 @@ export function initializeIpcHandlers(appState: AppState): void {
               typeof options?.promptInstruction === 'string'
                 ? options.promptInstruction
                 : undefined,
-            domContext:
-              typeof options?.domContext === 'string'
-                ? options.domContext.substring(0, DOM_CONTEXT_MAX_CHARS)
-                : undefined,
+            domContext: effectiveDomContext,
           },
         );
         if (answer) {
@@ -6951,6 +6977,28 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
+  // Smart Browser Context v2 — pre-answer auto-context pull. The renderer calls
+  // this just before generating an answer; the extension auto-attaches a coding
+  // page if one is in front, otherwise resolves attached:false and the answer
+  // proceeds without browser context. Honors the user's auto-attach setting.
+  safeHandle('phone-mirror:request-auto-context', async () => {
+    try {
+      const settings = SettingsManager.getInstance().getBrowserContextSettings();
+      // Proceed when coding auto-attach OR experimental full-page mode is on.
+      // Full-page mode relaxes the coding-only gate but NEVER the sensitive
+      // floor (email/chat/banking/auth stay blocked in the extension).
+      if (!settings.autoAttachCoding && !settings.experimentalFullPageCapture) {
+        return { attached: false, reason: 'disabled' };
+      }
+      return await PhoneMirrorService.getInstance().requestAutoContext({
+        fullPage: settings.experimentalFullPageCapture,
+      });
+    } catch (e: any) {
+      console.error('[IPC] phone-mirror:request-auto-context error:', e);
+      return { attached: false, reason: e?.message || 'failed to request auto context' };
+    }
+  });
+
   // Stealth screenshot capture triggered from the phone UI.
   // Takes a screenshot on the PC (adding it to the screenshot queue so it can
   // be used in the next AI prompt), then broadcasts an ack so the phone shows
@@ -6969,6 +7017,56 @@ export function initializeIpcHandlers(appState: AppState): void {
       return { error: e?.message || 'failed to capture screenshot' };
     }
   });
+
+  // ── Smart Browser Context v2 — settings get/set ────────────────────────
+  // Manual capture is always on (no flag). These drive the AUTO behaviour. The
+  // resolved getter applies the documented defaults in one place (SettingsManager).
+  safeHandle('browser-context:get-settings', async () => {
+    try {
+      return SettingsManager.getInstance().getBrowserContextSettings();
+    } catch (e: any) {
+      console.error('[IPC] browser-context:get-settings error:', e);
+      return { error: e?.message || 'failed to read settings' };
+    }
+  });
+
+  safeHandle(
+    'browser-context:set-settings',
+    async (
+      _,
+      patch?: Partial<{
+        browserAutoDetectCoding: boolean;
+        browserAutoAttachCoding: boolean;
+        browserAskBeforeUnknown: boolean;
+        browserAiClassifierEnabled: boolean;
+        browserAutoDetectJobDescriptions: boolean;
+        browserAutoDetectDeveloperDocs: boolean;
+        browserExperimentalFullPageCapture: boolean;
+      }>,
+    ) => {
+      try {
+        const sm = SettingsManager.getInstance();
+        // Only persist known boolean keys — never trust arbitrary renderer input.
+        const KEYS = [
+          'browserAutoDetectCoding',
+          'browserAutoAttachCoding',
+          'browserAskBeforeUnknown',
+          'browserAiClassifierEnabled',
+          'browserAutoDetectJobDescriptions',
+          'browserAutoDetectDeveloperDocs',
+          'browserExperimentalFullPageCapture',
+        ] as const;
+        for (const k of KEYS) {
+          const v = patch?.[k];
+          if (typeof v === 'boolean') sm.set(k, v);
+        }
+        return sm.getBrowserContextSettings();
+      } catch (e: any) {
+        console.error('[IPC] browser-context:set-settings error:', e);
+        return { error: e?.message || 'failed to save settings' };
+      }
+    },
+  );
 
   // Route commands sent by the phone browser back to the Electron renderer so
   // the existing action system (global-shortcut events, chat stream) handles

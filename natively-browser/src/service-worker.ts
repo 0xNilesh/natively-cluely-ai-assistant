@@ -59,12 +59,15 @@ export async function postDomToDesktop(
   pairing: Pairing,
   dom: string,
   fetchImpl: FetchLike,
-  extras?: { reqId?: string; meta?: CaptureMeta; probe?: boolean },
+  extras?: { reqId?: string; meta?: CaptureMeta; probe?: boolean; envelope?: unknown },
 ): Promise<DomPostOutcome> {
   const url = `http://127.0.0.1:${pairing.port}/dom?t=${encodeURIComponent(pairing.token)}`;
   const payload: Record<string, unknown> = { dom };
   if (extras?.reqId) payload.reqId = extras.reqId;
   if (extras?.meta) payload.meta = extras.meta;
+  // Smart Browser Context v2: the structured envelope rides alongside the legacy
+  // `dom` string. The desktop treats it as an ADDED field (back-compatible).
+  if (extras?.envelope) payload.envelope = extras.envelope;
   // probe = a liveness/auth check (connection status, pairing validation). The
   // desktop still authenticates it (so status works) but must NOT deliver it to
   // the overlay as captured page content — otherwise a phantom "14 chars" chip
@@ -337,7 +340,7 @@ async function sendDom(
   token: string,
   hintPort: number | undefined,
   dom: string,
-  extras?: { reqId?: string; meta?: CaptureMeta; probe?: boolean },
+  extras?: { reqId?: string; meta?: CaptureMeta; probe?: boolean; envelope?: unknown },
 ): Promise<DomPostOutcome> {
   const attempt = async (port: number): Promise<DomPostOutcome> =>
     postDomToDesktop({ port, token }, dom, fetch, extras);
@@ -476,6 +479,95 @@ async function captureActiveTab(opts?: { reqId?: string; tabId?: number }): Prom
   return { outcome, chars: extracted.text.length };
 }
 
+/** A smart-extract result returned by the content script (structured + legacy). */
+interface SmartExtractResult {
+  candidate: { matchedCategory?: string; matchedPlatform?: string; autoPolicy: string; confidenceScore: number };
+  envelope: unknown | null;
+  dom: string;
+  blocked: boolean;
+}
+
+/** Run the content script's smart-extract path (classify + structured extract). */
+async function smartExtractFromTab(
+  tabId: number,
+  contextId: string,
+  capturedAt: number,
+  mode: 'auto' | 'manual',
+  fullPage = false,
+): Promise<SmartExtractResult> {
+  await chrome.scripting.executeScript({ target: { tabId }, files: ['content-script.js'] });
+  const response = (await chrome.tabs.sendMessage(tabId, {
+    type: 'natively:smart-extract',
+    contextId,
+    capturedAt,
+    mode,
+    fullPage,
+  })) as { ok: true; smart: SmartExtractResult } | { ok: false; error: string } | undefined;
+  if (!response) throw new Error('No response from page');
+  if (!response.ok) throw new Error(response.error || 'Smart extraction failed');
+  return response.smart;
+}
+
+/** Outcome of an auto-context request (desktop pull just before an answer). */
+export type AutoContextOutcome =
+  | { kind: 'none'; reason: string } // nothing eligible to auto-attach
+  | { kind: 'blocked' } // sensitive page — deliberately not captured
+  | { kind: 'sent'; chars: number; category?: string }
+  | DomPostOutcome;
+
+/**
+ * Just-in-time auto-context capture. Picks the best tab, classifies it IN the
+ * page, and only posts when the local policy permits auto-attach (high-confidence
+ * coding). Sensitive pages return `blocked` and capture nothing. This is the path
+ * the desktop calls right before generating an answer.
+ */
+async function captureAutoContext(reqId: string, fullPage = false): Promise<AutoContextOutcome> {
+  const pairing = await getPairing();
+  if (!pairing) return { kind: 'unauthorized' };
+
+  const tab = await resolveCaptureTab();
+  if (!tab || tab.id == null || !isCapturable(tab)) {
+    return { kind: 'none', reason: 'no capturable tab' };
+  }
+
+  const contextId = `auto-${reqId}`;
+  let smart: SmartExtractResult;
+  try {
+    smart = await smartExtractFromTab(tab.id, contextId, Date.now(), 'auto', fullPage);
+  } catch (err) {
+    return { kind: 'none', reason: err instanceof Error ? err.message : String(err) };
+  }
+
+  if (smart.blocked) return { kind: 'blocked' };
+  // Only AUTO-attach when the local policy says auto / auto_if_high_confidence
+  // AND we actually extracted something. Everything else is left for a manual
+  // user action (the chip's "attach" affordance), so auto never surprises.
+  // EXPERIMENTAL full-page mode relaxes the coding-only gate: any non-blocked
+  // page is eligible (sensitive pages already returned `blocked` above, so by
+  // this point the page is non-sensitive). We still require non-empty content.
+  const policy = smart.candidate.autoPolicy;
+  const eligible = fullPage || policy === 'auto' || policy === 'auto_if_high_confidence';
+  if (!eligible || !smart.dom) {
+    return { kind: 'none', reason: `policy=${policy}` };
+  }
+
+  const meta: CaptureMeta = {
+    title: tab.title || '',
+    url: tab.url || '',
+    source: 'smart-auto',
+    pageType: smart.candidate.matchedCategory,
+  };
+  const outcome = await sendDom(pairing.token, pairing.port, smart.dom, {
+    reqId,
+    meta,
+    envelope: smart.envelope ?? undefined,
+  });
+  if (outcome.kind === 'success') {
+    return { kind: 'sent', chars: smart.dom.length, category: smart.candidate.matchedCategory };
+  }
+  return outcome;
+}
+
 /** Validate a pasted pairing by sending a tiny probe POST (manual fallback). */
 async function pairFromString(raw: string): Promise<DomPostOutcome> {
   const parsed = parsePairingString(raw);
@@ -547,6 +639,29 @@ async function handleCaptureDom(reqId: string, tabId?: number): Promise<void> {
   }
 }
 
+/**
+ * Desktop pull just before an answer: try to auto-attach high-confidence coding
+ * context. Acks `done` when context was sent, `none` when nothing eligible (so
+ * the desktop proceeds without browser context), `error` on failure. Sensitive
+ * pages ack `none` (deliberately not captured).
+ */
+async function handleRequestAutoContext(reqId: string, fullPage = false): Promise<void> {
+  wsSend({ type: 'capture-ack', reqId, status: 'started' });
+  try {
+    const result = await captureAutoContext(reqId, fullPage);
+    if (result.kind === 'sent') {
+      wsSend({ type: 'capture-ack', reqId, status: 'done', category: result.category });
+    } else if (result.kind === 'none' || result.kind === 'blocked') {
+      wsSend({ type: 'capture-ack', reqId, status: 'none', reason: result.kind === 'blocked' ? 'blocked' : result.reason });
+    } else {
+      const reason = ('message' in result && result.message) || result.kind;
+      wsSend({ type: 'capture-ack', reqId, status: 'error', error: reason });
+    }
+  } catch (err) {
+    wsSend({ type: 'capture-ack', reqId, status: 'error', error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
 async function handleListTabs(reqId: string): Promise<void> {
   try {
     const tabs = await chrome.tabs.query({});
@@ -582,6 +697,8 @@ async function ensureWsConnected(): Promise<void> {
       if (!msg || typeof msg !== 'object') return;
       if (msg.type === 'capture-dom' && typeof msg.reqId === 'string') {
         void handleCaptureDom(msg.reqId, typeof msg.tabId === 'number' ? msg.tabId : undefined);
+      } else if (msg.type === 'request-auto-context' && typeof msg.reqId === 'string') {
+        void handleRequestAutoContext(msg.reqId, msg.fullPage === true);
       } else if (msg.type === 'list-tabs' && typeof msg.reqId === 'string') {
         void handleListTabs(msg.reqId);
       }

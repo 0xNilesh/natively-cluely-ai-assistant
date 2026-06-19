@@ -9,6 +9,7 @@ import { SettingsManager } from './SettingsManager';
 import { CredentialsManager } from './CredentialsManager';
 import { PHONE_MIRROR_HTML } from './phoneMirrorClient';
 import { DOM_CONTEXT_MAX_CHARS } from '../config/constants';
+import { sanitizeContextEnvelope } from './browser-context/sanitize';
 
 export interface PhoneMirrorInfo {
   running: boolean;
@@ -161,7 +162,7 @@ export class PhoneMirrorService {
   private extConnectedAt = new WeakMap<WebSocket, number>();
   // In-flight desktop→extension requests keyed by reqId, resolved by the
   // matching `capture-ack`/`tabs` control frame (or a timeout).
-  private pendingCaptures = new Map<string, { resolve: (r: { ok: boolean; reason?: string }) => void; timer: ReturnType<typeof setTimeout> }>();
+  private pendingCaptures = new Map<string, { resolve: (r: { ok: boolean; reason?: string; category?: string }) => void; timer: ReturnType<typeof setTimeout> }>();
   private pendingTabs = new Map<string, { resolve: (tabs: ExtensionTab[]) => void; timer: ReturnType<typeof setTimeout> }>();
   // reqIds the desktop issued for capture-dom and is still waiting to receive over
   // /dom. The FIRST matching /dom POST consumes its reqId and delivers to the
@@ -459,6 +460,47 @@ export class PhoneMirrorService {
   }
 
   /**
+   * Smart Browser Context v2 — ask the active extension to AUTO-attach context
+   * just before an answer. The extension classifies the active tab IN the page
+   * and only posts a structured envelope to /dom when its local policy permits
+   * (high-confidence coding). Resolves:
+   *   { attached:true }  — context was captured + posted (arrives over /dom),
+   *   { attached:false, reason:'none'|'no-extension'|'timeout'|... } — nothing
+   *     eligible (no coding page, or a sensitive page deliberately skipped) →
+   *     the caller proceeds WITHOUT browser context.
+   * Mirrors requestDomCapture's reqId anti-clobber + timeout machinery.
+   */
+  requestAutoContext(opts?: { timeoutMs?: number; fullPage?: boolean }): Promise<{ attached: boolean; reason?: string; category?: string }> {
+    const target = this.pickExtensionClient();
+    if (!target) return Promise.resolve({ attached: false, reason: 'no-extension' });
+    const reqId = generateToken();
+    const fullPage = opts?.fullPage === true;
+    this.openCaptureReqIds.add(reqId);
+    return new Promise((resolve) => {
+      const settle = (r: { ok: boolean; reason?: string; category?: string }) => {
+        this.openCaptureReqIds.delete(reqId);
+        resolve(
+          r.ok
+            ? { attached: true, category: r.category }
+            : { attached: false, reason: r.reason },
+        );
+      };
+      const timer = setTimeout(() => {
+        this.pendingCaptures.delete(reqId);
+        settle({ ok: false, reason: 'timeout' });
+      }, opts?.timeoutMs ?? CAPTURE_TIMEOUT_MS);
+      this.pendingCaptures.set(reqId, { resolve: settle, timer });
+      try {
+        target.send(JSON.stringify({ type: 'request-auto-context', reqId, fullPage }));
+      } catch (_) {
+        clearTimeout(timer);
+        this.pendingCaptures.delete(reqId);
+        settle({ ok: false, reason: 'send-failed' });
+      }
+    });
+  }
+
+  /**
    * Ask the active extension for its open-tab list (multi-tab picker). Resolves
    * with [] on timeout / no extension. Plumbed now even before a UI consumes it.
    */
@@ -604,16 +646,22 @@ export class PhoneMirrorService {
         if (typeof msg.reqId !== 'string') return true;
         this.extActiveAt.set(ws, Date.now());
         const status = msg.status;
-        if (status === 'done' || status === 'error') {
-          // Terminal — settle the pending capture.
+        if (status === 'done' || status === 'error' || status === 'none') {
+          // Terminal — settle the pending capture. `none` (Smart Browser Context
+          // v2 auto-context) means the extension found nothing eligible to
+          // auto-attach (no high-confidence coding page, or a sensitive page that
+          // is deliberately not captured) — NOT an error. The caller proceeds
+          // without browser context.
           const pending = this.pendingCaptures.get(msg.reqId);
           if (pending) {
             clearTimeout(pending.timer);
             this.pendingCaptures.delete(msg.reqId);
             pending.resolve(
               status === 'done'
-                ? { ok: true }
-                : { ok: false, reason: typeof msg.error === 'string' ? msg.error : 'error' },
+                ? { ok: true, category: typeof msg.category === 'string' ? msg.category : undefined }
+                : status === 'none'
+                  ? { ok: false, reason: 'none' }
+                  : { ok: false, reason: typeof msg.error === 'string' ? msg.error : 'error' },
             );
           }
         } else if (status === 'started' || status === 'posting') {
@@ -947,7 +995,13 @@ export class PhoneMirrorService {
               return;
             }
             const meta = sanitizeCaptureMeta(parsed.meta);
-            targetWin.webContents.send('dom-context-received', cappedDom, meta);
+            // Smart Browser Context v2: an optional structured envelope rides
+            // alongside the legacy `dom` string. Validate + sanitize it; on any
+            // problem it is dropped (undefined) and we fall back to the plain
+            // string behaviour. The third IPC arg is ADDITIVE — existing 2-arg
+            // listeners (onDomContextReceived(dom, meta)) keep working unchanged.
+            const envelope = sanitizeContextEnvelope(parsed.envelope);
+            targetWin.webContents.send('dom-context-received', cappedDom, meta, envelope);
             res.writeHead(200, jsonHeaders);
             res.end(JSON.stringify({ success: true }));
             return;

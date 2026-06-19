@@ -312,7 +312,7 @@ interface ElectronAPI {
   generateWhatToSay: (
     question?: string,
     imagePaths?: string[],
-    options?: { promptInstruction?: string; domContext?: string },
+    options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: unknown },
   ) => Promise<{
     answer: string | null;
     question?: string;
@@ -873,7 +873,9 @@ interface ElectronAPI {
   // because a subsequent question's first token has to wait for the prior
   // response to drain through the supersession check.
   cancelChatStream: () => void;
-  onDomContextReceived: (callback: (dom: string, meta?: DomCaptureMeta) => void) => () => void;
+  onDomContextReceived: (
+    callback: (dom: string, meta?: DomCaptureMeta, envelope?: unknown) => void,
+  ) => () => void;
 }
 
 export const PROCESSING_EVENTS = {
@@ -1101,8 +1103,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   phoneMirrorArmExtension: () => ipcRenderer.invoke('phone-mirror:arm-extension'),
   phoneMirrorListTabs: () => ipcRenderer.invoke('phone-mirror:list-tabs'),
   phoneMirrorCaptureTab: (tabId: number) => ipcRenderer.invoke('phone-mirror:capture-tab', tabId),
+  phoneMirrorRequestAutoContext: () => ipcRenderer.invoke('phone-mirror:request-auto-context'),
   phoneMirrorPushScreenshot: (screenshotPath?: string) =>
     ipcRenderer.invoke('phone-mirror:push-screenshot', screenshotPath),
+  // Smart Browser Context v2 — auto-capture settings.
+  browserContextGetSettings: () => ipcRenderer.invoke('browser-context:get-settings'),
+  browserContextSetSettings: (patch: Record<string, boolean>) =>
+    ipcRenderer.invoke('browser-context:set-settings', patch),
   onPhoneMirrorStatus: (callback: (info: any) => void) => {
     const subscription = (_: any, info: any) => callback(info);
     ipcRenderer.on('phone-mirror:status', subscription);
@@ -1400,7 +1407,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   generateWhatToSay: (
     question?: string,
     imagePaths?: string[],
-    options?: { promptInstruction?: string; domContext?: string },
+    options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: unknown },
   ) => ipcRenderer.invoke('generate-what-to-say', question, imagePaths, options),
   generateClarify: () => ipcRenderer.invoke('generate-clarify'),
   generateCodeHint: (imagePaths?: string[], problemStatement?: string) =>
@@ -2219,11 +2226,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   cancelChatStream: () => {
     ipcRenderer.send('gemini-chat-stream-stop');
   },
-  onDomContextReceived: (callback: (dom: string, meta?: DomCaptureMeta) => void) => {
-    // The desktop sends (dom, meta?) — meta drives the optional "Page context"
-    // chip. Forwarding the extra arg is back-compatible: existing callers that
-    // only declare (dom) simply ignore it.
-    const subscription = (_: any, dom: string, meta?: DomCaptureMeta) => callback(dom, meta);
+  onDomContextReceived: (
+    callback: (dom: string, meta?: DomCaptureMeta, envelope?: unknown) => void,
+  ) => {
+    // The desktop sends (dom, meta?, envelope?) — meta drives the "Page context"
+    // chip, envelope (Smart Browser Context v2) carries the structured capture.
+    // Forwarding the extra args is back-compatible: existing callers that only
+    // declare (dom) or (dom, meta) simply ignore the trailing arg(s).
+    const subscription = (_: any, dom: string, meta?: DomCaptureMeta, envelope?: unknown) =>
+      callback(dom, meta, envelope);
     ipcRenderer.on('dom-context-received', subscription);
     return () => {
       ipcRenderer.removeListener('dom-context-received', subscription);

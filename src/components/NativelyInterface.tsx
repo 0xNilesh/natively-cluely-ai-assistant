@@ -529,6 +529,43 @@ const hostnameFromUrl = (url?: string): string | undefined => {
   }
 };
 
+// Smart Browser Context v2 — category-specific chip label. Falls back to the
+// host + "page ready" for legacy plain-string captures (no envelope category).
+const CATEGORY_CHIP_LABEL: Record<string, string> = {
+  coding_problem: 'Coding problem',
+  coding_editor: 'Coding editor',
+  interview_assessment: 'Coding assessment',
+  developer_docs: 'Developer docs',
+  job_description: 'Job description',
+  google_docs_visible: 'Google Docs',
+  notes: 'Notes',
+  article: 'Article',
+};
+const pageContextChipLabel = (pc: {
+  title: string;
+  url?: string;
+  category?: string;
+  platform?: string;
+  partial?: boolean;
+}): string => {
+  const host = hostnameFromUrl(pc.url) || pc.title;
+  if (!pc.category || pc.category === 'unknown') {
+    return pc.partial ? `${host} · partial — capture manually?` : `${host} · page ready`;
+  }
+  const base = CATEGORY_CHIP_LABEL[pc.category] || 'Page context';
+  const bits = [base];
+  if (pc.platform) bits.push(pc.platform);
+  // For coding problems the page title is usually the problem name — show it.
+  if ((pc.category === 'coding_problem' || pc.category === 'interview_assessment') && pc.title) {
+    const t = pc.title.replace(/\s*[-–|·].*$/, '').trim(); // strip "- LeetCode" suffix
+    if (t && t.length <= 40) bits.push(t);
+  }
+  // Honest partial-capture signal: tell the user the auto-capture was thin so
+  // they can grab it manually (highlight the code, or press the capture hotkey).
+  if (pc.partial) bits.push('partial — capture manually?');
+  return bits.join(' · ');
+};
+
 const subtleSurfaceClass = 'overlay-subtle-surface';
 
 const MessageRow = React.memo(
@@ -680,7 +717,21 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     url?: string;
     chars: number;
     at: number;
+    // Smart Browser Context v2 — when a structured envelope arrives, the chip
+    // shows a category-specific label (e.g. "Coding problem · LeetCode · Two Sum").
+    category?: import('../types/electron').BrowserContextCategory;
+    platform?: string;
+    // True when the extractor missed the essential fields (thin capture) — the
+    // chip turns amber and invites a manual capture instead of pretending it's
+    // complete. `missing` lists what was not captured (for the tooltip).
+    partial?: boolean;
+    missing?: string[];
   } | null>(null);
+
+  // The structured capture (Smart Browser Context v2) that arrived with the last
+  // page context, if any. Held in a ref so it survives re-renders and is consumed
+  // once (cleared) when the answer request reads it.
+  const capturedEnvelopeRef = useRef<import('../types/electron').ContextEnvelope | null>(null);
 
   // Multi-tab picker: when the user wants to choose which browser tab to capture
   // (e.g. the auto-pick grabbed the wrong one), we ask the extension for its open
@@ -809,14 +860,21 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   useEffect(() => {
     let unsubDom: (() => void) | undefined;
     try {
-      unsubDom = window.electronAPI?.onDomContextReceived?.((dom, meta) => {
+      unsubDom = window.electronAPI?.onDomContextReceived?.((dom, meta, envelope) => {
         (window as any).lastCapturedDOM = dom;
+        // Stash the structured envelope (Smart Browser Context v2) so handleWhatToSay
+        // can thread it into the answer request alongside the legacy domContext string.
+        capturedEnvelopeRef.current = envelope ?? null;
         if (typeof dom === 'string' && dom.trim().length > 0) {
           setPageContext({
             title: meta?.title?.trim() || hostnameFromUrl(meta?.url) || 'Captured page',
             url: meta?.url,
             chars: dom.length,
             at: Date.now(),
+            category: envelope?.category,
+            platform: envelope?.meta?.platform,
+            partial: envelope?.meta?.partial,
+            missing: envelope?.meta?.missing,
           });
         }
       });
@@ -3359,17 +3417,46 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     analytics.trackCommandExecuted('what_to_say');
 
     try {
+      // Smart Browser Context v2 — just-in-time auto-attach. If NO manual context
+      // is already captured, ask the extension for the best auto context (it only
+      // attaches a high-confidence coding page; sensitive/unknown pages are
+      // skipped). Manual context ALWAYS wins: we only run this when lastCapturedDOM
+      // is empty, and the request resolves quickly with attached:false when there
+      // is nothing to attach, so the answer is never blocked. The captured DOM (if
+      // any) arrives via onDomContextReceived → window.lastCapturedDOM, which we
+      // re-read below — reusing the proven domContext seam.
+      const hasManualContext =
+        typeof (window as any).lastCapturedDOM === 'string' &&
+        (window as any).lastCapturedDOM.trim().length > 0;
+      if (!hasManualContext) {
+        try {
+          await window.electronAPI.phoneMirrorRequestAutoContext?.();
+        } catch {
+          /* auto-context is best-effort — never block the answer */
+        }
+      }
+
+      // Safe to read synchronously right after the await above: the extension's
+      // SW awaits the /dom POST (which fires the `dom-context-received` IPC →
+      // sets window.lastCapturedDOM) BEFORE it emits the `done` ack that resolves
+      // phoneMirrorRequestAutoContext(). So by here, an auto-captured DOM has
+      // already landed — no extra settle delay needed.
       const rawDomContext = (window as any).lastCapturedDOM;
       const domContext =
         typeof rawDomContext === 'string' && rawDomContext.trim().length > 0
           ? rawDomContext.substring(0, DOM_CONTEXT_MAX_CHARS)
           : undefined;
 
+      // The structured envelope (if any) that arrived with this capture. Consumed
+      // once, alongside the legacy string, then cleared.
+      const domContextEnvelope = domContext ? capturedEnvelopeRef.current ?? undefined : undefined;
+
       // Clear the captured DOM immediately after reading it to ensure stale DOM context
       // from prior pages is never re-sent on subsequent requests.
       if (typeof (window as any).lastCapturedDOM === 'string') {
         (window as any).lastCapturedDOM = '';
       }
+      capturedEnvelopeRef.current = null;
       // Retire the "Page context" pill the moment the context is actually consumed,
       // so the lifecycle reads: capture → pill appears → answer → pill disappears.
       if (domContext) setPageContext(null);
@@ -3383,6 +3470,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           ? {
               ...(dynamicPromptInstruction ? { promptInstruction: dynamicPromptInstruction } : {}),
               ...(domContext ? { domContext } : {}),
+              ...(domContextEnvelope ? { domContextEnvelope } : {}),
             }
           : undefined;
 
@@ -5577,16 +5665,20 @@ Provide only the answer, nothing else.`;
                 )}
                 {pageContext && (
                   <div
-                    className={`${statusPillBaseClass} ${getStatusToneClass('ok')} pr-1.5`}
+                    className={`${statusPillBaseClass} ${getStatusToneClass(pageContext.partial ? 'warn' : 'ok')} pr-1.5`}
                     title={
-                      pageContext.url
-                        ? `${pageContext.url} · ${pageContext.chars.toLocaleString()} chars · used on your next answer`
-                        : `${pageContext.chars.toLocaleString()} chars · used on your next answer`
+                      pageContext.partial
+                        ? `Only part of this page could be read automatically${
+                            pageContext.missing?.length ? ` (missing: ${pageContext.missing.join(', ')})` : ''
+                          }. Highlight the relevant text or press the capture hotkey to capture it manually.`
+                        : pageContext.url
+                          ? `${pageContext.url} · ${pageContext.chars.toLocaleString()} chars · used on your next answer`
+                          : `${pageContext.chars.toLocaleString()} chars · used on your next answer`
                     }
                   >
                     <Globe className="h-3 w-3 opacity-70" />
-                    <span className="max-w-[160px] truncate">
-                      {hostnameFromUrl(pageContext.url) || pageContext.title} · page ready
+                    <span className="max-w-[220px] truncate">
+                      {pageContextChipLabel(pageContext)}
                     </span>
                     <button
                       type="button"
