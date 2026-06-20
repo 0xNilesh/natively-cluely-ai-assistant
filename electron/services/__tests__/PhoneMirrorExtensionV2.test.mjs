@@ -384,6 +384,29 @@ describe('PhoneMirror v2 — extensionConnected status flag', () => {
     await new Promise((r) => setTimeout(r, 80));
     await svc.stop({ persist: false });
   });
+
+  // REGRESSION: the Settings "Connected" dot is driven by the PUSHED status event
+  // (onStatusChange), not a snapshot pull. The hello branch must emit a status
+  // update so a subscriber sees extensionConnected flip true the moment the
+  // extension connects — previously it only emitted on disconnect, so the dot
+  // stayed "Not connected" until an unrelated status event refreshed it.
+  test('onStatusChange PUSHES extensionConnected:true when the extension connects', async () => {
+    const { svc, info } = await freshService();
+    const seen = [];
+    const off = svc.onStatusChange((i) => seen.push(i.extensionConnected));
+
+    const { ws } = await connectExtension(info.port, info.extToken);
+    // Wait past the ~150ms status debounce for the pushed emission.
+    await new Promise((r) => setTimeout(r, 300));
+    assert.ok(
+      seen.some((v) => v === true),
+      'a status event with extensionConnected:true must be pushed on hello',
+    );
+
+    off();
+    ws.close();
+    await svc.stop({ persist: false });
+  });
 });
 
 // ---------------------------------------------------------------------------

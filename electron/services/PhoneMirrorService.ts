@@ -691,6 +691,14 @@ export class PhoneMirrorService {
           // Begin keeping the MV3 service worker warm and release any hotkey waiters.
           this.ensureExtensionKeepalive();
           this.notifyExtensionWaiters();
+          // Push a status update so the Settings "Connected" dot flips green the
+          // instant the extension's `hello` arrives. The raw-connection emit in
+          // handleWsConnection() fired BEFORE this hello (socket not yet in
+          // extClients → extensionConnected still false), and the only other emit
+          // is on disconnect — so without this, the dot stays "Not connected"
+          // until an unrelated status event (a phone joining, or reopening
+          // Settings) happens to refresh it.
+          this.emitStatusClientCount();
           return true;
         }
         return false;
