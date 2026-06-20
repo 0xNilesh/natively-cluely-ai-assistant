@@ -98,6 +98,12 @@ const FLAGS: Record<IntelligenceFlagKey, FlagSpec> = {
   // Provider-native JSON mode is not implemented (the validate→repair→fallback ladder makes
   // it unnecessary for correctness); kept OFF as a reserved flag.
   meetingNotesStructuredOutput: { env: 'NATIVELY_MEETING_NOTES_STRUCTURED_OUTPUT', setting: 'meetingNotesStructuredOutputEnabled', default: false },
+  // Constrained LLM polish of the Summary (note-content-only, "no new tokens" gated). ON by
+  // default — it can only improve readability and always falls back to the deterministic
+  // summary, so it never hallucinates or blocks.
+  meetingSummaryLlmPolish: { env: 'NATIVELY_MEETING_SUMMARY_LLM_POLISH', setting: 'meetingSummaryLlmPolishEnabled', default: true },
+  // Provider diarization (Deepgram) — opt-in; touches the realtime STT path so default OFF.
+  speakerDiarizationV1: { env: 'NATIVELY_SPEAKER_DIARIZATION_V1', setting: 'speakerDiarizationV1Enabled', default: false },
   globalSearchV2: { env: 'NATIVELY_GLOBAL_SEARCH_V2', setting: 'globalSearchV2Enabled', default: false },
   inMeetingSearchV2: { env: 'NATIVELY_IN_MEETING_SEARCH_V2', setting: 'inMeetingSearchV2Enabled', default: false },
   conversationMemoryV2: { env: 'NATIVELY_CONVERSATION_MEMORY_V2', setting: 'conversationMemoryV2Enabled', default: false },

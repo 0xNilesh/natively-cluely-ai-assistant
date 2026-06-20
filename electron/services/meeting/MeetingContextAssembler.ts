@@ -32,6 +32,10 @@ export interface AssembleSummaryParams {
   // followUpDraftV2 flag + post_call_summary scope.
   generateFollowUpDraft?: boolean;
   followUpTone?: FollowUpTone;
+  // When true, run the constrained LLM Summary polish (#1). Gated by the caller on the
+  // meetingSummaryLlmPolish flag + post_call_summary scope. Always falls back to the
+  // deterministic summary, so it can never make the summary worse or block completion.
+  polishSummary?: boolean;
 }
 
 export class MeetingContextAssembler {
@@ -112,6 +116,28 @@ export class MeetingContextAssembler {
       if (!summary) {
         strategy = 'fallback';
         return { summary: null, meta: failMeta() };
+      }
+
+      // #1 — Constrained LLM Summary polish (note-content only, "no new tokens" gated).
+      // Rewrites summary.tldr into cleaner prose; on any rejection keeps the deterministic
+      // summary. overview is kept in sync for back-compat consumers.
+      if (params.polishSummary && summary.tldr.length > 0) {
+        try {
+          const polished = await new SummaryPolisher(this.llmHelper).polish({
+            deterministicSummary: summary.tldr,
+            decisions: summary.decisions,
+            actionItems: summary.actionItems,
+            risks: summary.risks,
+            sections: summary.sections,
+            mode: params.modeTemplateType,
+          });
+          if (polished && polished.length > 0) {
+            summary.tldr = polished;
+            summary.overview = polished.slice(0, 2).join(' ');
+          }
+        } catch (e) {
+          console.warn('[MeetingContextAssembler] summary polish failed (non-fatal):', (e as Error)?.message);
+        }
       }
 
       // Phase 8 — LLM follow-up draft (note-content only, never transcript).
