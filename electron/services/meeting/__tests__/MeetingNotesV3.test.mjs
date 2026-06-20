@@ -431,3 +431,51 @@ test('chunk extractor prefers compiledPrompt over description in the prompt', ()
   });
   assert.ok(summary.sections.some(s => s.title === 'Custom'));
 });
+
+// ── Constrained LLM Summary polish (#1) ──────────────────────────────────────
+
+const { SummaryPolisher, newSignificantTokens } = await load('SummaryPolisher.js');
+
+test('newSignificantTokens flags fact-shaped tokens not present in the source', () => {
+  const grounded = 'Summary points:\n- Adopt PostHog for analytics\nDecisions:\n- Use PostHog';
+  // "Mixpanel" (proper noun not in source) and "40%" (number not in source) must be flagged.
+  const offending = newSignificantTokens('We will adopt Mixpanel and cut costs 40% by Friday.', grounded);
+  assert.ok(offending.some(t => /Mixpanel/i.test(t)), 'flags invented proper noun');
+  assert.ok(offending.some(t => /40%/.test(t)), 'flags invented number');
+  assert.ok(offending.some(t => /Friday/i.test(t)), 'flags invented weekday');
+});
+
+test('newSignificantTokens allows pure rephrasing (no new facts)', () => {
+  const grounded = 'Summary points:\n- Adopt PostHog for analytics\nAction items:\n- Ari: draft retention proposal by Friday';
+  // Rephrase using only grounded facts (PostHog, Ari, Friday all present).
+  const offending = newSignificantTokens('The team chose PostHog; Ari will draft the retention proposal by Friday.', grounded);
+  assert.deepEqual(offending, []);
+});
+
+test('SummaryPolisher keeps polished prose when it introduces no new facts', async () => {
+  const llm = { generateMeetingSummary: async () => '{"summary":["The team selected PostHog for analytics.","Ari will draft the retention proposal by Friday."]}' };
+  const out = await new SummaryPolisher(llm).polish({
+    deterministicSummary: ['Adopt PostHog', 'Ari: draft retention proposal by Friday'],
+    decisions: [{ text: 'Adopt PostHog', confidence: 'high' }],
+    actionItems: [{ text: 'draft retention proposal', owner: 'Ari', deadline: 'Friday', explicitness: 'explicit', confidence: 'high' }],
+    risks: [], sections: [], mode: 'team-meet',
+  });
+  assert.ok(Array.isArray(out));
+  assert.ok(out.some(l => /PostHog/.test(l)));
+});
+
+test('SummaryPolisher REJECTS hallucinated output and returns null (keep deterministic)', async () => {
+  const llm = { generateMeetingSummary: async () => '{"summary":["The team selected Mixpanel and committed to a 40% cost cut by Q3."]}' };
+  const out = await new SummaryPolisher(llm).polish({
+    deterministicSummary: ['Adopt PostHog'],
+    decisions: [{ text: 'Adopt PostHog', confidence: 'high' }],
+    actionItems: [], risks: [], sections: [], mode: 'team-meet',
+  });
+  assert.equal(out, null); // hallucination gate tripped → caller keeps deterministic summary
+});
+
+test('SummaryPolisher returns null when there is nothing to polish', async () => {
+  const llm = { generateMeetingSummary: async () => '{"summary":["x"]}' };
+  const out = await new SummaryPolisher(llm).polish({ deterministicSummary: [], decisions: [], actionItems: [], risks: [], sections: [] });
+  assert.equal(out, null);
+});
