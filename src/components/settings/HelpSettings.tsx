@@ -1761,7 +1761,7 @@ export const HelpSettings: React.FC<{ onNavigate?: (tab: string) => void }> = ({
                                     <Wifi className="w-4 h-4 text-sky-500" /> Enable & Connect
                                 </h4>
                                 <ul className="text-[11px] text-text-secondary space-y-1 list-disc pl-4">
-                                    <li>Open <strong>Settings → Phone Mirror</strong></li>
+                                    <li>Open <strong>Settings → Sync</strong></li>
                                     <li>Toggle on, then scan the generated QR code from your phone</li>
                                     <li>Loopback by default — flip <strong>Expose on LAN</strong> to reach it from another device on the same Wi-Fi</li>
                                 </ul>
@@ -2006,7 +2006,7 @@ hindsight-api`}
                                     Establish a secure paired loopback connection (done only once):
                                 </p>
                                 <ol className="text-[11px] text-text-secondary space-y-1 list-decimal pl-4">
-                                    <li>In Natively desktop: go to <strong>Settings → Phone Mirror</strong>, ensure Phone Mirror is running, and under the **Browser Extension** card click <strong>Connect browser extension</strong> (arms pairing for 60s).</li>
+                                    <li>In Natively desktop: go to <strong>Settings → Sync</strong>, ensure Phone Mirror is running, and under the **Browser Extension** card click <strong>Connect browser extension</strong> (arms pairing for 60s).</li>
                                     <li>In your browser: click the Natively extension toolbar icon, then click <strong>Connect to Natively</strong>.</li>
                                     <li>Once paired, the connection status shows a green dot ("Connected — capture ready").</li>
                                 </ol>

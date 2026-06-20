@@ -238,15 +238,15 @@ export const PhoneMirrorSettings: React.FC = () => {
         </div>
         <div className="flex-1">
           <div className="flex items-center gap-2">
-            <h3 className="text-text-primary text-lg font-semibold tracking-tight">Phone Mirror</h3>
+            <h3 className="text-text-primary text-lg font-semibold tracking-tight">Sync</h3>
             <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-[0.08em] bg-amber-500/15 text-amber-400 border border-amber-500/30">
               Beta
             </span>
           </div>
           <p className="text-text-secondary text-sm mt-1 leading-relaxed">
-            Stream live AI responses from your desktop to a phone browser on the same network.
-            Useful when you're sharing your screen and want the AI output kept off the shared
-            display.
+            Connect Natively to your phone and your browser. Stream live AI responses to a phone
+            browser on the same network, and pair the companion browser extension to send the
+            active tab's page context to the desktop.
           </p>
         </div>
       </header>
