@@ -117,6 +117,12 @@ const cleanMarkdown = (content: string) => {
     return content.replace(/([^\n])```/g, '$1\n\n```');
 };
 
+// The mode's note-section template is the source of truth for the notes layout
+// (Summary on top, then the mode's sections). The imposed Decisions/Action-items/
+// Open-questions/Risks blocks are kept in the schema (they power the follow-up draft and
+// cross-meeting recall) but are NOT rendered as the primary layout. Set true to surface them.
+const SHOW_STRUCTURED_BLOCKS = false;
+
 interface Evidence { speakerId?: string; speakerName?: string; speaker?: string; timestampMs?: number; timestamp?: number; quote?: string; segmentId?: string }
 interface FollowUpDraftObj { type?: string; subject?: string; body: string; tone?: string }
 
@@ -610,9 +616,10 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                                     </section>
                                 )}
 
+                                {/* Summary on top — outcome-first, grounded. Then the mode's template sections below. */}
                                 {isV3Summary && v3Tldr.length > 0 && (
                                     <section className="mb-8">
-                                        <h2 className="text-lg font-semibold text-text-primary mb-4">TLDR</h2>
+                                        <h2 className="text-lg font-semibold text-text-primary mb-4">Summary</h2>
                                         <ul className="space-y-3">
                                             {v3Tldr.map((item, i) => (
                                                 <li key={i} className="flex items-start gap-3 group">
@@ -624,7 +631,37 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                                     </section>
                                 )}
 
-                                {isV3Summary && v3WhatChanged.length > 0 && (
+                                {/* The mode's note-section TEMPLATE — the primary notes layout (e.g. Questions and
+                                    responses, Discovery, Action items). Rendered right under Summary, in template order.
+                                    Empty sections are dropped server-side. */}
+                                {isV3Summary && meeting.detailedSummary?.sectionsV3 && meeting.detailedSummary.sectionsV3.length > 0 && (
+                                    <>
+                                        {meeting.detailedSummary.sectionsV3.map((section) => (
+                                            <section key={section.id} className="mb-8">
+                                                <h2 className="text-lg font-semibold text-text-primary mb-4">{section.title}</h2>
+                                                <ul className="space-y-3">
+                                                    {section.bullets.map((bullet, i) => (
+                                                        <li key={bullet.id || i} className="flex items-start gap-3">
+                                                            <div className="mt-2 w-1.5 h-1.5 rounded-full bg-text-secondary/60 shrink-0" />
+                                                            <div className="min-w-0 flex-1">
+                                                                <p className="text-sm text-text-secondary leading-relaxed">{bullet.text}</p>
+                                                                {showEvidence && evidenceLabel(bullet.evidence) && (
+                                                                    <button type="button" onClick={() => jumpToEvidence(bullet.evidence)} className="text-[11px] text-blue-400/80 hover:text-blue-300 mt-1 text-left">↳ {evidenceLabel(bullet.evidence)}</button>
+                                                                )}
+                                                            </div>
+                                                        </li>
+                                                    ))}
+                                                </ul>
+                                            </section>
+                                        ))}
+                                    </>
+                                )}
+
+                                {/* SHOW_STRUCTURED_BLOCKS: the mode's note-section TEMPLATE is the source of truth, so the
+                                    imposed What-changed/Decisions/Actions/Questions/Risks blocks are NOT rendered as the
+                                    primary layout (they remain in the schema, powering the follow-up draft + cross-meeting
+                                    recall). Flip to true to surface them again. */}
+                                {SHOW_STRUCTURED_BLOCKS && isV3Summary && v3WhatChanged.length > 0 && (
                                     <section className="mb-8">
                                         <h2 className="text-lg font-semibold text-text-primary mb-4">What changed</h2>
                                         <ul className="space-y-3">
@@ -638,7 +675,7 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                                     </section>
                                 )}
 
-                                {isV3Summary && v3Decisions.length > 0 && (
+                                {SHOW_STRUCTURED_BLOCKS && isV3Summary && v3Decisions.length > 0 && (
                                     <section className="mb-8">
                                         <h2 className="text-lg font-semibold text-text-primary mb-4">Decisions</h2>
                                         <ul className="space-y-3">
@@ -663,7 +700,7 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                                     </section>
                                 )}
 
-                                {isV3Summary && v3Actions.length > 0 && (
+                                {SHOW_STRUCTURED_BLOCKS && isV3Summary && v3Actions.length > 0 && (
                                     <section className="mb-8">
                                         <h2 className="text-lg font-semibold text-text-primary mb-4">Action Items</h2>
                                         <ul className="space-y-3">
@@ -690,7 +727,7 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                                     </section>
                                 )}
 
-                                {isV3Summary && v3Questions.length > 0 && (
+                                {SHOW_STRUCTURED_BLOCKS && isV3Summary && v3Questions.length > 0 && (
                                     <section className="mb-8">
                                         <h2 className="text-lg font-semibold text-text-primary mb-4">Open Questions</h2>
                                         <ul className="space-y-3">
@@ -707,7 +744,7 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                                     </section>
                                 )}
 
-                                {isV3Summary && v3Risks.length > 0 && (
+                                {SHOW_STRUCTURED_BLOCKS && isV3Summary && v3Risks.length > 0 && (
                                     <section className="mb-8">
                                         <h2 className="text-lg font-semibold text-text-primary mb-4">Risks / Blockers</h2>
                                         <ul className="space-y-3">
@@ -737,30 +774,6 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                                             ))}
                                         </div>
                                     </section>
-                                )}
-
-                                {/* V3 mode-specific sections (e.g. Pain points, Strengths, Core concepts). Empty sections are dropped server-side. */}
-                                {isV3Summary && meeting.detailedSummary?.sectionsV3 && meeting.detailedSummary.sectionsV3.length > 0 && (
-                                    <>
-                                        {meeting.detailedSummary.sectionsV3.map((section) => (
-                                            <section key={section.id} className="mb-8">
-                                                <h2 className="text-lg font-semibold text-text-primary mb-4">{section.title}</h2>
-                                                <ul className="space-y-3">
-                                                    {section.bullets.map((bullet, i) => (
-                                                        <li key={bullet.id || i} className="flex items-start gap-3">
-                                                            <div className="mt-2 w-1.5 h-1.5 rounded-full bg-text-secondary/60 shrink-0" />
-                                                            <div className="min-w-0 flex-1">
-                                                                <p className="text-sm text-text-secondary leading-relaxed">{bullet.text}</p>
-                                                                {showEvidence && evidenceLabel(bullet.evidence) && (
-                                                                    <button type="button" onClick={() => jumpToEvidence(bullet.evidence)} className="text-[11px] text-blue-400/80 hover:text-blue-300 mt-1 text-left">↳ {evidenceLabel(bullet.evidence)}</button>
-                                                                )}
-                                                            </div>
-                                                        </li>
-                                                    ))}
-                                                </ul>
-                                            </section>
-                                        ))}
-                                    </>
                                 )}
 
                                 {/* V3 follow-up draft — human prose, copy + regenerate + tone. */}

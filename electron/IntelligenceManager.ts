@@ -41,6 +41,13 @@ export class IntelligenceManager extends EventEmitter {
         this.engine = new IntelligenceEngine(llmHelper, this.session);
         this.persistence = new MeetingPersistence(this.session, llmHelper);
 
+        // Wire the LLMHelper used by the async per-section prompt compiler (Phase 16b).
+        // Fire-and-forget compilation runs when a user adds/edits a note section or custom mode.
+        try {
+            const { ModesManager } = require('./services/ModesManager');
+            ModesManager.setLlmHelperForCompiler(llmHelper);
+        } catch { /* non-fatal */ }
+
         // Forward all engine events through the facade
         this.forwardEngineEvents();
     }

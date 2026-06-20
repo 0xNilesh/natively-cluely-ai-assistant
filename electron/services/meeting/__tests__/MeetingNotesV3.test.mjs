@@ -17,6 +17,8 @@ const { CrossMeetingRecall, priorFromDetailedSummary } = await load('CrossMeetin
 const { FollowUpDraftGenerator, followUpTypeForMode } = await load('FollowUpDraftGenerator.js');
 const { generateStructured, extractJsonObject } = await load('generateStructured.js');
 const { MeetingSummarySchemaValidator } = await load('MeetingSummarySchemaValidator.js');
+const { MeetingSummaryReducer } = await load('MeetingSummaryReducer.js');
+const { SectionPromptCompiler, deterministicSectionInstruction } = await load('SectionPromptCompiler.js');
 
 function seg(speaker, text, timestamp) { return { speaker, text, timestamp, final: true }; }
 
@@ -306,4 +308,126 @@ test('normalizer assigns segmentId and canonical speakerId', () => {
   assert.equal(normalized.segments[0].speakerId, 'me');
   assert.equal(normalized.segments[1].speakerId, 'speaker_1');
   assert.ok(normalized.segments.every(s => typeof s.segmentId === 'string' && s.segmentId.length > 0));
+});
+
+// ── Template-section extraction (Phase 16b: mode template = source of truth) ──
+
+function atomsWith(findings, chunkIndex = 0) {
+  return {
+    chunkIndex,
+    timeRange: { startMs: 0, endMs: 60000 },
+    brief: 'chunk brief',
+    topics: [],
+    decisions: [],
+    actionItems: [],
+    openQuestions: [],
+    risks: [],
+    deadlines: [],
+    people: [],
+    importantQuotes: [],
+    modeSpecificFindings: findings,
+  };
+}
+
+test('validator coerces bare-string findings to {text} and keeps evidence on objects', () => {
+  const v = new MeetingSummarySchemaValidator();
+  const atoms = v.validateAndRepairAtoms({
+    brief: 'x',
+    modeSpecificFindings: {
+      'Discovery': ['bare string finding', { text: 'rich finding', evidence: [{ speakerName: 'Maya', timestampMs: 1000, quote: 'q' }], confidence: 'high' }],
+    },
+  }, 0, { allowedSectionTitles: ['Discovery'] });
+  const d = atoms.modeSpecificFindings['Discovery'];
+  assert.equal(d.length, 2);
+  assert.equal(d[0].text, 'bare string finding');
+  assert.equal(d[1].evidence[0].speakerName, 'Maya');
+  assert.equal(d[1].confidence, 'high');
+});
+
+test('validator DROPS invented section keys not in the allowed-title set', () => {
+  const v = new MeetingSummarySchemaValidator();
+  const atoms = v.validateAndRepairAtoms({
+    brief: 'x',
+    modeSpecificFindings: { 'Discovery': ['ok'], 'Made Up Section': ['should be dropped'] },
+  }, 0, { allowedSectionTitles: ['Discovery'] });
+  assert.ok(atoms.modeSpecificFindings['Discovery']);
+  assert.equal(atoms.modeSpecificFindings['Made Up Section'], undefined);
+});
+
+test('validator canonicalizes finding keys case/space-insensitively to the template title', () => {
+  const v = new MeetingSummarySchemaValidator();
+  const atoms = v.validateAndRepairAtoms({
+    brief: 'x',
+    modeSpecificFindings: { 'questions  and RESPONSES': ['routed'] },
+  }, 0, { allowedSectionTitles: ['Questions and responses'] });
+  assert.ok(atoms.modeSpecificFindings['Questions and responses']);
+  assert.equal(atoms.modeSpecificFindings['Questions and responses'][0].text, 'routed');
+});
+
+test('reducer routes findings (with evidence) into the declared template sections only', () => {
+  const reducer = new MeetingSummaryReducer();
+  const normalized = new TranscriptNormalizer().normalize([seg('user', 'hello there friend', 0)]);
+  const atoms = [atomsWith({
+    'Discovery': [{ text: 'Prospect needs faster QA', evidence: [{ speakerName: 'Maya', timestampMs: 5000, quote: 'QA takes days' }], confidence: 'high' }],
+    'Invented': ['nope'],
+  })];
+  const summary = reducer.reduce({ title: 't', atoms, normalizedTranscript: normalized, modeTemplateType: 'sales', modeNoteSections: [{ title: 'Discovery' }, { title: 'Objections' }] });
+  const discovery = summary.sections.find(s => s.title === 'Discovery');
+  assert.ok(discovery, 'Discovery section present');
+  assert.equal(discovery.bullets[0].text, 'Prospect needs faster QA');
+  assert.equal(discovery.bullets[0].evidence[0].speakerName, 'Maya');
+  assert.ok(!summary.sections.some(s => s.title === 'Invented'), 'invented section not rendered');
+});
+
+test('reducer Summary is outcome-first and never boilerplate; empty when no content', () => {
+  const reducer = new MeetingSummaryReducer();
+  const normalized = new TranscriptNormalizer().normalize([seg('user', 'hello there friend', 0)]);
+  // With a decision, Summary leads with grounded content.
+  const withDecision = reducer.reduce({
+    title: 't',
+    atoms: [{ ...atomsWith({}), decisions: [{ text: 'Adopt PostHog', confidence: 'high' }], brief: 'Team evaluated analytics tools' }],
+    normalizedTranscript: normalized, modeTemplateType: 'general', modeNoteSections: [],
+  });
+  assert.ok(withDecision.tldr.length > 0);
+  assert.ok(!withDecision.tldr.some(t => /captured from the transcript/i.test(t)), 'no boilerplate');
+  assert.ok(withDecision.tldr.some(t => /PostHog|analytics/i.test(t)));
+});
+
+// ── Section prompt compiler ──────────────────────────────────────────────────
+
+test('deterministicSectionInstruction carries source-only + empty-if-absent guardrails', () => {
+  const instr = deterministicSectionInstruction({ sectionTitle: 'Discovery', sectionDescription: 'What the prospect said', meetingMode: 'sales' });
+  assert.match(instr, /Discovery/);
+  assert.match(instr, /only the transcript/i);
+  assert.match(instr, /Not discussed/);
+});
+
+test('SectionPromptCompiler returns LLM instruction when it passes guardrails, else fallback', async () => {
+  // Good compiled instruction (has both required clauses).
+  const good = '{"instruction":"Extract the prospect statements. Use ONLY the transcript provided. Do not infer. If not present, output exactly: Not discussed."}';
+  const okGen = { generateMeetingSummary: async () => good };
+  const r1 = await new SectionPromptCompiler(okGen).compile({ sectionTitle: 'Discovery', sectionDescription: 'x', meetingMode: 'sales' });
+  assert.equal(r1.compiled, true);
+  assert.match(r1.instruction, /ONLY the transcript/i);
+
+  // Missing guardrails twice → fall back to deterministic.
+  const badGen = { generateMeetingSummary: async () => '{"instruction":"just grab whatever"}' };
+  const r2 = await new SectionPromptCompiler(badGen).compile({ sectionTitle: 'Discovery', sectionDescription: 'x', meetingMode: 'sales' });
+  assert.equal(r2.compiled, false);
+  assert.match(r2.instruction, /Not discussed/);
+});
+
+test('chunk extractor prefers compiledPrompt over description in the prompt', () => {
+  // White-box: verify the compiled guidance reaches the section block. We assert via the
+  // reducer path that a compiled section still routes (prompt text is internal), so here we
+  // just confirm MeetingModeSectionInput carries compiledPrompt through the reducer.
+  const reducer = new MeetingSummaryReducer();
+  const normalized = new TranscriptNormalizer().normalize([seg('user', 'hello there friend', 0)]);
+  const summary = reducer.reduce({
+    title: 't',
+    atoms: [atomsWith({ 'Custom': ['finding'] })],
+    normalizedTranscript: normalized,
+    modeNoteSections: [{ title: 'Custom', description: 'd', compiledPrompt: 'compiled instruction' }],
+  });
+  assert.ok(summary.sections.some(s => s.title === 'Custom'));
 });

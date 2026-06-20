@@ -1,6 +1,6 @@
 import type { LLMHelper } from '../../LLMHelper';
 import type { TranscriptSegment } from '../../SessionTracker';
-import type { ChunkMeetingAtoms, MeetingSummaryTelemetryMeta, MeetingSummaryV3, SummaryStatus } from './types';
+import type { ChunkMeetingAtoms, MeetingModeSectionInput, MeetingSummaryTelemetryMeta, MeetingSummaryV3, SummaryStatus } from './types';
 import type { MeetingSummaryModeMeta, SummaryStrategy } from './MeetingSummaryV3';
 import { ChunkSummaryGenerator } from './ChunkSummaryGenerator';
 import { MeetingSummaryReducer } from './MeetingSummaryReducer';
@@ -21,7 +21,7 @@ export interface AssembleSummaryParams {
   transcript: TranscriptSegment[];
   title?: string;
   modeTemplateType?: string | null;
-  modeNoteSections?: Array<{ title: string; description?: string }>;
+  modeNoteSections?: MeetingModeSectionInput[];
   modeContextBlock?: string;
   modeMeta?: MeetingSummaryModeMeta;
   onStatusUpdate?: (status: SummaryStatus) => void;

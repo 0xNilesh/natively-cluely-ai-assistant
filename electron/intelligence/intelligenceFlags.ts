@@ -49,6 +49,8 @@ export type IntelligenceFlagKey =
   | 'followUpDraftV2'              // Meeting Notes V3 — LLM-based follow-up draft generator
   | 'speakerLabelsV1'             // Meeting Notes V3 — editable speaker labels
   | 'meetingNotesStructuredOutput' // Meeting Notes V3 — provider-native JSON where available
+  | 'meetingSummaryLlmPolish'      // Meeting Notes V3 — constrained LLM polish of the Summary
+  | 'speakerDiarizationV1'         // Meeting Notes V3 — provider (Deepgram) diarization, opt-in
   | 'globalSearchV2'               // Phase 11
   | 'inMeetingSearchV2'            // Phase 12
   | 'conversationMemoryV2'         // Phase 13 (same-session follow-ups)

@@ -47,6 +47,16 @@ export interface TranscriptChunk {
   segmentIds: string[];
 }
 
+// A finding routed into one of the mode's note sections. Carries evidence so section
+// bullets are as inspectable as decisions/actions. Accepts a bare string on the wire
+// (coerced to { text } by the validator) for back-compat.
+export interface ModeSectionFinding {
+  text: string;
+  evidence?: EvidenceRef[];
+  source?: 'explicit' | 'inferred';
+  confidence?: 'high' | 'medium' | 'low';
+}
+
 export interface ChunkMeetingAtoms {
   chunkIndex: number;
   timeRange: { startMs?: number; endMs?: number };
@@ -59,13 +69,15 @@ export interface ChunkMeetingAtoms {
   deadlines?: ActionItem[];
   people: PersonMention[];
   importantQuotes: EvidenceRef[];
-  modeSpecificFindings: Record<string, string[]>;
+  modeSpecificFindings: Record<string, ModeSectionFinding[]>;
   sourceQualityWarnings?: string[];
 }
 
 export interface MeetingModeSectionInput {
   title: string;
   description?: string;
+  /** AI-compiled extraction instruction (preferred over description when present). */
+  compiledPrompt?: string;
 }
 
 export interface MeetingSummaryTelemetryMeta {

@@ -211,7 +211,7 @@ export class MeetingPersistence {
             // Load template note sections for the mode that was active when meeting stopped.
             // BUG-MODE-BLEEDING fix: use the snapshotted mode, not getActiveMode() which may
             // return a different mode if the user switched modes before async processing completed.
-            let modeNoteSections: Array<{ title: string; description: string }> = [];
+            let modeNoteSections: Array<{ title: string; description: string; compiledPrompt?: string }> = [];
             let modeContextBlock = '';
             try {
                 const { ModesManager, TEMPLATE_NOTE_SECTIONS } = require('./services/ModesManager');
@@ -226,8 +226,8 @@ export class MeetingPersistence {
                     const templateType = modeSnapshot?.templateType ?? modesMgr.getModes().find((m: { id: string; templateType?: string }) => m.id === targetModeId)?.templateType;
                     const modeName = modeSnapshot?.name ?? modesMgr.getModes().find((m: { id: string; name?: string }) => m.id === targetModeId)?.name ?? 'Unknown';
 
-                    // Prefer user's customized DB sections; fall back to canonical template
-                    const dbSections: Array<{ title: string; description: string }> = modesMgr.getNoteSections(targetModeId);
+                    // Prefer user's customized DB sections (carry compiledPrompt); fall back to canonical template
+                    const dbSections: Array<{ title: string; description: string; compiledPrompt?: string }> = modesMgr.getNoteSections(targetModeId);
                     modeNoteSections = dbSections.length > 0
                         ? dbSections
                         : (templateType ? (TEMPLATE_NOTE_SECTIONS[templateType as keyof typeof TEMPLATE_NOTE_SECTIONS] ?? []) : []);
@@ -764,7 +764,7 @@ Return ONLY valid JSON (no markdown code blocks):
         let templateType = opts?.templateType;
         let modeId: string | undefined;
         let modeName: string | undefined;
-        let modeNoteSections: Array<{ title: string; description: string }> = [];
+        let modeNoteSections: Array<{ title: string; description: string; compiledPrompt?: string }> = [];
         let modeContextBlock = '';
         try {
             const { ModesManager, TEMPLATE_NOTE_SECTIONS } = require('./services/ModesManager');

@@ -544,6 +544,7 @@ export class DatabaseManager {
                     title TEXT NOT NULL,
                     description TEXT NOT NULL DEFAULT '',
                     sort_order INTEGER NOT NULL DEFAULT 0,
+                    compiled_prompt TEXT DEFAULT '',
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(mode_id) REFERENCES modes(id) ON DELETE CASCADE
                 );
@@ -728,6 +729,17 @@ export class DatabaseManager {
             try { this.db.exec("ALTER TABLE meetings ADD COLUMN summary_status TEXT DEFAULT 'completed'"); } catch (e) { /* column already exists */ }
             try { this.db.exec("UPDATE meetings SET summary_status = 'queued' WHERE is_processed = 0"); } catch (e) { /* non-fatal backfill */ }
             this.db.pragma('user_version = 17');
+        }
+
+        // Version 17 → 18: Add compiled_prompt to mode_note_sections. When a user adds or
+        // edits a note-section (or creates a custom mode), an AI-compiled extraction
+        // instruction is generated from the section's title+description and cached here so
+        // summary generation can fill that section faithfully. Empty/null = fall back to
+        // title+description. Never stores transcript or note content.
+        if (version < 18) {
+            console.log('[DatabaseManager] Applying migration v17 → v18: Add compiled_prompt to mode_note_sections');
+            try { this.db.exec("ALTER TABLE mode_note_sections ADD COLUMN compiled_prompt TEXT DEFAULT ''"); } catch (e) { /* column already exists */ }
+            this.db.pragma('user_version = 18');
         }
 
         console.log('[DatabaseManager] Migrations completed.');
@@ -928,7 +940,7 @@ export class DatabaseManager {
         }
     }
 
-    public updateNoteSection(id: string, updates: { title?: string; description?: string; sortOrder?: number }): void {
+    public updateNoteSection(id: string, updates: { title?: string; description?: string; sortOrder?: number; compiledPrompt?: string }): void {
         if (!this.db) return;
         try {
             if (updates.title !== undefined) {
@@ -940,8 +952,28 @@ export class DatabaseManager {
             if (updates.sortOrder !== undefined) {
                 this.db.prepare('UPDATE mode_note_sections SET sort_order = ? WHERE id = ?').run(updates.sortOrder, id);
             }
+            if (updates.compiledPrompt !== undefined) {
+                try { this.db.prepare('UPDATE mode_note_sections SET compiled_prompt = ? WHERE id = ?').run(updates.compiledPrompt, id); } catch { /* column may not exist on very old DB */ }
+            }
         } catch (e) {
             console.error('[DatabaseManager] updateNoteSection failed:', e);
+        }
+    }
+
+    /** Look up the mode that owns a given note-section id (used by the prompt compiler). */
+    public getNoteSectionOwnerMode(sectionId: string): { sectionId: string; modeId: string; title: string; description: string; templateType?: string } | null {
+        if (!this.db) return null;
+        try {
+            const row = this.db.prepare(`
+                SELECT s.id as section_id, s.mode_id, s.title, s.description, m.template_type
+                FROM mode_note_sections s JOIN modes m ON m.id = s.mode_id
+                WHERE s.id = ?
+            `).get(sectionId) as any;
+            if (!row) return null;
+            return { sectionId: row.section_id, modeId: row.mode_id, title: row.title, description: row.description, templateType: row.template_type };
+        } catch (e) {
+            console.error('[DatabaseManager] getNoteSectionOwnerMode failed:', e);
+            return null;
         }
     }
 

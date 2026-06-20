@@ -39,9 +39,10 @@ export class MeetingSummaryReducer {
     const people = mergePeople(flatMap(atoms, atom => atom.people)).slice(0, 20);
     const sections = buildSections(params.modeNoteSections || [], atoms);
     const timeline = buildTimeline(atoms, decisions, actionItems, risks);
-    const tldr = buildTldr(decisions, actionItems, risks, atoms).slice(0, 5);
+    // "Summary" (rendered at the top of the notes) = outcome-first, grounded, no filler.
+    const tldr = buildSummary(decisions, actionItems, risks, atoms, sections);
     const whatChanged = buildWhatChanged(atoms, decisions).slice(0, 6);
-    const overview = buildOverview(tldr, atoms, params.modeTemplateType);
+    const overview = buildOverview(tldr, params.modeTemplateType);
     const actionConfidence = deriveActionConfidence(actionItems);
     const transcriptCoverage = Math.max(0, Math.min(1, typeof params.transcriptCoverage === 'number' ? params.transcriptCoverage : (params.normalizedTranscript.totalChars > 0 ? 1 : 0)));
     const warnings = [...params.normalizedTranscript.qualityWarnings];
@@ -109,14 +110,22 @@ function buildSections(modeSections: MeetingModeSectionInput[], atoms: ChunkMeet
 
   for (const section of modeSections) ensure(section.title);
 
+  // Only route findings into PRE-DECLARED mode sections — the validator already drops
+  // invented keys, but this is a second guard so the output never contains a section the
+  // user's template didn't define.
+  const allowedIds = new Set(sectionMap.keys());
   for (const atom of atoms) {
     for (const [title, findings] of Object.entries(atom.modeSpecificFindings || {})) {
       const matching = [...sectionMap.entries()].find(([, s]) => normalize(s.title) === normalize(title));
-      const id = matching?.[0] || ensure(title);
+      const id = matching?.[0];
+      if (!id || !allowedIds.has(id)) continue;
       const section = sectionMap.get(id)!;
-      for (const text of findings) {
+      for (const finding of findings) {
+        const text = typeof finding === 'string' ? finding : finding?.text;
         if (!text || section.bullets.some(b => similar(b.text, text))) continue;
-        section.bullets.push({ id: `bullet_${crypto.randomUUID()}`, text, confidence: 'medium' });
+        const evidence = (finding && typeof finding === 'object') ? finding.evidence : undefined;
+        const confidence = (finding && typeof finding === 'object' && finding.confidence) ? finding.confidence : 'medium';
+        section.bullets.push({ id: `bullet_${crypto.randomUUID()}`, text, ...(evidence?.length ? { evidence } : {}), confidence });
       }
     }
   }
@@ -146,24 +155,23 @@ function buildWhatChanged(atoms: ChunkMeetingAtoms[], decisions: DecisionItem[])
   return dedupeStrings(candidates).slice(0, 6);
 }
 
-function buildTldr(decisions: DecisionItem[], actionItems: ActionItem[], risks: RiskItem[], atoms: ChunkMeetingAtoms[]): string[] {
-  const candidates: string[] = [];
-  candidates.push(...decisions.slice(0, 2).map(item => item.text));
-  candidates.push(...actionItems.slice(0, 2).map(item => {
-    const owner = item.owner ? `${item.owner}: ` : '';
-    const deadline = item.deadline ? ` by ${item.deadline}` : '';
-    return `${owner}${item.text}${deadline}`;
-  }));
-  candidates.push(...risks.slice(0, 1).map(item => item.text));
-  if (candidates.length === 0) candidates.push(...atoms.map(atom => atom.brief).filter(Boolean).slice(0, 4));
-  return dedupeStrings(candidates).slice(0, 5);
+// Outcome-first Summary, built deterministically from the already-grounded reduced content.
+// 3–5 lines: purpose → key decisions → most important next step → top risk (only if nothing
+// else carried the meeting). Zero new information. Returns [] (empty Summary) rather than
+// boilerplate when there is genuinely no grounded outcome — honest beats filler.
+function buildSummary(decisions: DecisionItem[], actionItems: ActionItem[], risks: RiskItem[], atoms: ChunkMeetingAtoms[], sections: MeetingNoteSection[]): string[] {
+  const out: string[] = [];
+  const purpose = atoms.map(a => a.brief).find(Boolean) || sections.find(s => s.bullets.length)?.bullets[0]?.text;
+  if (purpose) out.push(purpose);
+  out.push(...decisions.slice(0, 2).map(d => d.text));
+  const a = actionItems[0];
+  if (a) out.push(`${a.owner ? `${a.owner}: ` : ''}${a.text}${a.deadline ? ` by ${a.deadline}` : ''}`);
+  if (out.length < 2 && risks[0]) out.push(risks[0].text);
+  return dedupeStrings(out).slice(0, 5);
 }
 
-function buildOverview(tldr: string[], atoms: ChunkMeetingAtoms[], mode?: string | null): string {
-  if (tldr.length > 0) return tldr.slice(0, 2).join(' ');
-  const briefs = dedupeStrings(atoms.map(atom => atom.brief).filter(Boolean)).slice(0, 2);
-  if (briefs.length > 0) return briefs.join(' ');
-  return mode === 'lecture' ? 'Lecture notes captured from the transcript.' : 'Meeting notes captured from the transcript.';
+function buildOverview(summary: string[], mode?: string | null): string {
+  return summary.slice(0, 2).join(' ');
 }
 
 // Deterministic follow-up body (fallback used when the LLM follow-up generator is
@@ -189,7 +197,7 @@ export function buildFollowUpBody(decisions: DecisionItem[], actionItems: Action
 function buildNoteBlocks(params: { tldr: string[]; whatChanged: string[]; decisions: DecisionItem[]; actionItems: ActionItem[]; openQuestions: QuestionItem[]; risks: RiskItem[]; sections: MeetingNoteSection[] }): NoteBlock[] {
   const blocks: NoteBlock[] = [];
   if (params.tldr.length) {
-    blocks.push({ type: 'heading', text: 'TLDR' });
+    blocks.push({ type: 'heading', text: 'Summary' });
     params.tldr.forEach(text => blocks.push({ type: 'bullet', text }));
   }
   if (params.whatChanged.length) {

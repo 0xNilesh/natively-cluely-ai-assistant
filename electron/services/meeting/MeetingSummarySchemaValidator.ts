@@ -35,7 +35,7 @@ export class MeetingSummarySchemaValidator {
     }
   }
 
-  validateAndRepairAtoms(value: unknown, fallbackChunkIndex: number): ChunkMeetingAtoms | null {
+  validateAndRepairAtoms(value: unknown, fallbackChunkIndex: number, opts?: { allowedSectionTitles?: string[]; chunkText?: string }): ChunkMeetingAtoms | null {
     if (!value || typeof value !== 'object') return null;
     const raw = value as any;
     // Accept both new (timeRange.startMs/endMs) and legacy (start/end) keys.
@@ -63,7 +63,7 @@ export class MeetingSummarySchemaValidator {
           })).filter((p: any) => p.name).slice(0, 20)
         : [],
       importantQuotes: sanitizeEvidenceArray(raw.importantQuotes, 12),
-      modeSpecificFindings: sanitizeFindings(raw.modeSpecificFindings),
+      modeSpecificFindings: sanitizeFindings(raw.modeSpecificFindings, opts?.allowedSectionTitles),
       sourceQualityWarnings: sanitizeStringArray(raw.sourceQualityWarnings, 12),
     };
     return atoms;
@@ -80,13 +80,47 @@ function num(value: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
-function sanitizeFindings(value: unknown): Record<string, string[]> {
+// Coerce modeSpecificFindings into Record<title, ModeSectionFinding[]>. Accepts the new
+// object-finding shape AND a bare string (legacy/loose) coerced to { text }. When an
+// allowed-title set is provided, keys not matching a real mode section are DROPPED — the
+// model cannot invent new sections (matched case/space-insensitively to the canonical title).
+function sanitizeFindings(value: unknown, allowedTitles?: string[]): Record<string, import('./types').ModeSectionFinding[]> {
   if (!value || typeof value !== 'object') return {};
-  const out: Record<string, string[]> = {};
+  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
+  const allowed = allowedTitles && allowedTitles.length
+    ? new Map(allowedTitles.map(t => [norm(t), t]))
+    : null;
+  const out: Record<string, import('./types').ModeSectionFinding[]> = {};
   for (const [key, items] of Object.entries(value as Record<string, unknown>)) {
-    const title = cleanString(key).slice(0, 80);
-    const bullets = sanitizeStringArray(items, 20);
-    if (title && bullets.length) out[title] = bullets;
+    const rawTitle = cleanString(key).slice(0, 80);
+    if (!rawTitle) continue;
+    // Drop invented keys; canonicalize to the exact mode section title when allowed.
+    let title = rawTitle;
+    if (allowed) {
+      const canonical = allowed.get(norm(rawTitle));
+      if (!canonical) continue;
+      title = canonical;
+    }
+    const list = Array.isArray(items) ? items : [];
+    const findings: import('./types').ModeSectionFinding[] = [];
+    const seen = new Set<string>();
+    for (const item of list) {
+      const text = cleanNoteText(typeof item === 'string' ? item : item?.text);
+      if (!text) continue;
+      const k = text.toLowerCase();
+      if (seen.has(k)) continue;
+      seen.add(k);
+      const finding: import('./types').ModeSectionFinding = { text };
+      if (item && typeof item === 'object') {
+        const ev = sanitizeEvidenceArray((item as any).evidence, 3);
+        if (ev.length) finding.evidence = ev;
+        if ((item as any).source === 'explicit' || (item as any).source === 'inferred') finding.source = (item as any).source;
+        if (['high', 'medium', 'low'].includes((item as any).confidence)) finding.confidence = (item as any).confidence;
+      }
+      findings.push(finding);
+      if (findings.length >= 20) break;
+    }
+    if (findings.length) out[title] = findings;
   }
   return out;
 }

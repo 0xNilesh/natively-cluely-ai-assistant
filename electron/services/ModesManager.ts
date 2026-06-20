@@ -63,6 +63,8 @@ export interface ModeNoteSection {
     description: string;
     sortOrder: number;
     createdAt: string;
+    /** AI-compiled extraction instruction for this section (cached). Empty = use title+description. */
+    compiledPrompt?: string;
 }
 
 export const MODE_TEMPLATES: Array<{
@@ -207,6 +209,7 @@ function rowToSection(row: any): ModeNoteSection {
         description: row.description ?? '',
         sortOrder: row.sort_order ?? 0,
         createdAt: row.created_at,
+        compiledPrompt: row.compiled_prompt || undefined,
     };
 }
 
@@ -354,6 +357,9 @@ export class ModesManager {
                 sortOrder: i,
             });
         });
+        // Compile extraction instructions for all seeded sections in parallel (fire-and-forget,
+        // bounded concurrency). Never blocks mode creation / UI.
+        this.compileAllSectionsAsync(id);
         return {
             id,
             name: params.name,
@@ -464,6 +470,9 @@ export class ModesManager {
             description: params.description,
             sortOrder,
         });
+        // Fire-and-forget: compile a tailored extraction instruction for this section so
+        // future summaries fill it faithfully. Never blocks the caller / UI.
+        this.compileSectionPromptAsync(id, params.modeId, params.title, params.description);
         return {
             id,
             modeId: params.modeId,
@@ -474,12 +483,95 @@ export class ModesManager {
         };
     }
 
-    public updateNoteSection(id: string, updates: { title?: string; description?: string }): void {
+    public updateNoteSection(id: string, updates: { title?: string; description?: string; compiledPrompt?: string }): void {
         DatabaseManager.getInstance().updateNoteSection(id, updates);
+        // If the section's meaning changed (title/description), recompile its instruction.
+        // Skip when we are only writing the compiledPrompt itself (avoids a loop).
+        if ((updates.title !== undefined || updates.description !== undefined) && updates.compiledPrompt === undefined) {
+            const owner = DatabaseManager.getInstance().getNoteSectionOwnerMode(id);
+            if (owner) {
+                this.compileSectionPromptAsync(id, owner.modeId, updates.title ?? owner.title, updates.description ?? owner.description);
+            }
+        }
     }
 
     public deleteNoteSection(id: string): void {
         DatabaseManager.getInstance().deleteNoteSection(id);
+    }
+
+    /**
+     * Compile + cache the AI extraction instruction for a section. Fire-and-forget;
+     * resolves silently. Requires an LLMHelper (set via setLlmHelperForCompiler); if absent
+     * or scope-denied, leaves compiled_prompt empty so the extractor uses title+description.
+     */
+    private compileSectionPromptAsync(sectionId: string, modeId: string, title: string, description: string): void {
+        void (async () => {
+            try {
+                const llmHelper = ModesManager.llmHelperForCompiler;
+                if (!llmHelper) return; // compiler not available in this context
+                // Scope gate: never call a cloud LLM for prompt compilation when post_call_summary
+                // is denied (the deterministic fallback covers it at summary time).
+                try {
+                    const { SettingsManager } = require('./SettingsManager');
+                    const scope = SettingsManager.getInstance().get('providerDataScopes');
+                    if (scope?.post_call_summary === false) return;
+                } catch { /* default allow */ }
+                const mode = this.getModes().find(m => m.id === modeId);
+                const { SectionPromptCompiler } = require('./meeting/SectionPromptCompiler');
+                const { instruction, compiled } = await new SectionPromptCompiler(llmHelper).compile({
+                    sectionTitle: title,
+                    sectionDescription: description,
+                    meetingMode: mode?.templateType,
+                });
+                if (compiled && instruction) {
+                    DatabaseManager.getInstance().updateNoteSection(sectionId, { compiledPrompt: instruction });
+                }
+            } catch (e) {
+                console.warn('[ModesManager] section prompt compile skipped (non-fatal):', (e as any)?.message);
+            }
+        })();
+    }
+
+    /**
+     * Compile extraction instructions for EVERY section of a mode, in parallel with bounded
+     * concurrency. Used when a custom mode is created (many sections at once). Fire-and-forget.
+     */
+    public compileAllSectionsAsync(modeId: string): void {
+        void (async () => {
+            try {
+                const llmHelper = ModesManager.llmHelperForCompiler;
+                if (!llmHelper) return;
+                try {
+                    const { SettingsManager } = require('./SettingsManager');
+                    if (SettingsManager.getInstance().get('providerDataScopes')?.post_call_summary === false) return;
+                } catch { /* default allow */ }
+                const mode = this.getModes().find(m => m.id === modeId);
+                const sections = this.getNoteSections(modeId).filter(s => !s.compiledPrompt || !s.compiledPrompt.trim());
+                if (sections.length === 0) return;
+                const { SectionPromptCompiler } = require('./meeting/SectionPromptCompiler');
+                const compiler = new SectionPromptCompiler(llmHelper);
+                const CONCURRENCY = 3;
+                let next = 0;
+                await Promise.all(Array.from({ length: Math.min(CONCURRENCY, sections.length) }, async () => {
+                    while (next < sections.length) {
+                        const s = sections[next++];
+                        try {
+                            const { instruction, compiled } = await compiler.compile({ sectionTitle: s.title, sectionDescription: s.description, meetingMode: mode?.templateType });
+                            if (compiled && instruction) DatabaseManager.getInstance().updateNoteSection(s.id, { compiledPrompt: instruction });
+                        } catch { /* per-section non-fatal */ }
+                    }
+                }));
+            } catch (e) {
+                console.warn('[ModesManager] compileAllSections skipped (non-fatal):', (e as any)?.message);
+            }
+        })();
+    }
+
+    private static llmHelperForCompiler: import('../LLMHelper').LLMHelper | null = null;
+
+    /** Wire the LLMHelper used by the async section-prompt compiler (called at startup). */
+    public static setLlmHelperForCompiler(llmHelper: import('../LLMHelper').LLMHelper): void {
+        ModesManager.llmHelperForCompiler = llmHelper;
     }
 
     public removeAllNoteSections(modeId: string): void {

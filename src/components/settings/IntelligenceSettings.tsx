@@ -1,49 +1,69 @@
 import { AlertTriangle, Brain, Check, Loader2, Wifi, WifiOff } from 'lucide-react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 
-// Label + one-line description + group for each Intelligence OS flag. Keyed by flag key;
-// an unknown key falls back to the raw key so a newly-added flag still renders. `dev:true`
-// marks internal / observe-only flags that are hidden behind the "Developer options"
-// disclosure — they either do nothing visible yet (shadow evaluations) or are diagnostics.
-// Copy is written for a non-technical audience (job candidates), so no internal jargon.
-const FLAG_META: Record<string, { label: string; desc: string; group: string; dev?: boolean }> = {
-  // Memory
-  hindsightMemory: { label: 'Long-term memory', desc: 'Turns cross-meeting memory on or off. Requires the memory server to be set up above.', group: 'Memory' },
-  hindsightPostMeetingRetain: { label: 'Remember meetings', desc: 'Saves a short summary of each meeting after it ends, so it can be recalled later.', group: 'Memory' },
-  hindsightLiveRecall: { label: 'Recall in answers', desc: 'When you ask about something from a past meeting ("what did we discuss last time?"), pulls it into the answer.', group: 'Memory' },
-  meetingMemoryV2: { label: 'Capture key points', desc: 'Automatically pulls out the topics, decisions, and action items from each meeting so you can recall and search them later.', group: 'Memory' },
-  meetingSummaryV3: { label: 'Better meeting notes', desc: 'Uses long-meeting chunking, decisions, action items, open questions, risks, follow-up drafts, and copy-ready recipes after a meeting ends.', group: 'Memory' },
-  followUpDraftV2: { label: 'Smart follow-up drafts', desc: 'Writes a short, human, copy-ready follow-up message from the meeting’s decisions and action items (instead of a bullet scaffold).', group: 'Memory' },
-  meetingModeAutoDetect: { label: 'Auto-detect meeting type', desc: 'Detects whether a meeting was a sales call, interview, standup, lecture, etc., and suggests regenerating notes with the best template.', group: 'Memory' },
-  speakerLabelsV1: { label: 'Speaker labels', desc: 'Lets you rename speakers (e.g. “John from Client”) and uses those names in notes, action items, and evidence.', group: 'Memory' },
-  durableMemoryWindow: { label: 'Full-session memory', desc: 'Remembers everything said earlier in your session, not just the last few exchanges — useful for long interviews or lectures.', group: 'Memory' },
-  conversationMemoryV2: { label: 'Conversation follow-ups', desc: 'Understands short follow-ups like "make that shorter" by looking back at what was just said.', group: 'Memory' },
-  // Search
-  globalSearchV2: { label: 'Search past meetings', desc: 'Search by keyword across all your saved meetings and jump to relevant moments.', group: 'Search' },
-  inMeetingSearchV2: { label: 'Search current meeting', desc: 'Search the live transcript of the meeting you’re in, with timestamps.', group: 'Search' },
-  // Answer quality
-  profileTreeV2: { label: 'Stronger candidate voice', desc: 'Keeps answers sounding like you — first person, your own experience, no generic AI phrasing.', group: 'Answer quality' },
-  answerDiversityGuard: { label: 'Polished phrasing', desc: 'Reduces repeated or templated wording so answers sound more natural.', group: 'Answer quality' },
-  // Lecture & diagrams
-  lectureIntelligenceV2: { label: 'Lecture notes', desc: 'Turns a lecture into structured notes, flashcards, and practice questions.', group: 'Lecture & diagrams' },
-  diagramIntelligence: { label: 'Diagrams', desc: 'Draws a diagram to explain a concept during a lecture.', group: 'Lecture & diagrams' },
-  // Developer options (hidden by default — observe-only / diagnostics, no visible effect)
-  trace: { label: 'Diagnostics trace', desc: 'Records a per-answer routing trace (no transcript content). For troubleshooting only.', group: 'Developer options', dev: true },
-  contextRouterV2: { label: 'Next-gen routing (preview)', desc: 'Evaluates a new routing engine in the background. No visible effect on answers yet.', group: 'Developer options', dev: true },
-  liveTranscriptBrain: { label: 'Live context engine (preview)', desc: 'Evaluates a new live-transcript engine in the background. No visible effect on answers yet.', group: 'Developer options', dev: true },
-  promptAssemblerV2: { label: 'Improved prompt builder (preview)', desc: 'Evaluates a new prompt builder in the background. No visible effect on answers yet.', group: 'Developer options', dev: true },
-  intelligenceOsEnabled: { label: 'Intelligence OS (reserved)', desc: 'Reserved flag with no effect on its own — toggle the specific features above instead.', group: 'Developer options', dev: true },
+// Label + one-line description + group + TIER for each Intelligence OS flag. Keyed by flag
+// key; an unknown key falls back to the raw key so a newly-added flag still renders.
+//
+// `tier` drives how much the user sees by default (so a non-technical job candidate isn't
+// confronted with ~15 switches):
+//   • 'core'     → bundled under the single "Smart features" master switch. These are the
+//                  on-device, default-ON quality features the backend already ships live
+//                  (see electron/intelligence/intelligenceFlags.ts — only these are both
+//                  default:true AND live-wired). The master orchestrates exactly this set;
+//                  the per-feature switches still live inside "Customize" for power users.
+//   • 'advanced' → real opt-in features with a genuine tradeoff (extra LLM passes, search,
+//                  lecture/diagram, full-session memory). Shown only inside "Customize".
+//                  NOTE: the Hindsight long-term-memory flags are NOT here — they live in
+//                  their own setup card above (privacy + external server), not the flag list.
+//   • 'dev'      → shadow / observe-only / inert diagnostics. Hidden behind "Developer
+//                  options". No visible effect on answers.
+//
+// Why not promote profileTreeV2 / answerDiversityGuard / meetingMemoryV2 / etc. into 'core'?
+// They're default-OFF in the registry and not yet eval-promoted — the master must only
+// orchestrate what actually ships on today, so it stays honest. They sit in 'advanced'.
+type FlagTier = 'core' | 'advanced' | 'dev';
+const FLAG_META: Record<string, { label: string; desc: string; group: string; tier: FlagTier }> = {
+  // ── Core: on-device, default-ON, live-wired → governed by the master switch ──────────
+  meetingSummaryV3: { label: 'Better meeting notes', desc: 'Pulls decisions, action items, open questions, and risks into clean notes after a meeting ends.', group: 'Meeting notes', tier: 'core' },
+  meetingModeAutoDetect: { label: 'Auto-detect meeting type', desc: 'Detects whether a meeting was a sales call, interview, standup, or lecture, and uses the best notes template.', group: 'Meeting notes', tier: 'core' },
+  followUpDraftV2: { label: 'Smart follow-up drafts', desc: 'Writes a short, copy-ready follow-up message from the meeting’s decisions and action items.', group: 'Meeting notes', tier: 'core' },
+  speakerLabelsV1: { label: 'Speaker labels', desc: 'Lets you rename speakers (e.g. “John from Client”) and uses those names in notes and action items.', group: 'Meeting notes', tier: 'core' },
+  // ── Advanced: real opt-in tradeoffs (cost / scope / niche) → inside "Customize" ──────
+  meetingMemoryV2: { label: 'Capture key points', desc: 'Automatically pulls out the topics, decisions, and action items from each meeting so you can recall and search them later.', group: 'Memory', tier: 'advanced' },
+  durableMemoryWindow: { label: 'Full-session memory', desc: 'Remembers everything said earlier in your session, not just the last few exchanges — useful for long interviews or lectures.', group: 'Memory', tier: 'advanced' },
+  conversationMemoryV2: { label: 'Conversation follow-ups', desc: 'Understands short follow-ups like "make that shorter" by looking back at what was just said.', group: 'Memory', tier: 'advanced' },
+  profileTreeV2: { label: 'Stronger candidate voice', desc: 'Keeps answers sounding like you — first person, your own experience, no generic AI phrasing.', group: 'Answer quality', tier: 'advanced' },
+  answerDiversityGuard: { label: 'Polished phrasing', desc: 'Reduces repeated or templated wording so answers sound more natural.', group: 'Answer quality', tier: 'advanced' },
+  globalSearchV2: { label: 'Search past meetings', desc: 'Search by keyword across all your saved meetings and jump to relevant moments.', group: 'Search', tier: 'advanced' },
+  inMeetingSearchV2: { label: 'Search current meeting', desc: 'Search the live transcript of the meeting you’re in, with timestamps.', group: 'Search', tier: 'advanced' },
+  lectureIntelligenceV2: { label: 'Lecture notes', desc: 'Turns a lecture into structured notes, flashcards, and practice questions.', group: 'Lecture & diagrams', tier: 'advanced' },
+  diagramIntelligence: { label: 'Diagrams', desc: 'Draws a diagram to explain a concept during a lecture.', group: 'Lecture & diagrams', tier: 'advanced' },
+  // ── Developer options: shadow / observe-only / inert → "Developer options" disclosure ─
+  trace: { label: 'Diagnostics trace', desc: 'Records a per-answer routing trace (no transcript content). For troubleshooting only.', group: 'Developer options', tier: 'dev' },
+  contextRouterV2: { label: 'Next-gen routing (preview)', desc: 'Evaluates a new routing engine in the background. No visible effect on answers yet.', group: 'Developer options', tier: 'dev' },
+  liveTranscriptBrain: { label: 'Live context engine (preview)', desc: 'Evaluates a new live-transcript engine in the background. No visible effect on answers yet.', group: 'Developer options', tier: 'dev' },
+  promptAssemblerV2: { label: 'Improved prompt builder (preview)', desc: 'Evaluates a new prompt builder in the background. No visible effect on answers yet.', group: 'Developer options', tier: 'dev' },
+  intelligenceOsEnabled: { label: 'Intelligence OS (reserved)', desc: 'Reserved flag with no effect on its own — toggle the specific features instead.', group: 'Developer options', tier: 'dev' },
 };
 
-const GROUP_ORDER = ['Memory', 'Search', 'Answer quality', 'Lecture & diagrams', 'Developer options'];
-const DEV_GROUP = 'Developer options';
+// The Hindsight long-term-memory flags are rendered by the dedicated setup card above (not
+// the generic flag list), so they're intentionally absent from FLAG_META. List them here so
+// the grouping logic can skip them rather than dump them into an "unknown" bucket.
+const HINDSIGHT_FLAG_KEYS = new Set(['hindsightMemory', 'hindsightPostMeetingRetain', 'hindsightLiveRecall']);
 
-// Map a "Try it" runner to the flag that controls it AND the human-readable location of
-// that toggle, so the off-state message can point the user at the exact switch to flip.
-const TRY_IT_TOGGLE: Record<'lecture' | 'diagram' | 'search', { flag: string; label: string; group: string }> = {
-  lecture: { flag: 'lectureIntelligenceV2', label: 'Lecture notes', group: 'Lecture & diagrams' },
-  diagram: { flag: 'diagramIntelligence', label: 'Diagrams', group: 'Lecture & diagrams' },
-  search: { flag: 'inMeetingSearchV2', label: 'Search current meeting', group: 'Search' },
+// Order for the per-group rendering inside the "Customize" disclosure (advanced tier).
+const ADVANCED_GROUP_ORDER = ['Memory', 'Answer quality', 'Search', 'Lecture & diagrams'];
+
+// Single source of truth for what the master "Smart features" switch controls: every
+// core-tier flag. Derived from FLAG_META so it can't drift.
+const CORE_FLAG_KEYS = Object.entries(FLAG_META).filter(([, m]) => m.tier === 'core').map(([k]) => k);
+
+// Map a "Try it" runner to the flag that controls it. The off-state message points the user
+// at "Customize" (where these advanced toggles now live), not a top-level group.
+const TRY_IT_TOGGLE: Record<'lecture' | 'diagram' | 'search', { flag: string; label: string }> = {
+  lecture: { flag: 'lectureIntelligenceV2', label: 'Lecture notes' },
+  diagram: { flag: 'diagramIntelligence', label: 'Diagrams' },
+  search: { flag: 'inMeetingSearchV2', label: 'Search current meeting' },
 };
 
 interface FlagRow { key: string; enabled: boolean; setting: string; env: string; default: boolean }
@@ -131,6 +151,8 @@ export const IntelligenceSettings: React.FC = () => {
   const [savedAt, setSavedAt] = useState(false);
   const [showSetup, setShowSetup] = useState(false);
   const [showDev, setShowDev] = useState(false);
+  const [showCustomize, setShowCustomize] = useState(false);
+  const [masterBusy, setMasterBusy] = useState(false);
   // "Try it" feature runners (lecture notes / diagram / in-meeting search). These call the
   // real IPCs against the CURRENT meeting transcript, so they need an active meeting + the
   // matching flag; the handlers return { enabled:false } when the flag is off.
@@ -145,9 +167,10 @@ export const IntelligenceSettings: React.FC = () => {
     try {
       const res = await fn();
       if (res && res.enabled === false) {
-        // Point the user at the EXACT toggle rather than a vague "enable it above".
+        // Point the user at the EXACT toggle. These advanced toggles live inside the
+        // "Customize individual features" disclosure under Smart features.
         const t = TRY_IT_TOGGLE[kind];
-        setTryOut({ kind, text: `“${t.label}” is off. Scroll up to the “${t.group}” section and turn it on, then try again.` });
+        setTryOut({ kind, text: `“${t.label}” is off. Open “Customize individual features” under Smart features, turn it on, then try again.` });
         return;
       }
       // Search returns structured rows — render them as readable timestamped quotes
@@ -223,14 +246,46 @@ export const IntelligenceSettings: React.FC = () => {
     } catch { setHealthy(false); } finally { setTesting(false); }
   }, []);
 
-  const grouped = useMemo(() => {
-    const byGroup: Record<string, FlagRow[]> = {};
+  // Bucket the flag rows by TIER (not group). Hindsight flags are skipped — they're owned by
+  // the setup card above. Within the advanced tier we keep the human group labels so the
+  // Customize disclosure stays organized.
+  const byTier = useMemo(() => {
+    const core: FlagRow[] = [];
+    const advancedByGroup: Record<string, FlagRow[]> = {};
+    const dev: FlagRow[] = [];
     for (const row of flags) {
-      const g = FLAG_META[row.key]?.group || DEV_GROUP;
-      (byGroup[g] ||= []).push(row);
+      if (HINDSIGHT_FLAG_KEYS.has(row.key)) continue;
+      const meta = FLAG_META[row.key];
+      const tier: FlagTier = meta?.tier || 'dev'; // unknown/new flags hide in dev until classified
+      if (tier === 'core') core.push(row);
+      else if (tier === 'dev') dev.push(row);
+      else (advancedByGroup[meta?.group || 'Other'] ||= []).push(row);
     }
-    return byGroup;
+    return { core, advancedByGroup, dev };
   }, [flags]);
+
+  // Master "Smart features" state, derived (not stored) so it can never lie:
+  //   on    → every core flag is on
+  //   off   → every core flag is off
+  //   mixed → a power user customized one in the disclosure (master shows "Customized")
+  const masterState: 'on' | 'off' | 'mixed' = useMemo(() => {
+    const vals = byTier.core.map((r) => r.enabled);
+    if (!vals.length || vals.every(Boolean)) return 'on';
+    if (vals.every((v) => !v)) return 'off';
+    return 'mixed';
+  }, [byTier.core]);
+
+  // One click fans out to every core flag via the existing per-flag IPC (no backend change).
+  // off/mixed → turn all on; on → turn all off. Optimistic, then reconcile from the server.
+  const onToggleMaster = useCallback(async () => {
+    const next = masterState !== 'on';
+    setMasterBusy(true);
+    setFlags((prev) => prev.map((r) => (CORE_FLAG_KEYS.includes(r.key) ? { ...r, enabled: next } : r)));
+    try {
+      await Promise.allSettled(CORE_FLAG_KEYS.map((k) => window.electronAPI.setIntelligenceFlag?.(k, next)));
+      await refresh();
+    } catch { await refresh(); } finally { setMasterBusy(false); }
+  }, [masterState, refresh]);
 
   // Connection status as a discrete state, so "never set up" reads differently from
   // "set up but unreachable" (the old single chip showed "Not running" for both).
@@ -293,7 +348,7 @@ export const IntelligenceSettings: React.FC = () => {
               </li>
               <li><span className="font-medium text-text-primary">3. Paste the address below</span> (the local default is already filled in), then press Save.</li>
             </ol>
-            <button type="button" onClick={() => openExternal('https://github.com/hindsightai/hindsight#readme')} className="text-[11px] text-accent-primary hover:underline">
+            <button type="button" onClick={() => openExternal('https://hindsight.vectorize.io/developer/installation')} className="text-[11px] text-accent-primary hover:underline">
               Full setup guide &amp; troubleshooting →
             </button>
 
@@ -366,49 +421,84 @@ export const IntelligenceSettings: React.FC = () => {
         ) : null}
       </section>
 
-      {/* ── Intelligence features ────────────────────────────────── */}
-      <section className="space-y-4">
-        <div>
-          <div className="text-sm font-medium text-text-primary">Intelligence features</div>
-          <div className="text-xs text-text-secondary">Optional extras — most of these work without any server setup.</div>
-        </div>
-        {/* User-facing groups render openly; the Developer options group is gated below. */}
-        {GROUP_ORDER.filter((g) => g !== DEV_GROUP && grouped[g]?.length).map((group) => (
-          <div key={group} className="space-y-2">
-            <div className="text-xs font-semibold uppercase tracking-wide text-text-secondary">{group}</div>
-            {grouped[group].map((row) => (
-              <FlagRowView key={row.key} row={row} onToggle={onToggleFlag} />
-            ))}
-          </div>
-        ))}
-
-        {/* Developer options — observe-only / diagnostics, hidden by default so they don't
-            confuse non-technical users (several have "no visible effect yet"). */}
-        {grouped[DEV_GROUP]?.length ? (
-          <div className="pt-1">
-            <button
-              type="button"
-              onClick={() => setShowDev((v) => !v)}
-              className="text-xs font-medium text-text-secondary hover:text-text-primary"
-            >
-              {showDev ? '▾ Hide developer options' : '▸ Developer options (for testing only)'}
-            </button>
-            {showDev ? (
-              <div className="mt-2 space-y-2">
-                {grouped[DEV_GROUP].map((row) => (
-                  <FlagRowView key={row.key} row={row} onToggle={onToggleFlag} />
-                ))}
+      {/* ── Smart features (master switch + Customize) ───────────── */}
+      <section className="space-y-3">
+        {/* One low-stakes lever for the normal user: turn the on-device quality features on
+            or off. The ~12 granular toggles live behind "Customize" for power users. */}
+        <div className="rounded-xl border border-border-subtle bg-bg-item-active/30 p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-text-primary">Smart features</div>
+              <div className="text-xs text-text-secondary">
+                Better answers, meeting notes, and follow-ups — all running on your device.
+                {masterState === 'mixed' ? <span className="ml-1 text-accent-primary">Customized.</span> : null}
               </div>
-            ) : null}
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              {masterBusy ? <Loader2 size={14} className="animate-spin text-text-secondary" /> : null}
+              <Toggle on={masterState !== 'off'} disabled={masterBusy} onClick={onToggleMaster} />
+            </div>
           </div>
-        ) : null}
+
+          <button
+            type="button"
+            onClick={() => setShowCustomize((v) => !v)}
+            className="mt-3 text-xs font-medium text-accent-primary hover:underline"
+          >
+            {showCustomize ? '▾ Hide individual features' : '▸ Customize individual features'}
+          </button>
+
+          {showCustomize ? (
+            <div className="mt-3 space-y-4 border-t border-border-subtle pt-3">
+              {/* Core features individually — same switches the master fans out to. */}
+              {byTier.core.length ? (
+                <div className="space-y-2">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-text-secondary">Meeting notes</div>
+                  {byTier.core.map((row) => (
+                    <FlagRowView key={row.key} row={row} onToggle={onToggleFlag} />
+                  ))}
+                </div>
+              ) : null}
+
+              {/* Advanced opt-in features (extra cost / niche / scope tradeoffs). */}
+              {ADVANCED_GROUP_ORDER.filter((g) => byTier.advancedByGroup[g]?.length).map((group) => (
+                <div key={group} className="space-y-2">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-text-secondary">{group}</div>
+                  {byTier.advancedByGroup[group].map((row) => (
+                    <FlagRowView key={row.key} row={row} onToggle={onToggleFlag} />
+                  ))}
+                </div>
+              ))}
+
+              {/* Developer options — shadow / diagnostics, no visible effect. */}
+              {byTier.dev.length ? (
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => setShowDev((v) => !v)}
+                    className="text-xs font-medium text-text-secondary hover:text-text-primary"
+                  >
+                    {showDev ? '▾ Hide developer options' : '▸ Developer options (for testing only)'}
+                  </button>
+                  {showDev ? (
+                    <div className="mt-2 space-y-2">
+                      {byTier.dev.map((row) => (
+                        <FlagRowView key={row.key} row={row} onToggle={onToggleFlag} />
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
       </section>
 
       {/* ── Try it (runs against the current meeting) ────────────── */}
       <section className="rounded-xl border border-border-subtle bg-bg-item-active/30 p-4 space-y-3">
         <div>
           <div className="text-sm font-medium text-text-primary">Try it</div>
-          <div className="text-xs text-text-secondary">These run on the meeting you’re currently in — not a saved recording. Turn on the matching feature above and join an active meeting first.</div>
+          <div className="text-xs text-text-secondary">These run on the meeting you’re currently in — not a saved recording. Turn the feature on under “Customize individual features” above, then join an active meeting.</div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <button

@@ -2811,6 +2811,29 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     }
   }, []);
 
+  const cancelActiveChatStream = useCallback(() => {
+    window.electronAPI?.cancelChatStream?.();
+    chatStreamIdRef.current = null;
+    requestStartTimeRef.current = null;
+    setIsProcessing(false);
+    flushToken();
+    tokenBufRef.current.intent = '';
+    tokenBufRef.current.text = '';
+    if (tokenBufRef.current.raf !== null) {
+      cancelAnimationFrame(tokenBufRef.current.raf);
+      tokenBufRef.current.raf = null;
+    }
+  }, [flushToken]);
+
+  const resetChatState = useCallback(() => {
+    cancelActiveChatStream();
+    setMessages([]);
+    answerPanelPinnedRef.current = false;
+    setAnswerPanelPinned(false);
+    lastManualSubmitRef.current = null;
+    manualSubmitInFlightRef.current = false;
+  }, [cancelActiveChatStream]);
+
   const finalizeStreamingByIntent = useCallback(
     (intent: string, text: string) => {
       // Cross-flow guard. The global `streamingMsgIdRef` can have been

@@ -124,6 +124,48 @@ locally only. Speaker labels and cross-meeting recall are local-first.
 - Live end-to-end LLM quality depends on provider output; tests validate deterministic pipeline
   behavior + schema invariants (no live-Gemini eval run this pass).
 
+## 13b. Re-scope (2026-06-20): mode template = source of truth + AI section-prompt compiler
+
+Per product direction, the notes layout is driven by the **mode's note-section template**
+(stored in `mode_note_sections`), not an imposed Granola-style structure:
+
+- **Layout** = a top **"Summary"** block + the mode's template sections in their defined
+  order (e.g. "Questions and responses", "Discovery", "Action items"). The imposed
+  Decisions/Action-items/Open-questions/Risks blocks are no longer the primary UI
+  (`SHOW_STRUCTURED_BLOCKS = false` in `MeetingDetails.tsx`); they remain extracted in the
+  schema and power the follow-up draft + cross-meeting recall.
+- **Summary** is produced deterministically, outcome-first (purpose → key decisions → top
+  next step → top risk), zero new information, and is **empty rather than boilerplate** when
+  no grounded outcome exists (`MeetingSummaryReducer.buildSummary`).
+- **Improved chunk extraction prompt** (`ChunkSummaryGenerator.buildChunkPrompt`): reframed
+  from "watch for" to "fill these EXACT sections faithfully"; renders each section's
+  per-section instruction; "empty/omit if absent"; owner/deadline gating; evidence required;
+  exact-keys discipline.
+- **AI section-prompt compiler** (`SectionPromptCompiler.ts`): a meta-prompt turns a section's
+  {title, description, mode} into a precise, self-contained, anti-hallucination extraction
+  instruction (grounding-by-quotation, source-only clause, empty-if-absent, no-inference,
+  self-check). Validated by `isUsableInstruction` (must carry the empty + source-only
+  clauses); deterministic fallback guarantees every section always has a usable instruction.
+  - Compiled **at save time, cached** in `mode_note_sections.compiled_prompt` (DB migration
+    v18). Triggered fire-and-forget by `ModesManager.addNoteSection` / `updateNoteSection`
+    (recompiles on title/desc change) and, for a new custom mode with many sections, by
+    `compileAllSectionsAsync` (bounded parallel). Never blocks the UI. Scope-gated on
+    `post_call_summary`. LLMHelper wired via `ModesManager.setLlmHelperForCompiler` at startup.
+- **`modeSpecificFindings`** upgraded `Record<string,string[]>` → `Record<string,
+  ModeSectionFinding[]>` so section bullets carry evidence/confidence. The validator coerces
+  bare strings, **drops invented section keys** (allowed-title set), and canonicalizes keys to
+  the exact template title. The reducer routes findings (with evidence) into declared
+  sections only.
+- **`compiledPrompt` threading** fixed end-to-end (was type-stripped): `AssembleSummaryParams`
+  + both `MeetingPersistence` load sites now use `MeetingModeSectionInput`, so the cached
+  instruction reaches the chunk prompt.
+- **Design basis**: a research+architect Workflow (4 parallel research agents on app
+  extraction quality / structured-extraction best practices / meta-prompting / current-code
+  audit, then a backend-architect synthesis) — see this round's findings folded in above.
+- **Tests**: +8 (template-section evidence, invented-key drop, key canonicalization,
+  outcome-first Summary, deterministic compiler guardrails, compiler LLM-vs-fallback). Suite
+  now **47/47** meeting-notes + 13/13 DB/post-call.
+
 ## 14. Remaining work to fully outperform Granola/Otter/Fireflies
 1. Live-Gemini end-to-end quality eval + golden before/after corpus.
 2. Provider diarization (Deepgram `diarize`) → real multi-speaker remote labels.
