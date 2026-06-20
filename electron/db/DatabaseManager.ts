@@ -5,6 +5,7 @@ import { app } from 'electron';
 import fs from 'fs';
 import * as sqliteVec from 'sqlite-vec';
 import { buildLegacySpaceCaseSql } from '../rag/embeddingSpace';
+import type { ActionItem, DecisionItem, FollowUpDraft, MeetingSummaryGenerationMeta, MeetingSummaryModeMeta, MeetingSummarySectionV3, NoteBlock, PersonMention, QuestionItem, RiskItem, SourceQualityMeta, SpeakerLabelMap, SummaryStatus, TimelineItem } from '../services/meeting/types';
 
 // Interfaces for our data objects
 export interface Meeting {
@@ -21,8 +22,26 @@ export interface Meeting {
         keyPointsTitle?: string;
         sections?: Array<{ title: string; bullets: string[] }>;
         schemaVersion?: number;
+        tldr?: string[];
+        whatChanged?: string[];
+        decisions?: DecisionItem[];
+        openQuestions?: QuestionItem[];
+        risks?: RiskItem[];
+        sourceQuality?: SourceQualityMeta;
+        timeline?: TimelineItem[];
+        people?: PersonMention[];
+        topics?: string[];
+        recipes?: Record<string, string>;
+        noteBlocks?: NoteBlock[];
+        sectionsV3?: MeetingSummarySectionV3[];
+        mode?: MeetingSummaryModeMeta;
+        generation?: MeetingSummaryGenerationMeta;
         actionItemsStructured?: Array<{ id: string; text: string; owner?: string; deadline?: string; sourceTimestamp?: number }>;
-        followUpDraft?: string;
+        actionItemsV3?: ActionItem[];
+        // V3 follow-up is a structured FollowUpDraft object; legacy rows stored a plain string.
+        followUpDraft?: FollowUpDraft | string;
+        speakerLabels?: SpeakerLabelMap;
+        crossMeeting?: { carriedOpenQuestions?: Array<{ text: string; fromMeetingId: string; fromTitle: string }>; recurringRisks?: Array<{ text: string; fromMeetingId: string; fromTitle: string }>; stillOpen?: string[] };
         coachingInsights?: Array<{ id: string; type: string; title: string; detail: string; severity: 'info' | 'opportunity' | 'warning'; evidence?: string }>;
     };
     transcript?: Array<{
@@ -40,6 +59,7 @@ export interface Meeting {
     calendarEventId?: string;
     source?: 'manual' | 'calendar';
     isProcessed?: boolean;
+    summaryStatus?: SummaryStatus;
 }
 
 export class DatabaseManager {
@@ -198,7 +218,8 @@ export class DatabaseManager {
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     calendar_event_id TEXT,
                     source TEXT,
-                    is_processed INTEGER DEFAULT 1
+                    is_processed INTEGER DEFAULT 1,
+                    summary_status TEXT DEFAULT 'completed'
                 );
 
                 CREATE TABLE IF NOT EXISTS transcripts (
@@ -698,6 +719,17 @@ export class DatabaseManager {
             this.db.pragma('user_version = 16');
         }
 
+        // Version 16 → 17: Track post-meeting note generation state.
+        // V3 summarization is multi-stage (queued → chunking → summarizing_chunks →
+        // reducing → validating → completed/failed). Store only a safe status string —
+        // never transcript or generated note content — so the UI can expose retry/regenerate.
+        if (version < 17) {
+            console.log('[DatabaseManager] Applying migration v16 → v17: Add summary_status column');
+            try { this.db.exec("ALTER TABLE meetings ADD COLUMN summary_status TEXT DEFAULT 'completed'"); } catch (e) { /* column already exists */ }
+            try { this.db.exec("UPDATE meetings SET summary_status = 'queued' WHERE is_processed = 0"); } catch (e) { /* non-fatal backfill */ }
+            this.db.pragma('user_version = 17');
+        }
+
         console.log('[DatabaseManager] Migrations completed.');
     }
 
@@ -1141,8 +1173,8 @@ export class DatabaseManager {
         }
 
         const insertMeeting = this.db.prepare(`
-            INSERT OR REPLACE INTO meetings (id, title, start_time, duration_ms, summary_json, created_at, calendar_event_id, source, is_processed)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO meetings (id, title, start_time, duration_ms, summary_json, created_at, calendar_event_id, source, is_processed, summary_status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
 
         const insertTranscript = this.db.prepare(`
@@ -1182,7 +1214,8 @@ export class DatabaseManager {
                 meeting.date, // Using the ISO string as created_at for sorting simply
                 meeting.calendarEventId || null,
                 meeting.source || 'manual',
-                meeting.isProcessed ? 1 : 0
+                meeting.isProcessed ? 1 : 0,
+                meeting.summaryStatus || (meeting.isProcessed ? 'completed' : 'queued')
             );
 
             // 2. Insert Transcript
@@ -1253,6 +1286,30 @@ export class DatabaseManager {
         }
     }
 
+    public updateSummaryStatus(id: string, status: SummaryStatus): boolean {
+        if (!this.db) return false;
+        try {
+            const allowed = new Set(['queued', 'chunking', 'summarizing_chunks', 'reducing', 'validating', 'completed', 'failed']);
+            if (!allowed.has(status)) return false;
+            const info = this.db.prepare('UPDATE meetings SET summary_status = ? WHERE id = ?').run(status, id);
+            return info.changes > 0;
+        } catch (error) {
+            console.error(`[DatabaseManager] Failed to update summary status for meeting ${id}:`, error);
+            return false;
+        }
+    }
+
+    public getMeetingsWithSummaryStatus(status: SummaryStatus): Array<{ id: string; title: string; summaryStatus: SummaryStatus; date: string }> {
+        if (!this.db) return [];
+        try {
+            const rows = this.db.prepare('SELECT id, title, created_at, summary_status FROM meetings WHERE summary_status = ? ORDER BY created_at DESC').all(status) as Array<{ id: string; title: string; created_at: string; summary_status: SummaryStatus }>;
+            return rows.map(row => ({ id: row.id, title: row.title, date: row.created_at, summaryStatus: row.summary_status }));
+        } catch (error) {
+            console.error(`[DatabaseManager] Failed to get meetings with summary status ${status}:`, error);
+            return [];
+        }
+    }
+
     public updateMeetingSummary(id: string, updates: { overview?: string, actionItems?: string[], keyPoints?: string[], actionItemsTitle?: string, keyPointsTitle?: string }): boolean {
         if (!this.db) return false;
 
@@ -1295,6 +1352,62 @@ export class DatabaseManager {
         }
     }
 
+    /**
+     * Replace the entire detailedSummary blob (used by regenerate-notes). Preserves any
+     * sibling keys in summary_json (e.g. legacy fields). Also updates the title column when
+     * the new summary carries one. summary_status is set to the provided value.
+     */
+    public replaceDetailedSummary(id: string, detailedSummary: Meeting['detailedSummary'], opts?: { title?: string; summaryStatus?: SummaryStatus }): boolean {
+        if (!this.db) return false;
+        try {
+            const row = this.db.prepare('SELECT summary_json FROM meetings WHERE id = ?').get(id) as any;
+            if (!row) return false;
+            const existingData = JSON.parse(row.summary_json || '{}');
+            const newData = { ...existingData, detailedSummary };
+            const jsonStr = JSON.stringify(newData);
+            if (opts?.title && opts?.summaryStatus) {
+                const info = this.db.prepare('UPDATE meetings SET summary_json = ?, title = ?, summary_status = ? WHERE id = ?').run(jsonStr, opts.title, opts.summaryStatus, id);
+                return info.changes > 0;
+            }
+            if (opts?.summaryStatus) {
+                const info = this.db.prepare('UPDATE meetings SET summary_json = ?, summary_status = ? WHERE id = ?').run(jsonStr, opts.summaryStatus, id);
+                return info.changes > 0;
+            }
+            const info = this.db.prepare('UPDATE meetings SET summary_json = ? WHERE id = ?').run(jsonStr, id);
+            return info.changes > 0;
+        } catch (error) {
+            console.error(`[DatabaseManager] Failed to replace detailed summary for meeting ${id}:`, error);
+            return false;
+        }
+    }
+
+    /**
+     * Persist the per-meeting speaker rename map into detailedSummary.speakerLabels.
+     * Additive: never touches transcript rows or other summary fields.
+     */
+    public updateSpeakerLabels(id: string, speakerLabels: Record<string, string>): boolean {
+        if (!this.db) return false;
+        try {
+            const row = this.db.prepare('SELECT summary_json FROM meetings WHERE id = ?').get(id) as any;
+            if (!row) return false;
+            const existingData = JSON.parse(row.summary_json || '{}');
+            // Preserve whatever detailedSummary shape exists (V3, legacy, or none). When it is
+            // absent we attach labels to a minimal object WITHOUT inventing empty
+            // actionItems/keyPoints arrays that the renderer would treat as "processed but
+            // empty" — labels alone is a safe additive blob a later summarize will merge into.
+            const currentDetailed = existingData.detailedSummary;
+            const newDetailed = currentDetailed && typeof currentDetailed === 'object'
+                ? { ...currentDetailed, speakerLabels }
+                : { speakerLabels };
+            const newData = { ...existingData, detailedSummary: newDetailed };
+            const info = this.db.prepare('UPDATE meetings SET summary_json = ? WHERE id = ?').run(JSON.stringify(newData), id);
+            return info.changes > 0;
+        } catch (error) {
+            console.error(`[DatabaseManager] Failed to update speaker labels for meeting ${id}:`, error);
+            return false;
+        }
+    }
+
     public getRecentMeetings(limit: number = 50): Meeting[] {
         if (!this.db) return [];
 
@@ -1324,6 +1437,7 @@ export class DatabaseManager {
                 detailedSummary: summaryData.detailedSummary,
                 calendarEventId: row.calendar_event_id,
                 source: row.source as any,
+                summaryStatus: row.summary_status as SummaryStatus | undefined,
                 // We don't load full transcript/usage for list view to keep it light
                 transcript: [] as any[],
                 usage: [] as any[]
@@ -1392,6 +1506,7 @@ export class DatabaseManager {
             detailedSummary: summaryData.detailedSummary,
             calendarEventId: meetingRow.calendar_event_id,
             source: meetingRow.source,
+            summaryStatus: meetingRow.summary_status as SummaryStatus | undefined,
             transcript: transcript,
             usage: usage
         };
@@ -1441,6 +1556,7 @@ export class DatabaseManager {
                 calendarEventId: row.calendar_event_id,
                 source: row.source,
                 isProcessed: false,
+                summaryStatus: row.summary_status as SummaryStatus | undefined,
                 transcript: [] as any[], // Fetched separately via getMeetingDetails or manually if needed
                 usage: [] as any[]
             };

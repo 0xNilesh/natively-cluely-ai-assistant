@@ -4752,6 +4752,40 @@ export function initializeIpcHandlers(appState: AppState): void {
     return DatabaseManager.getInstance().updateMeetingSummary(id, updates);
   });
 
+  // Meeting Notes V3 — regenerate the full structured notes for a saved meeting, optionally
+  // with a different mode (templateType) and follow-up tone. Runs the map-reduce pipeline on
+  // the stored transcript off the UI thread; honors the post_call_summary data scope.
+  safeHandle('regenerate-meeting-summary', async (_, { id, templateType, tone }: { id: string; templateType?: string; tone?: 'professional' | 'warm' | 'concise' | 'friendly' }) => {
+    if (!id || typeof id !== 'string') return { success: false, error: 'invalid id' };
+    const mgr = appState.getIntelligenceManager();
+    if (!mgr) return { success: false, error: 'intelligence manager unavailable' };
+    const ok = await mgr.regenerateMeetingSummary(id, { templateType, tone });
+    return { success: ok };
+  });
+
+  // Meeting Notes V3 — regenerate ONLY the follow-up draft (cheap; no re-summarize).
+  safeHandle('regenerate-meeting-followup', async (_, { id, tone }: { id: string; tone?: 'professional' | 'warm' | 'concise' | 'friendly' }) => {
+    if (!id || typeof id !== 'string') return { success: false, error: 'invalid id' };
+    const mgr = appState.getIntelligenceManager();
+    if (!mgr) return { success: false, error: 'intelligence manager unavailable' };
+    const ok = await mgr.regenerateMeetingFollowUp(id, tone);
+    return { success: ok };
+  });
+
+  // Meeting Notes V3 — persist a per-meeting speaker rename map. Additive; does not touch
+  // transcript rows. Returns the saved map so the renderer can update immediately.
+  safeHandle('update-meeting-speaker-labels', async (_, { id, labels }: { id: string; labels: Record<string, string> }) => {
+    if (!id || typeof id !== 'string') return { success: false, error: 'invalid id' };
+    try {
+      const { SpeakerLabelService } = require('./services/meeting/SpeakerLabelService');
+      const sanitized = new SpeakerLabelService().sanitizeLabelMap(labels);
+      const ok = DatabaseManager.getInstance().updateSpeakerLabels(id, sanitized);
+      return { success: ok, labels: sanitized };
+    } catch (e: any) {
+      return { success: false, error: e?.message || 'failed' };
+    }
+  });
+
   safeHandle('seed-demo', async () => {
     DatabaseManager.getInstance().seedDemoMeeting();
 

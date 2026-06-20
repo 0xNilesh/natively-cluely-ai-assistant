@@ -1,37 +1,76 @@
-import { Brain, Check, Loader2, Wifi, WifiOff } from 'lucide-react';
+import { AlertTriangle, Brain, Check, Loader2, Wifi, WifiOff } from 'lucide-react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 
 // Label + one-line description + group for each Intelligence OS flag. Keyed by flag key;
-// an unknown key falls back to the raw key so a newly-added flag still renders.
-const FLAG_META: Record<string, { label: string; desc: string; group: string }> = {
+// an unknown key falls back to the raw key so a newly-added flag still renders. `dev:true`
+// marks internal / observe-only flags that are hidden behind the "Developer options"
+// disclosure — they either do nothing visible yet (shadow evaluations) or are diagnostics.
+// Copy is written for a non-technical audience (job candidates), so no internal jargon.
+const FLAG_META: Record<string, { label: string; desc: string; group: string; dev?: boolean }> = {
   // Memory
-  hindsightMemory: { label: 'Long-term memory', desc: 'Master switch for cross-meeting memory (Hindsight). Needs a server configured above.', group: 'Memory' },
-  hindsightPostMeetingRetain: { label: 'Remember meetings', desc: 'Store a summary of each meeting after it ends, for later recall.', group: 'Memory' },
-  hindsightLiveRecall: { label: 'Recall in answers', desc: 'For backward-looking questions ("what did we discuss last time?"), surface prior-meeting memory into the answer.', group: 'Memory' },
-  durableMemoryWindow: { label: 'Durable session memory', desc: 'Keep long-range follow-up context for the whole session instead of a short rolling window.', group: 'Memory' },
-  conversationMemoryV2: { label: 'Conversation follow-ups', desc: 'Resolve bare follow-ups ("make that shorter") against earlier turns in this session.', group: 'Memory' },
+  hindsightMemory: { label: 'Long-term memory', desc: 'Turns cross-meeting memory on or off. Requires the memory server to be set up above.', group: 'Memory' },
+  hindsightPostMeetingRetain: { label: 'Remember meetings', desc: 'Saves a short summary of each meeting after it ends, so it can be recalled later.', group: 'Memory' },
+  hindsightLiveRecall: { label: 'Recall in answers', desc: 'When you ask about something from a past meeting ("what did we discuss last time?"), pulls it into the answer.', group: 'Memory' },
+  meetingMemoryV2: { label: 'Capture key points', desc: 'Automatically pulls out the topics, decisions, and action items from each meeting so you can recall and search them later.', group: 'Memory' },
+  meetingSummaryV3: { label: 'Better meeting notes', desc: 'Uses long-meeting chunking, decisions, action items, open questions, risks, follow-up drafts, and copy-ready recipes after a meeting ends.', group: 'Memory' },
+  followUpDraftV2: { label: 'Smart follow-up drafts', desc: 'Writes a short, human, copy-ready follow-up message from the meeting’s decisions and action items (instead of a bullet scaffold).', group: 'Memory' },
+  meetingModeAutoDetect: { label: 'Auto-detect meeting type', desc: 'Detects whether a meeting was a sales call, interview, standup, lecture, etc., and suggests regenerating notes with the best template.', group: 'Memory' },
+  speakerLabelsV1: { label: 'Speaker labels', desc: 'Lets you rename speakers (e.g. “John from Client”) and uses those names in notes, action items, and evidence.', group: 'Memory' },
+  durableMemoryWindow: { label: 'Full-session memory', desc: 'Remembers everything said earlier in your session, not just the last few exchanges — useful for long interviews or lectures.', group: 'Memory' },
+  conversationMemoryV2: { label: 'Conversation follow-ups', desc: 'Understands short follow-ups like "make that shorter" by looking back at what was just said.', group: 'Memory' },
   // Search
-  globalSearchV2: { label: 'Search past meetings', desc: 'Real local search across your saved meetings (ranked), instead of re-running the AI.', group: 'Search' },
-  inMeetingSearchV2: { label: 'Search current meeting', desc: 'Search the live meeting transcript for a phrase, with timestamps.', group: 'Search' },
-  meetingMemoryV2: { label: 'Structured meeting memory', desc: 'Extract topics / decisions / action items into each saved meeting (powers better search).', group: 'Search' },
+  globalSearchV2: { label: 'Search past meetings', desc: 'Search by keyword across all your saved meetings and jump to relevant moments.', group: 'Search' },
+  inMeetingSearchV2: { label: 'Search current meeting', desc: 'Search the live transcript of the meeting you’re in, with timestamps.', group: 'Search' },
   // Answer quality
-  profileTreeV2: { label: 'Stronger candidate voice', desc: 'Keep first-person ("I built…") and prevent assistant-identity leaks on profile questions.', group: 'Answer quality' },
-  answerDiversityGuard: { label: 'Answer shape polish', desc: 'Normalize the final answer shape and reduce repeated/templated phrasing.', group: 'Answer quality' },
+  profileTreeV2: { label: 'Stronger candidate voice', desc: 'Keeps answers sounding like you — first person, your own experience, no generic AI phrasing.', group: 'Answer quality' },
+  answerDiversityGuard: { label: 'Polished phrasing', desc: 'Reduces repeated or templated wording so answers sound more natural.', group: 'Answer quality' },
   // Lecture & diagrams
-  lectureIntelligenceV2: { label: 'Lecture notes', desc: 'Generate structured notes, flashcards and exam questions in lecture mode.', group: 'Lecture & diagrams' },
-  diagramIntelligence: { label: 'Diagrams', desc: 'Generate diagrams (Mermaid) from a question in lecture mode.', group: 'Lecture & diagrams' },
-  // Advanced / shadow (observe-only — included for transparency)
-  trace: { label: 'Diagnostics trace', desc: 'Record a per-answer routing trace (no content). Developer diagnostics only.', group: 'Advanced' },
-  contextRouterV2: { label: 'Context router (shadow)', desc: 'Compute the next-gen routing decision for telemetry only — does not change answers yet.', group: 'Advanced' },
-  liveTranscriptBrain: { label: 'Live-transcript brain (shadow)', desc: 'Evaluate the live-transcript engine for telemetry only — does not change answers yet.', group: 'Advanced' },
-  promptAssemblerV2: { label: 'Prompt assembler v2 (shadow)', desc: 'Evaluate the next-gen prompt builder for telemetry only — does not change answers yet.', group: 'Advanced' },
-  intelligenceOsEnabled: { label: 'Intelligence OS (umbrella)', desc: 'Reserved umbrella flag. No effect on its own — toggle the specific features above.', group: 'Advanced' },
+  lectureIntelligenceV2: { label: 'Lecture notes', desc: 'Turns a lecture into structured notes, flashcards, and practice questions.', group: 'Lecture & diagrams' },
+  diagramIntelligence: { label: 'Diagrams', desc: 'Draws a diagram to explain a concept during a lecture.', group: 'Lecture & diagrams' },
+  // Developer options (hidden by default — observe-only / diagnostics, no visible effect)
+  trace: { label: 'Diagnostics trace', desc: 'Records a per-answer routing trace (no transcript content). For troubleshooting only.', group: 'Developer options', dev: true },
+  contextRouterV2: { label: 'Next-gen routing (preview)', desc: 'Evaluates a new routing engine in the background. No visible effect on answers yet.', group: 'Developer options', dev: true },
+  liveTranscriptBrain: { label: 'Live context engine (preview)', desc: 'Evaluates a new live-transcript engine in the background. No visible effect on answers yet.', group: 'Developer options', dev: true },
+  promptAssemblerV2: { label: 'Improved prompt builder (preview)', desc: 'Evaluates a new prompt builder in the background. No visible effect on answers yet.', group: 'Developer options', dev: true },
+  intelligenceOsEnabled: { label: 'Intelligence OS (reserved)', desc: 'Reserved flag with no effect on its own — toggle the specific features above instead.', group: 'Developer options', dev: true },
 };
 
-const GROUP_ORDER = ['Memory', 'Search', 'Answer quality', 'Lecture & diagrams', 'Advanced'];
+const GROUP_ORDER = ['Memory', 'Search', 'Answer quality', 'Lecture & diagrams', 'Developer options'];
+const DEV_GROUP = 'Developer options';
+
+// Map a "Try it" runner to the flag that controls it AND the human-readable location of
+// that toggle, so the off-state message can point the user at the exact switch to flip.
+const TRY_IT_TOGGLE: Record<'lecture' | 'diagram' | 'search', { flag: string; label: string; group: string }> = {
+  lecture: { flag: 'lectureIntelligenceV2', label: 'Lecture notes', group: 'Lecture & diagrams' },
+  diagram: { flag: 'diagramIntelligence', label: 'Diagrams', group: 'Lecture & diagrams' },
+  search: { flag: 'inMeetingSearchV2', label: 'Search current meeting', group: 'Search' },
+};
 
 interface FlagRow { key: string; enabled: boolean; setting: string; env: string; default: boolean }
+
+// One feature row: label + plain-language description + its toggle. Shared by the
+// user-facing groups and the collapsed developer group.
+const FlagRowView: React.FC<{ row: FlagRow; onToggle: (row: FlagRow) => void }> = ({ row, onToggle }) => {
+  const meta = FLAG_META[row.key];
+  return (
+    <div className="flex items-start justify-between gap-4 rounded-lg px-3 py-2 hover:bg-bg-item-active/40">
+      <div className="min-w-0">
+        <div className="text-sm text-text-primary">{meta?.label || row.key}</div>
+        {meta?.desc ? <div className="text-xs text-text-secondary">{meta.desc}</div> : null}
+      </div>
+      <Toggle on={row.enabled} onClick={() => onToggle(row)} />
+    </div>
+  );
+};
 interface HindsightCfg { baseUrl: string; hasApiKey: boolean; autoStart: boolean; serverCommand: string; llmProvider: string; available: boolean }
+
+// Render a millisecond transcript offset as m:ss (e.g. 83400 → "1:23").
+const formatStamp = (ms: number): string => {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+};
 
 const Toggle: React.FC<{ on: boolean; disabled?: boolean; onClick: () => void }> = ({ on, disabled, onClick }) => (
   <button
@@ -45,6 +84,41 @@ const Toggle: React.FC<{ on: boolean; disabled?: boolean; onClick: () => void }>
   </button>
 );
 
+// Connection status pill with four distinct states, so the user can tell "I haven't set
+// this up" apart from "I set it up but it's offline" — the old single chip showed the same
+// "Not running" for both. The unreachable state offers an inline Retry.
+type ConnStatus = 'not-configured' | 'checking' | 'connected' | 'unreachable';
+const StatusChip: React.FC<{ status: ConnStatus; testing: boolean; onRetry: () => void }> = ({ status, testing, onRetry }) => {
+  if (status === 'connected') {
+    return (
+      <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-green-500/15 px-2 py-0.5 text-xs text-green-400">
+        <Wifi size={12} /> Connected
+      </span>
+    );
+  }
+  if (status === 'checking' || testing) {
+    return (
+      <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-bg-item-active px-2 py-0.5 text-xs text-text-secondary">
+        <Loader2 size={12} className="animate-spin" /> Checking…
+      </span>
+    );
+  }
+  if (status === 'unreachable') {
+    return (
+      <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-xs text-amber-400">
+        <WifiOff size={12} /> Can’t connect
+        <button type="button" onClick={onRetry} className="ml-1 underline hover:no-underline">Retry</button>
+      </span>
+    );
+  }
+  // not-configured
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-bg-item-active px-2 py-0.5 text-xs text-text-secondary">
+      Not set up
+    </span>
+  );
+};
+
 export const IntelligenceSettings: React.FC = () => {
   const [flags, setFlags] = useState<FlagRow[]>([]);
   const [cfg, setCfg] = useState<HindsightCfg | null>(null);
@@ -55,6 +129,8 @@ export const IntelligenceSettings: React.FC = () => {
   const [testing, setTesting] = useState(false);
   const [healthy, setHealthy] = useState<boolean | null>(null);
   const [savedAt, setSavedAt] = useState(false);
+  const [showSetup, setShowSetup] = useState(false);
+  const [showDev, setShowDev] = useState(false);
   // "Try it" feature runners (lecture notes / diagram / in-meeting search). These call the
   // real IPCs against the CURRENT meeting transcript, so they need an active meeting + the
   // matching flag; the handlers return { enabled:false } when the flag is off.
@@ -69,10 +145,28 @@ export const IntelligenceSettings: React.FC = () => {
     try {
       const res = await fn();
       if (res && res.enabled === false) {
-        setTryOut({ kind, text: 'This feature is off — enable its toggle above first.' });
+        // Point the user at the EXACT toggle rather than a vague "enable it above".
+        const t = TRY_IT_TOGGLE[kind];
+        setTryOut({ kind, text: `“${t.label}” is off. Scroll up to the “${t.group}” section and turn it on, then try again.` });
         return;
       }
-      const payload = res?.notes ?? res?.diagram ?? res?.results ?? res;
+      // Search returns structured rows — render them as readable timestamped quotes
+      // instead of dumping raw JSON at the user.
+      if (kind === 'search') {
+        const rows: Array<{ snippet?: string; timestampMs?: number; speaker?: string }> = Array.isArray(res?.results) ? res.results : [];
+        if (!rows.length) {
+          setTryOut({ kind, text: 'No matches — is a meeting active with a transcript?' });
+          return;
+        }
+        const text = rows.slice(0, 20).map((r) => {
+          const stamp = typeof r.timestampMs === 'number' ? formatStamp(r.timestampMs) : '—';
+          const who = r.speaker ? `${r.speaker}: ` : '';
+          return `${stamp}  ${who}${(r.snippet || '').trim()}`;
+        }).join('\n');
+        setTryOut({ kind, text });
+        return;
+      }
+      const payload = res?.notes ?? res?.diagram ?? res;
       const text = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2);
       setTryOut({ kind, text: text && text !== 'null' ? text : 'No result — is a meeting active with a transcript?' });
     } catch (e: any) {
@@ -132,11 +226,27 @@ export const IntelligenceSettings: React.FC = () => {
   const grouped = useMemo(() => {
     const byGroup: Record<string, FlagRow[]> = {};
     for (const row of flags) {
-      const g = FLAG_META[row.key]?.group || 'Advanced';
+      const g = FLAG_META[row.key]?.group || DEV_GROUP;
       (byGroup[g] ||= []).push(row);
     }
     return byGroup;
   }, [flags]);
+
+  // Connection status as a discrete state, so "never set up" reads differently from
+  // "set up but unreachable" (the old single chip showed "Not running" for both).
+  //   not-configured → no server URL saved yet (the common first-run case)
+  //   checking       → a URL exists but health hasn't resolved this load
+  //   connected      → last health check passed
+  //   unreachable    → a URL exists but the server didn't answer
+  const status: 'not-configured' | 'checking' | 'connected' | 'unreachable' = useMemo(() => {
+    if (healthy === true) return 'connected';
+    if (!baseUrl.trim()) return 'not-configured';
+    return healthy === null ? 'checking' : 'unreachable';
+  }, [healthy, baseUrl]);
+
+  const openExternal = useCallback((url: string) => {
+    try { window.electronAPI.openExternal?.(url); } catch { /* noop */ }
+  }, []);
 
   // A flag is forced by env when a NATIVELY_* env var is set — we can't tell the raw env
   // value from the renderer, but the get payload's `setting` is the SettingsManager key;
@@ -152,95 +262,153 @@ export const IntelligenceSettings: React.FC = () => {
 
       {/* ── Long-term memory (Hindsight) ─────────────────────────── */}
       <section className="rounded-xl border border-border-subtle bg-bg-item-active/30 p-4 space-y-3">
-        <div className="flex items-center justify-between">
-          <div>
-            <div className="text-sm font-medium text-text-primary">Long-term memory server</div>
-            <div className="text-xs text-text-secondary">Cross-meeting memory needs a Hindsight server — local or Cloud.</div>
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-text-primary">Long-term memory <span className="ml-1 rounded bg-accent-primary/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-accent-primary">Beta</span></div>
+            <div className="text-xs text-text-secondary">Remember what was discussed in past meetings and surface it automatically. Needs a free companion app — about 5 minutes to set up.</div>
           </div>
-          <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs ${healthy ? 'bg-green-500/15 text-green-400' : 'bg-bg-item-active text-text-secondary'}`}>
-            {healthy ? <Wifi size={12} /> : <WifiOff size={12} />}{healthy ? 'Connected' : 'Not running'}
-          </span>
+          <StatusChip status={status} onRetry={onTest} testing={testing} />
         </div>
 
-        <label className="block">
-          <span className="text-xs text-text-secondary">Server URL</span>
-          <input
-            type="text"
-            value={baseUrl}
-            onChange={(e) => setBaseUrl(e.target.value)}
-            placeholder="http://localhost:8888  (local)  or  your Hindsight Cloud URL"
-            className="mt-1 w-full rounded-lg bg-bg-input px-3 py-2 text-sm text-text-primary outline-none ring-1 ring-border-subtle focus:ring-accent-primary"
-          />
-        </label>
+        <button
+          type="button"
+          onClick={() => setShowSetup((v) => !v)}
+          className="text-xs font-medium text-accent-primary hover:underline"
+        >
+          {showSetup ? 'Hide setup' : (status === 'connected' ? 'Edit setup' : 'Set up long-term memory →')}
+        </button>
 
-        <label className="block">
-          <span className="text-xs text-text-secondary">API key {cfg?.hasApiKey ? '(saved — leave blank to keep)' : '(Cloud only)'}</span>
-          <input
-            type="password"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            placeholder={cfg?.hasApiKey ? '••••••••  saved' : 'optional — for Hindsight Cloud'}
-            className="mt-1 w-full rounded-lg bg-bg-input px-3 py-2 text-sm text-text-primary outline-none ring-1 ring-border-subtle focus:ring-accent-primary"
-          />
-        </label>
+        {showSetup ? (
+          <div className="space-y-3 rounded-lg border border-border-subtle bg-bg-input/40 p-3">
+            {/* Step-by-step install — the companion server is a separate app the user installs. */}
+            <ol className="space-y-2 text-xs text-text-secondary">
+              <li>
+                <span className="font-medium text-text-primary">1. Install the companion app.</span> In your Terminal, run:
+                <code className="mt-1 block rounded bg-bg-input px-2 py-1 font-mono text-[11px] text-text-primary">pip install hindsight-all</code>
+                Requires Python 3.11 or later. Your AI provider key (from the AI Providers screen) is used automatically — no extra key needed.
+              </li>
+              <li>
+                <span className="font-medium text-text-primary">2. Start it.</span> Keep this running while you use the app:
+                <code className="mt-1 block rounded bg-bg-input px-2 py-1 font-mono text-[11px] text-text-primary">hindsight serve --port 8888</code>
+              </li>
+              <li><span className="font-medium text-text-primary">3. Paste the address below</span> (the local default is already filled in), then press Save.</li>
+            </ol>
+            <button type="button" onClick={() => openExternal('https://github.com/hindsightai/hindsight#readme')} className="text-[11px] text-accent-primary hover:underline">
+              Full setup guide &amp; troubleshooting →
+            </button>
 
-        <label className="flex items-center justify-between">
-          <span className="text-sm text-text-primary">Auto-start a local server when installed</span>
-          <Toggle on={autoStart} onClick={() => setAutoStart((v) => !v)} />
-        </label>
+            <label className="block">
+              <span className="text-xs text-text-secondary">Server address</span>
+              <input
+                type="text"
+                value={baseUrl}
+                onChange={(e) => setBaseUrl(e.target.value)}
+                placeholder="http://localhost:8888"
+                className="mt-1 w-full rounded-lg bg-bg-input px-3 py-2 text-sm text-text-primary outline-none ring-1 ring-border-subtle focus:ring-accent-primary"
+              />
+            </label>
 
-        <div className="flex items-center gap-2 pt-1">
-          <button
-            type="button"
-            onClick={onSaveHindsight}
-            disabled={saving}
-            className="rounded-lg bg-accent-primary px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50 inline-flex items-center gap-1.5"
-          >
-            {saving ? <Loader2 size={14} className="animate-spin" /> : savedAt ? <Check size={14} /> : null}
-            {savedAt ? 'Saved' : 'Save'}
-          </button>
-          <button
-            type="button"
-            onClick={onTest}
-            disabled={testing || !baseUrl.trim()}
-            className="rounded-lg bg-bg-item-active px-3 py-1.5 text-sm text-text-primary hover:bg-bg-item-active/70 disabled:opacity-50 inline-flex items-center gap-1.5"
-          >
-            {testing ? <Loader2 size={14} className="animate-spin" /> : null}
-            Test connection
-          </button>
-        </div>
-        <p className="text-[11px] text-text-secondary">
-          Local keeps memory on this device. Cloud sends meeting summaries to Hindsight's servers — a privacy trade-off for a local-first app.
-        </p>
+            {/* Cloud is the alternative to running local software. The API key here is the
+                Hindsight Cloud ACCOUNT key — explicitly NOT the user's AI provider key, which
+                already lives in the AI Providers screen and is forwarded automatically. */}
+            <label className="block">
+              <span className="text-xs text-text-secondary">
+                Hindsight Cloud account key <span className="text-text-secondary/70">(not your AI key)</span>
+                {cfg?.hasApiKey ? ' — saved, leave blank to keep' : ''}
+              </span>
+              <input
+                type="password"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder={cfg?.hasApiKey ? '••••••••  saved' : 'Only if you use Hindsight Cloud instead of local'}
+                className="mt-1 w-full rounded-lg bg-bg-input px-3 py-2 text-sm text-text-primary outline-none ring-1 ring-border-subtle focus:ring-accent-primary"
+              />
+              <span className="mt-1 block text-[11px] text-text-secondary">
+                Only needed for Hindsight Cloud. Your AI provider key stays on this device and is used separately.
+              </span>
+            </label>
+
+            <label className="flex items-center justify-between gap-3">
+              <span className="text-sm text-text-primary">
+                Start memory server automatically at launch
+                <span className="block text-[11px] text-text-secondary">Only works after setup is complete. No effect if the companion app isn’t installed.</span>
+              </span>
+              <Toggle on={autoStart} onClick={() => setAutoStart((v) => !v)} />
+            </label>
+
+            {/* Privacy disclosure ABOVE the Save action so it's seen before any data is sent. */}
+            <div className="flex items-start gap-2 rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-[11px] text-text-secondary">
+              <AlertTriangle size={13} className="mt-0.5 shrink-0 text-amber-400" />
+              <span>Local keeps memory on this device. Choosing Cloud sends meeting summaries to Hindsight’s servers — a privacy trade-off for an otherwise local-first app.</span>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={onSaveHindsight}
+                disabled={saving}
+                className="rounded-lg bg-accent-primary px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50 inline-flex items-center gap-1.5"
+              >
+                {saving ? <Loader2 size={14} className="animate-spin" /> : savedAt ? <Check size={14} /> : null}
+                {savedAt ? 'Saved' : 'Save'}
+              </button>
+              <button
+                type="button"
+                onClick={onTest}
+                disabled={testing || !baseUrl.trim()}
+                className="rounded-lg bg-bg-item-active px-3 py-1.5 text-sm text-text-primary hover:bg-bg-item-active/70 disabled:opacity-50 inline-flex items-center gap-1.5"
+              >
+                {testing ? <Loader2 size={14} className="animate-spin" /> : null}
+                Test connection
+              </button>
+            </div>
+          </div>
+        ) : null}
       </section>
 
       {/* ── Intelligence features ────────────────────────────────── */}
       <section className="space-y-4">
-        <div className="text-sm font-medium text-text-primary">Intelligence features</div>
-        {GROUP_ORDER.filter((g) => grouped[g]?.length).map((group) => (
+        <div>
+          <div className="text-sm font-medium text-text-primary">Intelligence features</div>
+          <div className="text-xs text-text-secondary">Optional extras — most of these work without any server setup.</div>
+        </div>
+        {/* User-facing groups render openly; the Developer options group is gated below. */}
+        {GROUP_ORDER.filter((g) => g !== DEV_GROUP && grouped[g]?.length).map((group) => (
           <div key={group} className="space-y-2">
             <div className="text-xs font-semibold uppercase tracking-wide text-text-secondary">{group}</div>
-            {grouped[group].map((row) => {
-              const meta = FLAG_META[row.key];
-              return (
-                <div key={row.key} className="flex items-start justify-between gap-4 rounded-lg px-3 py-2 hover:bg-bg-item-active/40">
-                  <div className="min-w-0">
-                    <div className="text-sm text-text-primary">{meta?.label || row.key}</div>
-                    {meta?.desc ? <div className="text-xs text-text-secondary">{meta.desc}</div> : null}
-                  </div>
-                  <Toggle on={row.enabled} onClick={() => onToggleFlag(row)} />
-                </div>
-              );
-            })}
+            {grouped[group].map((row) => (
+              <FlagRowView key={row.key} row={row} onToggle={onToggleFlag} />
+            ))}
           </div>
         ))}
+
+        {/* Developer options — observe-only / diagnostics, hidden by default so they don't
+            confuse non-technical users (several have "no visible effect yet"). */}
+        {grouped[DEV_GROUP]?.length ? (
+          <div className="pt-1">
+            <button
+              type="button"
+              onClick={() => setShowDev((v) => !v)}
+              className="text-xs font-medium text-text-secondary hover:text-text-primary"
+            >
+              {showDev ? '▾ Hide developer options' : '▸ Developer options (for testing only)'}
+            </button>
+            {showDev ? (
+              <div className="mt-2 space-y-2">
+                {grouped[DEV_GROUP].map((row) => (
+                  <FlagRowView key={row.key} row={row} onToggle={onToggleFlag} />
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </section>
 
       {/* ── Try it (runs against the current meeting) ────────────── */}
       <section className="rounded-xl border border-border-subtle bg-bg-item-active/30 p-4 space-y-3">
         <div>
           <div className="text-sm font-medium text-text-primary">Try it</div>
-          <div className="text-xs text-text-secondary">Runs against the current meeting's transcript. Enable the matching toggle above and start a meeting first.</div>
+          <div className="text-xs text-text-secondary">These run on the meeting you’re currently in — not a saved recording. Turn on the matching feature above and join an active meeting first.</div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <button

@@ -117,6 +117,9 @@ const cleanMarkdown = (content: string) => {
     return content.replace(/([^\n])```/g, '$1\n\n```');
 };
 
+interface Evidence { speakerId?: string; speakerName?: string; speaker?: string; timestampMs?: number; timestamp?: number; quote?: string; segmentId?: string }
+interface FollowUpDraftObj { type?: string; subject?: string; body: string; tone?: string }
+
 interface Meeting {
     id: string;
     title: string;
@@ -130,9 +133,23 @@ interface Meeting {
         actionItemsTitle?: string;
         keyPointsTitle?: string;
         sections?: Array<{ title: string; bullets: string[] }>;
+        sectionsV3?: Array<{ id: string; title: string; order?: number; bullets: Array<{ id?: string; text: string; confidence?: 'high' | 'medium' | 'low'; evidence?: Evidence[] }> }>;
+        tldr?: string[];
+        whatChanged?: string[];
+        decisions?: Array<{ id?: string; text: string; owner?: string; timestampMs?: number; confidence: 'high' | 'medium' | 'low'; evidence?: Evidence[] }>;
+        actionItemsV3?: Array<{ id?: string; text: string; owner?: string; deadline?: string; sourceTimestampMs?: number; explicitness: 'explicit' | 'inferred'; confidence: 'high' | 'medium' | 'low'; status?: 'open' | 'done' | 'deferred'; evidence?: Evidence[] }>;
+        openQuestions?: Array<{ id?: string; text: string; owner?: string; status: 'open' | 'answered' | 'deferred'; confidence?: 'high' | 'medium' | 'low'; evidence?: Evidence[] }>;
+        risks?: Array<{ id?: string; text: string; severity: 'low' | 'medium' | 'high'; confidence?: 'high' | 'medium' | 'low'; evidence?: Evidence[] }>;
+        timeline?: Array<{ id?: string; timestampMs?: number; title: string; description?: string; type: string; evidence?: Evidence[] }>;
+        sourceQuality?: { transcriptCoverage: number; speakerQuality: 'good' | 'mixed' | 'poor'; actionItemConfidence: 'high' | 'medium' | 'low'; warnings: string[] };
+        mode?: { selectedModeId?: string; selectedModeName?: string; selectedTemplateType?: string; detectedModeId?: string; detectedModeName?: string; detectedConfidence?: number; summaryModeUsed?: string };
+        generation?: { strategy?: string; chunkCount?: number; durationMs?: number; warnings?: string[] };
+        speakerLabels?: Record<string, string>;
+        crossMeeting?: { stillOpen?: string[] };
+        recipes?: Record<string, string>;
         // Phase 7 — PostCallWorkflow enhancements (schema v2). Backend writes
         // these via buildPostCallEnhancements(); UI renders them when present.
-        schemaVersion?: 2;
+        schemaVersion?: number;
         actionItemsStructured?: Array<{
             id: string;
             text: string;
@@ -140,7 +157,8 @@ interface Meeting {
             deadline?: string;
             sourceTimestamp?: number;
         }>;
-        followUpDraft?: string;
+        // V3 follow-up is a structured object; legacy rows stored a plain string.
+        followUpDraft?: FollowUpDraftObj | string;
         coachingInsights?: Array<{
             id: string;
             type: string;
@@ -195,6 +213,102 @@ const MeetingDetails: React.FC<MeetingDetailsProps> = ({ meeting: initialMeeting
         (initialMeeting.detailedSummary?.keyPoints ?? []).map(() => genMessageId()),
     );
 
+    const isV3Summary = meeting.detailedSummary?.schemaVersion === 3;
+    const v3Actions = meeting.detailedSummary?.actionItemsV3 || [];
+    const v3Decisions = meeting.detailedSummary?.decisions || [];
+    const v3Questions = meeting.detailedSummary?.openQuestions || [];
+    const v3Risks = meeting.detailedSummary?.risks || [];
+    const v3Tldr = meeting.detailedSummary?.tldr || [];
+    const v3WhatChanged = meeting.detailedSummary?.whatChanged || [];
+    const v3Mode = meeting.detailedSummary?.mode;
+    const v3SummaryStatus = (meeting as any).summaryStatus as string | undefined;
+
+    // Normalize follow-up draft (object in V3, legacy string).
+    const rawFollowUp = meeting.detailedSummary?.followUpDraft;
+    const followUpBody = typeof rawFollowUp === 'string' ? rawFollowUp : (rawFollowUp?.body || '');
+    const followUpSubject = typeof rawFollowUp === 'string' ? undefined : rawFollowUp?.subject;
+
+    // Regenerate / evidence-jump / speaker-rename UI state.
+    const [isRegenerating, setIsRegenerating] = useState(false);
+    const [isRegeneratingFollowUp, setIsRegeneratingFollowUp] = useState(false);
+    const [showEvidence, setShowEvidence] = useState(false);
+    const [pendingScrollTs, setPendingScrollTs] = useState<number | null>(null);
+    const [editingSpeaker, setEditingSpeaker] = useState<string | null>(null);
+    const [speakerDraft, setSpeakerDraft] = useState('');
+
+    const copyRecipe = (text: string) => {
+        navigator.clipboard?.writeText(text || '').catch(() => { /* swallow */ });
+    };
+
+    const reloadMeeting = async () => {
+        try {
+            const fresh = await window.electronAPI?.getMeetingDetails?.(meeting.id);
+            if (fresh) setMeeting(fresh as Meeting);
+        } catch { /* swallow */ }
+    };
+
+    const handleRegenerate = async (templateType?: string) => {
+        if (isRegenerating || !window.electronAPI?.regenerateMeetingSummary) return;
+        setIsRegenerating(true);
+        try {
+            const res = await window.electronAPI.regenerateMeetingSummary(meeting.id, templateType ? { templateType } : undefined);
+            if (res?.success) await reloadMeeting();
+        } catch { /* swallow */ } finally { setIsRegenerating(false); }
+    };
+
+    const handleRegenerateFollowUp = async (tone?: 'professional' | 'warm' | 'concise' | 'friendly') => {
+        if (isRegeneratingFollowUp || !window.electronAPI?.regenerateMeetingFollowUp) return;
+        setIsRegeneratingFollowUp(true);
+        try {
+            const res = await window.electronAPI.regenerateMeetingFollowUp(meeting.id, tone);
+            if (res?.success) await reloadMeeting();
+        } catch { /* swallow */ } finally { setIsRegeneratingFollowUp(false); }
+    };
+
+    const handleSaveSpeakerLabel = async (speakerId: string, name: string) => {
+        const existing = meeting.detailedSummary?.speakerLabels || {};
+        const next = { ...existing, [speakerId]: name.trim() };
+        if (!name.trim()) delete next[speakerId];
+        setMeeting(prev => ({ ...prev, detailedSummary: { ...(prev.detailedSummary as any), speakerLabels: next } }));
+        setEditingSpeaker(null);
+        try { await window.electronAPI?.updateMeetingSpeakerLabels?.(meeting.id, next); } catch { /* swallow */ }
+    };
+
+    // Resolve a transcript segment's display name using saved speaker labels.
+    const resolveSpeakerName = (rawSpeaker: string): string => {
+        const labels = meeting.detailedSummary?.speakerLabels || {};
+        const lower = (rawSpeaker || '').toLowerCase();
+        const id = /^(user|me)$/.test(lower) ? 'me' : (/^(interviewer|them|other|system|assistant)$/.test(lower) ? 'speaker_1' : lower.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'unknown');
+        if (labels[id]) return labels[id];
+        if (id === 'me') return 'Me';
+        if (id === 'speaker_1') return 'Speaker 1';
+        return rawSpeaker || 'Speaker';
+    };
+
+    const evidenceTimestamp = (evidence?: Evidence[]): number | undefined => {
+        const first = evidence?.[0];
+        if (!first) return undefined;
+        return typeof first.timestampMs === 'number' ? first.timestampMs : (typeof first.timestamp === 'number' ? first.timestamp : undefined);
+    };
+
+    const evidenceLabel = (evidence?: Evidence[]) => {
+        const first = evidence?.[0];
+        if (!first) return '';
+        const ts = evidenceTimestamp(evidence);
+        const time = typeof ts === 'number' ? formatDuration(ts) : '';
+        const who = first.speakerName || first.speaker || '';
+        const quote = first.quote ? `“${first.quote}”` : '';
+        return [time, who, quote].filter(Boolean).join(' · ');
+    };
+
+    // Jump to the transcript tab and scroll to the segment nearest an evidence timestamp.
+    const jumpToEvidence = (evidence?: Evidence[]) => {
+        const ts = evidenceTimestamp(evidence);
+        if (typeof ts !== 'number') return;
+        setActiveTab('transcript');
+        setPendingScrollTs(ts);
+    };
+
     const handleSubmitQuestion = () => {
         if (query.trim()) {
             setSubmittedQuery(query);
@@ -216,7 +330,35 @@ const MeetingDetails: React.FC<MeetingDetailsProps> = ({ meeting: initialMeeting
         let textToCopy = '';
 
         if (activeTab === 'summary' && meeting.detailedSummary) {
-            textToCopy = `
+            if (meeting.detailedSummary.schemaVersion === 3) {
+                textToCopy = `
+Meeting: ${meeting.title}
+Date: ${new Date(meeting.date).toLocaleDateString()}
+
+TLDR:
+${meeting.detailedSummary.tldr?.map(item => `- ${item}`).join('\n') || 'None'}
+
+WHAT CHANGED:
+${meeting.detailedSummary.whatChanged?.map(item => `- ${item}`).join('\n') || 'None'}
+
+DECISIONS:
+${meeting.detailedSummary.decisions?.map(item => `- ${item.text}`).join('\n') || 'None'}
+
+ACTION ITEMS:
+${meeting.detailedSummary.actionItemsV3?.map(item => `- ${item.owner ? `${item.owner}: ` : ''}${item.text}${item.deadline ? ` by ${item.deadline}` : ''}${item.explicitness === 'inferred' ? ' (inferred)' : ''}`).join('\n') || 'None'}
+
+OPEN QUESTIONS:
+${meeting.detailedSummary.openQuestions?.map(item => `- ${item.text}`).join('\n') || 'None'}
+
+RISKS / BLOCKERS:
+${meeting.detailedSummary.risks?.map(item => `- [${item.severity}] ${item.text}`).join('\n') || 'None'}
+
+OVERVIEW:
+${meeting.detailedSummary.overview || ''}
+${followUpBody.trim() ? `\nFOLLOW-UP DRAFT:\n${followUpSubject ? `Subject: ${followUpSubject}\n` : ''}${followUpBody}` : ''}
+                `.trim();
+            } else {
+                textToCopy = `
 Meeting: ${meeting.title}
 Date: ${new Date(meeting.date).toLocaleDateString()}
 
@@ -228,9 +370,10 @@ ${meeting.detailedSummary.actionItems?.map(item => `- ${item}`).join('\n') || 'N
 
 KEY POINTS:
 ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'None'}
-            `.trim();
+                `.trim();
+            }
         } else if (activeTab === 'transcript' && meeting.transcript) {
-            textToCopy = meeting.transcript.map(t => `[${formatTime(t.timestamp)}] ${t.speaker === 'user' ? 'Me' : 'Them'}: ${t.text}`).join('\n');
+            textToCopy = meeting.transcript.map(t => `[${formatTime(t.timestamp)}] ${resolveSpeakerName(t.speaker)}: ${t.text}`).join('\n');
         } else if (activeTab === 'usage' && meeting.usage) {
             textToCopy = meeting.usage.map(u => `Q: ${u.question || ''}\nA: ${u.answer || ''}`).join('\n\n');
         }
@@ -400,8 +543,255 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                                 </div>
                                 )}
 
+                                {/* V3 — product-grade structured notes: fast skim, decisions, actions, open questions, risks, quality. */}
+                                {isV3Summary && meeting.detailedSummary?.sourceQuality?.warnings && meeting.detailedSummary.sourceQuality.warnings.length > 0 && (
+                                    <section className="mb-6 p-3 rounded-[10px] border border-amber-400/30 bg-amber-500/5">
+                                        <p className="text-sm font-semibold text-text-primary mb-1">Quality warning</p>
+                                        <ul className="space-y-1">
+                                            {meeting.detailedSummary.sourceQuality.warnings.map((warning, i) => (
+                                                <li key={i} className="text-[12.5px] text-text-secondary leading-relaxed">{warning}</li>
+                                            ))}
+                                        </ul>
+                                    </section>
+                                )}
+
+                                {/* V3 toolbar: regenerate + evidence toggle + processing status */}
+                                {isV3Summary && (
+                                    <div className="mb-6 flex flex-wrap items-center gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => handleRegenerate()}
+                                            disabled={isRegenerating}
+                                            className="text-[11px] px-2.5 py-1 rounded-md bg-white/5 hover:bg-white/10 disabled:opacity-50 text-text-secondary border border-white/10 transition-colors"
+                                        >
+                                            {isRegenerating ? 'Regenerating…' : 'Regenerate notes'}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowEvidence(v => !v)}
+                                            className="text-[11px] px-2.5 py-1 rounded-md bg-white/5 hover:bg-white/10 text-text-secondary border border-white/10 transition-colors"
+                                        >
+                                            {showEvidence ? 'Hide evidence' : 'Show evidence'}
+                                        </button>
+                                        {v3SummaryStatus && v3SummaryStatus !== 'completed' && (
+                                            <span className="text-[11px] text-amber-400">Status: {v3SummaryStatus.replace(/_/g, ' ')}</span>
+                                        )}
+                                    </div>
+                                )}
+
+                                {/* Mode auto-detect suggestion: only when detected differs from selected with confidence. */}
+                                {isV3Summary && v3Mode?.detectedModeName && v3Mode?.detectedConfidence != null && v3Mode.detectedConfidence >= 0.5 &&
+                                  v3Mode.detectedModeName !== v3Mode.selectedModeName && (
+                                    <section className="mb-6 p-3 rounded-[10px] border border-blue-400/30 bg-blue-500/5 flex items-center justify-between gap-3">
+                                        <p className="text-[12.5px] text-text-secondary leading-relaxed">
+                                            This looks like a <span className="font-semibold text-text-primary">{v3Mode.detectedModeName}</span> meeting
+                                            {v3Mode.selectedModeName ? <> (notes used {v3Mode.selectedModeName})</> : null}.
+                                        </p>
+                                        <button
+                                            type="button"
+                                            onClick={() => handleRegenerate(v3Mode.detectedModeId ? undefined : (v3Mode.detectedModeName || '').toLowerCase())}
+                                            disabled={isRegenerating}
+                                            className="shrink-0 text-[11px] px-2.5 py-1 rounded-md bg-blue-500/15 hover:bg-blue-500/25 disabled:opacity-50 text-blue-300 border border-blue-400/30 transition-colors"
+                                        >
+                                            Regenerate as {v3Mode.detectedModeName}
+                                        </button>
+                                    </section>
+                                )}
+
+                                {/* Cross-meeting recall: still-open carryover from prior meetings (Phase 13). */}
+                                {isV3Summary && meeting.detailedSummary?.crossMeeting?.stillOpen && meeting.detailedSummary.crossMeeting.stillOpen.length > 0 && (
+                                    <section className="mb-6 p-3 rounded-[10px] border border-purple-400/30 bg-purple-500/5">
+                                        <p className="text-sm font-semibold text-text-primary mb-1">Carried over from earlier meetings</p>
+                                        <ul className="space-y-1">
+                                            {meeting.detailedSummary.crossMeeting.stillOpen.map((line, i) => (
+                                                <li key={i} className="text-[12.5px] text-text-secondary leading-relaxed">{line}</li>
+                                            ))}
+                                        </ul>
+                                    </section>
+                                )}
+
+                                {isV3Summary && v3Tldr.length > 0 && (
+                                    <section className="mb-8">
+                                        <h2 className="text-lg font-semibold text-text-primary mb-4">TLDR</h2>
+                                        <ul className="space-y-3">
+                                            {v3Tldr.map((item, i) => (
+                                                <li key={i} className="flex items-start gap-3 group">
+                                                    <div className="mt-2 w-1.5 h-1.5 rounded-full bg-purple-500/80 shrink-0" />
+                                                    <p className="text-sm text-text-secondary leading-relaxed">{item}</p>
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    </section>
+                                )}
+
+                                {isV3Summary && v3WhatChanged.length > 0 && (
+                                    <section className="mb-8">
+                                        <h2 className="text-lg font-semibold text-text-primary mb-4">What changed</h2>
+                                        <ul className="space-y-3">
+                                            {v3WhatChanged.map((item, i) => (
+                                                <li key={i} className="flex items-start gap-3 group">
+                                                    <div className="mt-2 w-1.5 h-1.5 rounded-full bg-indigo-500/80 shrink-0" />
+                                                    <p className="text-sm text-text-secondary leading-relaxed">{item}</p>
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    </section>
+                                )}
+
+                                {isV3Summary && v3Decisions.length > 0 && (
+                                    <section className="mb-8">
+                                        <h2 className="text-lg font-semibold text-text-primary mb-4">Decisions</h2>
+                                        <ul className="space-y-3">
+                                            {v3Decisions.map((item, i) => (
+                                                <li key={item.id || i} className="p-3 rounded-[10px] border border-white/10 bg-white/[0.02]">
+                                                    <div className="flex items-start gap-3">
+                                                        <div className="mt-2 w-1.5 h-1.5 rounded-full bg-blue-500/80 shrink-0" />
+                                                        <div className="min-w-0 flex-1">
+                                                            <p className="text-sm text-text-secondary leading-relaxed">{item.text}</p>
+                                                            <p className="text-[11px] text-text-tertiary mt-1">
+                                                                {item.owner && <span>{item.owner} · </span>}
+                                                                <span>{item.confidence} confidence</span>
+                                                            </p>
+                                                            {showEvidence && evidenceLabel(item.evidence) && (
+                                                                <button type="button" onClick={() => jumpToEvidence(item.evidence)} className="text-[11px] text-blue-400/80 hover:text-blue-300 mt-1 text-left">↳ {evidenceLabel(item.evidence)}</button>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    </section>
+                                )}
+
+                                {isV3Summary && v3Actions.length > 0 && (
+                                    <section className="mb-8">
+                                        <h2 className="text-lg font-semibold text-text-primary mb-4">Action Items</h2>
+                                        <ul className="space-y-3">
+                                            {v3Actions.map((item, i) => (
+                                                <li key={item.id || i} className="p-3 rounded-[10px] border border-emerald-400/20 bg-emerald-500/[0.03]">
+                                                    <div className="flex items-start gap-3">
+                                                        <div className="mt-2 w-1.5 h-1.5 rounded-full bg-emerald-500/80 shrink-0" />
+                                                        <div className="min-w-0 flex-1">
+                                                            <p className="text-sm text-text-secondary leading-relaxed">{item.text}</p>
+                                                            <p className="text-[11px] text-text-tertiary mt-1 flex flex-wrap gap-x-1">
+                                                                {item.owner && <span className="font-medium">{item.owner}</span>}
+                                                                {item.deadline && <span>by {item.deadline}</span>}
+                                                                <span className={`px-1.5 py-0.5 rounded border ${item.explicitness === 'explicit' ? 'border-emerald-400/30 text-emerald-400' : 'border-amber-400/30 text-amber-400'}`}>{item.explicitness}</span>
+                                                                <span>{item.confidence} confidence</span>
+                                                            </p>
+                                                            {showEvidence && evidenceLabel(item.evidence) && (
+                                                                <button type="button" onClick={() => jumpToEvidence(item.evidence)} className="text-[11px] text-blue-400/80 hover:text-blue-300 mt-1 text-left">↳ {evidenceLabel(item.evidence)}</button>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    </section>
+                                )}
+
+                                {isV3Summary && v3Questions.length > 0 && (
+                                    <section className="mb-8">
+                                        <h2 className="text-lg font-semibold text-text-primary mb-4">Open Questions</h2>
+                                        <ul className="space-y-3">
+                                            {v3Questions.map((item, i) => (
+                                                <li key={item.id || i} className="flex items-start gap-3 group">
+                                                    <div className="mt-2 w-1.5 h-1.5 rounded-full bg-yellow-500/80 shrink-0" />
+                                                    <div className="flex-1 min-w-0">
+                                                        <p className="text-sm text-text-secondary leading-relaxed">{item.text}</p>
+                                                        <p className="text-[11px] text-text-tertiary mt-0.5">{item.status}{item.owner ? ` · ${item.owner}` : ''}{evidenceLabel(item.evidence) ? ` · ${evidenceLabel(item.evidence)}` : ''}</p>
+                                                    </div>
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    </section>
+                                )}
+
+                                {isV3Summary && v3Risks.length > 0 && (
+                                    <section className="mb-8">
+                                        <h2 className="text-lg font-semibold text-text-primary mb-4">Risks / Blockers</h2>
+                                        <ul className="space-y-3">
+                                            {v3Risks.map((item, i) => (
+                                                <li key={item.id || i} className="p-3 rounded-[10px] border border-red-400/20 bg-red-500/[0.03]">
+                                                    <p className="text-sm text-text-secondary leading-relaxed">{item.text}</p>
+                                                    <p className="text-[11px] text-text-tertiary mt-1">{item.severity} severity{evidenceLabel(item.evidence) ? ` · ${evidenceLabel(item.evidence)}` : ''}</p>
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    </section>
+                                )}
+
+                                {isV3Summary && meeting.detailedSummary?.recipes && Object.keys(meeting.detailedSummary.recipes).length > 0 && (
+                                    <section className="mb-8">
+                                        <h2 className="text-lg font-semibold text-text-primary mb-3">Recipes</h2>
+                                        <div className="flex flex-wrap gap-2">
+                                            {Object.entries(meeting.detailedSummary.recipes).map(([name, text]) => (
+                                                <button
+                                                    key={name}
+                                                    type="button"
+                                                    onClick={() => copyRecipe(text)}
+                                                    className="text-[11px] px-2 py-1 rounded-md bg-white/5 hover:bg-white/10 text-text-secondary border border-white/10 transition-colors"
+                                                >
+                                                    Copy {name.replace(/-/g, ' ')}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </section>
+                                )}
+
+                                {/* V3 mode-specific sections (e.g. Pain points, Strengths, Core concepts). Empty sections are dropped server-side. */}
+                                {isV3Summary && meeting.detailedSummary?.sectionsV3 && meeting.detailedSummary.sectionsV3.length > 0 && (
+                                    <>
+                                        {meeting.detailedSummary.sectionsV3.map((section) => (
+                                            <section key={section.id} className="mb-8">
+                                                <h2 className="text-lg font-semibold text-text-primary mb-4">{section.title}</h2>
+                                                <ul className="space-y-3">
+                                                    {section.bullets.map((bullet, i) => (
+                                                        <li key={bullet.id || i} className="flex items-start gap-3">
+                                                            <div className="mt-2 w-1.5 h-1.5 rounded-full bg-text-secondary/60 shrink-0" />
+                                                            <div className="min-w-0 flex-1">
+                                                                <p className="text-sm text-text-secondary leading-relaxed">{bullet.text}</p>
+                                                                {showEvidence && evidenceLabel(bullet.evidence) && (
+                                                                    <button type="button" onClick={() => jumpToEvidence(bullet.evidence)} className="text-[11px] text-blue-400/80 hover:text-blue-300 mt-1 text-left">↳ {evidenceLabel(bullet.evidence)}</button>
+                                                                )}
+                                                            </div>
+                                                        </li>
+                                                    ))}
+                                                </ul>
+                                            </section>
+                                        ))}
+                                    </>
+                                )}
+
+                                {/* V3 follow-up draft — human prose, copy + regenerate + tone. */}
+                                {isV3Summary && followUpBody.trim() && (
+                                    <section className="mb-8">
+                                        <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
+                                            <h2 className="text-lg font-semibold text-text-primary">Follow-up draft</h2>
+                                            <div className="flex items-center gap-2">
+                                                <button type="button" onClick={() => copyRecipe((followUpSubject ? `Subject: ${followUpSubject}\n\n` : '') + followUpBody)} className="text-[11px] px-2.5 py-1 rounded-md bg-white/5 hover:bg-white/10 text-text-secondary border border-white/10 transition-colors">Copy</button>
+                                                <button type="button" onClick={() => handleRegenerateFollowUp()} disabled={isRegeneratingFollowUp} className="text-[11px] px-2.5 py-1 rounded-md bg-white/5 hover:bg-white/10 disabled:opacity-50 text-text-secondary border border-white/10 transition-colors">{isRegeneratingFollowUp ? 'Regenerating…' : 'Regenerate'}</button>
+                                                <select
+                                                    onChange={(e) => { if (e.target.value) handleRegenerateFollowUp(e.target.value as any); }}
+                                                    defaultValue=""
+                                                    className="text-[11px] px-1.5 py-1 rounded-md bg-white/5 text-text-secondary border border-white/10"
+                                                    title="Regenerate with tone"
+                                                >
+                                                    <option value="" disabled>Tone…</option>
+                                                    <option value="professional">Professional</option>
+                                                    <option value="warm">Warm</option>
+                                                    <option value="concise">Concise</option>
+                                                    <option value="friendly">Friendly</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                        {followUpSubject && <p className="text-[12.5px] text-text-tertiary mb-1">Subject: {followUpSubject}</p>}
+                                        <pre className="text-[12.5px] text-text-secondary leading-relaxed whitespace-pre-wrap font-sans select-text cursor-text p-3 rounded-[10px] border border-white/10 bg-white/[0.02]">{followUpBody}</pre>
+                                    </section>
+                                )}
+
                                 {/* Action Items - Only show if there are items */}
-                                {meeting.detailedSummary?.actionItems && meeting.detailedSummary.actionItems.length > 0 && (
+                                {!isV3Summary && meeting.detailedSummary?.actionItems && meeting.detailedSummary.actionItems.length > 0 && (
                                     <section className="mb-8">
                                         <div className="flex items-center justify-between mb-4">
                                             <EditableTextBlock
@@ -451,7 +841,7 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                                 )}
 
                                 {/* Key Points - Only show if there are items */}
-                                {meeting.detailedSummary?.keyPoints && meeting.detailedSummary.keyPoints.length > 0 && (
+                                {!isV3Summary && meeting.detailedSummary?.keyPoints && meeting.detailedSummary.keyPoints.length > 0 && (
                                     <section>
                                         <div className="flex items-center justify-between mb-4">
                                             <EditableTextBlock
@@ -504,7 +894,7 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                                     Rendered ONLY when PostCallWorkflow has produced them
                                     (schemaVersion === 2). Falls through silently otherwise so
                                     pre-Phase-7 meetings still look the same. */}
-                                {meeting.detailedSummary?.actionItemsStructured && meeting.detailedSummary.actionItemsStructured.length > 0 && (
+                                {!isV3Summary && meeting.detailedSummary?.actionItemsStructured && meeting.detailedSummary.actionItemsStructured.length > 0 && (
                                     <section className="mb-8">
                                         <h2 className="text-lg font-semibold text-text-primary mb-4">Next Steps</h2>
                                         <ul className="space-y-2">
@@ -552,15 +942,16 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                                     </section>
                                 )}
 
-                                {/* Phase 7 — Follow-up email draft. Selectable + copy-friendly. */}
-                                {meeting.detailedSummary?.followUpDraft && meeting.detailedSummary.followUpDraft.trim() && (
+                                {/* Phase 7 — Follow-up email draft (legacy V2: string). V3 renders its own above. */}
+                                {!isV3Summary && typeof meeting.detailedSummary?.followUpDraft === 'string' && meeting.detailedSummary.followUpDraft.trim() && (
                                     <section className="mb-8">
                                         <div className="flex items-center justify-between mb-3">
                                             <h2 className="text-lg font-semibold text-text-primary">Follow-up Draft</h2>
                                             <button
                                                 type="button"
                                                 onClick={() => {
-                                                    navigator.clipboard?.writeText(meeting.detailedSummary?.followUpDraft || '').catch(() => { /* swallow */ });
+                                                    const fu = meeting.detailedSummary?.followUpDraft;
+                                                    navigator.clipboard?.writeText(typeof fu === 'string' ? fu : '').catch(() => { /* swallow */ });
                                                 }}
                                                 className="text-[11px] px-2 py-1 rounded-md bg-white/5 hover:bg-white/10 text-text-secondary border border-white/10 transition-colors"
                                             >
@@ -572,11 +963,11 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                                 )}
 
                                 {/* Mode-specific sections (when active mode has a notes template) */}
-                                {meeting.detailedSummary?.sections && meeting.detailedSummary.sections.length > 0 && (
+                                {!isV3Summary && meeting.detailedSummary?.sections && meeting.detailedSummary.sections.length > 0 && (
                                     <div className="space-y-8">
                                         {meeting.detailedSummary.sections.map((section, si) => (
                                             section.bullets.length > 0 && (
-                                                <section key={si}>
+                                                <section key={`${section.title}-${si}`}>
                                                     <div className="flex items-center justify-between mb-4">
                                                         <h2 className="text-lg font-semibold text-text-primary">{section.title}</h2>
                                                     </div>
@@ -598,25 +989,74 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
 
                         {activeTab === 'transcript' && (
                             <motion.section initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+                                {/* Speaker rename row: distinct speakers + inline rename (Phase 9). */}
+                                {(() => {
+                                    const speakers = Array.from(new Set((meeting.transcript || [])
+                                        .filter(e => !['system', 'ai', 'assistant', 'model'].includes((e.speaker || '').toLowerCase()))
+                                        .map(e => e.speaker)));
+                                    if (speakers.length === 0) return null;
+                                    return (
+                                        <div className="mb-5 flex flex-wrap items-center gap-2">
+                                            <span className="text-[11px] text-text-tertiary">Speakers:</span>
+                                            {speakers.map((sp) => {
+                                                const display = resolveSpeakerName(sp);
+                                                const id = (sp || '').toLowerCase().replace(/^(user|me)$/, 'me').replace(/^(interviewer|them|other|system|assistant)$/, 'speaker_1').replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'unknown';
+                                                if (editingSpeaker === id) {
+                                                    return (
+                                                        <span key={id} className="flex items-center gap-1">
+                                                            <input
+                                                                autoFocus
+                                                                value={speakerDraft}
+                                                                onChange={e => setSpeakerDraft(e.target.value)}
+                                                                onKeyDown={e => { if (e.key === 'Enter') handleSaveSpeakerLabel(id, speakerDraft); if (e.key === 'Escape') setEditingSpeaker(null); }}
+                                                                onBlur={() => handleSaveSpeakerLabel(id, speakerDraft)}
+                                                                placeholder={display}
+                                                                className="text-[11px] px-2 py-1 rounded-md bg-white/10 text-text-primary border border-blue-400/40 w-36"
+                                                            />
+                                                        </span>
+                                                    );
+                                                }
+                                                return (
+                                                    <button
+                                                        key={id}
+                                                        type="button"
+                                                        onClick={() => { setEditingSpeaker(id); setSpeakerDraft(display); }}
+                                                        className="text-[11px] px-2 py-1 rounded-md bg-white/5 hover:bg-white/10 text-text-secondary border border-white/10 transition-colors"
+                                                        title="Rename speaker"
+                                                    >
+                                                        {display} ✎
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    );
+                                })()}
                                 <div className="space-y-6">
                                     {(() => {
-                                        console.log('Raw Transcript:', meeting.transcript);
                                         const filteredTranscript = meeting.transcript?.filter(entry => {
                                             const isHidden = ['system', 'ai', 'assistant', 'model'].includes(entry.speaker?.toLowerCase());
-                                            if (isHidden) console.log('Filtered out:', entry);
                                             return !isHidden;
                                         }) || [];
-                                        console.log('Filtered Transcript:', filteredTranscript);
 
                                         if (filteredTranscript.length === 0) {
                                             return <p className="text-text-tertiary">No transcript available.</p>;
                                         }
 
+                                        // Find the segment index closest to a pending evidence timestamp.
+                                        const scrollIndex = pendingScrollTs == null ? -1 : filteredTranscript.reduce((best, e, idx) => {
+                                            const d = Math.abs((e.timestamp || 0) - pendingScrollTs);
+                                            return d < best.d ? { d, idx } : best;
+                                        }, { d: Infinity, idx: -1 }).idx;
+
                                         return filteredTranscript.map((entry, i) => (
-                                            <div key={i} className="group">
+                                            <div
+                                                key={i}
+                                                className={`group rounded-md transition-colors ${i === scrollIndex ? 'bg-blue-500/10 ring-1 ring-blue-400/30 -mx-2 px-2 py-1' : ''}`}
+                                                ref={i === scrollIndex ? (el) => { if (el && pendingScrollTs != null) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); setTimeout(() => setPendingScrollTs(null), 1500); } } : undefined}
+                                            >
                                                 <div className="flex items-center gap-2 mb-1">
                                                     <span className="text-xs font-semibold text-text-secondary">
-                                                        {entry.speaker === 'user' ? 'Me' : 'Them'}
+                                                        {resolveSpeakerName(entry.speaker)}
                                                     </span>
                                                     <span className="text-xs text-text-tertiary font-mono">{entry.timestamp ? formatTime(entry.timestamp) : '0:00'}</span>
                                                 </div>
