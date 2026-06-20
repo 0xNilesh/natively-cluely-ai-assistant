@@ -73,10 +73,10 @@ interface FlagRow { key: string; enabled: boolean; setting: string; env: string;
 const FlagRowView: React.FC<{ row: FlagRow; onToggle: (row: FlagRow) => void }> = ({ row, onToggle }) => {
   const meta = FLAG_META[row.key];
   return (
-    <div className="flex items-start justify-between gap-4 rounded-lg px-3 py-2 hover:bg-bg-item-active/40">
+    <div className="flex items-start justify-between gap-4 rounded-lg px-3 py-2.5 transition-colors hover:bg-bg-item-active">
       <div className="min-w-0">
-        <div className="text-sm text-text-primary">{meta?.label || row.key}</div>
-        {meta?.desc ? <div className="text-xs text-text-secondary">{meta.desc}</div> : null}
+        <div className="text-sm font-medium text-text-primary">{meta?.label || row.key}</div>
+        {meta?.desc ? <div className="mt-0.5 text-xs leading-relaxed text-text-secondary">{meta.desc}</div> : null}
       </div>
       <Toggle on={row.enabled} onClick={() => onToggle(row)} />
     </div>
@@ -111,29 +111,29 @@ type ConnStatus = 'not-configured' | 'checking' | 'connected' | 'unreachable';
 const StatusChip: React.FC<{ status: ConnStatus; testing: boolean; onRetry: () => void }> = ({ status, testing, onRetry }) => {
   if (status === 'connected') {
     return (
-      <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-green-500/15 px-2 py-0.5 text-xs text-green-400">
+      <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-green-500/30 bg-green-500/15 px-2.5 py-0.5 text-[11px] font-medium text-green-400">
         <Wifi size={12} /> Connected
       </span>
     );
   }
   if (status === 'checking' || testing) {
     return (
-      <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-bg-item-active px-2 py-0.5 text-xs text-text-secondary">
+      <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border-subtle bg-bg-input px-2.5 py-0.5 text-[11px] font-medium text-text-secondary">
         <Loader2 size={12} className="animate-spin" /> Checking…
       </span>
     );
   }
   if (status === 'unreachable') {
     return (
-      <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-xs text-amber-400">
+      <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/15 px-2.5 py-0.5 text-[11px] font-medium text-amber-400">
         <WifiOff size={12} /> Can’t connect
-        <button type="button" onClick={onRetry} className="ml-1 underline hover:no-underline">Retry</button>
+        <button type="button" onClick={onRetry} className="ml-0.5 underline hover:no-underline">Retry</button>
       </span>
     );
   }
   // not-configured
   return (
-    <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-bg-item-active px-2 py-0.5 text-xs text-text-secondary">
+    <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border-subtle bg-bg-input px-2.5 py-0.5 text-[11px] font-medium text-text-tertiary">
       Not set up
     </span>
   );
@@ -316,11 +316,14 @@ export const IntelligenceSettings: React.FC = () => {
       </div>
 
       {/* ── Long-term memory (Hindsight) ─────────────────────────── */}
-      <section className="rounded-xl border border-border-subtle bg-bg-item-active/30 p-4 space-y-3">
-        <div className="flex items-center justify-between gap-3">
+      <section className="rounded-xl border border-border-subtle bg-bg-item-surface p-5 space-y-4">
+        <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <div className="text-sm font-medium text-text-primary">Long-term memory <span className="ml-1 rounded bg-accent-primary/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-accent-primary">Beta</span></div>
-            <div className="text-xs text-text-secondary">Remember what was discussed in past meetings and surface it automatically. Needs a free companion app — about 5 minutes to set up.</div>
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-semibold text-text-primary">Long-term memory</h3>
+              <span className="inline-flex items-center rounded-full border border-accent-primary/30 bg-accent-primary/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-accent-primary">Beta</span>
+            </div>
+            <p className="mt-1 text-xs leading-relaxed text-text-secondary">Remember what was discussed in past meetings and surface it automatically. Needs a free companion app — about 5 minutes to set up.</p>
           </div>
           <StatusChip status={status} onRetry={onTest} testing={testing} />
         </div>
@@ -328,7 +331,7 @@ export const IntelligenceSettings: React.FC = () => {
         <button
           type="button"
           onClick={() => setShowSetup((v) => !v)}
-          className="text-xs font-medium text-accent-primary hover:underline"
+          className="text-xs font-medium text-accent-primary transition-colors hover:text-accent-secondary"
         >
           {showSetup ? 'Hide setup' : (status === 'connected' ? 'Edit setup' : 'Set up long-term memory →')}
         </button>
