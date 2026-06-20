@@ -813,6 +813,7 @@ Return ONLY valid JSON (no markdown code blocks):
                 startedAtMs: startedMs,
                 startedAtIso: new Date(startedMs).toISOString(),
                 generateFollowUpDraft: isIntelligenceFlagEnabled('followUpDraftV2'),
+                polishSummary: isIntelligenceFlagEnabled('meetingSummaryLlmPolish'),
                 followUpTone: opts?.tone,
                 onStatusUpdate: status => db.updateSummaryStatus(meetingId, status),
             });
