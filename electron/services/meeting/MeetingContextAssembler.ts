@@ -10,6 +10,7 @@ import { TranscriptChunker } from './TranscriptChunker';
 import { TranscriptNormalizer } from './TranscriptNormalizer';
 import { generateBuiltInRecipes } from './MeetingRecipes';
 import { FollowUpDraftGenerator } from './FollowUpDraftGenerator';
+import { SummaryPolisher } from './SummaryPolisher';
 import type { FollowUpTone } from './MeetingSummaryV3';
 
 export interface AssembleSummaryResult {

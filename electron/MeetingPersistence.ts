@@ -328,6 +328,8 @@ export class MeetingPersistence {
                     // Phase 8 — LLM follow-up draft. Gated by flag; scope already enforced by
                     // postCallSummaryAllowed (we are inside that branch).
                     generateFollowUpDraft: isIntelligenceFlagEnabled('followUpDraftV2'),
+                    // #1 — constrained LLM Summary polish (note-content-only, gated, safe fallback).
+                    polishSummary: isIntelligenceFlagEnabled('meetingSummaryLlmPolish'),
                     onStatusUpdate: status => db.updateSummaryStatus(meetingId, status),
                 });
                 v3SummaryMeta = assembled.meta;
