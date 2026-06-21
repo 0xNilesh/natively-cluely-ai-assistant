@@ -196,7 +196,7 @@ export interface ElectronAPI {
 
   // Intelligence Mode IPC
   generateAssist: () => Promise<{ insight: string | null }>
-  generateWhatToSay: (question?: string, imagePaths?: string[], options?: { promptInstruction?: string; domContext?: string }) => Promise<{
+  generateWhatToSay: (question?: string, imagePaths?: string[], options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: ContextEnvelope }) => Promise<{
     answer: string | null;
     question?: string;
     error?: string;
@@ -258,6 +258,9 @@ export interface ElectronAPI {
   testHindsightConnection: () => Promise<{ healthy: boolean; error?: string }>
   updateMeetingTitle: (id: string, title: string) => Promise<boolean>
   updateMeetingSummary: (id: string, updates: { overview?: string, actionItems?: string[], keyPoints?: string[], actionItemsTitle?: string, keyPointsTitle?: string }) => Promise<boolean>
+  regenerateMeetingSummary: (id: string, opts?: { templateType?: string; tone?: 'professional' | 'warm' | 'concise' | 'friendly' }) => Promise<{ success: boolean; error?: string }>
+  regenerateMeetingFollowUp: (id: string, tone?: 'professional' | 'warm' | 'concise' | 'friendly') => Promise<{ success: boolean; error?: string }>
+  updateMeetingSpeakerLabels: (id: string, labels: Record<string, string>) => Promise<{ success: boolean; labels?: Record<string, string>; error?: string }>
   deleteMeeting: (id: string) => Promise<boolean>
   setWindowMode: (mode: 'launcher' | 'overlay', inactive?: boolean) => Promise<void>
   setMeetingInterfaceTheme: (theme: string) => void
@@ -540,11 +543,166 @@ export interface ElectronAPI {
   phoneMirrorDisable: () => Promise<{ success: true }>;
   phoneMirrorSetLan: (exposeOnLan: boolean) => Promise<PhoneMirrorInfo | { error: string }>;
   phoneMirrorRotateToken: () => Promise<PhoneMirrorInfo | { error: string }>;
+  // Arm the 60s one-click pairing window for the companion browser extension.
+  phoneMirrorArmExtension: () => Promise<{ armedMs: number } | { error: string }>;
+  phoneMirrorListTabs: () => Promise<{ tabs: Array<{ id: number; title: string; url: string }>; error?: string }>;
+  phoneMirrorCaptureTab: (tabId: number) => Promise<{ ok: boolean; reason?: string }>;
+  // Smart Browser Context v2 — pre-answer auto-context pull. Resolves attached:true
+  // when a coding page was auto-attached (arrives via onDomContextReceived), else
+  // attached:false (answer proceeds without browser context).
+  phoneMirrorRequestAutoContext: () => Promise<{ attached: boolean; reason?: string; category?: string }>;
+  // Smart Browser Context v2 — auto-capture settings.
+  browserContextGetSettings: () => Promise<BrowserContextSettings | { error: string }>;
+  browserContextSetSettings: (
+    patch: Partial<{
+      browserAutoDetectCoding: boolean;
+      browserAutoAttachCoding: boolean;
+      browserAskBeforeUnknown: boolean;
+      browserAiClassifierEnabled: boolean;
+      browserAutoDetectJobDescriptions: boolean;
+      browserAutoDetectDeveloperDocs: boolean;
+      browserExperimentalFullPageCapture: boolean;
+    }>,
+  ) => Promise<BrowserContextSettings | { error: string }>;
   onPhoneMirrorStatus: (callback: (info: PhoneMirrorInfo) => void) => () => void;
   onPhoneMirrorIncomingChat: (
     callback: (data: { message: string; streamId: string }) => void,
   ) => () => void;
-  onDomContextReceived: (callback: (dom: string) => void) => () => void;
+  onDomContextReceived: (
+    callback: (dom: string, meta?: DomCaptureMeta, envelope?: ContextEnvelope) => void,
+  ) => () => void;
+}
+
+/**
+ * Metadata sent by the companion extension with a captured page; drives the
+ * optional "Page context" chip. Mirrors DomCaptureMeta in PhoneMirrorService.
+ */
+export interface DomCaptureMeta {
+  title?: string;
+  url?: string;
+  source?: string;
+  pageType?: string;
+  firstLine?: string;
+}
+
+/* ─────────────── Smart Browser Context v2 (RENDERER mirror) ───────────────
+ * Duplicated per subsystem (the extension package + electron compile separately
+ * and can't share a file). Canonical source: natively-browser/src/capture/types.ts;
+ * desktop mirror: electron/services/browser-context/types.ts. A drift-guard test
+ * in each suite string-compares the union literals across all three copies. Keep
+ * these in sync when editing a union.
+ */
+export type BrowserContextCategory =
+  | 'coding_problem'
+  | 'coding_editor'
+  | 'interview_assessment'
+  | 'developer_docs'
+  | 'job_description'
+  | 'google_docs_visible'
+  | 'notes'
+  | 'article'
+  | 'email'
+  | 'chat'
+  | 'banking'
+  | 'auth'
+  | 'unknown';
+
+export type AutoPolicy =
+  | 'auto'
+  | 'auto_if_high_confidence'
+  | 'ask'
+  | 'manual'
+  | 'blocked';
+
+export type BrowserContextSensitivity = 'low' | 'medium' | 'high' | 'critical';
+
+export type ClassificationConfidence = 'high' | 'medium' | 'low';
+
+export type CaptureMode = 'auto' | 'manual' | 'selected_text' | 'screenshot_fallback';
+
+export type ExtractionSource =
+  | 'platform-selector'
+  | 'embedded-state'
+  | 'editor-dom'
+  | 'selection'
+  | 'readability'
+  | 'innerText'
+  | 'screenshot';
+
+/**
+ * The structured capture the desktop forwards to the overlay alongside the
+ * legacy `dom` string. `payload` is category-specific (coding problem, notes,
+ * developer docs, …); the renderer only needs the meta + category to render a
+ * richer chip and thread the envelope back into the answer request.
+ */
+export interface ContextEnvelope<TPayload = unknown> {
+  envelopeVersion: 1;
+  contextId: string;
+  source: 'browser_extension';
+  captureMode: CaptureMode;
+  category: BrowserContextCategory;
+  sensitivity: BrowserContextSensitivity;
+  confidence: ClassificationConfidence;
+  meta: {
+    platform?: string;
+    title?: string;
+    host?: string;
+    url?: string;
+    urlHash?: string;
+    capturedAt: number;
+    charCount: number;
+    extractionSource: ExtractionSource;
+    /** True when the extractor missed the essential fields for this category. */
+    partial?: boolean;
+    /** Which essential fields were missing (drives the chip hint). */
+    missing?: string[];
+  };
+  payload: TPayload;
+}
+
+export interface CodingProblemPayload {
+  platform?: string;
+  problemTitle?: string;
+  problemStatement?: string;
+  inputFormat?: string;
+  outputFormat?: string;
+  examples?: string;
+  constraints?: string;
+  starterCode?: string;
+  visibleCode?: string;
+  language?: string;
+  selectedText?: string;
+}
+
+export interface NotesPayload {
+  editorType:
+    | 'google_docs'
+    | 'notion'
+    | 'textarea'
+    | 'contenteditable'
+    | 'prosemirror'
+    | 'unknown';
+  selectedText?: string;
+  visibleText?: string;
+}
+
+export interface DeveloperDocsPayload {
+  title?: string;
+  headings?: string[];
+  mainText?: string;
+  codeBlocks?: string[];
+  publicUrl?: string;
+}
+
+/** Resolved Smart Browser Context auto-capture settings (defaults applied). */
+export interface BrowserContextSettings {
+  autoDetectCoding: boolean;
+  autoAttachCoding: boolean;
+  askBeforeUnknown: boolean;
+  aiClassifierEnabled: boolean;
+  autoDetectJobDescriptions: boolean;
+  autoDetectDeveloperDocs: boolean;
+  experimentalFullPageCapture: boolean;
 }
 
 export interface SkillSummary {
@@ -562,9 +720,13 @@ export interface PhoneMirrorInfo {
   loopbackUrl: string | null;
   primaryUrl: string | null;
   lanUrls: string[];
+  /** Phone (LAN) token — embedded in the QR/pairing URL. Not the extension token. */
   token: string | null;
+  /** Loopback-scoped extension token — used for the manual `port:extToken` pairing string. */
+  extToken: string | null;
   qrDataUrl: string | null;
   clients: number;
+  extensionConnected: boolean;
 }
 
 declare global {

@@ -773,7 +773,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onO
                                                              : 'bg-emerald-400/10 hover:bg-emerald-400/20 border-emerald-500/20 text-emerald-400'
                                                      }`}
                                                  >
-                                                     <span>What's New in 2.7</span>
+                                                     <span>What's New in 2.8</span>
                                                      <ArrowUpRight size={12} className="group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" />
                                                  </button>
                                              )}

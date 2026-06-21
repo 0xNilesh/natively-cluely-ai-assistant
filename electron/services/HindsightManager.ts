@@ -18,6 +18,13 @@
 // hindsightServerCommand is set (autoStart defaults on), start() spawns it (detached,
 // group-killed on quit via stopSync) and polls for readiness. Cloud / a user-run server
 // stays healthy → no spawn.
+//
+// LLM credential forwarding: when spawning a local server, buildCredentialEnv() reads
+// CredentialsManager and maps every configured AI provider key into the env vars that
+// hindsight-start.sh + hindsight-llm-config.mjs expect. This is the ONLY way the packaged
+// app can forward keys — CredentialsManager encrypts them at rest and they never live in
+// process.env. The child inherits process.env PLUS these injected keys; the shell script
+// then builds a litellm.Router chain from whatever subset is present.
 
 import type { HindsightConfig } from '../intelligence/memory/HindsightClientAdapter';
 import type { ChildProcess } from 'child_process';
@@ -203,6 +210,84 @@ export class HindsightManager {
     }
   }
 
+  /**
+   * Build the environment that the spawned Hindsight server process should see.
+   *
+   * The packaged app never exposes user credentials in process.env — they live in
+   * CredentialsManager (encrypted on disk). This method reads every configured AI
+   * provider key and maps it to the standard env var that hindsight-llm-config.mjs
+   * (and transitively litellm) expects. The result is merged with process.env so the
+   * child gets the full ambient env PLUS the credential overrides.
+   *
+   * Provider priority mirrors hindsight-llm-config.mjs:
+   *   Gemini → OpenAI → Anthropic → DeepSeek → Groq → LiteLLM gateway → Ollama
+   *
+   * Never throws — a missing CredentialsManager (e.g. test environment) is silently
+   * handled and the child falls back to env-var defaults (dev .env path).
+   */
+  private buildCredentialEnv(): Record<string, string> {
+    const extra: Record<string, string> = {};
+    try {
+      const { CredentialsManager } = require('./CredentialsManager') as typeof import('./CredentialsManager');
+      const cm = CredentialsManager.getInstance();
+
+      const gemini = cm.getGeminiApiKey();
+      if (gemini) extra.GEMINI_API_KEY = gemini;
+
+      const openai = cm.getOpenaiApiKey();
+      if (openai) extra.OPENAI_API_KEY = openai;
+
+      const claude = cm.getClaudeApiKey();
+      if (claude) extra.ANTHROPIC_API_KEY = claude;
+
+      const deepseek = cm.getDeepseekApiKey();
+      if (deepseek) extra.DEEPSEEK_API_KEY = deepseek;
+
+      const groq = cm.getGroqApiKey();
+      if (groq) extra.GROQ_API_KEY = groq;
+
+      // LiteLLM gateway — treated as an OpenAI-compatible endpoint. The shell script
+      // passes OPENAI_API_KEY to litellm; OPENAI_API_BASE redirects calls to the gateway.
+      // Only applied when a base URL is configured (key alone is meaningless without URL).
+      const litellmUrl = cm.getLitellmBaseURL();
+      if (litellmUrl?.trim()) {
+        extra.OPENAI_API_BASE = litellmUrl.trim();
+        // Prefer the explicit LiteLLM key; fall back to the OpenAI key already set above.
+        const litellmKey = cm.getLitellmApiKey();
+        if (litellmKey) extra.OPENAI_API_KEY = litellmKey;
+        // Guard: if neither key is present, litellm still needs a non-empty string.
+        if (!extra.OPENAI_API_KEY) extra.OPENAI_API_KEY = 'natively-gateway';
+      }
+
+      // Ollama — no API key; signal availability via the enable flag and pass the base URL.
+      // LLMHelper always defaults to 127.0.0.1:11434 when OLLAMA_URL is unset; mirror that.
+      const ollamaUrl = process.env.OLLAMA_URL || 'http://127.0.0.1:11434';
+      // Only enable Ollama for Hindsight when the app is actively using it (avoid forcing
+      // a heavyweight local model when the user has cloud keys configured).
+      try {
+        const { llmHelper } = require('../LLMHelper') as { llmHelper: { isUsingOllama(): boolean } };
+        if (llmHelper?.isUsingOllama?.()) {
+          extra.HINDSIGHT_LLM_ENABLE_OLLAMA = 'true';
+          extra.HINDSIGHT_LLM_OLLAMA_BASE = ollamaUrl;
+        }
+      } catch { /* LLMHelper not available yet — skip Ollama */ }
+    } catch (e: any) {
+      console.warn('[HindsightManager] buildCredentialEnv: could not read CredentialsManager (non-fatal):', e?.message);
+    }
+
+    if (Object.keys(extra).length > 0) {
+      const providerList = Object.keys(extra)
+        .filter((k) => k.endsWith('_API_KEY') || k === 'HINDSIGHT_LLM_ENABLE_OLLAMA')
+        .map((k) => k.replace('_API_KEY', '').replace('HINDSIGHT_LLM_ENABLE_', '').toLowerCase())
+        .join(', ');
+      console.log(`[HindsightManager] credential env: forwarding providers → ${providerList || 'none'}`);
+    } else {
+      console.warn('[HindsightManager] credential env: no provider keys found — Hindsight server will fall back to its own env defaults');
+    }
+
+    return extra;
+  }
+
   /** Spawn the configured server command (shell form, like `bash scripts/hindsight-start.sh`).
    *  Degrades gracefully on error ("python/script not found") — app unaffected. */
   private spawnServer(command: string): void {
@@ -222,6 +307,10 @@ export class HindsightManager {
         windowsHide: true,
         stdio: 'ignore',
         cwd: process.cwd(),
+        // Forward credentials from CredentialsManager into the child's env so the
+        // packaged app doesn't need .env or manual GEMINI_API_KEY exports. The shell
+        // script (hindsight-start.sh) picks these up and builds the litellm router.
+        env: { ...process.env, ...this.buildCredentialEnv() },
       });
       // Don't let the detached child keep the parent event loop alive.
       this.serverProcess.unref?.();

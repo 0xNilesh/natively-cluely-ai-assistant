@@ -415,6 +415,7 @@ import { loadNativeModule } from "./audio/nativeModuleLoader"
 import { GoogleSTT } from "./audio/GoogleSTT"
 import { RestSTT } from "./audio/RestSTT"
 import { DeepgramStreamingSTT } from "./audio/DeepgramStreamingSTT"
+import { isIntelligenceFlagEnabled } from "./intelligence/intelligenceFlags"
 import { SonioxStreamingSTT } from "./audio/SonioxStreamingSTT"
 import { ElevenLabsStreamingSTT } from "./audio/ElevenLabsStreamingSTT"
 import { OpenAIStreamingSTT } from "./audio/OpenAIStreamingSTT"
@@ -728,21 +729,41 @@ export class AppState {
           }
         } else if (actionId === 'general:capture-and-process') {
           // Single-trigger: capture current screen then immediately request AI analysis
-          const screenshotPath = await this.takeScreenshot(false);
-          const preview = await this.getImagePreview(screenshotPath);
-          // Ensure the window is visible so the user can see the response without stealing focus
-          this.showMainWindow(true);
-          // win.focus() can cause macOS to re-activate the app. Re-hide the dock
-          // if we are in undetectable mode.
-          if (process.platform === 'darwin' && this.isUndetectable) {
-            app.dock.hide();
+          await this.captureScreenAndProcess();
+
+        } else if (actionId === 'general:capture-dom') {
+          // One hotkey, the right capture: if the companion browser extension is
+          // connected, ask it to grab the active tab's page context (delivered to
+          // the overlay via /dom). If it isn't reachable — not in a browser, SW
+          // asleep, Phone Mirror off — fall back to a screenshot automatically so
+          // the gesture always does something. See natively-browser/README.md.
+          let captured = false;
+          try {
+            const svc = PhoneMirrorService.getInstance();
+            // MV3 race fix: the extension's service worker may have been idle-killed
+            // and is only just reconnecting (its wake-on-interaction handlers fire as
+            // the user touches the browser right before capturing). Poll briefly for
+            // an extension to connect before deciding — otherwise a just-woken SW
+            // would fall straight through to a screenshot. waitForExtension resolves
+            // immediately when one is already connected.
+            const extReady = svc.isRunning() && (await svc.waitForExtension());
+            if (extReady) {
+              const result = await svc.requestDomCapture();
+              captured = result.ok;
+              if (captured) {
+                // The extension only acks `done` after /dom returns 200, so by here
+                // the overlay has already received the page context (it surfaces a
+                // "Page context" pill and uses it on the next answer).
+                console.log('[Main] DOM capture delivered to overlay');
+              } else {
+                console.log('[Main] DOM capture unavailable (', result.reason, ') — falling back to screenshot');
+              }
+            }
+          } catch (e: any) {
+            console.warn('[Main] DOM capture error — falling back to screenshot:', e?.message || e);
           }
-          const mainWindow = this.getMainWindow();
-          if (mainWindow) {
-            mainWindow.webContents.send("capture-and-process", {
-              path: screenshotPath,
-              preview
-            });
+          if (!captured) {
+            await this.captureScreenAndProcess();
           }
 
         // --- STEALTH SHORTCUTS: no focus, no show, pure IPC dispatch ---
@@ -1596,7 +1617,16 @@ export class AppState {
       const apiKey = CredentialsManager.getInstance().getDeepgramApiKey();
       if (apiKey) {
         console.log(`[Main] Using DeepgramStreamingSTT for ${speaker}`);
-        stt = new DeepgramStreamingSTT(apiKey);
+        const dg = new DeepgramStreamingSTT(apiKey);
+        // Opt-in diarization (#3): only on the remote/system channel ('interviewer'), where
+        // multiple people may speak. The mic channel is always the local user ('me'), so
+        // diarizing it adds cost with no benefit. Default OFF via flag.
+        try {
+          if (speaker === 'interviewer' && isIntelligenceFlagEnabled('speakerDiarizationV1')) {
+            dg.setDiarization(true);
+          }
+        } catch { /* flag read non-fatal */ }
+        stt = dg;
       } else {
         console.warn(`[Main] No API key for Deepgram STT, falling back to GoogleSTT`);
         stt = new GoogleSTT(speaker);
@@ -1682,7 +1712,7 @@ export class AppState {
     stt.setRecognitionLanguage(sttLanguage);
 
     // Wire Transcript Events
-    stt.on('transcript', (segment: { text: string, isFinal: boolean, confidence: number }) => {
+    stt.on('transcript', (segment: { text: string, isFinal: boolean, confidence: number, speakerId?: string }) => {
       // Accept transcripts while a meeting is active OR while we're draining
       // trailing finals after Stop. `_isDraining` covers the ~250 ms grace
       // window between Stop click and STT socket close so the user's last
@@ -1693,6 +1723,7 @@ export class AppState {
 
       this.intelligenceManager.handleTranscript({
         speaker: speaker,
+        ...(segment.speakerId ? { speakerId: segment.speakerId } : {}),
         text: segment.text,
         timestamp: Date.now(),
         final: segment.isFinal,
@@ -1710,6 +1741,7 @@ export class AppState {
 
       const payload = {
         speaker: speaker,
+        ...(segment.speakerId ? { speakerId: segment.speakerId } : {}),
         text: segment.text,
         timestamp: Date.now(),
         final: segment.isFinal,
@@ -4876,6 +4908,31 @@ export class AppState {
     return this.withScreenshotCaptureSession('full', restoreFocus, (session) =>
       this.screenshotHelper.takeScreenshot(this.getTargetDisplayForFullScreenshot(session))
     )
+  }
+
+  /**
+   * Capture the current screen and immediately request AI analysis (the
+   * "capture-and-process" single-trigger). Extracted so both the
+   * `general:capture-and-process` hotkey and the `general:capture-dom`
+   * screenshot fallback share one path.
+   */
+  private async captureScreenAndProcess(): Promise<void> {
+    const screenshotPath = await this.takeScreenshot(false);
+    const preview = await this.getImagePreview(screenshotPath);
+    // Ensure the window is visible so the user can see the response without stealing focus
+    this.showMainWindow(true);
+    // win.focus() can cause macOS to re-activate the app. Re-hide the dock
+    // if we are in undetectable mode.
+    if (process.platform === 'darwin' && this.isUndetectable) {
+      app.dock.hide();
+    }
+    const mainWindow = this.getMainWindow();
+    if (mainWindow) {
+      mainWindow.webContents.send("capture-and-process", {
+        path: screenshotPath,
+        preview
+      });
+    }
   }
 
   public async takeSelectiveScreenshot(restoreFocus: boolean = true): Promise<string> {

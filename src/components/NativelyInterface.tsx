@@ -5,9 +5,11 @@ import {
   Code,
   Copy,
   Check,
+  Globe,
   HelpCircle,
   Image,
   Lightbulb,
+  List,
   MessageSquare,
   Mic,
   Pencil,
@@ -516,6 +518,54 @@ const getStatusToneClass = (tone: 'ok' | 'warn' | 'error'): string => {
   return 'text-emerald-600 dark:text-emerald-300 border-emerald-500/20 bg-emerald-500/10';
 };
 
+// Compact host label for the "Page context" pill (e.g. "example.com"), stripping
+// a leading www. Returns undefined for a missing/unparseable URL.
+const hostnameFromUrl = (url?: string): string | undefined => {
+  if (!url) return undefined;
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return undefined;
+  }
+};
+
+// Smart Browser Context v2 — category-specific chip label. Falls back to the
+// host + "page ready" for legacy plain-string captures (no envelope category).
+const CATEGORY_CHIP_LABEL: Record<string, string> = {
+  coding_problem: 'Coding problem',
+  coding_editor: 'Coding editor',
+  interview_assessment: 'Coding assessment',
+  developer_docs: 'Developer docs',
+  job_description: 'Job description',
+  google_docs_visible: 'Google Docs',
+  notes: 'Notes',
+  article: 'Article',
+};
+const pageContextChipLabel = (pc: {
+  title: string;
+  url?: string;
+  category?: string;
+  platform?: string;
+  partial?: boolean;
+}): string => {
+  const host = hostnameFromUrl(pc.url) || pc.title;
+  if (!pc.category || pc.category === 'unknown') {
+    return pc.partial ? `${host} · partial — capture manually?` : `${host} · page ready`;
+  }
+  const base = CATEGORY_CHIP_LABEL[pc.category] || 'Page context';
+  const bits = [base];
+  if (pc.platform) bits.push(pc.platform);
+  // For coding problems the page title is usually the problem name — show it.
+  if ((pc.category === 'coding_problem' || pc.category === 'interview_assessment') && pc.title) {
+    const t = pc.title.replace(/\s*[-–|·].*$/, '').trim(); // strip "- LeetCode" suffix
+    if (t && t.length <= 40) bits.push(t);
+  }
+  // Honest partial-capture signal: tell the user the auto-capture was thin so
+  // they can grab it manually (highlight the code, or press the capture hotkey).
+  if (pc.partial) bits.push('partial — capture manually?');
+  return bits.join(' · ');
+};
+
 const subtleSurfaceClass = 'overlay-subtle-surface';
 
 const MessageRow = React.memo(
@@ -658,10 +708,63 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // Analytics State
   const requestStartTimeRef = useRef<number | null>(null);
 
+  // Captured browser page context (from the companion extension). Latent like
+  // attachedContext: armed for the NEXT answer and surfaced as a status pill so the
+  // capture is visible, then cleared on use / dismiss / timeout. Declared here —
+  // ahead of the DOM-bridge effects below that reference it.
+  const [pageContext, setPageContext] = useState<{
+    title: string;
+    url?: string;
+    chars: number;
+    at: number;
+    // Smart Browser Context v2 — when a structured envelope arrives, the chip
+    // shows a category-specific label (e.g. "Coding problem · LeetCode · Two Sum").
+    category?: import('../types/electron').BrowserContextCategory;
+    platform?: string;
+    // True when the extractor missed the essential fields (thin capture) — the
+    // chip turns amber and invites a manual capture instead of pretending it's
+    // complete. `missing` lists what was not captured (for the tooltip).
+    partial?: boolean;
+    missing?: string[];
+  } | null>(null);
+
+  // The structured capture (Smart Browser Context v2) that arrived with the last
+  // page context, if any. Held in a ref so it survives re-renders and is consumed
+  // once (cleared) when the answer request reads it.
+  const capturedEnvelopeRef = useRef<import('../types/electron').ContextEnvelope | null>(null);
+
+  // Multi-tab picker: when the user wants to choose which browser tab to capture
+  // (e.g. the auto-pick grabbed the wrong one), we ask the extension for its open
+  // tabs and show a compact list. null = closed; [] = loading/empty.
+  const [tabPicker, setTabPicker] = useState<Array<{ id: number; title: string; url: string }> | null>(null);
+  const [tabPickerLoading, setTabPickerLoading] = useState(false);
+
+  const openTabPicker = useCallback(async () => {
+    setTabPickerLoading(true);
+    setTabPicker([]);
+    try {
+      const res = await window.electronAPI?.phoneMirrorListTabs?.();
+      setTabPicker(res?.tabs ?? []);
+    } catch {
+      setTabPicker([]);
+    } finally {
+      setTabPickerLoading(false);
+    }
+  }, []);
+
+  const pickTab = useCallback(async (tabId: number) => {
+    setTabPicker(null);
+    try {
+      await window.electronAPI?.phoneMirrorCaptureTab?.(tabId);
+    } catch (_) {
+      /* the desktop logs the reason; the chip will appear on success */
+    }
+  }, []);
+
   /**
    * BROWSER DOM CONTEXT INTEGRATION
    * ═════════════════════════════════════════════════════════════════
-   * 
+   *
    * This property acts as a secure bridge between the companion browser
    * extension and the Natively LLM pipeline. The extension captures the
    * active browser tab's DOM structure and writes it to this property,
@@ -750,12 +853,30 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     };
   }, []);
 
-  // Listen to secure cross-process companion browser extension bridge events
+  // Listen to secure cross-process companion browser extension bridge events.
+  // The desktop delivers (dom, meta?) — store the DOM for the next answer AND
+  // surface a "Page context" status pill so the capture is visible to the user
+  // (otherwise the DOM sits invisibly on window.lastCapturedDOM until consumed).
   useEffect(() => {
     let unsubDom: (() => void) | undefined;
     try {
-      unsubDom = window.electronAPI?.onDomContextReceived?.((dom) => {
+      unsubDom = window.electronAPI?.onDomContextReceived?.((dom, meta, envelope) => {
         (window as any).lastCapturedDOM = dom;
+        // Stash the structured envelope (Smart Browser Context v2) so handleWhatToSay
+        // can thread it into the answer request alongside the legacy domContext string.
+        capturedEnvelopeRef.current = envelope ?? null;
+        if (typeof dom === 'string' && dom.trim().length > 0) {
+          setPageContext({
+            title: meta?.title?.trim() || hostnameFromUrl(meta?.url) || 'Captured page',
+            url: meta?.url,
+            chars: dom.length,
+            at: Date.now(),
+            category: envelope?.category,
+            platform: envelope?.meta?.platform,
+            partial: envelope?.meta?.partial,
+            missing: envelope?.meta?.missing,
+          });
+        }
       });
     } catch (e) {
       console.warn('[Security] Failed to register onDomContextReceived listener:', e);
@@ -769,6 +890,22 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       }
     };
   }, []);
+
+  // Auto-expire the captured page-context pill if it's never consumed. The DOM
+  // itself is cleared on use (handleWhatToSay) or dismiss; this just stops the
+  // pill from lingering indefinitely after a capture the user didn't end up using.
+  useEffect(() => {
+    if (!pageContext) return;
+    const timer = setTimeout(() => {
+      setPageContext(null);
+      try {
+        if (typeof (window as any).lastCapturedDOM === 'string') {
+          (window as any).lastCapturedDOM = '';
+        }
+      } catch (_) {}
+    }, 90_000);
+    return () => clearTimeout(timer);
+  }, [pageContext]);
 
   // Sync transcript setting
   useEffect(() => {
@@ -2238,6 +2375,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     if (!window.electronAPI?.onSessionReset) return;
     const unsubscribe = window.electronAPI.onSessionReset(() => {
       console.log('[NativelyInterface] Resetting session state...');
+      window.electronAPI?.cancelChatStream?.();
+      chatStreamIdRef.current = null;
+      requestStartTimeRef.current = null;
       setMessages([]);
       eagerCodeExpansionHoldRef.current = false;
       answerPanelPinnedRef.current = false;
@@ -2673,6 +2813,29 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       lastOverlayActionRef.current = null;
     }
   }, []);
+
+  const cancelActiveChatStream = useCallback(() => {
+    window.electronAPI?.cancelChatStream?.();
+    chatStreamIdRef.current = null;
+    requestStartTimeRef.current = null;
+    setIsProcessing(false);
+    flushToken();
+    tokenBufRef.current.intent = '';
+    tokenBufRef.current.text = '';
+    if (tokenBufRef.current.raf !== null) {
+      cancelAnimationFrame(tokenBufRef.current.raf);
+      tokenBufRef.current.raf = null;
+    }
+  }, [flushToken]);
+
+  const resetChatState = useCallback(() => {
+    cancelActiveChatStream();
+    setMessages([]);
+    answerPanelPinnedRef.current = false;
+    setAnswerPanelPinned(false);
+    lastManualSubmitRef.current = null;
+    manualSubmitInFlightRef.current = false;
+  }, [cancelActiveChatStream]);
 
   const finalizeStreamingByIntent = useCallback(
     (intent: string, text: string) => {
@@ -3169,16 +3332,17 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     );
 
     cleanups.push(
+      window.electronAPI.onIntelligenceManualStarted(() => {
+        setIsExpanded(true);
+        setIsProcessing(true);
+        prepareIntelligenceStreamPlaceholder('chat');
+      }),
+    );
+
+    cleanups.push(
       window.electronAPI.onIntelligenceManualResult((data) => {
         setIsProcessing(false);
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: genMessageId(),
-            role: 'system',
-            text: `🎯 **Answer:**\n\n${data.answer}`,
-          },
-        ]);
+        finalizeStreamingByIntent('chat', `🎯 **Answer:**\n\n${data.answer}`);
       }),
     );
 
@@ -3202,7 +3366,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       }
       cleanups.forEach((fn) => fn());
     };
-  }, [queueToken, flushToken, applyRollingPartialPreview, flushRollingPartialPreview, pinAnswerPanel, finalizeStreamingByIntent]);
+  }, [queueToken, flushToken, applyRollingPartialPreview, flushRollingPartialPreview, pinAnswerPanel, finalizeStreamingByIntent, prepareIntelligenceStreamPlaceholder]);
 
   // Stable mount-only effect for screenshot listeners.
   // These MUST NOT be inside the [isExpanded] effect — when a screenshot is
@@ -3280,17 +3444,49 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     analytics.trackCommandExecuted('what_to_say');
 
     try {
+      // Smart Browser Context v2 — just-in-time auto-attach. If NO manual context
+      // is already captured, ask the extension for the best auto context (it only
+      // attaches a high-confidence coding page; sensitive/unknown pages are
+      // skipped). Manual context ALWAYS wins: we only run this when lastCapturedDOM
+      // is empty, and the request resolves quickly with attached:false when there
+      // is nothing to attach, so the answer is never blocked. The captured DOM (if
+      // any) arrives via onDomContextReceived → window.lastCapturedDOM, which we
+      // re-read below — reusing the proven domContext seam.
+      const hasManualContext =
+        typeof (window as any).lastCapturedDOM === 'string' &&
+        (window as any).lastCapturedDOM.trim().length > 0;
+      if (!hasManualContext) {
+        try {
+          await window.electronAPI.phoneMirrorRequestAutoContext?.();
+        } catch {
+          /* auto-context is best-effort — never block the answer */
+        }
+      }
+
+      // Safe to read synchronously right after the await above: the extension's
+      // SW awaits the /dom POST (which fires the `dom-context-received` IPC →
+      // sets window.lastCapturedDOM) BEFORE it emits the `done` ack that resolves
+      // phoneMirrorRequestAutoContext(). So by here, an auto-captured DOM has
+      // already landed — no extra settle delay needed.
       const rawDomContext = (window as any).lastCapturedDOM;
       const domContext =
         typeof rawDomContext === 'string' && rawDomContext.trim().length > 0
           ? rawDomContext.substring(0, DOM_CONTEXT_MAX_CHARS)
           : undefined;
 
+      // The structured envelope (if any) that arrived with this capture. Consumed
+      // once, alongside the legacy string, then cleared.
+      const domContextEnvelope = domContext ? capturedEnvelopeRef.current ?? undefined : undefined;
+
       // Clear the captured DOM immediately after reading it to ensure stale DOM context
       // from prior pages is never re-sent on subsequent requests.
       if (typeof (window as any).lastCapturedDOM === 'string') {
         (window as any).lastCapturedDOM = '';
       }
+      capturedEnvelopeRef.current = null;
+      // Retire the "Page context" pill the moment the context is actually consumed,
+      // so the lifecycle reads: capture → pill appears → answer → pill disappears.
+      if (domContext) setPageContext(null);
 
       if (domContext) {
         console.debug(`[DOM Context] Forwarding captured active-tab DOM structure (${domContext.length} chars)`);
@@ -3301,6 +3497,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           ? {
               ...(dynamicPromptInstruction ? { promptInstruction: dynamicPromptInstruction } : {}),
               ...(domContext ? { domContext } : {}),
+              ...(domContextEnvelope ? { domContextEnvelope } : {}),
             }
           : undefined;
 
@@ -3981,6 +4178,7 @@ Provide only the answer, nothing else.`;
     lastManualSubmitRef.current = { text: userText, atMs: nowMs };
 
     const currentAttachments = attachedContext;
+    const conversationContextForSubmit = buildConversationContextFromMessages(messages);
 
     // Clear inputs immediately
     setInputValue('');
@@ -4068,7 +4266,7 @@ Provide only the answer, nothing else.`;
       await window.electronAPI.streamGeminiChat(
         userText || 'Analyze this screenshot',
         currentAttachments.length > 0 ? currentAttachments.map((s) => s.path) : undefined,
-        conversationContext, // Pass context so "answer this" works
+        conversationContextForSubmit, // Pass freshly-derived context so "answer this" works
       );
     } catch (err) {
       setIsProcessing(false);
@@ -4102,11 +4300,7 @@ Provide only the answer, nothing else.`;
   handleManualSubmitRef.current = handleManualSubmit;
 
   const clearChat = () => {
-    setMessages([]);
-    answerPanelPinnedRef.current = false;
-    setAnswerPanelPinned(false);
-    lastManualSubmitRef.current = null;
-    manualSubmitInFlightRef.current = false;
+    resetChatState();
   };
 
   // PERF: useCallback so MessageRow's memo comparator can rely on a stable
@@ -4697,12 +4891,10 @@ Provide only the answer, nothing else.`;
     processScreenshots: handleWhatToSay,
     resetCancel: async () => {
       if (isProcessing) {
-        setIsProcessing(false);
+        cancelActiveChatStream();
       } else {
         await window.electronAPI.resetIntelligence();
-        setMessages([]);
-        answerPanelPinnedRef.current = false;
-        setAnswerPanelPinned(false);
+        resetChatState();
         setAttachedContext([]);
         setInputValue('');
       }
@@ -4740,12 +4932,10 @@ Provide only the answer, nothing else.`;
     processScreenshots: handleWhatToSay,
     resetCancel: async () => {
       if (isProcessing) {
-        setIsProcessing(false);
+        cancelActiveChatStream();
       } else {
         await window.electronAPI.resetIntelligence();
-        setMessages([]);
-        answerPanelPinnedRef.current = false;
-        setAnswerPanelPinned(false);
+        resetChatState();
         setAttachedContext([]);
         setInputValue('');
       }
@@ -5327,7 +5517,7 @@ Provide only the answer, nothing else.`;
   // Suppressed: mode label pill is not required in the UI.
   // Suppressed: LLM privacy label pill is not required in the UI.
   // Suppressed: vision pill ("Vision: provider") is not required in the UI.
-  const hasStatusPill = shouldShowSttSummaryPill;
+  const hasStatusPill = shouldShowSttSummaryPill || !!pageContext;
   const statusPillBaseClass = `flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-medium shadow-sm backdrop-blur-xl ${isLightTheme ? 'bg-white/55 border-black/10' : 'bg-black/20 border-white/10'}`;
 
   // Suppress the shell's scale/translate entry animation until it has rendered
@@ -5493,7 +5683,90 @@ Provide only the answer, nothing else.`;
                     <span>{sttSummary.label}</span>
                   </div>
                 )}
+                {pageContext && (
+                  <div
+                    className={`${statusPillBaseClass} ${getStatusToneClass(pageContext.partial ? 'warn' : 'ok')} pr-1.5`}
+                    title={
+                      pageContext.partial
+                        ? `Only part of this page could be read automatically${
+                            pageContext.missing?.length ? ` (missing: ${pageContext.missing.join(', ')})` : ''
+                          }. Highlight the relevant text or press the capture hotkey to capture it manually.`
+                        : pageContext.url
+                          ? `${pageContext.url} · ${pageContext.chars.toLocaleString()} chars · used on your next answer`
+                          : `${pageContext.chars.toLocaleString()} chars · used on your next answer`
+                    }
+                  >
+                    <Globe className="h-3 w-3 opacity-70" />
+                    <span className="max-w-[220px] truncate">
+                      {pageContextChipLabel(pageContext)}
+                    </span>
+                    <button
+                      type="button"
+                      aria-label="Pick a different browser tab"
+                      title="Capture a different tab"
+                      className="ml-0.5 rounded-full p-0.5 opacity-60 hover:opacity-100 hover:bg-black/10 dark:hover:bg-white/10 transition-opacity"
+                      onClick={() => { void openTabPicker(); }}
+                    >
+                      <List className="h-2.5 w-2.5" />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="Dismiss captured page context"
+                      className="ml-0.5 rounded-full p-0.5 opacity-60 hover:opacity-100 hover:bg-black/10 dark:hover:bg-white/10 transition-opacity"
+                      onClick={() => {
+                        setPageContext(null);
+                        try {
+                          if (typeof (window as any).lastCapturedDOM === 'string') {
+                            (window as any).lastCapturedDOM = '';
+                          }
+                        } catch (_) {}
+                      }}
+                    >
+                      <X className="h-2.5 w-2.5" />
+                    </button>
+                  </div>
+                )}
               </div>
+              )}
+
+              {/* Multi-tab picker — choose which open browser tab to capture. */}
+              {tabPicker !== null && (
+                <div className="relative no-drag mx-4 mt-1 mb-1 rounded-[12px] border border-white/10 bg-black/30 backdrop-blur-xl p-2 shadow-sm">
+                  <div className="flex items-center justify-between px-1 pb-1.5">
+                    <span className="text-[11px] font-medium overlay-text-primary">
+                      {tabPickerLoading ? 'Finding open tabs…' : 'Pick a tab to capture'}
+                    </span>
+                    <button
+                      type="button"
+                      aria-label="Close tab picker"
+                      className="rounded-full p-0.5 opacity-60 hover:opacity-100 hover:bg-white/10 transition-opacity"
+                      onClick={() => setTabPicker(null)}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                  {!tabPickerLoading && tabPicker.length === 0 && (
+                    <div className="px-1 py-1 text-[10px] overlay-text-muted">
+                      No capturable tabs — is the browser open and the extension connected?
+                    </div>
+                  )}
+                  <div className="flex flex-col gap-0.5 max-h-44 overflow-y-auto">
+                    {tabPicker.map((t) => (
+                      <button
+                        key={t.id}
+                        type="button"
+                        onClick={() => { void pickTab(t.id); }}
+                        className="text-left px-2 py-1.5 rounded-md text-[11px] overlay-text-primary hover:bg-white/10 transition-colors"
+                        title={t.url}
+                      >
+                        <span className="block truncate">{t.title || t.url}</span>
+                        <span className="block truncate text-[9px] overlay-text-muted">
+                          {hostnameFromUrl(t.url) || t.url}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
               )}
 
               {/* System Audio / Screen Recording Warning Banner */}

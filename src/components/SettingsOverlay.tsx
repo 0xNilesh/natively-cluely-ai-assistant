@@ -352,9 +352,17 @@ interface SettingsOverlayProps {
     isOpen: boolean;
     onClose: () => void;
     initialTab?: string;
+    initialIsPremium?: boolean | null;
+    initialHasNativelyKey?: boolean;
 }
 
-const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, initialTab = 'general' }) => {
+const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
+    isOpen,
+    onClose,
+    initialTab = 'general',
+    initialIsPremium = null,
+    initialHasNativelyKey = false,
+}) => {
     const isLight = useResolvedTheme() === 'light';
     const [activeTab, setActiveTab] = useState(initialTab);
 
@@ -849,7 +857,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     const [sttSaving, setSttSaving] = useState(false);
     const [sttSaved, setSttSaved] = useState(false);
     const [googleServiceAccountPath, setGoogleServiceAccountPath] = useState<string | null>(null);
-    const [hasNativelyKey, setHasNativelyKey] = useState(false);
+    const [hasNativelyKey, setHasNativelyKey] = useState(initialHasNativelyKey);
     const [hasStoredSttGroqKey, setHasStoredSttGroqKey] = useState(false);
     const [hasStoredSttOpenaiKey, setHasStoredSttOpenaiKey] = useState(false);
     const [hasStoredDeepgramKey, setHasStoredDeepgramKey] = useState(false);
@@ -1395,7 +1403,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                         onClick={() => setActiveTab('phone-mirror')}
                                         className={`w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-3 ${activeTab === 'phone-mirror' ? 'bg-bg-item-active text-text-primary' : 'text-text-secondary hover:text-text-primary hover:bg-bg-item-active/50'}`}
                                     >
-                                        <Smartphone size={16} /> Phone Mirror
+                                        <Smartphone size={16} /> Sync
                                     </button>
 
                                     <button
@@ -2080,10 +2088,10 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                 <SkillsSettings />
                             )}
                             {activeTab === 'natively-api' && (
-                                <NativelyApiSettings />
+                                <NativelyApiSettings initialIsSaved={hasNativelyKey} />
                             )}
                             {activeTab === 'natively-pro' && (
-                                <NativelyProSettings />
+                                <NativelyProSettings initialIsPremium={initialIsPremium} />
                             )}
                             {activeTab === 'keybinds' && (
                                 <div className="space-y-5 animated fadeIn select-text pb-4">
@@ -2144,6 +2152,16 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                     <KeyRecorder
                                                         currentKeys={shortcuts.captureAndProcess}
                                                         onSave={(keys) => updateShortcut('captureAndProcess', keys)}
+                                                    />
+                                                </div>
+                                                <div className="flex items-center justify-between py-1.5 group">
+                                                    <div className="flex items-center gap-3">
+                                                        <span className="text-text-tertiary group-hover:text-text-primary transition-colors w-5 flex justify-center"><Globe size={14} /></span>
+                                                        <span className="text-sm text-text-secondary font-medium group-hover:text-text-primary transition-colors">Capture Page (Browser)</span>
+                                                    </div>
+                                                    <KeyRecorder
+                                                        currentKeys={shortcuts.capturePage}
+                                                        onSave={(keys) => updateShortcut('capturePage', keys)}
                                                     />
                                                 </div>
                                                 <div className="flex items-center justify-between py-1.5 group">

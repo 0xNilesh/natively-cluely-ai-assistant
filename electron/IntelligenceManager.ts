@@ -41,6 +41,13 @@ export class IntelligenceManager extends EventEmitter {
         this.engine = new IntelligenceEngine(llmHelper, this.session);
         this.persistence = new MeetingPersistence(this.session, llmHelper);
 
+        // Wire the LLMHelper used by the async per-section prompt compiler (Phase 16b).
+        // Fire-and-forget compilation runs when a user adds/edits a note section or custom mode.
+        try {
+            const { ModesManager } = require('./services/ModesManager');
+            ModesManager.setLlmHelperForCompiler(llmHelper);
+        } catch { /* non-fatal */ }
+
         // Forward all engine events through the facade
         this.forwardEngineEvents();
     }
@@ -221,6 +228,16 @@ export class IntelligenceManager extends EventEmitter {
 
     async recoverUnprocessedMeetings(): Promise<void> {
         return this.persistence.recoverUnprocessedMeetings();
+    }
+
+    /** Regenerate V3 notes for a saved meeting (optionally with a different mode/tone). */
+    async regenerateMeetingSummary(meetingId: string, opts?: { templateType?: string; tone?: 'professional' | 'warm' | 'concise' | 'friendly' }): Promise<boolean> {
+        return this.persistence.regenerateSavedMeeting(meetingId, opts);
+    }
+
+    /** Regenerate only the follow-up draft for a saved V3 meeting. */
+    async regenerateMeetingFollowUp(meetingId: string, tone?: 'professional' | 'warm' | 'concise' | 'friendly'): Promise<boolean> {
+        return this.persistence.regenerateFollowUpDraft(meetingId, tone);
     }
 
     // ============================================

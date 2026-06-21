@@ -53,6 +53,7 @@ const PLAN_STANDARD_URL = 'https://checkout.dodopayments.com/buy/pdt_0NbFixGmD8C
 const PLAN_PRO_URL = 'https://checkout.dodopayments.com/buy/pdt_0NcM6Aw0IWdspbsgUeCLA';
 const PLAN_MAX_URL = 'https://checkout.dodopayments.com/buy/pdt_0NcM7JElX4Af6LNVFS1Yf';
 const PLAN_ULTRA_URL = 'https://checkout.dodopayments.com/buy/pdt_0NcM7rC2kAb69TFKsZnUU';
+const MASKED_NATIVELY_KEY = '•'.repeat(24);
 
 const PLANS = [
   {
@@ -370,10 +371,14 @@ function Card({ children, className = '' }: { children: React.ReactNode; classNa
 }
 
 // ─── Component ───────────────────────────────────────────────
-export const NativelyApiSettings: React.FC = () => {
-  const [apiKey, setApiKey] = useState('');
-  const [isSaved, setIsSaved] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
+interface NativelyApiSettingsProps {
+  initialIsSaved?: boolean;
+}
+
+export const NativelyApiSettings: React.FC<NativelyApiSettingsProps> = ({ initialIsSaved = false }) => {
+  const [apiKey, setApiKey] = useState(() => (initialIsSaved ? MASKED_NATIVELY_KEY : ''));
+  const [isSaved, setIsSaved] = useState(initialIsSaved);
+  const [isLoading, setIsLoading] = useState(!initialIsSaved);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [justSaved, setJustSaved] = useState(false);
@@ -458,8 +463,13 @@ export const NativelyApiSettings: React.FC = () => {
       try {
         const creds = await window.electronAPI.getStoredCredentials();
         if (creds.hasNativelyKey) {
-          setApiKey('•'.repeat(24));
+          setApiKey(MASKED_NATIVELY_KEY);
           setIsSaved(true);
+        } else {
+          setApiKey('');
+          setIsSaved(false);
+          setUsageData(null);
+          setUsageError(null);
         }
       } catch (e) {
         console.error('[NativelyApi]', e);

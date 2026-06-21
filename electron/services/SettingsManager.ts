@@ -31,6 +31,25 @@ export interface AppSettings {
     knowledgeMode?: boolean;
     phoneMirrorEnabled?: boolean;
     phoneMirrorExposeOnLan?: boolean;
+    // ── Smart Browser Context v2 ───────────────────────────────────────────
+    // Manual browser capture is always available (no flag). These control the
+    // AUTOMATIC behaviour. Defaults (read at the use sites): coding auto-detect
+    // and auto-attach default ON (high-confidence coding only); the AI metadata
+    // classifier is OFF (opt-in); job-desc/dev-docs auto-detect OFF. Sensitive
+    // categories (email/chat/banking/auth) are ALWAYS blocked — there is no
+    // setting to disable that floor.
+    browserAutoDetectCoding?: boolean;        // default true
+    browserAutoAttachCoding?: boolean;        // default true
+    browserAskBeforeUnknown?: boolean;        // default true
+    browserAiClassifierEnabled?: boolean;     // default false (opt-in)
+    browserAutoDetectJobDescriptions?: boolean; // default false
+    browserAutoDetectDeveloperDocs?: boolean; // default false
+    // EXPERIMENTAL: when true, the auto-capture path attaches the FULL page
+    // content (readable text) for ANY non-sensitive page — not just coding — and
+    // lets the answer model pick what it needs. Default false. Sensitive pages
+    // (email/chat/banking/auth) are STILL hard-blocked; this only relaxes the
+    // coding-only / high-confidence-only gate, never the sensitive floor.
+    browserExperimentalFullPageCapture?: boolean; // default false (experimental)
     localWhisperModel?: string;
     // Per-channel model overrides for local Whisper. When
     // localWhisperPerChannelEnabled is true, the two LocalWhisperSTT instances
@@ -187,6 +206,31 @@ export class SettingsManager {
 
     public getTechnicalInterviewVisionFirst(): boolean {
         return this.settings.technicalInterviewVisionFirst !== false;
+    }
+
+    // ── Smart Browser Context v2 — resolved settings (single default source) ──
+    // Manual capture is always on (not represented here). These resolve the
+    // documented defaults so callers never repeat them. Sensitive blocking is a
+    // hard floor in the policy engine and is intentionally NOT a setting.
+    public getBrowserContextSettings(): {
+        autoDetectCoding: boolean;
+        autoAttachCoding: boolean;
+        askBeforeUnknown: boolean;
+        aiClassifierEnabled: boolean;
+        autoDetectJobDescriptions: boolean;
+        autoDetectDeveloperDocs: boolean;
+        experimentalFullPageCapture: boolean;
+    } {
+        const s = this.settings;
+        return {
+            autoDetectCoding: s.browserAutoDetectCoding !== false, // default true
+            autoAttachCoding: s.browserAutoAttachCoding !== false, // default true
+            askBeforeUnknown: s.browserAskBeforeUnknown !== false, // default true
+            aiClassifierEnabled: s.browserAiClassifierEnabled === true, // default false (opt-in)
+            autoDetectJobDescriptions: s.browserAutoDetectJobDescriptions === true, // default false
+            autoDetectDeveloperDocs: s.browserAutoDetectDeveloperDocs === true, // default false
+            experimentalFullPageCapture: s.browserExperimentalFullPageCapture === true, // default false (experimental)
+        };
     }
 
     // ── Regional STT relay (Phase 7/8) typed accessors ─────────────────────

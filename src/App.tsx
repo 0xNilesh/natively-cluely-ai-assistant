@@ -36,6 +36,7 @@ import ModesSettings from "./components/settings/ModesSettings"
 import { ProfileIntelligenceSettings } from "./components/ProfileIntelligenceSettings"
 
 const queryClient = new QueryClient()
+const CropperWindow = React.lazy(() => import('./components/Cropper'))
 
 const App: React.FC = () => {
   const isSettingsWindow = new URLSearchParams(window.location.search).get('window') === 'settings';
@@ -46,15 +47,6 @@ const App: React.FC = () => {
 
   // Default to launcher if not specified (dev mode safety)
   const isDefault = !isSettingsWindow && !isOverlayWindow && !isModelSelectorWindow && !isCropperWindow;
-
-  if (isCropperWindow) {
-    const Cropper = React.lazy(() => import('./components/Cropper'));
-    return (
-      <React.Suspense fallback={<div className="w-screen h-screen bg-transparent" />}>
-        <Cropper />
-      </React.Suspense>
-    );
-  }
 
   // Initialize Analytics
   useEffect(() => {
@@ -584,6 +576,14 @@ const App: React.FC = () => {
   const interfaceThemeAttribute = meetingInterfaceTheme === 'default' ? undefined : meetingInterfaceTheme;
 
   // Render Logic
+  if (isCropperWindow) {
+    return (
+      <React.Suspense fallback={<div className="w-screen h-screen bg-transparent" />}>
+        <CropperWindow />
+      </React.Suspense>
+    );
+  }
+
   if (isSettingsWindow) {
     return (
       <ErrorBoundary context="SettingsPopup">
@@ -691,6 +691,8 @@ const App: React.FC = () => {
                     setIsSettingsOpen(false);
                   }}
                   initialTab={settingsInitialTab}
+                  initialIsPremium={hasLoadedLicense ? isPremiumActive : null}
+                  initialHasNativelyKey={hasNativelyApi}
                 />
                 <AnimatePresence>
                   {isModesOpen && (

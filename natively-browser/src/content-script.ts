@@ -13,25 +13,82 @@
  */
 import { Readability } from '@mozilla/readability';
 import { extractPageContent, type ExtractResult } from './extract';
+import { smartCapture, type SmartCaptureResult } from './capture/smart-capture';
+import type { BrowserContextCategory, CaptureMode } from './capture/types';
 
-export type CaptureRequest = { type: 'natively:extract' };
+export interface SmartExtractOpts {
+  contextId: string;
+  capturedAt: number;
+  mode?: CaptureMode;
+  /** EXPERIMENTAL: attach the full readable text of any non-sensitive page. */
+  fullPage?: boolean;
+  /** Classify + build sanitized metadata only; do NOT read the page body. */
+  classifyOnly?: boolean;
+  /** Extra opted-in categories treated as auto-eligible (e.g. job_description). */
+  extraCategories?: BrowserContextCategory[];
+  /** The desktop AI classifier approved this page → auto-eligible. */
+  aiApproved?: boolean;
+  /** Defaults true; false drops the coding eligibility branch. */
+  codingEnabled?: boolean;
+}
+
+export type CaptureRequest =
+  | { type: 'natively:extract' }
+  // Smart Browser Context v2: classify + structured-extract in one round-trip.
+  // `mode` lets the SW distinguish manual vs auto captures for the envelope.
+  // `fullPage` (experimental) attaches the full readable text of any non-sensitive
+  // page in auto mode — sensitive pages are still hard-blocked downstream.
+  // `classifyOnly`/`extraCategories`/`aiApproved` drive the AI-classifier round-trip.
+  | ({ type: 'natively:smart-extract' } & SmartExtractOpts);
 export type CaptureResponse =
   | { ok: true; result: ExtractResult }
+  | { ok: true; smart: SmartCaptureResult }
   | { ok: false; error: string };
 
 const GUARD = '__natively_capture_listener__';
+
+function pageSelection(): string {
+  try {
+    return window.getSelection()?.toString() ?? '';
+  } catch {
+    return '';
+  }
+}
 
 function runExtraction(): ExtractResult {
   return extractPageContent({
     document,
     readabilityFactory: (doc) => new Readability(doc),
-    getSelection: () => {
-      try {
-        return window.getSelection()?.toString() ?? '';
-      } catch {
-        return '';
-      }
-    },
+    getSelection: pageSelection,
+  });
+}
+
+function runSmartCapture(opts: SmartExtractOpts): SmartCaptureResult {
+  const mode = opts.mode || 'auto';
+  return smartCapture({
+    document,
+    host: location.hostname,
+    url: location.href,
+    title: document.title,
+    getSelection: pageSelection,
+    readabilityFactory: (doc) => new Readability(doc),
+    contextId: opts.contextId,
+    capturedAt: opts.capturedAt,
+    captureMode: mode,
+    // Auto captures (pre-answer pull) only extract auto-eligible coding pages;
+    // a manual capture extracts whatever the user is on.
+    autoEligibleOnly: mode === 'auto',
+    // EXPERIMENTAL: relax the coding-only auto gate and capture the full page
+    // text for any non-sensitive page. Sensitive pages stay blocked.
+    fullPageMode: opts.fullPage === true,
+    // Classify-only first leg of the AI round-trip: build metadata, read no body.
+    classifyOnly: opts.classifyOnly === true,
+    // Opted-in extra categories (JD / dev-docs) treated as auto-eligible.
+    extraEligibleCategories: opts.extraCategories ? new Set(opts.extraCategories) : undefined,
+    // Desktop AI classifier already approved this page (after the round-trip).
+    aiApproved: opts.aiApproved === true,
+    // Defaults true; false drops the coding eligibility branch.
+    codingEnabled: opts.codingEnabled !== false,
   });
 }
 
@@ -40,14 +97,21 @@ if (!w[GUARD]) {
   w[GUARD] = true;
   chrome.runtime.onMessage.addListener(
     (message: CaptureRequest, _sender, sendResponse: (r: CaptureResponse) => void) => {
-      if (!message || message.type !== 'natively:extract') return undefined;
+      if (!message) return undefined;
       try {
-        const result = runExtraction();
-        sendResponse({ ok: true, result });
+        if (message.type === 'natively:extract') {
+          sendResponse({ ok: true, result: runExtraction() });
+          return undefined;
+        }
+        if (message.type === 'natively:smart-extract') {
+          const smart = runSmartCapture(message);
+          sendResponse({ ok: true, smart });
+          return undefined;
+        }
       } catch (err) {
         sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) });
+        return undefined;
       }
-      // Synchronous response; returning true is unnecessary but harmless.
       return undefined;
     },
   );

@@ -1,7 +1,17 @@
-import { Check, Copy, Lock, RefreshCw, ShieldAlert, Smartphone, Wifi } from 'lucide-react';
-import React, { useCallback, useEffect, useState } from 'react';
-import type { PhoneMirrorInfo } from '../../types/electron';
+import { Check, Copy, Lock, Puzzle, RefreshCw, ShieldAlert, ShieldCheck, Smartphone, Wifi, Zap } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import type { BrowserContextSettings, PhoneMirrorInfo } from '../../types/electron';
 import { isMac } from '../../utils/platformUtils';
+
+const EMPTY_BROWSER_CTX: BrowserContextSettings = {
+  autoDetectCoding: true,
+  autoAttachCoding: true,
+  askBeforeUnknown: true,
+  aiClassifierEnabled: false,
+  autoDetectJobDescriptions: false,
+  autoDetectDeveloperDocs: false,
+  experimentalFullPageCapture: false,
+};
 
 const EMPTY_INFO: PhoneMirrorInfo = {
   running: false,
@@ -12,8 +22,10 @@ const EMPTY_INFO: PhoneMirrorInfo = {
   primaryUrl: null,
   lanUrls: [],
   token: null,
+  extToken: null,
   qrDataUrl: null,
   clients: 0,
+  extensionConnected: false,
 };
 
 export const PhoneMirrorSettings: React.FC = () => {
@@ -21,6 +33,16 @@ export const PhoneMirrorSettings: React.FC = () => {
   const [busy, setBusy] = useState<null | 'enable' | 'disable' | 'lan' | 'rotate'>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  // Companion browser-extension pairing: countdown (seconds left) while the 60s
+  // one-click /pair window is open after "Connect browser extension".
+  const [armCountdown, setArmCountdown] = useState(0);
+  const [armError, setArmError] = useState<string | null>(null);
+  const [pairCopied, setPairCopied] = useState(false);
+  const [showManualPair, setShowManualPair] = useState(false);
+  const armTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Smart Browser Context v2 — auto-capture settings.
+  const [ctx, setCtx] = useState<BrowserContextSettings>(EMPTY_BROWSER_CTX);
 
   const refresh = useCallback(async () => {
     try {
@@ -42,8 +64,10 @@ export const PhoneMirrorSettings: React.FC = () => {
           prev.qrDataUrl === n.qrDataUrl &&
           prev.primaryUrl === n.primaryUrl &&
           prev.token === n.token &&
+          prev.extToken === n.extToken &&
           prev.running === n.running &&
-          prev.clients === n.clients
+          prev.clients === n.clients &&
+          prev.extensionConnected === n.extensionConnected
         ) {
           return prev;
         }
@@ -54,6 +78,50 @@ export const PhoneMirrorSettings: React.FC = () => {
       off?.();
     };
   }, [refresh]);
+
+  // Load Smart Browser Context settings once.
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await window.electronAPI.browserContextGetSettings?.();
+        if (res && typeof res === 'object' && !('error' in res)) {
+          setCtx(res as BrowserContextSettings);
+        }
+      } catch {
+        /* keep documented defaults */
+      }
+    })();
+  }, []);
+
+  // Toggle one auto-capture setting and persist it. Keys map 1:1 to the resolved
+  // BrowserContextSettings fields → the IPC's browser* setting keys.
+  const onToggleCtx = useCallback(
+    async (
+      field: keyof BrowserContextSettings,
+      ipcKey:
+        | 'browserAutoDetectCoding'
+        | 'browserAutoAttachCoding'
+        | 'browserAskBeforeUnknown'
+        | 'browserAiClassifierEnabled'
+        | 'browserAutoDetectJobDescriptions'
+        | 'browserAutoDetectDeveloperDocs'
+        | 'browserExperimentalFullPageCapture',
+    ) => {
+      const next = !ctx[field];
+      // Optimistic update; reconcile with the persisted resolved settings.
+      setCtx((prev) => ({ ...prev, [field]: next }));
+      try {
+        const res = await window.electronAPI.browserContextSetSettings?.({ [ipcKey]: next });
+        if (res && typeof res === 'object' && !('error' in res)) {
+          setCtx(res as BrowserContextSettings);
+        }
+      } catch (e: any) {
+        setError(e?.message || 'Failed to save browser context setting');
+        setCtx((prev) => ({ ...prev, [field]: !next })); // revert
+      }
+    },
+    [ctx],
+  );
 
   const apply = useCallback(
     async (key: 'enable' | 'disable' | 'lan' | 'rotate', fn: () => Promise<any>) => {
@@ -104,6 +172,60 @@ export const PhoneMirrorSettings: React.FC = () => {
     }
   }, [info.primaryUrl]);
 
+  // Clear the countdown interval on unmount.
+  useEffect(() => {
+    return () => {
+      if (armTimerRef.current) clearInterval(armTimerRef.current);
+    };
+  }, []);
+
+  // "Connect browser extension" — arm the 60s one-click pairing window on the
+  // desktop, then run a local countdown so the user knows how long they have to
+  // click "Connect to Natively" in the extension popup.
+  const onArmExtension = useCallback(async () => {
+    setArmError(null);
+    try {
+      const result = await window.electronAPI.phoneMirrorArmExtension();
+      if (result && typeof result === 'object' && 'error' in result && result.error) {
+        setArmError(String(result.error));
+        return;
+      }
+      const seconds =
+        result && typeof result === 'object' && 'armedMs' in result
+          ? Math.round((result.armedMs as number) / 1000)
+          : 60;
+      if (armTimerRef.current) clearInterval(armTimerRef.current);
+      setArmCountdown(seconds);
+      armTimerRef.current = setInterval(() => {
+        setArmCountdown((prev) => {
+          if (prev <= 1) {
+            if (armTimerRef.current) clearInterval(armTimerRef.current);
+            armTimerRef.current = null;
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    } catch (e: any) {
+      setArmError(e?.message || 'Failed to arm pairing');
+    }
+  }, []);
+
+  // Manual fallback: copy the raw `port:token` pairing string for the extension's
+  // "Pair manually instead" field. Only shown after the user expands it. Uses the
+  // EXTENSION token (loopback-scoped), not the phone token — this string pairs the
+  // browser extension.
+  const onCopyPairString = useCallback(async () => {
+    if (!info.port || !info.extToken) return;
+    try {
+      await navigator.clipboard.writeText(`${info.port}:${info.extToken}`);
+      setPairCopied(true);
+      setTimeout(() => setPairCopied(false), 1200);
+    } catch (_) {
+      /* noop */
+    }
+  }, [info.port, info.extToken]);
+
   const lanWarning = info.running && info.exposeOnLan;
   const showQr = info.running && info.qrDataUrl;
   const lanRequestedButMissing = info.running && info.exposeOnLan && info.lanUrls.length === 0;
@@ -116,15 +238,15 @@ export const PhoneMirrorSettings: React.FC = () => {
         </div>
         <div className="flex-1">
           <div className="flex items-center gap-2">
-            <h3 className="text-text-primary text-lg font-semibold tracking-tight">Phone Mirror</h3>
+            <h3 className="text-text-primary text-lg font-semibold tracking-tight">Sync</h3>
             <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-[0.08em] bg-amber-500/15 text-amber-400 border border-amber-500/30">
               Beta
             </span>
           </div>
           <p className="text-text-secondary text-sm mt-1 leading-relaxed">
-            Stream live AI responses from your desktop to a phone browser on the same network.
-            Useful when you're sharing your screen and want the AI output kept off the shared
-            display.
+            Connect Natively to your phone and your browser. Stream live AI responses to a phone
+            browser on the same network, and pair the companion browser extension to send the
+            active tab's page context to the desktop.
           </p>
         </div>
       </header>
@@ -302,6 +424,202 @@ export const PhoneMirrorSettings: React.FC = () => {
         </div>
       )}
 
+      {/* Browser Extension card — pair the companion extension to send the active
+          browser tab's page context to the desktop. Shares the Phone Mirror
+          server + pairing token. */}
+      <div className="bg-bg-item-surface rounded-xl border border-border-subtle p-5 space-y-4">
+        <div className="flex items-start gap-3">
+          <div className="rounded-lg bg-bg-main p-2 border border-border-subtle flex-shrink-0">
+            <Puzzle size={16} className="text-indigo-400" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-text-primary font-medium text-sm">Browser Extension</div>
+              {/* Live connection indicator: green = extension connected over the
+                  capture WebSocket; grey = paired/installed but not connected. */}
+              {info.running && (
+                <span className="flex items-center gap-1.5 flex-shrink-0">
+                  <span
+                    className={`w-2 h-2 rounded-full ${
+                      info.extensionConnected ? 'bg-green-500' : 'bg-text-secondary/40'
+                    }`}
+                  />
+                  <span className="text-[11px] text-text-secondary">
+                    {info.extensionConnected ? 'Connected' : 'Not connected'}
+                  </span>
+                </span>
+              )}
+            </div>
+            <div className="text-text-secondary text-xs mt-1 leading-relaxed">
+              Pair the Natively companion extension to send the active tab's page content
+              to the desktop. Press{' '}
+              <kbd className="px-1 py-0.5 rounded bg-bg-main border border-border-subtle font-mono text-[10px]">
+                {isMac ? '⌘' : 'Ctrl'}+Shift+Y
+              </kbd>{' '}
+              to capture (falls back to a screenshot when no browser is reachable). Install
+              steps are in the Help tab.
+            </div>
+          </div>
+        </div>
+
+        {info.running ? (
+          <>
+            <button
+              type="button"
+              onClick={onArmExtension}
+              disabled={armCountdown > 0}
+              className={`w-full inline-flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+                armCountdown > 0
+                  ? 'bg-blue-500/15 text-blue-300 cursor-default'
+                  : 'bg-blue-500 text-white hover:bg-blue-400'
+              }`}
+            >
+              {armCountdown > 0 ? (
+                <>
+                  <Zap size={14} className="animate-pulse" />
+                  Open the extension and click “Connect to Natively” · {armCountdown}s
+                </>
+              ) : (
+                <>
+                  <Zap size={14} />
+                  Connect browser extension
+                </>
+              )}
+            </button>
+
+            <details
+              className="text-xs"
+              open={showManualPair}
+              onToggle={(e) => setShowManualPair((e.target as HTMLDetailsElement).open)}
+            >
+              <summary className="text-text-secondary cursor-pointer hover:text-text-primary select-none">
+                Pair manually instead
+              </summary>
+              <div className="mt-2 space-y-2">
+                <div className="text-text-secondary leading-relaxed">
+                  In the extension popup, expand <strong>Pair manually instead</strong> and paste
+                  this pairing string:
+                </div>
+                <div className="flex items-center gap-2">
+                  <code className="flex-1 min-w-0 truncate font-mono text-xs px-2.5 py-2 rounded-md bg-bg-main border border-border-subtle text-text-primary">
+                    {info.port && info.extToken ? `${info.port}:${info.extToken}` : '—'}
+                  </code>
+                  <button
+                    type="button"
+                    onClick={onCopyPairString}
+                    disabled={!info.port || !info.extToken}
+                    className="flex-shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-md text-xs font-medium bg-bg-item-active text-text-primary hover:bg-bg-item-active/70 disabled:opacity-50 transition-colors"
+                  >
+                    {pairCopied ? (
+                      <>
+                        <Check size={13} /> Copied
+                      </>
+                    ) : (
+                      <>
+                        <Copy size={13} /> Copy
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </details>
+
+            {armError && (
+              <div className="text-xs text-red-300">{armError}</div>
+            )}
+          </>
+        ) : (
+          <div className="text-text-secondary text-xs flex items-center gap-2">
+            <Lock size={12} /> Enable Phone Mirror first to pair the browser extension.
+          </div>
+        )}
+      </div>
+
+      {/* Smart Browser Context — automatic coding/interview capture. Manual
+          capture (the hotkey + popup) always works and is intentionally not a
+          toggle here. Sensitive pages (email/chat/banking/auth) are ALWAYS
+          blocked — that floor is enforced in the desktop policy engine and has
+          no off switch. */}
+      <div className="bg-bg-item-surface rounded-xl border border-border-subtle p-5 space-y-4">
+        <div className="flex items-start gap-3">
+          <div className="rounded-lg bg-bg-main p-2 border border-border-subtle flex-shrink-0">
+            <ShieldCheck size={16} className="text-emerald-400" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="text-text-primary font-medium text-sm">Smart Browser Context</div>
+            <div className="text-text-secondary text-xs mt-1 leading-relaxed">
+              Automatically detect coding/interview pages (LeetCode, HackerRank, CoderPad, and
+              more) and attach the problem context when you ask for an answer. Manual capture
+              always works regardless of these settings.
+            </div>
+          </div>
+        </div>
+
+        <CtxToggle
+          label="Auto-detect coding problems"
+          desc="Recognize high-confidence coding/interview pages locally (no page content is read in the background)."
+          checked={ctx.autoDetectCoding}
+          onChange={() => onToggleCtx('autoDetectCoding', 'browserAutoDetectCoding')}
+        />
+        <CtxToggle
+          label="Auto-attach coding context when answering"
+          desc="When you ask for an answer on a high-confidence coding page, capture and attach it just-in-time."
+          checked={ctx.autoAttachCoding}
+          onChange={() => onToggleCtx('autoAttachCoding', 'browserAutoAttachCoding')}
+        />
+        <CtxToggle
+          label="Ask before attaching unknown pages"
+          desc="For pages we can't classify confidently, ask first instead of attaching automatically."
+          checked={ctx.askBeforeUnknown}
+          onChange={() => onToggleCtx('askBeforeUnknown', 'browserAskBeforeUnknown')}
+        />
+        <CtxToggle
+          label="AI page classifier (opt-in)"
+          desc="For unknown pages, send sanitized metadata only (host + keywords, never page content) to your configured AI provider to classify the page. Off by default."
+          checked={ctx.aiClassifierEnabled}
+          onChange={() => onToggleCtx('aiClassifierEnabled', 'browserAiClassifierEnabled')}
+        />
+        <CtxToggle
+          label="Auto-detect job descriptions"
+          desc="Optional. Recognize job-posting pages so you can attach them when answering."
+          checked={ctx.autoDetectJobDescriptions}
+          onChange={() => onToggleCtx('autoDetectJobDescriptions', 'browserAutoDetectJobDescriptions')}
+        />
+        <CtxToggle
+          label="Auto-detect developer docs"
+          desc="Optional. Recognize documentation pages so you can attach them when answering."
+          checked={ctx.autoDetectDeveloperDocs}
+          onChange={() => onToggleCtx('autoDetectDeveloperDocs', 'browserAutoDetectDeveloperDocs')}
+        />
+
+        {/* EXPERIMENTAL: full-page capture. Relaxes the coding-only auto gate but
+            NEVER the sensitive floor below — email/chat/banking/auth stay blocked. */}
+        <CtxToggle
+          label="Experimental: send full page to AI"
+          desc="When on, attach the FULL page content (not just coding problems) when you ask for an answer, and let the AI pick what's relevant. Email, chat, banking, and auth pages are still never captured."
+          checked={ctx.experimentalFullPageCapture}
+          onChange={() => onToggleCtx('experimentalFullPageCapture', 'browserExperimentalFullPageCapture')}
+          experimental
+        />
+
+        {/* The non-negotiable privacy floor — shown as a locked, always-on row. */}
+        <div className="flex items-start justify-between gap-3 pt-1">
+          <div className="min-w-0">
+            <div className="text-text-primary text-sm flex items-center gap-1.5">
+              <Lock size={12} className="text-text-secondary" />
+              Never capture email, chat, banking, or auth pages
+            </div>
+            <div className="text-text-secondary text-xs mt-0.5 leading-relaxed">
+              Always on. Sensitive pages are never auto-captured and are never sent to the AI
+              classifier, even if a page looks like a coding problem.
+            </div>
+          </div>
+          <span className="flex-shrink-0 text-[11px] text-emerald-400 font-medium mt-0.5">
+            Enforced
+          </span>
+        </div>
+      </div>
+
       {error && (
         <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
           {error}
@@ -316,3 +634,57 @@ export const PhoneMirrorSettings: React.FC = () => {
     </div>
   );
 };
+
+/** A single labelled on/off row for the Smart Browser Context settings group. */
+const CtxToggle: React.FC<{
+  label: string;
+  desc: string;
+  checked: boolean;
+  onChange: () => void;
+  /** Show a subtle amber "Experimental" chip next to the label. */
+  experimental?: boolean;
+  /**
+   * Mark the control as scaffolding for a not-yet-wired feature: shows a "Coming
+   * soon" chip, dims the row, and disables the switch so it can't promise
+   * behavior that doesn't exist yet. (The AI metadata classifier + JD/dev-docs
+   * auto-detect are built + tested but not yet wired into the live auto-context
+   * path — tracked as a follow-up.)
+   */
+  comingSoon?: boolean;
+}> = ({ label, desc, checked, onChange, experimental, comingSoon }) => (
+  <div className={`flex items-start justify-between gap-3 ${comingSoon ? 'opacity-55' : ''}`}>
+    <div className="min-w-0">
+      <div className="text-text-primary text-sm flex items-center gap-2">
+        {label}
+        {experimental && (
+          <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-[0.08em] bg-amber-500/15 text-amber-400 border border-amber-500/30">
+            Experimental
+          </span>
+        )}
+        {comingSoon && (
+          <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-[0.08em] bg-text-secondary/15 text-text-secondary border border-border-subtle">
+            Coming soon
+          </span>
+        )}
+      </div>
+      <div className="text-text-secondary text-xs mt-0.5 leading-relaxed">{desc}</div>
+    </div>
+    <button
+      type="button"
+      role="switch"
+      aria-checked={comingSoon ? false : checked}
+      aria-label={label}
+      disabled={comingSoon}
+      onClick={comingSoon ? undefined : onChange}
+      className={`flex-shrink-0 mt-0.5 relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+        comingSoon ? 'cursor-not-allowed bg-bg-item-active' : checked ? 'bg-blue-500' : 'bg-bg-item-active'
+      }`}
+    >
+      <span
+        className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+          !comingSoon && checked ? 'translate-x-4' : 'translate-x-0.5'
+        }`}
+      />
+    </button>
+  </div>
+);

@@ -501,7 +501,11 @@ function ResumeMatchPoster({ animateShimmer }: { animateShimmer: boolean }) {
 }
 
 
-export const NativelyProSettings: React.FC = () => {
+interface NativelyProSettingsProps {
+    initialIsPremium?: boolean | null;
+}
+
+export const NativelyProSettings: React.FC<NativelyProSettingsProps> = ({ initialIsPremium = null }) => {
     const prefersReducedMotion = useReducedMotion();
     const [interfaceTheme, setInterfaceTheme] = useState<MeetingInterfaceTheme>(() => {
         const theme = getMeetingInterfaceTheme();
@@ -525,21 +529,27 @@ export const NativelyProSettings: React.FC = () => {
     const [pricingProducts, setPricingProducts] = useState<Record<string, PricingProduct>>({});
 
 
-    // We fetch isPremium ourselves so SettingsOverlay doesn't need to pass it
-    const [isPremium, setIsPremium] = useState<boolean | null>(null);
+    const [isPremium, setIsPremium] = useState<boolean | null>(initialIsPremium);
 
     const refreshLicense = async () => {
         try {
             const details = await window.electronAPI?.licenseGetDetails?.();
-            setIsPremium(details?.isPremium ?? false);
+            if (details) {
+                setIsPremium(details.isPremium ?? false);
+            } else {
+                setIsPremium(prev => prev ?? false);
+            }
         } catch {
-            // fallback
             const check = window.electronAPI?.licenseCheckPremiumAsync ?? window.electronAPI?.licenseCheckPremium;
             if (check) {
-                const active = await check();
-                setIsPremium(active);
+                try {
+                    const active = await check();
+                    setIsPremium(active);
+                } catch {
+                    setIsPremium(prev => prev ?? false);
+                }
             } else {
-                setIsPremium(false);
+                setIsPremium(prev => prev ?? false);
             }
         }
     };
@@ -554,12 +564,18 @@ export const NativelyProSettings: React.FC = () => {
             .catch(() => {});
 
         // Optional: listen to license status changes if the main process sends them
-        const onStatusChanged = () => refreshLicense();
-        // @ts-ignore
-        if (window.electronAPI?.onLicenseStatusChanged) {
-            // @ts-ignore
-            window.electronAPI.onLicenseStatusChanged(onStatusChanged);
-        }
+        const onStatusChanged = (data?: { isPremium: boolean; plan?: string }) => {
+            if (data && typeof data.isPremium === 'boolean') {
+                setIsPremium(data.isPremium);
+            } else {
+                refreshLicense();
+            }
+        };
+        const removeLicenseListener = window.electronAPI?.onLicenseStatusChanged?.(onStatusChanged);
+
+        return () => {
+            removeLicenseListener?.();
+        };
     }, []);
 
     const handleActivate = async () => {

@@ -63,6 +63,8 @@ export interface ModeNoteSection {
     description: string;
     sortOrder: number;
     createdAt: string;
+    /** AI-compiled extraction instruction for this section (cached). Empty = use title+description. */
+    compiledPrompt?: string;
 }
 
 export const MODE_TEMPLATES: Array<{
@@ -82,51 +84,68 @@ export const MODE_TEMPLATES: Array<{
 // Default note sections seeded when a mode is created from a template
 export const TEMPLATE_NOTE_SECTIONS: Record<ModeTemplateType, Array<{ title: string; description: string }>> = {
     general: [
-        { title: 'Summary',      description: 'High-level summary of the conversation.' },
-        { title: 'Action items', description: 'Tasks and follow-ups identified.' },
-        { title: 'Key points',   description: 'Important points discussed.' },
-    ],
-    'looking-for-work': [
-        { title: 'Follow-up actions',      description: 'Next interview steps or additional materials I said I would send if applicable.' },
-        { title: 'Overview',               description: 'Overview of the interview, the company, and general structure.' },
-        { title: 'Questions and responses', description: 'All questions asked to me during the interview and answers that gave.' },
-        { title: 'Areas to improve',       description: 'What I could have done better during the interview.' },
-        { title: 'Role details',           description: 'Anything discussed about the position, salary expectations, etc.' },
-    ],
-    sales: [
-        { title: 'Action Items',         description: 'All action items that were said I would do after the meeting.' },
-        { title: 'Outcome',              description: 'Did I close the sale and what was the outcome of the conversation.' },
-        { title: 'Prospect background',  description: 'Background and context on who I was selling to.' },
-        { title: 'Discovery',            description: 'What the prospect said during discovery.' },
-        { title: 'Product',              description: "How I pitched the product and the prospect's reaction." },
-        { title: 'Objections',           description: 'Objections from the prospect if there were any.' },
-    ],
-    recruiting: [
-        { title: 'Action Items',          description: 'All action items that I have to do after the meeting.' },
-        { title: 'Experience and skills', description: "Candidate's previous work experience and skills discussed." },
-        { title: 'Quality of responses',  description: 'If there were questions asked, how well and how accurately the candidate answered each question.' },
-        { title: 'Interest in company',   description: 'What the candidate said about their interest in the company.' },
-        { title: 'Role expectations',     description: 'Anything discussed about the position, salary expectations, etc.' },
+        { title: 'What changed', description: 'Concrete outcomes, updates, or shifts from the meeting — not generic discussion.' },
+        { title: 'Decisions', description: 'Confirmed decisions only. Do not include options that were merely discussed.' },
+        { title: 'Action items', description: 'Follow-ups with owner/deadline when present. Mark unknown owner/deadline as absent.' },
+        { title: 'Open questions', description: 'Questions that remain unresolved, deferred, or need follow-up.' },
+        { title: 'Risks / blockers', description: 'Blockers, dependencies, privacy concerns, timeline risks, or unresolved constraints.' },
+        { title: 'Notes', description: 'Useful supporting context that does not fit a stronger outcome section.' },
     ],
     'team-meet': [
-        { title: 'Action Items',          description: 'All action items that were said I would do after the meeting.' },
-        { title: 'Announcements',         description: 'Any team-wide announcements from the meeting.' },
-        { title: 'Team updates',          description: "Each team member's progress, accomplishments, and current focus." },
-        { title: 'Challenges or blockers', description: 'Any issues or obstacles raised that may affect progress.' },
-        { title: 'Decisions made',        description: 'Key decisions or agreements reached during the meeting.' },
+        { title: 'Progress since last sync', description: 'Team member progress, shipped work, changed status, and notable updates.' },
+        { title: 'Decisions', description: 'Decisions and agreements reached by the team.' },
+        { title: 'Owners and next steps', description: 'Concrete next steps, owners, dependencies, and deadlines if stated.' },
+        { title: 'Blockers', description: 'Anything blocked, delayed, at risk, or requiring escalation.' },
+        { title: 'Dependencies', description: 'Cross-team handoffs, external dependencies, or sequencing constraints.' },
+        { title: 'Follow-up needed', description: 'Follow-ups that should happen after the meeting even if not assigned.' },
     ],
-    lecture: [
-        { title: 'Follow-up work',  description: 'Follow-up reading, assignments, or tasks to complete.' },
-        { title: 'Topic',           description: 'Main subject or theme of the lecture.' },
-        { title: 'Key concepts',    description: 'Core ideas or frameworks covered.' },
-        { title: 'Content',         description: 'All content from the lecture with incredibly detailed bullet notes.' },
+    sales: [
+        { title: 'Account context', description: 'Company, stakeholders, use case, team size, current workflow, and business context.' },
+        { title: 'Pain points', description: 'Customer pain, needs, current gaps, and why the problem matters.' },
+        { title: 'Buying signals', description: 'Positive intent, urgency, evaluation signals, pilot/trial interest, or expansion signals.' },
+        { title: 'Objections', description: 'Concerns about price, competitors, timing, security, procurement, or fit.' },
+        { title: 'Budget / timeline / authority', description: 'Budget, approval process, economic buyer, timeline, procurement, or decision criteria.' },
+        { title: 'Next steps', description: 'Specific sales follow-ups, owners, deadlines, and promised materials.' },
+        { title: 'Follow-up email', description: 'Facts that should be included in a concise customer follow-up email.' },
+    ],
+    recruiting: [
+        { title: 'Candidate profile', description: 'Candidate background, experience, current role, motivations, and logistics.' },
+        { title: 'Role fit', description: 'Evidence for or against fit with the role, team, and level.' },
+        { title: 'Strengths', description: 'Concrete strengths shown in answers or experience.' },
+        { title: 'Concerns', description: 'Risks, gaps, inconsistencies, or follow-up areas.' },
+        { title: 'Compensation / logistics', description: 'Compensation, notice period, availability, location, visa, timeline, or constraints.' },
+        { title: 'Next steps', description: 'Recruiting follow-ups, owners, deadlines, next interview stage, or materials.' },
+        { title: 'Follow-up draft', description: 'Information that should appear in the recruiter or candidate follow-up.' },
     ],
     'technical-interview': [
-        { title: 'Problems covered',  description: 'Each problem asked, the approach used, and the outcome.' },
-        { title: 'Concepts tested',   description: 'Key algorithms, data structures, or system design concepts that came up.' },
-        { title: 'What went well',    description: 'Approaches or explanations that landed well.' },
-        { title: 'Areas to study',    description: 'Topics or gaps identified that need more preparation.' },
-        { title: 'Action items',      description: 'Follow-up steps — e.g. send code, study specific topics, await next round.' },
+        { title: 'Problem discussed', description: 'Problem statement, constraints, clarifications, and target outcome.' },
+        { title: 'Approach', description: 'Candidate approach, algorithm, system design, alternatives, and tradeoffs.' },
+        { title: 'Correctness', description: 'Correctness reasoning, edge cases, bugs found, or unresolved correctness issues.' },
+        { title: 'Complexity', description: 'Time/space complexity, scaling assumptions, and performance tradeoffs.' },
+        { title: 'Code quality', description: 'Implementation quality, readability, structure, testing, and maintainability.' },
+        { title: 'Communication', description: 'How clearly the candidate explained reasoning and handled feedback.' },
+        { title: 'Strengths', description: 'Concrete positive signals from the interview.' },
+        { title: 'Weaknesses', description: 'Concrete gaps, missed cases, or areas to improve.' },
+        { title: 'Hiring signal', description: 'Overall hire/no-hire signal and evidence; avoid inventing a final decision.' },
+        { title: 'Follow-up', description: 'Next steps, additional questions, take-home, or interviewer follow-up.' },
+    ],
+    lecture: [
+        { title: 'Core concepts', description: 'Main concepts, frameworks, and claims from the lecture.' },
+        { title: 'Definitions', description: 'Terms, definitions, formulas, and distinctions introduced.' },
+        { title: 'Examples', description: 'Concrete examples, analogies, demonstrations, or case studies.' },
+        { title: 'Formulas / steps', description: 'Procedures, equations, workflows, or step-by-step methods.' },
+        { title: 'Things to memorize', description: 'Facts, definitions, formulas, or lists that should be memorized.' },
+        { title: 'Confusing points', description: 'Ambiguous or confusing ideas that need review.' },
+        { title: 'Questions to review', description: 'Open questions, exam prep prompts, or self-study questions.' },
+        { title: 'Study summary', description: 'Concise study-focused recap of what matters most.' },
+    ],
+    'looking-for-work': [
+        { title: 'Opportunity summary', description: 'Company, role, team, interview stage, and opportunity context.' },
+        { title: 'Company / role details', description: 'Role responsibilities, compensation, logistics, process, and requirements.' },
+        { title: 'Fit signals', description: 'Evidence that my experience or preferences fit the opportunity.' },
+        { title: 'Concerns', description: 'Risks, gaps, objections, or areas to prepare for.' },
+        { title: 'Referral / follow-up', description: 'Referral requests, thank-you notes, materials to send, or networking follow-up.' },
+        { title: 'Next steps', description: 'Concrete next steps, owners, dates, and preparation items.' },
     ],
 };
 
@@ -190,6 +209,7 @@ function rowToSection(row: any): ModeNoteSection {
         description: row.description ?? '',
         sortOrder: row.sort_order ?? 0,
         createdAt: row.created_at,
+        compiledPrompt: row.compiled_prompt || undefined,
     };
 }
 
@@ -337,6 +357,9 @@ export class ModesManager {
                 sortOrder: i,
             });
         });
+        // Compile extraction instructions for all seeded sections in parallel (fire-and-forget,
+        // bounded concurrency). Never blocks mode creation / UI.
+        this.compileAllSectionsAsync(id);
         return {
             id,
             name: params.name,
@@ -447,6 +470,9 @@ export class ModesManager {
             description: params.description,
             sortOrder,
         });
+        // Fire-and-forget: compile a tailored extraction instruction for this section so
+        // future summaries fill it faithfully. Never blocks the caller / UI.
+        this.compileSectionPromptAsync(id, params.modeId, params.title, params.description);
         return {
             id,
             modeId: params.modeId,
@@ -457,12 +483,95 @@ export class ModesManager {
         };
     }
 
-    public updateNoteSection(id: string, updates: { title?: string; description?: string }): void {
+    public updateNoteSection(id: string, updates: { title?: string; description?: string; compiledPrompt?: string }): void {
         DatabaseManager.getInstance().updateNoteSection(id, updates);
+        // If the section's meaning changed (title/description), recompile its instruction.
+        // Skip when we are only writing the compiledPrompt itself (avoids a loop).
+        if ((updates.title !== undefined || updates.description !== undefined) && updates.compiledPrompt === undefined) {
+            const owner = DatabaseManager.getInstance().getNoteSectionOwnerMode(id);
+            if (owner) {
+                this.compileSectionPromptAsync(id, owner.modeId, updates.title ?? owner.title, updates.description ?? owner.description);
+            }
+        }
     }
 
     public deleteNoteSection(id: string): void {
         DatabaseManager.getInstance().deleteNoteSection(id);
+    }
+
+    /**
+     * Compile + cache the AI extraction instruction for a section. Fire-and-forget;
+     * resolves silently. Requires an LLMHelper (set via setLlmHelperForCompiler); if absent
+     * or scope-denied, leaves compiled_prompt empty so the extractor uses title+description.
+     */
+    private compileSectionPromptAsync(sectionId: string, modeId: string, title: string, description: string): void {
+        void (async () => {
+            try {
+                const llmHelper = ModesManager.llmHelperForCompiler;
+                if (!llmHelper) return; // compiler not available in this context
+                // Scope gate: never call a cloud LLM for prompt compilation when post_call_summary
+                // is denied (the deterministic fallback covers it at summary time).
+                try {
+                    const { SettingsManager } = require('./SettingsManager');
+                    const scope = SettingsManager.getInstance().get('providerDataScopes');
+                    if (scope?.post_call_summary === false) return;
+                } catch { /* default allow */ }
+                const mode = this.getModes().find(m => m.id === modeId);
+                const { SectionPromptCompiler } = require('./meeting/SectionPromptCompiler');
+                const { instruction, compiled } = await new SectionPromptCompiler(llmHelper).compile({
+                    sectionTitle: title,
+                    sectionDescription: description,
+                    meetingMode: mode?.templateType,
+                });
+                if (compiled && instruction) {
+                    DatabaseManager.getInstance().updateNoteSection(sectionId, { compiledPrompt: instruction });
+                }
+            } catch (e) {
+                console.warn('[ModesManager] section prompt compile skipped (non-fatal):', (e as any)?.message);
+            }
+        })();
+    }
+
+    /**
+     * Compile extraction instructions for EVERY section of a mode, in parallel with bounded
+     * concurrency. Used when a custom mode is created (many sections at once). Fire-and-forget.
+     */
+    public compileAllSectionsAsync(modeId: string): void {
+        void (async () => {
+            try {
+                const llmHelper = ModesManager.llmHelperForCompiler;
+                if (!llmHelper) return;
+                try {
+                    const { SettingsManager } = require('./SettingsManager');
+                    if (SettingsManager.getInstance().get('providerDataScopes')?.post_call_summary === false) return;
+                } catch { /* default allow */ }
+                const mode = this.getModes().find(m => m.id === modeId);
+                const sections = this.getNoteSections(modeId).filter(s => !s.compiledPrompt || !s.compiledPrompt.trim());
+                if (sections.length === 0) return;
+                const { SectionPromptCompiler } = require('./meeting/SectionPromptCompiler');
+                const compiler = new SectionPromptCompiler(llmHelper);
+                const CONCURRENCY = 3;
+                let next = 0;
+                await Promise.all(Array.from({ length: Math.min(CONCURRENCY, sections.length) }, async () => {
+                    while (next < sections.length) {
+                        const s = sections[next++];
+                        try {
+                            const { instruction, compiled } = await compiler.compile({ sectionTitle: s.title, sectionDescription: s.description, meetingMode: mode?.templateType });
+                            if (compiled && instruction) DatabaseManager.getInstance().updateNoteSection(s.id, { compiledPrompt: instruction });
+                        } catch { /* per-section non-fatal */ }
+                    }
+                }));
+            } catch (e) {
+                console.warn('[ModesManager] compileAllSections skipped (non-fatal):', (e as any)?.message);
+            }
+        })();
+    }
+
+    private static llmHelperForCompiler: import('../LLMHelper').LLMHelper | null = null;
+
+    /** Wire the LLMHelper used by the async section-prompt compiler (called at startup). */
+    public static setLlmHelperForCompiler(llmHelper: import('../LLMHelper').LLMHelper): void {
+        ModesManager.llmHelperForCompiler = llmHelper;
     }
 
     public removeAllNoteSections(modeId: string): void {

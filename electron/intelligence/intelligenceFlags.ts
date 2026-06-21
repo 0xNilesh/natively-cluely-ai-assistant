@@ -44,6 +44,13 @@ export type IntelligenceFlagKey =
   | 'promptAssemblerV2'            // Phase 9
   | 'answerDiversityGuard'         // Phase 5 — wire AnswerDiversityGuard into delivery
   | 'meetingMemoryV2'              // Phase 10
+  | 'meetingSummaryV3'             // Chunked/schema-v3 post-meeting notes
+  | 'meetingModeAutoDetect'        // Meeting Notes V3 — detect mode from transcript/calendar
+  | 'followUpDraftV2'              // Meeting Notes V3 — LLM-based follow-up draft generator
+  | 'speakerLabelsV1'             // Meeting Notes V3 — editable speaker labels
+  | 'meetingNotesStructuredOutput' // Meeting Notes V3 — provider-native JSON where available
+  | 'meetingSummaryLlmPolish'      // Meeting Notes V3 — constrained LLM polish of the Summary
+  | 'speakerDiarizationV1'         // Meeting Notes V3 — provider (Deepgram) diarization, opt-in
   | 'globalSearchV2'               // Phase 11
   | 'inMeetingSearchV2'            // Phase 12
   | 'conversationMemoryV2'         // Phase 13 (same-session follow-ups)
@@ -80,6 +87,23 @@ const FLAGS: Record<IntelligenceFlagKey, FlagSpec> = {
   promptAssemblerV2: { env: 'NATIVELY_PROMPT_ASSEMBLER_V2', setting: 'promptAssemblerV2Enabled', default: false },
   answerDiversityGuard: { env: 'NATIVELY_ANSWER_DIVERSITY_GUARD', setting: 'answerDiversityGuardEnabled', default: false },
   meetingMemoryV2: { env: 'NATIVELY_MEETING_MEMORY_V2', setting: 'meetingMemoryV2Enabled', default: false },
+  // Meeting Notes V3 ships ON by default (product decision 2026-06-20). Each remains
+  // env/settings-overridable; set NATIVELY_MEETING_SUMMARY_V3=0 to revert to the legacy
+  // single-pass summary path. All paths keep a deterministic fallback and honor the
+  // post_call_summary data scope.
+  meetingSummaryV3: { env: 'NATIVELY_MEETING_SUMMARY_V3', setting: 'meetingSummaryV3Enabled', default: true },
+  meetingModeAutoDetect: { env: 'NATIVELY_MEETING_MODE_AUTODETECT', setting: 'meetingModeAutoDetectEnabled', default: true },
+  followUpDraftV2: { env: 'NATIVELY_FOLLOWUP_DRAFT_V2', setting: 'followUpDraftV2Enabled', default: true },
+  speakerLabelsV1: { env: 'NATIVELY_SPEAKER_LABELS_V1', setting: 'speakerLabelsV1Enabled', default: true },
+  // Provider-native JSON mode is not implemented (the validate→repair→fallback ladder makes
+  // it unnecessary for correctness); kept OFF as a reserved flag.
+  meetingNotesStructuredOutput: { env: 'NATIVELY_MEETING_NOTES_STRUCTURED_OUTPUT', setting: 'meetingNotesStructuredOutputEnabled', default: false },
+  // Constrained LLM polish of the Summary (note-content-only, "no new tokens" gated). ON by
+  // default — it can only improve readability and always falls back to the deterministic
+  // summary, so it never hallucinates or blocks.
+  meetingSummaryLlmPolish: { env: 'NATIVELY_MEETING_SUMMARY_LLM_POLISH', setting: 'meetingSummaryLlmPolishEnabled', default: true },
+  // Provider diarization (Deepgram) — opt-in; touches the realtime STT path so default OFF.
+  speakerDiarizationV1: { env: 'NATIVELY_SPEAKER_DIARIZATION_V1', setting: 'speakerDiarizationV1Enabled', default: false },
   globalSearchV2: { env: 'NATIVELY_GLOBAL_SEARCH_V2', setting: 'globalSearchV2Enabled', default: false },
   inMeetingSearchV2: { env: 'NATIVELY_IN_MEETING_SEARCH_V2', setting: 'inMeetingSearchV2Enabled', default: false },
   conversationMemoryV2: { env: 'NATIVELY_CONVERSATION_MEMORY_V2', setting: 'conversationMemoryV2Enabled', default: false },

@@ -14,9 +14,8 @@ POST http://127.0.0.1:<port>/dom?t=<token>
 | Field | Value |
 |-------|-------|
 | `port` | DEFAULT `4123`, probe range `4123..4134`. **Discovered at call time** by the extension via `GET /healthz` across the range — NOT stored as truth (the desktop port can drift between launches). The last-known port is kept only as a fast-path hint. |
-| `token` | 32-char base64url string (`crypto.randomBytes(24).toString('base64url')`). **Persisted on the desktop (encrypted) and stable across restarts** — the extension pairs once, not every launch. SHARED with phone-mirror pairing; regenerated only when the user clicks "Rotate token" (which forces exactly one deliberate re-pair). |
+| `token` | 32-char base64url string (`crypto.randomBytes(24).toString('base64url')`). The **extension token** is loopback-scoped, **persisted on the desktop (encrypted) and stable across restarts** — the extension pairs once, not every launch. It is **SEPARATE from the phone-mirror token** (the phone token is per-session and rides a plaintext-HTTP LAN QR; keeping them separate stops a sniffed LAN token from reaching `/dom`). `/dom` accepts ONLY the extension token; `/ws` accepts either. Regenerated only when the user clicks "Rotate token" (which cycles both and forces one deliberate extension re-pair). |
 | `Origin` header | The browser sets `chrome-extension://<id>` automatically. Required for the CORS response to be readable. The desktop echoes `Access-Control-Allow-Origin` for origins matching `^chrome-extension://[a-p]{32}$` (structural) for `/dom`; the one-click `/pair` endpoint requires the EXACT extension ID. |
-| `Origin` header | The browser sets `chrome-extension://<id>` automatically. Required for the CORS response to be readable. The desktop only echoes `Access-Control-Allow-Origin` for origins matching `^chrome-extension://[a-p]{32}$`. |
 | `Content-Type` | `application/json` |
 | Body | `{"dom": "<string>"}` — raw body hard cap **500,000 bytes** → `413` + socket destroyed. The server then truncates the string to **25,000 chars** (`DOM_CONTEXT_MAX_CHARS`). The extension caps at 25,000 chars before sending. |
 
@@ -44,9 +43,14 @@ Hands the extension the token with no copy-paste. Strictly gated:
 - **POST** (not GET — a Chrome MV3 service worker reliably sends `Origin` on POST but
   often omits it on GET, which would fail the exact-origin pin). **Loopback caller only**
   (never reachable off-box, even with `exposeOnLan`).
-- **Origin must EXACTLY equal** `chrome-extension://macjecgdfliikhplbbdbpljomcigjnjg` (the
-  pinned extension ID — not the structural `[a-p]{32}` check). A web page cannot forge a
-  `chrome-extension://` origin; a different extension won't match the exact ID.
+- **Origin must EXACTLY equal a pinned extension ID** (not the structural `[a-p]{32}`
+  check). The desktop pins TWO IDs because the Chrome Web Store **re-signs** the published
+  extension with Google's own key, giving it a DIFFERENT ID than the unpacked dev build:
+    - `chrome-extension://lmhgnkbjnelmciecjkleaomjpejcgaln` — Chrome Web Store build.
+    - `chrome-extension://macjecgdfliikhplbbdbpljomcigjnjg` — unpacked dev build
+      (deterministic from the manifest `key`).
+  Plus an optional `NATIVELY_DOM_EXTENSION_ID` override. A web page cannot forge a
+  `chrome-extension://` origin; a different extension won't match any pinned ID.
 - **Must be armed**: the user clicked "Connect browser extension" in Settings, which opens
   a 60-second window. **Single-use** — burns on first success.
 

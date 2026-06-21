@@ -39,10 +39,23 @@ export class DeepgramStreamingSTT extends EventEmitter {
     private keepAliveInterval: NodeJS.Timeout | null = null;
     private buffer: Buffer[] = [];
     private isConnecting = false;
+    // Opt-in provider diarization (#3). When on, Deepgram returns a per-word `speaker`
+    // index; we surface it as a canonical speakerId on the transcript event so multiple
+    // remote speakers can be distinguished. Default OFF — must never destabilize the
+    // realtime path for users who don't enable it.
+    private diarize = false;
 
     constructor(apiKey: string) {
         super();
         this.apiKey = apiKey;
+    }
+
+    /** Enable/disable provider diarization. Restarts the stream if active (it's a connect param). */
+    public setDiarization(enabled: boolean): void {
+        if (this.diarize === enabled) return;
+        this.diarize = enabled;
+        console.log(`[DeepgramStreaming] Diarization ${enabled ? 'enabled' : 'disabled'}`);
+        if (this.isActive) this.restartStream();
     }
 
     public setSampleRate(rate: number): void {
@@ -163,6 +176,8 @@ export class DeepgramStreamingSTT extends EventEmitter {
                 endpointing: 300,
                 utterance_end_ms: 1000,
                 vad_events: true,
+                // Opt-in: ask Deepgram to tag each word with a speaker index.
+                ...(this.diarize ? { diarize: true } : {}),
             });
 
             this.live.on(LiveTranscriptionEvents.Open, () => {
@@ -178,10 +193,20 @@ export class DeepgramStreamingSTT extends EventEmitter {
                         const isFinal = data.is_final ?? false;
                         console.log(`[DeepgramStreaming] Transcript event`, { final: isFinal, length: transcript?.length ?? 0 });
                         if (!transcript) return;
+                        // Opt-in diarization: derive the dominant speaker index across the words
+                        // in this result and surface it as a canonical id (speaker_<n+1>). Only
+                        // emitted when diarize is on AND a numeric speaker index is present, so
+                        // the default payload shape is byte-for-byte unchanged for everyone else.
+                        let speakerId: string | undefined;
+                        if (this.diarize) {
+                            const idx = dominantSpeakerIndex(alt?.words);
+                            if (idx !== undefined) speakerId = `speaker_${idx + 1}`;
+                        }
                         this.emit('transcript', {
                             text: transcript,
                             isFinal,
                             confidence: alt?.confidence ?? 1.0,
+                            ...(speakerId ? { speakerId } : {}),
                         });
                     } catch (err) {
                         console.error('[DeepgramStreaming] Parse error:', err);
@@ -282,4 +307,20 @@ export class DeepgramStreamingSTT extends EventEmitter {
             this.keepAliveInterval = null;
         }
     }
+}
+
+// Pick the most-frequent speaker index across a Deepgram result's words. Deepgram emits a
+// per-word integer `speaker` when diarize=true. Returns undefined when no numeric index is
+// present (diarization off, or pre-diarization SDK shape) so the caller omits speakerId.
+function dominantSpeakerIndex(words: any): number | undefined {
+    if (!Array.isArray(words) || words.length === 0) return undefined;
+    const counts = new Map<number, number>();
+    for (const w of words) {
+        const s = w?.speaker;
+        if (typeof s === 'number' && Number.isFinite(s) && s >= 0) counts.set(s, (counts.get(s) || 0) + 1);
+    }
+    if (counts.size === 0) return undefined;
+    let best = -1; let bestCount = -1;
+    for (const [idx, c] of counts) if (c > bestCount) { best = idx; bestCount = c; }
+    return best >= 0 ? best : undefined;
 }

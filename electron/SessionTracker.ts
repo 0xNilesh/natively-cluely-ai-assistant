@@ -8,6 +8,10 @@ import { isVerboseLogging } from './verboseLog';
 export interface TranscriptSegment {
     marker?: string;
     speaker: string;
+    // Optional canonical speaker id from provider diarization (e.g. "speaker_2"). Only set on
+    // the remote/system channel when diarization is enabled; the mic channel is always "me".
+    // Additive — summary normalization reads it when present, everything else ignores it.
+    speakerId?: string;
     text: string;
     timestamp: number;
     final: boolean;

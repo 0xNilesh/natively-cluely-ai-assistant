@@ -1,5 +1,17 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
+/**
+ * Metadata the companion extension sends with a captured page (drives the
+ * optional "Page context" chip). Mirrors DomCaptureMeta in PhoneMirrorService.
+ */
+interface DomCaptureMeta {
+  title?: string;
+  url?: string;
+  source?: string;
+  pageType?: string;
+  firstLine?: string;
+}
+
 // Types for the exposed Electron API
 interface ElectronAPI {
   updateContentDimensions: (dimensions: { width: number; height: number }) => Promise<void>;
@@ -300,7 +312,7 @@ interface ElectronAPI {
   generateWhatToSay: (
     question?: string,
     imagePaths?: string[],
-    options?: { promptInstruction?: string; domContext?: string },
+    options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: unknown },
   ) => Promise<{
     answer: string | null;
     question?: string;
@@ -861,7 +873,9 @@ interface ElectronAPI {
   // because a subsequent question's first token has to wait for the prior
   // response to drain through the supersession check.
   cancelChatStream: () => void;
-  onDomContextReceived: (callback: (dom: string) => void) => () => void;
+  onDomContextReceived: (
+    callback: (dom: string, meta?: DomCaptureMeta, envelope?: unknown) => void,
+  ) => () => void;
 }
 
 export const PROCESSING_EVENTS = {
@@ -1086,8 +1100,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   phoneMirrorSetLan: (exposeOnLan: boolean) =>
     ipcRenderer.invoke('phone-mirror:set-lan', exposeOnLan),
   phoneMirrorRotateToken: () => ipcRenderer.invoke('phone-mirror:rotate-token'),
+  phoneMirrorArmExtension: () => ipcRenderer.invoke('phone-mirror:arm-extension'),
+  phoneMirrorListTabs: () => ipcRenderer.invoke('phone-mirror:list-tabs'),
+  phoneMirrorCaptureTab: (tabId: number) => ipcRenderer.invoke('phone-mirror:capture-tab', tabId),
+  phoneMirrorRequestAutoContext: () => ipcRenderer.invoke('phone-mirror:request-auto-context'),
   phoneMirrorPushScreenshot: (screenshotPath?: string) =>
     ipcRenderer.invoke('phone-mirror:push-screenshot', screenshotPath),
+  // Smart Browser Context v2 — auto-capture settings.
+  browserContextGetSettings: () => ipcRenderer.invoke('browser-context:get-settings'),
+  browserContextSetSettings: (patch: Record<string, boolean>) =>
+    ipcRenderer.invoke('browser-context:set-settings', patch),
   onPhoneMirrorStatus: (callback: (info: any) => void) => {
     const subscription = (_: any, info: any) => callback(info);
     ipcRenderer.on('phone-mirror:status', subscription);
@@ -1385,7 +1407,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   generateWhatToSay: (
     question?: string,
     imagePaths?: string[],
-    options?: { promptInstruction?: string; domContext?: string },
+    options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: unknown },
   ) => ipcRenderer.invoke('generate-what-to-say', question, imagePaths, options),
   generateClarify: () => ipcRenderer.invoke('generate-clarify'),
   generateCodeHint: (imagePaths?: string[], problemStatement?: string) =>
@@ -1448,6 +1470,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('update-meeting-title', { id, title }),
   updateMeetingSummary: (id: string, updates: any) =>
     ipcRenderer.invoke('update-meeting-summary', { id, updates }),
+  regenerateMeetingSummary: (id: string, opts?: { templateType?: string; tone?: 'professional' | 'warm' | 'concise' | 'friendly' }) =>
+    ipcRenderer.invoke('regenerate-meeting-summary', { id, templateType: opts?.templateType, tone: opts?.tone }),
+  regenerateMeetingFollowUp: (id: string, tone?: 'professional' | 'warm' | 'concise' | 'friendly') =>
+    ipcRenderer.invoke('regenerate-meeting-followup', { id, tone }),
+  updateMeetingSpeakerLabels: (id: string, labels: Record<string, string>) =>
+    ipcRenderer.invoke('update-meeting-speaker-labels', { id, labels }),
   deleteMeeting: (id: string) => ipcRenderer.invoke('delete-meeting', id),
 
   onMeetingsUpdated: (callback: () => void) => {
@@ -2204,8 +2232,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   cancelChatStream: () => {
     ipcRenderer.send('gemini-chat-stream-stop');
   },
-  onDomContextReceived: (callback: (dom: string) => void) => {
-    const subscription = (_: any, dom: string) => callback(dom);
+  onDomContextReceived: (
+    callback: (dom: string, meta?: DomCaptureMeta, envelope?: unknown) => void,
+  ) => {
+    // The desktop sends (dom, meta?, envelope?) — meta drives the "Page context"
+    // chip, envelope (Smart Browser Context v2) carries the structured capture.
+    // Forwarding the extra args is back-compatible: existing callers that only
+    // declare (dom) or (dom, meta) simply ignore the trailing arg(s).
+    const subscription = (_: any, dom: string, meta?: DomCaptureMeta, envelope?: unknown) =>
+      callback(dom, meta, envelope);
     ipcRenderer.on('dom-context-received', subscription);
     return () => {
       ipcRenderer.removeListener('dom-context-received', subscription);

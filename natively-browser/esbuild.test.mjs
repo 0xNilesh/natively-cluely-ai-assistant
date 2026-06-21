@@ -18,6 +18,15 @@ await build({
   entryPoints: [
     path.join(rootDir, 'src', 'extract.ts'),
     path.join(rootDir, 'src', 'service-worker.ts'),
+    // Smart Browser Context v2 pure modules (registry + classifier + extractors).
+    path.join(rootDir, 'src', 'capture', 'registry', 'registry.ts'),
+    path.join(rootDir, 'src', 'capture', 'classifier', 'signal-scorer.ts'),
+    path.join(rootDir, 'src', 'capture', 'classifier', 'sensitive-page-detector.ts'),
+    path.join(rootDir, 'src', 'capture', 'classifier', 'tab-classifier.ts'),
+    path.join(rootDir, 'src', 'capture', 'permissions.ts'),
+    path.join(rootDir, 'src', 'capture', 'extractors', 'index.ts'),
+    path.join(rootDir, 'src', 'capture', 'smart-capture.ts'),
+    path.join(rootDir, 'src', 'capture', 'page-signals.ts'),
   ],
   bundle: true,
   outdir: path.join(rootDir, 'dist-test'),
