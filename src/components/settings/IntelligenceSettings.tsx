@@ -446,8 +446,9 @@ export const IntelligenceSettings: React.FC = () => {
                 Requires Python 3.11 or later. Your AI provider key (from the AI Providers screen) is used automatically — no extra key needed.
               </li>
               <li>
-                <span className="font-medium text-text-primary">2. Start it.</span> Keep this running while you use the app:
-                <code className="mt-1 block rounded-md border border-border-subtle bg-bg-main px-2.5 py-2 font-mono text-[11px] text-text-primary">hindsight serve --port 8888</code>
+                <span className="font-medium text-text-primary">2. Start it.</span> From the Natively project folder, run the bundled launcher and keep it running while you use the app:
+                <code className="mt-1 block rounded-md border border-border-subtle bg-bg-main px-2.5 py-2 font-mono text-[11px] text-text-primary">bash scripts/hindsight-start.sh</code>
+                This starts the embedded memory server on port 8888 and wires your AI provider chain automatically.
               </li>
               <li><span className="font-medium text-text-primary">3. Paste the address below</span> (the local default is already filled in), then press Save.</li>
             </ol>

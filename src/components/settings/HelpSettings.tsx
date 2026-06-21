@@ -1900,8 +1900,8 @@ hindsight-api`}
                                     Quickly start a local developer instance using the scripts packaged with Natively:
                                 </p>
                                 <ol className="text-[11px] text-text-secondary space-y-1 list-decimal pl-4">
-                                    <li>Install Python dependencies: <code className="bg-bg-elevated px-1 font-mono text-[10px]">pip install sentence-transformers chromadb fastapi uvicorn</code>.</li>
-                                    <li>Run the startup script: <code className="bg-bg-elevated px-1 font-mono text-[10px]">./scripts/hindsight-start.sh</code>.</li>
+                                    <li>Install the embedded server package (Python 3.11+): <code className="bg-bg-elevated px-1 font-mono text-[10px]">pip install hindsight-all</code> (Intel Macs: <code className="bg-bg-elevated px-1 font-mono text-[10px]">hindsight-all-slim</code>).</li>
+                                    <li>From the Natively project folder, run the bundled launcher: <code className="bg-bg-elevated px-1 font-mono text-[10px]">bash scripts/hindsight-start.sh</code>. It starts the embedded memory server (bundled Postgres + pgvector, no Docker) on port 8888 and wires your AI provider chain + fallback automatically.</li>
                                     <li>Set Natively Base URL to <code className="bg-bg-elevated px-1 font-mono text-[10px]">http://localhost:8888</code> and toggle on memory.</li>
                                 </ol>
                             </div>
