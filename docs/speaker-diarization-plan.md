@@ -40,9 +40,28 @@ Implemented in `electron/services/meeting/SpeakerLabelService.ts` +
 - **UI (Phase 12):** rename speaker, apply to all matching segments, regenerate notes with
   labels, show names in transcript + evidence.
 
-## 3. Provider diarization integration (future)
+## 3. Provider diarization integration — Deepgram (IMPLEMENTED, opt-in 2026-06-21)
 
-When we enable a diarizing STT provider:
+Shipped behind flag `speakerDiarizationV1` (default OFF), isolated to the STT adapter so it
+can never destabilize the realtime path for users who don't enable it:
+
+- `DeepgramStreamingSTT.setDiarization(true)` adds `diarize: true` to the live connect config.
+  `dominantSpeakerIndex(words)` picks the most-frequent per-word `speaker` integer in each
+  result and emits `speakerId: "speaker_<n+1>"` on the transcript event (omitted when off / no
+  index present, so the default payload is byte-for-byte unchanged).
+- `main.ts createSTTProvider`: enables diarization ONLY on the `interviewer` (system) channel
+  — the mic channel is always `me`, so diarizing it adds cost with no benefit.
+- `TranscriptSegment.speakerId` (additive optional) carries it through
+  `handleTranscript → SessionTracker.fullTranscript → snapshot → V3 normalizer`.
+- `TranscriptNormalizer`: a provider `speakerId` **wins** over the channel-derived id and sets
+  the display name (`speaker_2` → "Speaker 2"), so multiple remote speakers are distinguished;
+  user renames still override (resolved at render via `SpeakerLabelService`).
+- Tests: diarized-id precedence + back-compat (no id → unchanged) in `MeetingNotesV3.test.mjs`.
+
+Remaining for full parity: per-speaker confidence → `sourceQuality.speakerQuality`, and
+mapping provider ids stably across reconnects within one meeting.
+
+### When we enable any other diarizing STT provider:
 
 - **Deepgram:** `diarize=true` (and/or `multichannel=true`) returns `speaker: <int>` per word.
   Map provider speaker int → canonical `speaker_<n>`; keep provider speaker confidence.

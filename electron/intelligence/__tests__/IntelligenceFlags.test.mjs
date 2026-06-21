@@ -14,16 +14,35 @@ import {
 const ENV_KEYS = [
   'NATIVELY_INTELLIGENCE_TRACE', 'NATIVELY_DURABLE_MEMORY_WINDOW', 'NATIVELY_INTELLIGENCE_OS',
   'NATIVELY_PROFILE_TREE_V2', 'NATIVELY_CONTEXT_ROUTER_V2', 'NATIVELY_LIVE_TRANSCRIPT_BRAIN',
-  'NATIVELY_ANSWER_DIVERSITY_GUARD', 'NATIVELY_HINDSIGHT_MEMORY', 'NATIVELY_HINDSIGHT_LIVE_RECALL',
+  'NATIVELY_PROMPT_ASSEMBLER_V2', 'NATIVELY_ANSWER_DIVERSITY_GUARD', 'NATIVELY_MEETING_MEMORY_V2',
+  'NATIVELY_MEETING_SUMMARY_V3', 'NATIVELY_MEETING_MODE_AUTODETECT', 'NATIVELY_FOLLOWUP_DRAFT_V2',
+  'NATIVELY_SPEAKER_LABELS_V1', 'NATIVELY_MEETING_NOTES_STRUCTURED_OUTPUT',
+  'NATIVELY_MEETING_SUMMARY_LLM_POLISH', 'NATIVELY_SPEAKER_DIARIZATION_V1',
+  'NATIVELY_GLOBAL_SEARCH_V2', 'NATIVELY_IN_MEETING_SEARCH_V2', 'NATIVELY_CONVERSATION_MEMORY_V2',
+  'NATIVELY_LECTURE_INTELLIGENCE_V2', 'NATIVELY_DIAGRAM_INTELLIGENCE', 'NATIVELY_HINDSIGHT_MEMORY',
+  'NATIVELY_HINDSIGHT_LIVE_RECALL', 'NATIVELY_HINDSIGHT_POST_MEETING_RETAIN',
 ];
 
-// The full flag set from the prompt — every one must be present and default OFF.
+// The full flag set — Meeting Notes V3 product flags intentionally ship default ON;
+// the rest remain additive/opt-in default OFF.
 const ALL_FLAG_KEYS = [
   'trace', 'durableMemoryWindow', 'intelligenceOsEnabled', 'profileTreeV2', 'contextRouterV2',
   'liveTranscriptBrain', 'promptAssemblerV2', 'answerDiversityGuard', 'meetingMemoryV2',
+  'meetingSummaryV3', 'meetingModeAutoDetect', 'followUpDraftV2', 'speakerLabelsV1',
+  'meetingNotesStructuredOutput', 'meetingSummaryLlmPolish', 'speakerDiarizationV1',
   'globalSearchV2', 'inMeetingSearchV2', 'conversationMemoryV2', 'lectureIntelligenceV2', 'diagramIntelligence',
   'hindsightMemory', 'hindsightLiveRecall', 'hindsightPostMeetingRetain',
 ];
+
+const DEFAULT_ON_KEYS = new Set([
+  'meetingSummaryV3',
+  'meetingModeAutoDetect',
+  'followUpDraftV2',
+  'speakerLabelsV1',
+  'meetingSummaryLlmPolish',
+]);
+
+const expectedDefault = (key) => DEFAULT_ON_KEYS.has(key) ? true : false;
 
 function clearEnv() {
   for (const k of ENV_KEYS) delete process.env[k];
@@ -34,12 +53,12 @@ describe('intelligenceFlags', () => {
   beforeEach(clearEnv);
   afterEach(clearEnv);
 
-  test('every flag defaults OFF (additive, opt-in)', () => {
+  test('every flag resolves to its documented default', () => {
     assert.equal(isIntelligenceTraceEnabled(), false);
     assert.equal(isDurableMemoryWindowEnabled(), false);
     assert.equal(isIntelligenceOsEnabled(), false);
     for (const key of ALL_FLAG_KEYS) {
-      assert.equal(isIntelligenceFlagEnabled(key), false, `flag ${key} must default OFF`);
+      assert.equal(isIntelligenceFlagEnabled(key), expectedDefault(key), `flag ${key} default mismatch`);
     }
   });
 
@@ -47,7 +66,7 @@ describe('intelligenceFlags', () => {
     const snap = intelligenceFlagSnapshot();
     for (const key of ALL_FLAG_KEYS) {
       assert.ok(key in snap, `snapshot missing flag: ${key}`);
-      assert.equal(snap[key], false);
+      assert.equal(snap[key], expectedDefault(key));
     }
     // Snapshot must not invent extra keys.
     assert.equal(Object.keys(snap).length, ALL_FLAG_KEYS.length);
@@ -91,8 +110,7 @@ describe('intelligenceFlags', () => {
 
   test('snapshot reflects resolved state', () => {
     const snap0 = intelligenceFlagSnapshot();
-    // All flags default OFF.
-    for (const v of Object.values(snap0)) assert.equal(v, false);
+    for (const [key, val] of Object.entries(snap0)) assert.equal(val, expectedDefault(key));
     process.env.NATIVELY_INTELLIGENCE_TRACE = 'on';
     __resetIntelligenceFlagsCache();
     const snap1 = intelligenceFlagSnapshot();

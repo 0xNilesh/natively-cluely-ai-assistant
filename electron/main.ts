@@ -415,6 +415,7 @@ import { loadNativeModule } from "./audio/nativeModuleLoader"
 import { GoogleSTT } from "./audio/GoogleSTT"
 import { RestSTT } from "./audio/RestSTT"
 import { DeepgramStreamingSTT } from "./audio/DeepgramStreamingSTT"
+import { isIntelligenceFlagEnabled } from "./intelligence/intelligenceFlags"
 import { SonioxStreamingSTT } from "./audio/SonioxStreamingSTT"
 import { ElevenLabsStreamingSTT } from "./audio/ElevenLabsStreamingSTT"
 import { OpenAIStreamingSTT } from "./audio/OpenAIStreamingSTT"
@@ -1616,7 +1617,16 @@ export class AppState {
       const apiKey = CredentialsManager.getInstance().getDeepgramApiKey();
       if (apiKey) {
         console.log(`[Main] Using DeepgramStreamingSTT for ${speaker}`);
-        stt = new DeepgramStreamingSTT(apiKey);
+        const dg = new DeepgramStreamingSTT(apiKey);
+        // Opt-in diarization (#3): only on the remote/system channel ('interviewer'), where
+        // multiple people may speak. The mic channel is always the local user ('me'), so
+        // diarizing it adds cost with no benefit. Default OFF via flag.
+        try {
+          if (speaker === 'interviewer' && isIntelligenceFlagEnabled('speakerDiarizationV1')) {
+            dg.setDiarization(true);
+          }
+        } catch { /* flag read non-fatal */ }
+        stt = dg;
       } else {
         console.warn(`[Main] No API key for Deepgram STT, falling back to GoogleSTT`);
         stt = new GoogleSTT(speaker);
@@ -1702,7 +1712,7 @@ export class AppState {
     stt.setRecognitionLanguage(sttLanguage);
 
     // Wire Transcript Events
-    stt.on('transcript', (segment: { text: string, isFinal: boolean, confidence: number }) => {
+    stt.on('transcript', (segment: { text: string, isFinal: boolean, confidence: number, speakerId?: string }) => {
       // Accept transcripts while a meeting is active OR while we're draining
       // trailing finals after Stop. `_isDraining` covers the ~250 ms grace
       // window between Stop click and STT socket close so the user's last
@@ -1713,6 +1723,7 @@ export class AppState {
 
       this.intelligenceManager.handleTranscript({
         speaker: speaker,
+        ...(segment.speakerId ? { speakerId: segment.speakerId } : {}),
         text: segment.text,
         timestamp: Date.now(),
         final: segment.isFinal,
@@ -1730,6 +1741,7 @@ export class AppState {
 
       const payload = {
         speaker: speaker,
+        ...(segment.speakerId ? { speakerId: segment.speakerId } : {}),
         text: segment.text,
         timestamp: Date.now(),
         final: segment.isFinal,

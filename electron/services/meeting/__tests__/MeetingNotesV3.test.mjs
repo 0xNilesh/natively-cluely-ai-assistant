@@ -479,3 +479,28 @@ test('SummaryPolisher returns null when there is nothing to polish', async () =>
   const out = await new SummaryPolisher(llm).polish({ deterministicSummary: [], decisions: [], actionItems: [], risks: [], sections: [] });
   assert.equal(out, null);
 });
+
+// ── Provider diarization (#3): diarized speakerId precedence ─────────────────
+
+test('normalizer: provider speakerId wins over channel mapping and sets display name', () => {
+  const t = [
+    { speaker: 'interviewer', speakerId: 'speaker_2', text: 'I run product here.', timestamp: 0, final: true },
+    { speaker: 'interviewer', speakerId: 'speaker_3', text: 'And I lead engineering.', timestamp: 5000, final: true },
+    { speaker: 'user', text: 'Great to meet you both.', timestamp: 10000, final: true },
+  ];
+  const normalized = new TranscriptNormalizer().normalize(t);
+  assert.equal(normalized.segments[0].speakerId, 'speaker_2');
+  assert.equal(normalized.segments[0].speaker, 'Speaker 2');
+  assert.equal(normalized.segments[1].speakerId, 'speaker_3');
+  assert.equal(normalized.segments[1].speaker, 'Speaker 3');
+  assert.equal(normalized.segments[2].speakerId, 'me'); // mic channel unchanged
+  // Three distinct speakers now resolvable (diarization split the remote channel).
+  assert.equal(new Set(normalized.segments.map(s => s.speakerId)).size, 3);
+});
+
+test('normalizer: without speakerId, channel mapping is unchanged (back-compat)', () => {
+  const t = [{ speaker: 'interviewer', text: 'hello', timestamp: 0, final: true }];
+  const normalized = new TranscriptNormalizer().normalize(t);
+  assert.equal(normalized.segments[0].speakerId, 'speaker_1');
+  assert.equal(normalized.segments[0].speaker, 'Speaker 1');
+});

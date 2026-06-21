@@ -352,9 +352,17 @@ interface SettingsOverlayProps {
     isOpen: boolean;
     onClose: () => void;
     initialTab?: string;
+    initialIsPremium?: boolean | null;
+    initialHasNativelyKey?: boolean;
 }
 
-const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, initialTab = 'general' }) => {
+const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
+    isOpen,
+    onClose,
+    initialTab = 'general',
+    initialIsPremium = null,
+    initialHasNativelyKey = false,
+}) => {
     const isLight = useResolvedTheme() === 'light';
     const [activeTab, setActiveTab] = useState(initialTab);
 
@@ -849,7 +857,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     const [sttSaving, setSttSaving] = useState(false);
     const [sttSaved, setSttSaved] = useState(false);
     const [googleServiceAccountPath, setGoogleServiceAccountPath] = useState<string | null>(null);
-    const [hasNativelyKey, setHasNativelyKey] = useState(false);
+    const [hasNativelyKey, setHasNativelyKey] = useState(initialHasNativelyKey);
     const [hasStoredSttGroqKey, setHasStoredSttGroqKey] = useState(false);
     const [hasStoredSttOpenaiKey, setHasStoredSttOpenaiKey] = useState(false);
     const [hasStoredDeepgramKey, setHasStoredDeepgramKey] = useState(false);
@@ -2080,10 +2088,10 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                 <SkillsSettings />
                             )}
                             {activeTab === 'natively-api' && (
-                                <NativelyApiSettings />
+                                <NativelyApiSettings initialIsSaved={hasNativelyKey} />
                             )}
                             {activeTab === 'natively-pro' && (
-                                <NativelyProSettings />
+                                <NativelyProSettings initialIsPremium={initialIsPremium} />
                             )}
                             {activeTab === 'keybinds' && (
                                 <div className="space-y-5 animated fadeIn select-text pb-4">

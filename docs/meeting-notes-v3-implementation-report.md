@@ -166,6 +166,32 @@ Per product direction, the notes layout is driven by the **mode's note-section t
   outcome-first Summary, deterministic compiler guardrails, compiler LLM-vs-fallback). Suite
   now **47/47** meeting-notes + 13/13 DB/post-call.
 
+## 13c. Post-review quality work (2026-06-21)
+
+Three follow-ups requested ("do all three"):
+
+**#1 — Constrained LLM Summary polish** (`SummaryPolisher.ts`, flag `meetingSummaryLlmPolish`,
+default ON). One LLM call rewrites the grounded deterministic Summary into clean outcome-first
+prose, over **note content only** (never transcript). A hard "no new tokens" gate
+(`newSignificantTokens`) rejects any output that introduces a name/number/date/proper-noun not
+present in the grounded input; on rejection the deterministic Summary is kept. The LLM can
+never hallucinate, worsen, or block the Summary. +6 unit tests incl. the hallucination gate.
+**This is the answer to "isn't an LLM summary better?" — yes for readability, but only as a
+constrained polish over grounded facts, which is what this does.**
+
+**#2 — Live-transcript eval** (`benchmarks/meeting-notes/`, `npm run eval:meeting-notes`). Runs
+the REAL pipeline against a REAL model (gemini-3.1-flash-lite) on 4 realistic fixtures (sales
+discovery, 60-min team sync, job interview, no-action catch-up), scoring faithfulness
+(forbidden never-occurred facts must not appear), begin/middle/end coverage, section-fill, and
+no-fabricated-actions. **Result (2026-06-21): 41–43/43 checks, ZERO hallucinations across runs.**
+Summaries read at Granola level (outcome-first, correct owners/deadlines, honest "no action
+items" when none exist). The 2 intermittent misses are scorer-strictness synonyms (model wrote
+"project management" for "payments migration"), not content loss. Aborts cleanly with no key.
+
+**#3 — Provider diarization** (Deepgram, flag `speakerDiarizationV1`, default OFF). See §6 +
+`speaker-diarization-plan.md` — opt-in, isolated to the STT adapter, splits remote speakers
+into `speaker_1..n`; never destabilizes the realtime path.
+
 ## 14. Remaining work to fully outperform Granola/Otter/Fireflies
 1. Live-Gemini end-to-end quality eval + golden before/after corpus.
 2. Provider diarization (Deepgram `diarize`) → real multi-speaker remote labels.

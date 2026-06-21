@@ -75,9 +75,13 @@ function buildChunkPrompt(params: {
       }).join('\n')
     : '';
 
+  // Each section value is an array of finding OBJECTS so section bullets carry the same
+  // evidence (speaker + timestamp + quote) as decisions/actions. Omit a section's key when
+  // this chunk has nothing for it.
+  const findingShape = `{ "text": "one-sentence finding grounded in this chunk", "evidence": [{ "speakerName": "speaker", "timestampMs": 0, "quote": "short verbatim quote" }], "confidence": "high" }`;
   const sectionKeysHint = sectionList.length > 0
-    ? `{ ${sectionList.map(s => `"${s.title.replace(/"/g, "'")}": ["one-sentence bullet grounded in the transcript, or omit this key if not discussed in this chunk"]`).join(', ')} }`
-    : `{ "Section title": ["bullet"] }`;
+    ? `{\n${sectionList.map(s => `    "${s.title.replace(/"/g, "'")}": [${findingShape}]`).join(',\n')}\n  }`
+    : `{ "Section title": [${findingShape}] }`;
 
   const systemPrompt = `You are a meticulous meeting note-taker extracting grounded notes from ONE chronological transcript chunk. The transcript appears in the user message; read it first, then extract.
 ${params.modeContextBlock || ''}
@@ -86,7 +90,7 @@ MEETING MODE: ${params.modeTemplateType || 'general'}
 CHUNK: ${params.chunk.chunkIndex + 1} of ${params.totalChunks}
 TIME RANGE: ${formatMs(params.chunk.timeRange.startMs)} - ${formatMs(params.chunk.timeRange.endMs)}
 
-${sectionGuidance ? `YOUR PRIMARY TASK — fill these EXACT note sections faithfully. For each, follow its instruction. Put findings under "modeSpecificFindings" keyed by the EXACT section title shown. OMIT a section's key entirely if this chunk contains nothing for it (do not output an empty bullet, a placeholder, or "Not discussed"):
+${sectionGuidance ? `YOUR PRIMARY TASK — fill these EXACT note sections faithfully. For each, follow its instruction. Put findings under "modeSpecificFindings" keyed by the EXACT section title shown. Each finding is an object with "text" and "evidence" (speaker + timestampMs + a short verbatim quote from this chunk). OMIT a section's key entirely if this chunk contains nothing for it (do not output an empty bullet, a placeholder, or "Not discussed"):
 
 ${sectionGuidance}
 ` : ''}GROUNDING RULES (non-negotiable):

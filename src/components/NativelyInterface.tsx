@@ -2375,6 +2375,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     if (!window.electronAPI?.onSessionReset) return;
     const unsubscribe = window.electronAPI.onSessionReset(() => {
       console.log('[NativelyInterface] Resetting session state...');
+      window.electronAPI?.cancelChatStream?.();
+      chatStreamIdRef.current = null;
+      requestStartTimeRef.current = null;
       setMessages([]);
       eagerCodeExpansionHoldRef.current = false;
       answerPanelPinnedRef.current = false;
@@ -3329,16 +3332,17 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     );
 
     cleanups.push(
+      window.electronAPI.onIntelligenceManualStarted(() => {
+        setIsExpanded(true);
+        setIsProcessing(true);
+        prepareIntelligenceStreamPlaceholder('chat');
+      }),
+    );
+
+    cleanups.push(
       window.electronAPI.onIntelligenceManualResult((data) => {
         setIsProcessing(false);
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: genMessageId(),
-            role: 'system',
-            text: `🎯 **Answer:**\n\n${data.answer}`,
-          },
-        ]);
+        finalizeStreamingByIntent('chat', `🎯 **Answer:**\n\n${data.answer}`);
       }),
     );
 
@@ -3362,7 +3366,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       }
       cleanups.forEach((fn) => fn());
     };
-  }, [queueToken, flushToken, applyRollingPartialPreview, flushRollingPartialPreview, pinAnswerPanel, finalizeStreamingByIntent]);
+  }, [queueToken, flushToken, applyRollingPartialPreview, flushRollingPartialPreview, pinAnswerPanel, finalizeStreamingByIntent, prepareIntelligenceStreamPlaceholder]);
 
   // Stable mount-only effect for screenshot listeners.
   // These MUST NOT be inside the [isExpanded] effect — when a screenshot is
@@ -4174,6 +4178,7 @@ Provide only the answer, nothing else.`;
     lastManualSubmitRef.current = { text: userText, atMs: nowMs };
 
     const currentAttachments = attachedContext;
+    const conversationContextForSubmit = buildConversationContextFromMessages(messages);
 
     // Clear inputs immediately
     setInputValue('');
@@ -4261,7 +4266,7 @@ Provide only the answer, nothing else.`;
       await window.electronAPI.streamGeminiChat(
         userText || 'Analyze this screenshot',
         currentAttachments.length > 0 ? currentAttachments.map((s) => s.path) : undefined,
-        conversationContext, // Pass context so "answer this" works
+        conversationContextForSubmit, // Pass freshly-derived context so "answer this" works
       );
     } catch (err) {
       setIsProcessing(false);
@@ -4295,11 +4300,7 @@ Provide only the answer, nothing else.`;
   handleManualSubmitRef.current = handleManualSubmit;
 
   const clearChat = () => {
-    setMessages([]);
-    answerPanelPinnedRef.current = false;
-    setAnswerPanelPinned(false);
-    lastManualSubmitRef.current = null;
-    manualSubmitInFlightRef.current = false;
+    resetChatState();
   };
 
   // PERF: useCallback so MessageRow's memo comparator can rely on a stable
@@ -4890,12 +4891,10 @@ Provide only the answer, nothing else.`;
     processScreenshots: handleWhatToSay,
     resetCancel: async () => {
       if (isProcessing) {
-        setIsProcessing(false);
+        cancelActiveChatStream();
       } else {
         await window.electronAPI.resetIntelligence();
-        setMessages([]);
-        answerPanelPinnedRef.current = false;
-        setAnswerPanelPinned(false);
+        resetChatState();
         setAttachedContext([]);
         setInputValue('');
       }
@@ -4933,12 +4932,10 @@ Provide only the answer, nothing else.`;
     processScreenshots: handleWhatToSay,
     resetCancel: async () => {
       if (isProcessing) {
-        setIsProcessing(false);
+        cancelActiveChatStream();
       } else {
         await window.electronAPI.resetIntelligence();
-        setMessages([]);
-        answerPanelPinnedRef.current = false;
-        setAnswerPanelPinned(false);
+        resetChatState();
         setAttachedContext([]);
         setInputValue('');
       }

@@ -37,6 +37,15 @@ export function canonicalSpeaker(speaker?: string): { speaker: string; speakerId
   return { speaker: raw, speakerId: id, uncertainSpeaker: raw.length <= 2 };
 }
 
+// Default display name for a canonical speaker id (e.g. "speaker_2" → "Speaker 2"). Falls
+// back to the channel-derived name for ids that aren't the speaker_N shape.
+function displayNameForId(speakerId: string, fallback: string): string {
+  if (speakerId === 'me') return 'Me';
+  const m = /^speaker_(\d+)$/.exec(speakerId);
+  if (m) return `Speaker ${m[1]}`;
+  return fallback;
+}
+
 function isInterimNoise(text: string): boolean {
   const stripped = text.toLowerCase().replace(/[\s.,!?;:]/g, '');
   if (!stripped) return true;
@@ -62,7 +71,13 @@ export class TranscriptNormalizer {
         continue;
       }
 
-      const { speaker, speakerId, uncertainSpeaker } = canonicalSpeaker(raw?.speaker);
+      const base = canonicalSpeaker(raw?.speaker);
+      const uncertainSpeaker = base.uncertainSpeaker;
+      // Provider diarization id (e.g. "speaker_2") wins over the channel-derived id, and its
+      // display name follows from it ("Speaker 2") rather than the channel default.
+      const resolvedSpeakerId = raw?.speakerId || base.speakerId;
+      const speakerId = resolvedSpeakerId;
+      const speaker = raw?.speakerId ? displayNameForId(resolvedSpeakerId, base.speaker) : base.speaker;
       const timestamp = typeof raw?.timestamp === 'number' && Number.isFinite(raw.timestamp) ? raw.timestamp : 0;
       const key = `${speaker.toLowerCase()}::${text.toLowerCase()}`;
       if (key === previousKey) {
@@ -78,7 +93,7 @@ export class TranscriptNormalizer {
       normalized.push({
         segmentId: raw?.segmentId || `seg_${i}`,
         speaker,
-        speakerId: raw?.speakerId || speakerId,
+        speakerId,
         text,
         timestamp,
         uncertainSpeaker,

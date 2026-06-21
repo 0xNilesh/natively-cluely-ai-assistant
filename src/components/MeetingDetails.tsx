@@ -233,10 +233,13 @@ const MeetingDetails: React.FC<MeetingDetailsProps> = ({ meeting: initialMeeting
     const rawFollowUp = meeting.detailedSummary?.followUpDraft;
     const followUpBody = typeof rawFollowUp === 'string' ? rawFollowUp : (rawFollowUp?.body || '');
     const followUpSubject = typeof rawFollowUp === 'string' ? undefined : rawFollowUp?.subject;
+    const followUpDraftTone = (typeof rawFollowUp === 'string' ? undefined : rawFollowUp?.tone) as 'professional' | 'warm' | 'concise' | 'friendly' | undefined;
 
     // Regenerate / evidence-jump / speaker-rename UI state.
     const [isRegenerating, setIsRegenerating] = useState(false);
     const [isRegeneratingFollowUp, setIsRegeneratingFollowUp] = useState(false);
+    // Selected follow-up tone, shown in the selector. Seeded from the saved draft's tone.
+    const [followUpTone, setFollowUpTone] = useState<'professional' | 'warm' | 'concise' | 'friendly'>(followUpDraftTone || 'professional');
     const [showEvidence, setShowEvidence] = useState(false);
     const [pendingScrollTs, setPendingScrollTs] = useState<number | null>(null);
     const [editingSpeaker, setEditingSpeaker] = useState<string | null>(null);
@@ -249,7 +252,13 @@ const MeetingDetails: React.FC<MeetingDetailsProps> = ({ meeting: initialMeeting
     const reloadMeeting = async () => {
         try {
             const fresh = await window.electronAPI?.getMeetingDetails?.(meeting.id);
-            if (fresh) setMeeting(fresh as Meeting);
+            if (fresh) {
+                setMeeting(fresh as Meeting);
+                // Keep the tone selector in sync with the regenerated draft.
+                const fu = (fresh as Meeting).detailedSummary?.followUpDraft;
+                const tone = typeof fu === 'string' ? undefined : fu?.tone;
+                if (tone === 'professional' || tone === 'warm' || tone === 'concise' || tone === 'friendly') setFollowUpTone(tone);
+            }
         } catch { /* swallow */ }
     };
 
@@ -297,11 +306,25 @@ const MeetingDetails: React.FC<MeetingDetailsProps> = ({ meeting: initialMeeting
         return typeof first.timestampMs === 'number' ? first.timestampMs : (typeof first.timestamp === 'number' ? first.timestamp : undefined);
     };
 
+    // Transcript timestamps are absolute epoch ms (Date.now()); the earliest segment is the
+    // meeting start. Use it to render evidence times as a relative m:ss offset into the meeting.
+    const meetingStartMs = React.useMemo(() => {
+        const ts = (meeting.transcript || []).map(t => t.timestamp).filter(t => typeof t === 'number' && t > 0);
+        return ts.length ? Math.min(...ts) : 0;
+    }, [meeting.transcript]);
+
+    // Render a (possibly absolute-epoch) timestamp as a relative m:ss into the meeting.
+    const formatEvidenceTime = (ts?: number): string => {
+        if (typeof ts !== 'number') return '';
+        // Epoch-ms values are huge; subtract meeting start. Already-relative small values pass through.
+        const rel = ts > 1e11 && meetingStartMs > 0 ? ts - meetingStartMs : ts;
+        return formatDuration(Math.max(0, rel));
+    };
+
     const evidenceLabel = (evidence?: Evidence[]) => {
         const first = evidence?.[0];
         if (!first) return '';
-        const ts = evidenceTimestamp(evidence);
-        const time = typeof ts === 'number' ? formatDuration(ts) : '';
+        const time = formatEvidenceTime(evidenceTimestamp(evidence));
         const who = first.speakerName || first.speaker || '';
         const quote = first.quote ? `“${first.quote}”` : '';
         return [time, who, quote].filter(Boolean).join(' · ');
@@ -758,24 +781,6 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                                     </section>
                                 )}
 
-                                {isV3Summary && meeting.detailedSummary?.recipes && Object.keys(meeting.detailedSummary.recipes).length > 0 && (
-                                    <section className="mb-8">
-                                        <h2 className="text-lg font-semibold text-text-primary mb-3">Recipes</h2>
-                                        <div className="flex flex-wrap gap-2">
-                                            {Object.entries(meeting.detailedSummary.recipes).map(([name, text]) => (
-                                                <button
-                                                    key={name}
-                                                    type="button"
-                                                    onClick={() => copyRecipe(text)}
-                                                    className="text-[11px] px-2 py-1 rounded-md bg-white/5 hover:bg-white/10 text-text-secondary border border-white/10 transition-colors"
-                                                >
-                                                    Copy {name.replace(/-/g, ' ')}
-                                                </button>
-                                            ))}
-                                        </div>
-                                    </section>
-                                )}
-
                                 {/* V3 follow-up draft — human prose, copy + regenerate + tone. */}
                                 {isV3Summary && followUpBody.trim() && (
                                     <section className="mb-8">
@@ -785,12 +790,11 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                                                 <button type="button" onClick={() => copyRecipe((followUpSubject ? `Subject: ${followUpSubject}\n\n` : '') + followUpBody)} className="text-[11px] px-2.5 py-1 rounded-md bg-white/5 hover:bg-white/10 text-text-secondary border border-white/10 transition-colors">Copy</button>
                                                 <button type="button" onClick={() => handleRegenerateFollowUp()} disabled={isRegeneratingFollowUp} className="text-[11px] px-2.5 py-1 rounded-md bg-white/5 hover:bg-white/10 disabled:opacity-50 text-text-secondary border border-white/10 transition-colors">{isRegeneratingFollowUp ? 'Regenerating…' : 'Regenerate'}</button>
                                                 <select
-                                                    onChange={(e) => { if (e.target.value) handleRegenerateFollowUp(e.target.value as any); }}
-                                                    defaultValue=""
+                                                    value={followUpTone}
+                                                    onChange={(e) => { const t = e.target.value as 'professional' | 'warm' | 'concise' | 'friendly'; setFollowUpTone(t); handleRegenerateFollowUp(t); }}
                                                     className="text-[11px] px-1.5 py-1 rounded-md bg-white/5 text-text-secondary border border-white/10"
                                                     title="Regenerate with tone"
                                                 >
-                                                    <option value="" disabled>Tone…</option>
                                                     <option value="professional">Professional</option>
                                                     <option value="warm">Warm</option>
                                                     <option value="concise">Concise</option>

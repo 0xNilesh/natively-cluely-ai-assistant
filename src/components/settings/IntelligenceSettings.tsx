@@ -1,4 +1,5 @@
-import { AlertTriangle, Brain, Check, Loader2, Wifi, WifiOff } from 'lucide-react';
+import { AlertTriangle, Brain, Check, ChevronDown, Loader2, Wifi, WifiOff } from 'lucide-react';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 
 // Label + one-line description + group + TIER for each Intelligence OS flag. Keyed by flag
@@ -75,13 +76,37 @@ const FlagRowView: React.FC<{ row: FlagRow; onToggle: (row: FlagRow) => void }> 
   return (
     <div className="flex items-start justify-between gap-4 rounded-lg px-3 py-2.5 transition-colors hover:bg-bg-item-active">
       <div className="min-w-0">
-        <div className="text-sm font-medium text-text-primary">{meta?.label || row.key}</div>
-        {meta?.desc ? <div className="mt-0.5 text-xs leading-relaxed text-text-secondary">{meta.desc}</div> : null}
+        <div className="text-xs font-medium text-text-primary">{meta?.label || row.key}</div>
+        {meta?.desc ? <div className="mt-0.5 text-[11px] leading-relaxed text-text-secondary">{meta.desc}</div> : null}
       </div>
       <Toggle on={row.enabled} onClick={() => onToggle(row)} />
     </div>
   );
 };
+// The "Try it" output. Fades and slides up as a result lands instead of popping into place;
+// keyed by content so a fresh run re-animates. Reduced motion → it simply appears.
+const TryResult: React.FC<{ out: { kind: string; text: string } | null }> = ({ out }) => {
+  const reduce = useReducedMotion();
+  if (!out) return null;
+  const pre = (
+    <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-lg border border-border-subtle bg-bg-main p-3 font-mono text-[11px] leading-relaxed text-text-secondary">{out.text}</pre>
+  );
+  if (reduce) return pre;
+  return (
+    <AnimatePresence mode="wait" initial={false}>
+      <motion.div
+        key={out.text}
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        exit={{ opacity: 0, y: -4 }}
+        transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+      >
+        {pre}
+      </motion.div>
+    </AnimatePresence>
+  );
+};
+
 interface HindsightCfg { baseUrl: string; hasApiKey: boolean; autoStart: boolean; serverCommand: string; llmProvider: string; available: boolean }
 
 // Render a millisecond transcript offset as m:ss (e.g. 83400 → "1:23").
@@ -100,42 +125,117 @@ const Toggle: React.FC<{ on: boolean; disabled?: boolean; onClick: () => void }>
     aria-pressed={on}
     className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${on ? 'bg-accent-primary' : 'bg-bg-toggle-switch border border-border-muted'} ${disabled ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
   >
-    <span className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${on ? 'translate-x-5' : 'translate-x-0'}`} />
+    <span className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white shadow-sm transition-transform duration-200 ease-spring motion-reduce:transition-none ${on ? 'translate-x-5' : 'translate-x-0'}`} />
   </button>
 );
+
+// Smooth height+opacity expand/collapse for the disclosures (Set up / Customize / Developer
+// options), matching the HelpSettings AccordionSection idiom. Height-auto is measured by
+// framer-motion; under prefers-reduced-motion we drop the height/opacity tween so nothing
+// slides or reflows — the content just appears.
+const Disclosure: React.FC<{ open: boolean; children: React.ReactNode }> = ({ open, children }) => {
+  const reduce = useReducedMotion();
+  return (
+    <AnimatePresence initial={false}>
+      {open ? (
+        <motion.div
+          key="disclosure"
+          initial={reduce ? { opacity: 0 } : { height: 0, opacity: 0 }}
+          animate={reduce ? { opacity: 1 } : { height: 'auto', opacity: 1 }}
+          exit={reduce ? { opacity: 0 } : { height: 0, opacity: 0 }}
+          transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+          style={{ overflow: 'hidden' }}
+        >
+          {children}
+        </motion.div>
+      ) : null}
+    </AnimatePresence>
+  );
+};
+
+// A chevron that rotates between collapsed (▸) and expanded (▾) instead of swapping glyphs,
+// so the disclosure indicator turns smoothly with the panel.
+const DisclosureChevron: React.FC<{ open: boolean }> = ({ open }) => (
+  <ChevronDown size={14} className={`shrink-0 transition-transform duration-200 ease-apple-ease motion-reduce:transition-none ${open ? 'rotate-0' : '-rotate-90'}`} />
+);
+
+// One-shot fade-up for a row as it first mounts, with a short per-index delay so the core
+// feature rows cascade in when "Customize" opens — reinforcing that these are the switches the
+// master fans out to. Only the initial mount animates; flipping a toggle later mutates the
+// child's props (the element persists), so this never replays on click. Reduced motion → no-op.
+const StaggerRow: React.FC<{ index: number; children: React.ReactNode }> = ({ index, children }) => {
+  const reduce = useReducedMotion();
+  if (reduce) return <>{children}</>;
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1], delay: Math.min(index, 5) * 0.04 }}
+    >
+      {children}
+    </motion.div>
+  );
+};
 
 // Connection status pill with four distinct states, so the user can tell "I haven't set
 // this up" apart from "I set it up but it's offline" — the old single chip showed the same
 // "Not running" for both. The unreachable state offers an inline Retry.
 type ConnStatus = 'not-configured' | 'checking' | 'connected' | 'unreachable';
 const StatusChip: React.FC<{ status: ConnStatus; testing: boolean; onRetry: () => void }> = ({ status, testing, onRetry }) => {
-  if (status === 'connected') {
-    return (
+  const reduce = useReducedMotion();
+  // Resolve the chip to a single keyed visual state. The 4-state derivation (status + testing)
+  // is unchanged — only the presentation is keyed so AnimatePresence can transition between
+  // states instead of hard-swapping them.
+  const visual: ConnStatus = status === 'connected' ? 'connected' : (status === 'checking' || testing) ? 'checking' : status;
+
+  let body: React.ReactNode;
+  if (visual === 'connected') {
+    body = (
       <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-green-500/30 bg-green-500/15 px-2.5 py-0.5 text-[11px] font-medium text-green-400">
         <Wifi size={12} /> Connected
       </span>
     );
-  }
-  if (status === 'checking' || testing) {
-    return (
+  } else if (visual === 'checking') {
+    body = (
       <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border-subtle bg-bg-input px-2.5 py-0.5 text-[11px] font-medium text-text-secondary">
         <Loader2 size={12} className="animate-spin" /> Checking…
       </span>
     );
-  }
-  if (status === 'unreachable') {
-    return (
+  } else if (visual === 'unreachable') {
+    body = (
       <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/15 px-2.5 py-0.5 text-[11px] font-medium text-amber-400">
         <WifiOff size={12} /> Can’t connect
         <button type="button" onClick={onRetry} className="ml-0.5 underline hover:no-underline">Retry</button>
       </span>
     );
+  } else {
+    body = (
+      <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border-subtle bg-bg-input px-2.5 py-0.5 text-[11px] font-medium text-text-tertiary">
+        Not set up
+      </span>
+    );
   }
-  // not-configured
+
+  if (reduce) return <div className="shrink-0">{body}</div>;
+
+  // "Connected" pops in with the spring easing (a connection just established earns a little
+  // life); the other states cross-fade calmly. mode="wait" so the outgoing chip clears before
+  // the incoming one settles — reads as a transition, not a jump.
+  const isConnected = visual === 'connected';
   return (
-    <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border-subtle bg-bg-input px-2.5 py-0.5 text-[11px] font-medium text-text-tertiary">
-      Not set up
-    </span>
+    <div className="relative shrink-0">
+      <AnimatePresence mode="wait" initial={false}>
+        <motion.div
+          key={visual}
+          initial={{ opacity: 0, scale: isConnected ? 0.85 : 0.96 }}
+          animate={{ opacity: 1, scale: 1 }}
+          exit={{ opacity: 0, scale: 0.96 }}
+          transition={{ duration: isConnected ? 0.26 : 0.16, ease: isConnected ? [0.34, 1.56, 0.64, 1] : [0.25, 1, 0.5, 1] }}
+        >
+          {body}
+        </motion.div>
+      </AnimatePresence>
+    </div>
   );
 };
 
@@ -321,7 +421,7 @@ export const IntelligenceSettings: React.FC = () => {
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <h3 className="text-sm font-semibold text-text-primary">Long-term memory</h3>
-              <span className="inline-flex items-center rounded-full border border-accent-primary/30 bg-accent-primary/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-accent-primary">Beta</span>
+              <span className="inline-flex items-center rounded-full border border-amber-500/30 bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-amber-400">Beta</span>
             </div>
             <p className="mt-1 text-xs leading-relaxed text-text-secondary">Remember what was discussed in past meetings and surface it automatically. Needs a free companion app — about 5 minutes to set up.</p>
           </div>
@@ -331,47 +431,47 @@ export const IntelligenceSettings: React.FC = () => {
         <button
           type="button"
           onClick={() => setShowSetup((v) => !v)}
-          className="text-xs font-medium text-accent-primary transition-colors hover:text-accent-secondary"
+          className="text-xs font-medium text-accent-primary transition-colors hover:text-accent-secondary active:scale-[0.98]"
         >
           {showSetup ? 'Hide setup' : (status === 'connected' ? 'Edit setup' : 'Set up long-term memory →')}
         </button>
 
-        {showSetup ? (
-          <div className="space-y-3 rounded-lg border border-border-subtle bg-bg-input/40 p-3">
+        <Disclosure open={showSetup}>
+          <div className="space-y-3 rounded-lg border border-border-subtle bg-bg-main/40 p-4">
             {/* Step-by-step install — the companion server is a separate app the user installs. */}
-            <ol className="space-y-2 text-xs text-text-secondary">
+            <ol className="space-y-2 text-xs leading-relaxed text-text-secondary">
               <li>
                 <span className="font-medium text-text-primary">1. Install the companion app.</span> In your Terminal, run:
-                <code className="mt-1 block rounded bg-bg-input px-2 py-1 font-mono text-[11px] text-text-primary">pip install hindsight-all</code>
+                <code className="mt-1 block rounded-md border border-border-subtle bg-bg-main px-2.5 py-2 font-mono text-[11px] text-text-primary">pip install hindsight-all</code>
                 Requires Python 3.11 or later. Your AI provider key (from the AI Providers screen) is used automatically — no extra key needed.
               </li>
               <li>
                 <span className="font-medium text-text-primary">2. Start it.</span> Keep this running while you use the app:
-                <code className="mt-1 block rounded bg-bg-input px-2 py-1 font-mono text-[11px] text-text-primary">hindsight serve --port 8888</code>
+                <code className="mt-1 block rounded-md border border-border-subtle bg-bg-main px-2.5 py-2 font-mono text-[11px] text-text-primary">hindsight serve --port 8888</code>
               </li>
               <li><span className="font-medium text-text-primary">3. Paste the address below</span> (the local default is already filled in), then press Save.</li>
             </ol>
-            <button type="button" onClick={() => openExternal('https://hindsight.vectorize.io/developer/installation')} className="text-[11px] text-accent-primary hover:underline">
+            <button type="button" onClick={() => openExternal('https://hindsight.vectorize.io/developer/installation')} className="text-[11px] font-medium text-accent-primary transition-colors hover:text-accent-secondary">
               Full setup guide &amp; troubleshooting →
             </button>
 
-            <label className="block">
-              <span className="text-xs text-text-secondary">Server address</span>
+            <label className="block space-y-1">
+              <span className="text-[10px] font-medium uppercase tracking-wide text-text-secondary">Server address</span>
               <input
                 type="text"
                 value={baseUrl}
                 onChange={(e) => setBaseUrl(e.target.value)}
                 placeholder="http://localhost:8888"
-                className="mt-1 w-full rounded-lg bg-bg-input px-3 py-2 text-sm text-text-primary outline-none ring-1 ring-border-subtle focus:ring-accent-primary"
+                className="w-full rounded-lg border border-border-subtle bg-bg-input px-3 py-2 text-xs text-text-primary transition-colors focus:outline-none focus:border-accent-primary"
               />
             </label>
 
             {/* Cloud is the alternative to running local software. The API key here is the
                 Hindsight Cloud ACCOUNT key — explicitly NOT the user's AI provider key, which
                 already lives in the AI Providers screen and is forwarded automatically. */}
-            <label className="block">
-              <span className="text-xs text-text-secondary">
-                Hindsight Cloud account key <span className="text-text-secondary/70">(not your AI key)</span>
+            <label className="block space-y-1">
+              <span className="text-[10px] font-medium uppercase tracking-wide text-text-secondary">
+                Hindsight Cloud account key <span className="normal-case text-text-tertiary">(not your AI key)</span>
                 {cfg?.hasApiKey ? ' — saved, leave blank to keep' : ''}
               </span>
               <input
@@ -379,23 +479,23 @@ export const IntelligenceSettings: React.FC = () => {
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
                 placeholder={cfg?.hasApiKey ? '••••••••  saved' : 'Only if you use Hindsight Cloud instead of local'}
-                className="mt-1 w-full rounded-lg bg-bg-input px-3 py-2 text-sm text-text-primary outline-none ring-1 ring-border-subtle focus:ring-accent-primary"
+                className="w-full rounded-lg border border-border-subtle bg-bg-input px-3 py-2 text-xs text-text-primary transition-colors focus:outline-none focus:border-accent-primary"
               />
-              <span className="mt-1 block text-[11px] text-text-secondary">
+              <span className="block text-[11px] leading-relaxed text-text-secondary">
                 Only needed for Hindsight Cloud. Your AI provider key stays on this device and is used separately.
               </span>
             </label>
 
             <label className="flex items-center justify-between gap-3">
-              <span className="text-sm text-text-primary">
+              <span className="text-xs text-text-primary">
                 Start memory server automatically at launch
-                <span className="block text-[11px] text-text-secondary">Only works after setup is complete. No effect if the companion app isn’t installed.</span>
+                <span className="mt-0.5 block text-[11px] leading-relaxed text-text-secondary">Only works after setup is complete. No effect if the companion app isn’t installed.</span>
               </span>
               <Toggle on={autoStart} onClick={() => setAutoStart((v) => !v)} />
             </label>
 
             {/* Privacy disclosure ABOVE the Save action so it's seen before any data is sent. */}
-            <div className="flex items-start gap-2 rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-[11px] text-text-secondary">
+            <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-[11px] leading-relaxed text-amber-300/90">
               <AlertTriangle size={13} className="mt-0.5 shrink-0 text-amber-400" />
               <span>Local keeps memory on this device. Choosing Cloud sends meeting summaries to Hindsight’s servers — a privacy trade-off for an otherwise local-first app.</span>
             </div>
@@ -405,40 +505,66 @@ export const IntelligenceSettings: React.FC = () => {
                 type="button"
                 onClick={onSaveHindsight}
                 disabled={saving}
-                className="rounded-lg bg-accent-primary px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50 inline-flex items-center gap-1.5"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-accent-primary px-3 py-1.5 text-xs font-medium text-white transition-[opacity,transform] active:scale-[0.97] disabled:opacity-50 disabled:active:scale-100 motion-reduce:active:scale-100"
               >
-                {saving ? <Loader2 size={14} className="animate-spin" /> : savedAt ? <Check size={14} /> : null}
+                <AnimatePresence mode="wait" initial={false}>
+                  {saving ? (
+                    <motion.span key="saving" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.12 }} className="inline-flex">
+                      <Loader2 size={14} className="animate-spin" />
+                    </motion.span>
+                  ) : savedAt ? (
+                    <motion.span key="saved" initial={{ opacity: 0, scale: 0.6 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.24, ease: [0.34, 1.56, 0.64, 1] }} className="inline-flex">
+                      <Check size={14} />
+                    </motion.span>
+                  ) : null}
+                </AnimatePresence>
                 {savedAt ? 'Saved' : 'Save'}
               </button>
               <button
                 type="button"
                 onClick={onTest}
                 disabled={testing || !baseUrl.trim()}
-                className="rounded-lg bg-bg-item-active px-3 py-1.5 text-sm text-text-primary hover:bg-bg-item-active/70 disabled:opacity-50 inline-flex items-center gap-1.5"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-border-subtle px-3 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:text-text-primary active:scale-[0.97] disabled:opacity-50 disabled:active:scale-100 motion-reduce:active:scale-100"
               >
                 {testing ? <Loader2 size={14} className="animate-spin" /> : null}
                 Test connection
               </button>
             </div>
           </div>
-        ) : null}
+        </Disclosure>
       </section>
 
       {/* ── Smart features (master switch + Customize) ───────────── */}
       <section className="space-y-3">
         {/* One low-stakes lever for the normal user: turn the on-device quality features on
             or off. The ~12 granular toggles live behind "Customize" for power users. */}
-        <div className="rounded-xl border border-border-subtle bg-bg-item-active/30 p-4">
-          <div className="flex items-center justify-between gap-3">
+        <div className="rounded-xl border border-border-subtle bg-bg-item-surface p-5">
+          <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <div className="text-sm font-medium text-text-primary">Smart features</div>
-              <div className="text-xs text-text-secondary">
+              <div className="flex items-center gap-2">
+                <Brain size={15} className="shrink-0 text-accent-primary" />
+                <div className="text-sm font-semibold text-text-primary">Smart features</div>
+              </div>
+              <div className="mt-1 text-xs leading-relaxed text-text-secondary">
                 Better answers, meeting notes, and follow-ups — all running on your device.
-                {masterState === 'mixed' ? <span className="ml-1 text-accent-primary">Customized.</span> : null}
+                {masterState === 'mixed' ? <span className="ml-1 font-medium text-accent-primary">Customized.</span> : null}
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-2">
-              {masterBusy ? <Loader2 size={14} className="animate-spin text-text-secondary" /> : null}
+              <AnimatePresence initial={false}>
+                {masterBusy ? (
+                  <motion.span
+                    key="master-busy"
+                    initial={{ opacity: 0, scale: 0.8 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.8 }}
+                    transition={{ duration: 0.15 }}
+                    className="inline-flex"
+                  >
+                    <Loader2 size={14} className="animate-spin text-text-secondary" />
+                  </motion.span>
+                ) : null}
+              </AnimatePresence>
               <Toggle on={masterState !== 'off'} disabled={masterBusy} onClick={onToggleMaster} />
             </div>
           </div>
@@ -446,27 +572,28 @@ export const IntelligenceSettings: React.FC = () => {
           <button
             type="button"
             onClick={() => setShowCustomize((v) => !v)}
-            className="mt-3 text-xs font-medium text-accent-primary hover:underline"
+            className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-accent-primary transition-colors hover:text-accent-secondary active:scale-[0.98]"
           >
-            {showCustomize ? '▾ Hide individual features' : '▸ Customize individual features'}
+            <DisclosureChevron open={showCustomize} />
+            {showCustomize ? 'Hide individual features' : 'Customize individual features'}
           </button>
 
-          {showCustomize ? (
+          <Disclosure open={showCustomize}>
             <div className="mt-3 space-y-4 border-t border-border-subtle pt-3">
               {/* Core features individually — same switches the master fans out to. */}
               {byTier.core.length ? (
-                <div className="space-y-2">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-text-secondary">Meeting notes</div>
-                  {byTier.core.map((row) => (
-                    <FlagRowView key={row.key} row={row} onToggle={onToggleFlag} />
+                <div className="space-y-1.5">
+                  <div className="px-3 text-[10px] font-semibold uppercase tracking-[0.08em] text-text-tertiary">Meeting notes</div>
+                  {byTier.core.map((row, i) => (
+                    <StaggerRow key={row.key} index={i}><FlagRowView row={row} onToggle={onToggleFlag} /></StaggerRow>
                   ))}
                 </div>
               ) : null}
 
               {/* Advanced opt-in features (extra cost / niche / scope tradeoffs). */}
               {ADVANCED_GROUP_ORDER.filter((g) => byTier.advancedByGroup[g]?.length).map((group) => (
-                <div key={group} className="space-y-2">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-text-secondary">{group}</div>
+                <div key={group} className="space-y-1.5">
+                  <div className="px-3 text-[10px] font-semibold uppercase tracking-[0.08em] text-text-tertiary">{group}</div>
                   {byTier.advancedByGroup[group].map((row) => (
                     <FlagRowView key={row.key} row={row} onToggle={onToggleFlag} />
                   ))}
@@ -479,36 +606,37 @@ export const IntelligenceSettings: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => setShowDev((v) => !v)}
-                    className="text-xs font-medium text-text-secondary hover:text-text-primary"
+                    className="inline-flex items-center gap-1 text-xs font-medium text-text-secondary transition-colors hover:text-text-primary active:scale-[0.98]"
                   >
-                    {showDev ? '▾ Hide developer options' : '▸ Developer options (for testing only)'}
+                    <DisclosureChevron open={showDev} />
+                    {showDev ? 'Hide developer options' : 'Developer options (for testing only)'}
                   </button>
-                  {showDev ? (
-                    <div className="mt-2 space-y-2">
+                  <Disclosure open={showDev}>
+                    <div className="mt-2 space-y-1.5">
                       {byTier.dev.map((row) => (
                         <FlagRowView key={row.key} row={row} onToggle={onToggleFlag} />
                       ))}
                     </div>
-                  ) : null}
+                  </Disclosure>
                 </div>
               ) : null}
             </div>
-          ) : null}
+          </Disclosure>
         </div>
       </section>
 
       {/* ── Try it (runs against the current meeting) ────────────── */}
-      <section className="rounded-xl border border-border-subtle bg-bg-item-active/30 p-4 space-y-3">
+      <section className="rounded-xl border border-border-subtle bg-bg-item-surface p-5 space-y-3">
         <div>
-          <div className="text-sm font-medium text-text-primary">Try it</div>
-          <div className="text-xs text-text-secondary">These run on the meeting you’re currently in — not a saved recording. Turn the feature on under “Customize individual features” above, then join an active meeting.</div>
+          <div className="text-sm font-semibold text-text-primary">Try it</div>
+          <div className="mt-1 text-xs leading-relaxed text-text-secondary">These run on the meeting you’re currently in — not a saved recording. Turn the feature on under “Customize individual features” above, then join an active meeting.</div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             disabled={tryBusy !== null || !flagOn('lectureIntelligenceV2')}
             onClick={() => runTry('lecture', () => window.electronAPI.generateLectureNotes?.())}
-            className="rounded-lg bg-bg-item-active px-3 py-1.5 text-sm text-text-primary hover:bg-bg-item-active/70 disabled:opacity-40 inline-flex items-center gap-1.5"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border-subtle px-3 py-1.5 text-xs font-medium text-text-secondary transition-[colors,transform] hover:text-text-primary active:scale-[0.97] disabled:opacity-40 disabled:active:scale-100 motion-reduce:active:scale-100"
           >
             {tryBusy === 'lecture' ? <Loader2 size={14} className="animate-spin" /> : null} Lecture notes
           </button>
@@ -516,7 +644,7 @@ export const IntelligenceSettings: React.FC = () => {
             type="button"
             disabled={tryBusy !== null || !flagOn('diagramIntelligence')}
             onClick={() => runTry('diagram', () => window.electronAPI.generateDiagram?.())}
-            className="rounded-lg bg-bg-item-active px-3 py-1.5 text-sm text-text-primary hover:bg-bg-item-active/70 disabled:opacity-40 inline-flex items-center gap-1.5"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border-subtle px-3 py-1.5 text-xs font-medium text-text-secondary transition-[colors,transform] hover:text-text-primary active:scale-[0.97] disabled:opacity-40 disabled:active:scale-100 motion-reduce:active:scale-100"
           >
             {tryBusy === 'diagram' ? <Loader2 size={14} className="animate-spin" /> : null} Diagram
           </button>
@@ -528,20 +656,18 @@ export const IntelligenceSettings: React.FC = () => {
             onChange={(e) => setSearchQ(e.target.value)}
             placeholder="Search the current meeting…"
             disabled={!flagOn('inMeetingSearchV2')}
-            className="flex-1 rounded-lg bg-bg-input px-3 py-2 text-sm text-text-primary outline-none ring-1 ring-border-subtle focus:ring-accent-primary disabled:opacity-40"
+            className="flex-1 rounded-lg border border-border-subtle bg-bg-input px-3 py-2 text-xs text-text-primary transition-colors focus:outline-none focus:border-accent-primary disabled:opacity-40"
           />
           <button
             type="button"
             disabled={tryBusy !== null || !flagOn('inMeetingSearchV2') || !searchQ.trim()}
             onClick={() => runTry('search', () => window.electronAPI.searchInMeeting?.(searchQ.trim()))}
-            className="rounded-lg bg-bg-item-active px-3 py-1.5 text-sm text-text-primary hover:bg-bg-item-active/70 disabled:opacity-40 inline-flex items-center gap-1.5"
+            className="inline-flex items-center gap-1.5 rounded-lg bg-accent-primary px-3 py-1.5 text-xs font-medium text-white transition-[opacity,transform] active:scale-[0.97] disabled:opacity-40 disabled:active:scale-100 motion-reduce:active:scale-100"
           >
             {tryBusy === 'search' ? <Loader2 size={14} className="animate-spin" /> : null} Search
           </button>
         </div>
-        {tryOut ? (
-          <pre className="max-h-48 overflow-auto rounded-lg bg-bg-input p-3 text-[11px] text-text-secondary whitespace-pre-wrap">{tryOut.text}</pre>
-        ) : null}
+        <TryResult out={tryOut} />
       </section>
     </div>
   );

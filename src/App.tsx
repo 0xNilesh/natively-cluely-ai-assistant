@@ -691,6 +691,8 @@ const App: React.FC = () => {
                     setIsSettingsOpen(false);
                   }}
                   initialTab={settingsInitialTab}
+                  initialIsPremium={hasLoadedLicense ? isPremiumActive : null}
+                  initialHasNativelyKey={hasNativelyApi}
                 />
                 <AnimatePresence>
                   {isModesOpen && (

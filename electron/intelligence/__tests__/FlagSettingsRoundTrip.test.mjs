@@ -1,6 +1,8 @@
 // node:test — Phase 14 live-wiring verification: the Intelligence-OS feature-flag
 // settings contract (intelligenceFlagKeys / intelligenceFlagMeta / setIntelligenceFlag)
 // that backs the dev/experimental flag toggle IPC (`intelligence-flags:get|set`).
+// Meeting Notes V3 flags intentionally ship with product defaults ON; all other
+// Intelligence OS rollout flags keep their conservative default-OFF posture.
 //
 // WHAT PHASE 14 SHIPS: a backend contract so a flag can be toggled by PERSISTING its
 // SettingsManager key — no env edit / redeploy needed. The flags already resolve in the
@@ -56,6 +58,13 @@ const EXPECTED_KEYS = [
   'promptAssemblerV2',
   'answerDiversityGuard',
   'meetingMemoryV2',
+  'meetingSummaryV3',
+  'meetingModeAutoDetect',
+  'followUpDraftV2',
+  'speakerLabelsV1',
+  'meetingNotesStructuredOutput',
+  'meetingSummaryLlmPolish',
+  'speakerDiarizationV1',
   'globalSearchV2',
   'inMeetingSearchV2',
   'conversationMemoryV2',
@@ -68,6 +77,14 @@ const EXPECTED_KEYS = [
 
 // All NATIVELY_* env vars these flags read — cleared before/after so a leaked env from the
 // host (or another test) can't make an assertion pass/fail spuriously.
+const DEFAULT_ON_KEYS = new Set([
+  'meetingSummaryV3',
+  'meetingModeAutoDetect',
+  'followUpDraftV2',
+  'speakerLabelsV1',
+  'meetingSummaryLlmPolish',
+]);
+
 const ALL_ENV_VARS = [
   'NATIVELY_INTELLIGENCE_TRACE',
   'NATIVELY_DURABLE_MEMORY_WINDOW',
@@ -78,6 +95,13 @@ const ALL_ENV_VARS = [
   'NATIVELY_PROMPT_ASSEMBLER_V2',
   'NATIVELY_ANSWER_DIVERSITY_GUARD',
   'NATIVELY_MEETING_MEMORY_V2',
+  'NATIVELY_MEETING_SUMMARY_V3',
+  'NATIVELY_MEETING_MODE_AUTODETECT',
+  'NATIVELY_FOLLOWUP_DRAFT_V2',
+  'NATIVELY_SPEAKER_LABELS_V1',
+  'NATIVELY_MEETING_NOTES_STRUCTURED_OUTPUT',
+  'NATIVELY_MEETING_SUMMARY_LLM_POLISH',
+  'NATIVELY_SPEAKER_DIARIZATION_V1',
   'NATIVELY_GLOBAL_SEARCH_V2',
   'NATIVELY_IN_MEETING_SEARCH_V2',
   'NATIVELY_CONVERSATION_MEMORY_V2',
@@ -116,8 +140,8 @@ describe('Phase 14 — intelligence flag settings contract (key + meta surface)'
       assert.equal(typeof meta.setting, 'string', `${key}.setting is a string`);
       assert.ok(meta.setting.length > 0, `${key}.setting non-empty`);
       assert.ok(meta.env.startsWith('NATIVELY_'), `${key}.env follows NATIVELY_ convention (${meta.env})`);
-      // EVERY flag ships default OFF — the conservative production posture the task requires.
-      assert.equal(meta.default, false, `${key}.default is false (conservative)`);
+      const expectedDefault = DEFAULT_ON_KEYS.has(key) ? true : false;
+      assert.equal(meta.default, expectedDefault, `${key}.default matches documented rollout posture`);
     }
   });
 
@@ -184,9 +208,10 @@ describe('Phase 14 — ENV override resolution chain (the mechanism the UI/IPC r
   beforeEach(clearAllEnv);
   afterEach(clearAllEnv);
 
-  test('default (no env, no settings) → every flag resolves false', () => {
+  test('default (no env, no settings) → each flag resolves to its documented default', () => {
     for (const key of intelligenceFlagKeys()) {
-      assert.equal(isIntelligenceFlagEnabled(key), false, `${key} default false`);
+      const expectedDefault = DEFAULT_ON_KEYS.has(key) ? true : false;
+      assert.equal(isIntelligenceFlagEnabled(key), expectedDefault, `${key} default matches meta`);
     }
   });
 
