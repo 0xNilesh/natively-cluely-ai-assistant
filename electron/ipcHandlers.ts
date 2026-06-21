@@ -3654,6 +3654,22 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
+  // Shared guard for STT key saves: when OS-level encryption is unavailable the
+  // setter only updates the in-memory copy — the key works this session but is
+  // gone on restart. Returning success:false here surfaces a real error in the
+  // settings UI instead of a misleading "Saved" badge (the root cause behind
+  // "STT keys reset to none after restart" reports). Only flagged when a non-empty
+  // key was provided (clearing a key has nothing to persist).
+  const sttPersistError =
+    'API key saved for this session only — your system blocked secure storage, so it will not survive a restart. See Help → STT setup.';
+  const sttKeyPersistenceWarning = (apiKey: string): { success: false; error: string } | null => {
+    const { CredentialsManager } = require('./services/CredentialsManager');
+    if (apiKey && apiKey.trim().length > 0 && !CredentialsManager.getInstance().isPersistenceAvailable()) {
+      return { success: false, error: sttPersistError };
+    }
+    return null;
+  };
+
   safeHandle('set-groq-stt-api-key', async (_, apiKey: string) => {
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
@@ -3661,7 +3677,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       BrowserWindow.getAllWindows().forEach((win) => {
         if (!win.isDestroyed()) win.webContents.send('credentials-changed');
       });
-      return { success: true };
+      return sttKeyPersistenceWarning(apiKey) ?? { success: true };
     } catch (error: any) {
       console.error('Error saving Groq STT API key:', error);
       return { success: false, error: error.message };
@@ -3675,7 +3691,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       BrowserWindow.getAllWindows().forEach((win) => {
         if (!win.isDestroyed()) win.webContents.send('credentials-changed');
       });
-      return { success: true };
+      return sttKeyPersistenceWarning(apiKey) ?? { success: true };
     } catch (error: any) {
       console.error('Error saving OpenAI STT API key:', error);
       return { success: false, error: error.message };
@@ -3707,7 +3723,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       BrowserWindow.getAllWindows().forEach((win) => {
         if (!win.isDestroyed()) win.webContents.send('credentials-changed');
       });
-      return { success: true };
+      return sttKeyPersistenceWarning(apiKey) ?? { success: true };
     } catch (error: any) {
       console.error('Error saving Deepgram API key:', error);
       return { success: false, error: error.message };
@@ -3737,7 +3753,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       BrowserWindow.getAllWindows().forEach((win) => {
         if (!win.isDestroyed()) win.webContents.send('credentials-changed');
       });
-      return { success: true };
+      return sttKeyPersistenceWarning(apiKey) ?? { success: true };
     } catch (error: any) {
       console.error('Error saving ElevenLabs API key:', error);
       return { success: false, error: error.message };
@@ -3752,7 +3768,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       BrowserWindow.getAllWindows().forEach((win) => {
         if (!win.isDestroyed()) win.webContents.send('credentials-changed');
       });
-      return { success: true };
+      return sttKeyPersistenceWarning(apiKey) ?? { success: true };
     } catch (error: any) {
       console.error('Error saving Azure API key:', error);
       return { success: false, error: error.message };
@@ -3782,7 +3798,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       BrowserWindow.getAllWindows().forEach((win) => {
         if (!win.isDestroyed()) win.webContents.send('credentials-changed');
       });
-      return { success: true };
+      return sttKeyPersistenceWarning(apiKey) ?? { success: true };
     } catch (error: any) {
       console.error('Error saving IBM Watson API key:', error);
       return { success: false, error: error.message };
@@ -3800,7 +3816,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       BrowserWindow.getAllWindows().forEach((win) => {
         if (!win.isDestroyed()) win.webContents.send('credentials-changed');
       });
-      return { success: true };
+      return sttKeyPersistenceWarning(apiKey) ?? { success: true };
     } catch (error: any) {
       console.error('Error saving Soniox API key:', error);
       return { success: false, error: error.message };

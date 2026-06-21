@@ -630,11 +630,33 @@ export class CredentialsManager {
     // Storage (Encrypted)
     // =========================================================================
 
-    private saveCredentials(): void {
+    /**
+     * True when credentials can actually be written to disk (OS-level encryption
+     * is available). When false, every setter still updates the in-memory copy —
+     * so keys work for the current session — but nothing is persisted, and they
+     * are gone on the next launch. Callers that want to warn the user (e.g. the
+     * STT-key save IPC handlers) check this so we never report a false "Saved".
+     */
+    public isPersistenceAvailable(): boolean {
+        try {
+            return safeStorage.isEncryptionAvailable();
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * Persist the in-memory credentials to the encrypted file.
+     * Returns true when the write actually reached disk, false when it was a
+     * memory-only no-op (encryption unavailable) or the write threw. Most callers
+     * ignore the return; the STT-key handlers use it to surface a real error
+     * instead of a misleading success.
+     */
+    private saveCredentials(): boolean {
         try {
             if (!safeStorage.isEncryptionAvailable()) {
-                console.warn('[CredentialsManager] Encryption not available; credentials kept in memory only');
-                return;
+                console.warn('[CredentialsManager] Encryption not available; credentials kept in memory only (will NOT survive restart)');
+                return false;
             }
 
             const data = JSON.stringify(this.credentials);
@@ -642,8 +664,10 @@ export class CredentialsManager {
             const tmpEnc = CREDENTIALS_PATH + '.tmp';
             fs.writeFileSync(tmpEnc, encrypted);
             fs.renameSync(tmpEnc, CREDENTIALS_PATH);
+            return true;
         } catch (error) {
             console.error('[CredentialsManager] Failed to save credentials:', error);
+            return false;
         }
     }
 

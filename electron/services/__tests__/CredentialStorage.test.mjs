@@ -13,7 +13,7 @@ function read(relativePath) {
 
 test('CredentialsManager does not persist plaintext fallback credentials when encryption is unavailable', () => {
   const source = read('electron/services/CredentialsManager.ts');
-  const saveStart = source.indexOf('    private saveCredentials(): void');
+  const saveStart = source.indexOf('    private saveCredentials(): boolean');
   const saveEnd = source.indexOf('    private loadCredentials(): void', saveStart);
   const saveSource = source.slice(saveStart, saveEnd);
 
@@ -41,6 +41,51 @@ test('CredentialsManager removes plaintext fallback files instead of loading the
   assert.doesNotMatch(plaintextSection, /const data = fs\.readFileSync/);
   assert.doesNotMatch(plaintextSection, /JSON\.parse\(data\)/);
   assert.doesNotMatch(plaintextSection, /this\.credentials = parsed/);
+});
+
+test('saveCredentials reports whether the write reached disk (no silent memory-only success)', () => {
+  const source = read('electron/services/CredentialsManager.ts');
+  const saveStart = source.indexOf('    private saveCredentials(): boolean');
+  const saveEnd = source.indexOf('    private loadCredentials(): void', saveStart);
+  const saveSource = source.slice(saveStart, saveEnd);
+
+  assert.ok(saveStart >= 0, 'saveCredentials should return boolean');
+  // Memory-only no-op must return false, not silently look like success.
+  assert.match(saveSource, /credentials kept in memory only[^\n]*\n\s*return false;/);
+  // A real on-disk write returns true; a thrown write returns false.
+  assert.match(saveSource, /fs\.renameSync\(tmpEnc, CREDENTIALS_PATH\);\s*\n\s*return true;/);
+  assert.match(saveSource, /Failed to save credentials:[^\n]*\)\s*;\s*\n\s*return false;/);
+});
+
+test('CredentialsManager exposes isPersistenceAvailable for the STT-key save guard', () => {
+  const source = read('electron/services/CredentialsManager.ts');
+  assert.match(source, /public isPersistenceAvailable\(\): boolean/);
+  assert.match(source, /return safeStorage\.isEncryptionAvailable\(\);/);
+});
+
+test('STT key IPC handlers warn the user when keys cannot be persisted', () => {
+  const source = read('electron/ipcHandlers.ts');
+  // The shared guard must gate on persistence availability and a non-empty key.
+  assert.match(source, /isPersistenceAvailable\(\)/);
+  assert.match(source, /const sttKeyPersistenceWarning/);
+  // Every STT key save handler must route through the guard instead of an
+  // unconditional { success: true } (the false-"Saved" bug).
+  const handlers = [
+    'set-groq-stt-api-key',
+    'set-openai-stt-api-key',
+    'set-deepgram-api-key',
+    'set-elevenlabs-api-key',
+    'set-azure-api-key',
+    'set-ibmwatson-api-key',
+    'set-soniox-api-key',
+  ];
+  for (const id of handlers) {
+    const start = source.indexOf(`'${id}'`);
+    assert.ok(start >= 0, `${id} handler should exist`);
+    const block = source.slice(start, start + 1000);
+    assert.match(block, /sttKeyPersistenceWarning\(apiKey\) \?\? \{ success: true \}/,
+      `${id} should return the persistence-aware result`);
+  }
 });
 
 test('SettingsManager does not log full settings JSON', () => {
