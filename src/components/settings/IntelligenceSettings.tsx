@@ -1,4 +1,4 @@
-import { AlertTriangle, Brain, Check, ChevronDown, Loader2, Wifi, WifiOff } from 'lucide-react';
+import { AlertTriangle, Check, ChevronDown, Cpu, Loader2, Wifi, WifiOff } from 'lucide-react';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 
@@ -411,7 +411,7 @@ export const IntelligenceSettings: React.FC = () => {
   return (
     <div className="space-y-6 max-w-2xl">
       <div className="flex items-center gap-2">
-        <Brain size={18} className="text-accent-primary" />
+        <Cpu size={18} className="text-accent-primary" />
         <h2 className="text-base font-semibold text-text-primary">Intelligence</h2>
       </div>
 
@@ -542,7 +542,7 @@ export const IntelligenceSettings: React.FC = () => {
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <Brain size={15} className="shrink-0 text-accent-primary" />
+                <Cpu size={15} className="shrink-0 text-accent-primary" />
                 <div className="text-sm font-semibold text-text-primary">Smart features</div>
               </div>
               <div className="mt-1 text-xs leading-relaxed text-text-secondary">

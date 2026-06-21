@@ -42,7 +42,7 @@ export class MeetingSummaryReducer {
     // "Summary" (rendered at the top of the notes) = outcome-first, grounded, no filler.
     const tldr = buildSummary(decisions, actionItems, risks, atoms, sections);
     const whatChanged = buildWhatChanged(atoms, decisions).slice(0, 6);
-    const overview = buildOverview(tldr, params.modeTemplateType);
+    const overview = buildOverview(tldr, atoms, decisions);
     const actionConfidence = deriveActionConfidence(actionItems);
     const transcriptCoverage = Math.max(0, Math.min(1, typeof params.transcriptCoverage === 'number' ? params.transcriptCoverage : (params.normalizedTranscript.totalChars > 0 ? 1 : 0)));
     const warnings = [...params.normalizedTranscript.qualityWarnings];
@@ -170,8 +170,20 @@ function buildSummary(decisions: DecisionItem[], actionItems: ActionItem[], risk
   return dedupeStrings(out).slice(0, 5);
 }
 
-function buildOverview(summary: string[], mode?: string | null): string {
-  return summary.slice(0, 2).join(' ');
+// Deterministic whole-meeting overview paragraph (fallback when LLM polish is off/unavailable).
+// Stitches the chunk briefs (the chronological arc of the meeting) into a paragraph, then
+// folds in the headline decisions so it reads as a quick recap of the ENTIRE meeting rather
+// than just the first two summary bullets. Capped to ~400 words.
+function buildOverview(summary: string[], atoms: ChunkMeetingAtoms[], decisions: DecisionItem[]): string {
+  const briefs = dedupeStrings(atoms.map(a => a.brief).filter(Boolean));
+  const parts: string[] = [];
+  if (briefs.length) parts.push(briefs.join(' '));
+  else if (summary.length) parts.push(summary.join(' '));
+  const topDecisions = decisions.slice(0, 3).map(d => d.text);
+  if (topDecisions.length) parts.push(`Key decisions: ${topDecisions.join('; ')}.`);
+  const text = parts.join(' ').replace(/\s+/g, ' ').trim();
+  const words = text.split(/\s+/);
+  return words.length > 400 ? words.slice(0, 400).join(' ') : text;
 }
 
 // Deterministic follow-up body (fallback used when the LLM follow-up generator is

@@ -119,23 +119,29 @@ export class MeetingContextAssembler {
         return { summary: null, meta: failMeta() };
       }
 
-      // #1 — Constrained LLM Summary polish (note-content only, "no new tokens" gated).
-      // Rewrites summary.tldr into cleaner prose; on any rejection keeps the deterministic
-      // summary. overview is kept in sync for back-compat consumers.
-      if (params.polishSummary && summary.tldr.length > 0) {
+      // #1 — Constrained LLM polish (note-content only, "no new tokens" gated). Polishes both
+      // the bullet Summary (summary.tldr) and the whole-meeting Overview paragraph. On any
+      // rejection the deterministic versions are kept.
+      if (params.polishSummary && (summary.tldr.length > 0 || validAtoms.length > 0)) {
         try {
-          const polished = await new SummaryPolisher(this.llmHelper).polish({
+          const polisher = new SummaryPolisher(this.llmHelper);
+          const baseInputs = {
             deterministicSummary: summary.tldr,
             decisions: summary.decisions,
             actionItems: summary.actionItems,
             risks: summary.risks,
             sections: summary.sections,
             mode: params.modeTemplateType,
-          });
-          if (polished && polished.length > 0) {
-            summary.tldr = polished;
-            summary.overview = polished.slice(0, 2).join(' ');
-          }
+          };
+          // Run the bullet-summary polish and the whole-meeting overview polish in parallel.
+          const briefs = validAtoms.map(a => a.brief).filter(Boolean);
+          const topics = summary.topics || [];
+          const [polished, polishedOverview] = await Promise.all([
+            summary.tldr.length > 0 ? polisher.polish(baseInputs) : Promise.resolve(null),
+            polisher.polishOverview({ ...baseInputs, briefs, topics }),
+          ]);
+          if (polished && polished.length > 0) summary.tldr = polished;
+          if (polishedOverview) summary.overview = polishedOverview;
         } catch (e) {
           console.warn('[MeetingContextAssembler] summary polish failed (non-fatal):', (e as Error)?.message);
         }

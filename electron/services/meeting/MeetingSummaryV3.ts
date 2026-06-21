@@ -466,7 +466,8 @@ export function validateMeetingSummaryV3(value: unknown): ValidationResult<Meeti
   const errors: string[] = [];
 
   const tldr = sanitizeStringArray(raw.tldr, 6);
-  const overview = cleanNoteText(raw.overview, 600);
+  // Overview is a whole-meeting paragraph TLDR (up to ~400 words ≈ 2800 chars).
+  const overview = cleanNoteText(raw.overview, 2800);
   const repairedTldr = tldr.length > 0
     ? tldr
     : overview.split(/(?<=[.!?])\s+/).map(s => cleanNoteText(s)).filter(Boolean).slice(0, 4);

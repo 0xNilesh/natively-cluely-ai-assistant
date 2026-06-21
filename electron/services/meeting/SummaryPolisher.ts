@@ -77,6 +77,55 @@ ${grounded}`;
     if (result.ok && result.data && result.data.summary.length > 0) return result.data.summary;
     return null; // keep deterministic summary
   }
+
+  // Whole-meeting Overview: a single grounded paragraph (up to ~400 words) covering the
+  // entire meeting — purpose, the arc of what was discussed, key decisions/outcomes, and where
+  // things landed. Drawn from the WHOLE meeting's grounded content (chunk briefs across the
+  // timeline + topics + decisions/actions/risks + section bullets), never raw transcript.
+  // Same "no new tokens" gate; returns null to keep the deterministic overview.
+  async polishOverview(p: PolishSummaryParams & { briefs?: string[]; topics?: string[] }): Promise<string | null> {
+    const noteCorpus = this.buildGroundedNotes(p);
+    const timeline = (p.briefs || []).filter(Boolean);
+    const topics = (p.topics || []).filter(Boolean);
+    const groundedParts: string[] = [];
+    if (timeline.length) groundedParts.push(`Chronological highlights:\n${timeline.map(b => `- ${b}`).join('\n')}`);
+    if (topics.length) groundedParts.push(`Topics:\n${topics.map(t => `- ${t}`).join('\n')}`);
+    if (noteCorpus) groundedParts.push(noteCorpus);
+    const grounded = groundedParts.join('\n\n');
+    if (!grounded.trim()) return null;
+
+    const systemPrompt = `Write a single-paragraph overview of the ENTIRE meeting from the grounded notes below — a quick read that tells someone who missed it what happened. Up to 400 words; usually much shorter. Cover the meeting's purpose, the arc of what was discussed, the key decisions/outcomes, and where things landed. Flowing prose, ONE paragraph (no headings, no bullets).
+
+STRICT RULES:
+- Use ONLY the facts in the NOTES below. Introduce NO new information, name, number, date, company, or owner not already present.
+- No filler ("productive discussion", "the team aligned", "great meeting"). Every sentence must carry a real fact.
+- If the notes contain no substance, return an empty "overview" string.
+
+NOTES:
+${grounded}`;
+
+    const jsonShapeHint = `{ "overview": "one flowing paragraph summarizing the whole meeting" }`;
+
+    const result = await generateStructured<{ overview: string }>({
+      schemaName: 'MeetingOverview',
+      systemPrompt,
+      jsonShapeHint,
+      userContent: grounded,
+      llmHelper: this.llmHelper,
+      validate: (raw) => {
+        const text = (raw && typeof raw === 'object') ? String((raw as any).overview || '').replace(/\s+/g, ' ').trim() : '';
+        if (!text || text.length < 20) return { ok: false, errors: ['missing/short overview'], repaired: false };
+        const words = text.split(/\s+/);
+        const clipped = words.length > 400 ? words.slice(0, 400).join(' ') : text;
+        const offending = newSignificantTokens(clipped, grounded);
+        if (offending.length > 0) return { ok: false, errors: [`introduced new tokens: ${offending.slice(0, 5).join(', ')}`], repaired: false };
+        return { ok: true, data: { overview: clipped }, errors: [], repaired: false };
+      },
+    });
+
+    if (result.ok && result.data && result.data.overview) return result.data.overview;
+    return null; // keep deterministic overview
+  }
 }
 
 // ── "No new information" gate ─────────────────────────────────────────────────

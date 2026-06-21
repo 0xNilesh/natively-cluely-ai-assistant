@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
-import { ArrowLeft, Search, Mail, Link, ChevronDown, Play, ArrowUp, Copy, Check, MoreHorizontal, Settings, ArrowRight } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { ArrowLeft, Search, Mail, Link, ChevronDown, Play, ArrowUp, Copy, Check, MoreHorizontal, Settings, ArrowRight, RefreshCw, Info, AlertTriangle, Eye, EyeOff, Sparkles, History, Pencil, X } from 'lucide-react';
+import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import { genMessageId } from '../utils/messageId';
 import MeetingChatOverlay from './MeetingChatOverlay';
 import EditableTextBlock from './EditableTextBlock';
@@ -123,6 +123,13 @@ const cleanMarkdown = (content: string) => {
 // cross-meeting recall) but are NOT rendered as the primary layout. Set true to surface them.
 const SHOW_STRUCTURED_BLOCKS = false;
 
+// Not every "quality warning" is a real problem. A note like "Removed 1 empty,
+// duplicate, or interim transcript segment." is a benign cleanup log and should
+// read as low-key info — not an alarming amber warning. Anything about speaker
+// labels, coverage, or that asks the reader to verify is a genuine concern.
+const isBenignQualityNote = (warning: string): boolean =>
+    /removed|cleaned|interim|duplicate|empty/i.test(warning);
+
 interface Evidence { speakerId?: string; speakerName?: string; speaker?: string; timestampMs?: number; timestamp?: number; quote?: string; segmentId?: string }
 interface FollowUpDraftObj { type?: string; subject?: string; body: string; tone?: string }
 
@@ -240,10 +247,13 @@ const MeetingDetails: React.FC<MeetingDetailsProps> = ({ meeting: initialMeeting
     const [isRegeneratingFollowUp, setIsRegeneratingFollowUp] = useState(false);
     // Selected follow-up tone, shown in the selector. Seeded from the saved draft's tone.
     const [followUpTone, setFollowUpTone] = useState<'professional' | 'warm' | 'concise' | 'friendly'>(followUpDraftTone || 'professional');
+    // Local "Copied!" confirmation for the follow-up copy button.
+    const [followUpCopied, setFollowUpCopied] = useState(false);
     const [showEvidence, setShowEvidence] = useState(false);
     const [pendingScrollTs, setPendingScrollTs] = useState<number | null>(null);
     const [editingSpeaker, setEditingSpeaker] = useState<string | null>(null);
     const [speakerDraft, setSpeakerDraft] = useState('');
+    const prefersReducedMotion = useReducedMotion();
 
     const copyRecipe = (text: string) => {
         navigator.clipboard?.writeText(text || '').catch(() => { /* swallow */ });
@@ -572,71 +582,204 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                                 </div>
                                 )}
 
-                                {/* V3 — product-grade structured notes: fast skim, decisions, actions, open questions, risks, quality. */}
-                                {isV3Summary && meeting.detailedSummary?.sourceQuality?.warnings && meeting.detailedSummary.sourceQuality.warnings.length > 0 && (
-                                    <section className="mb-6 p-3 rounded-[10px] border border-amber-400/30 bg-amber-500/5">
-                                        <p className="text-sm font-semibold text-text-primary mb-1">Quality warning</p>
-                                        <ul className="space-y-1">
-                                            {meeting.detailedSummary.sourceQuality.warnings.map((warning, i) => (
-                                                <li key={i} className="text-[12.5px] text-text-secondary leading-relaxed">{warning}</li>
-                                            ))}
-                                        </ul>
-                                    </section>
-                                )}
+                                {/* V3 — product-grade structured notes: fast skim, decisions, actions, open questions, risks, quality.
+                                    The four callout cards below form one coherent family: same radius, padding, icon
+                                    treatment and type scale. They fade + lift in with a short ease-out stagger. */}
 
-                                {/* V3 toolbar: regenerate + evidence toggle + processing status */}
+                                {/* 1. Source quality — severity-aware. Benign cleanup notes (segments removed/cleaned)
+                                    read as quiet info; genuine concerns (speaker labels, coverage, "verify") stay amber. */}
+                                {isV3Summary && meeting.detailedSummary?.sourceQuality?.warnings && meeting.detailedSummary.sourceQuality.warnings.length > 0 && (() => {
+                                    const warnings = meeting.detailedSummary.sourceQuality.warnings;
+                                    const realIssues = warnings.filter(w => !isBenignQualityNote(w));
+                                    const allBenign = realIssues.length === 0;
+                                    return (
+                                        <motion.section
+                                            initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 12 }}
+                                            animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
+                                            transition={{ duration: 0.22, ease: [0.23, 1, 0.32, 1], delay: prefersReducedMotion ? 0 : 0 }}
+                                            className={
+                                                allBenign
+                                                    ? 'mb-6 px-3 py-2 rounded-[10px] border border-border-subtle bg-white/[0.02] flex items-start gap-2.5'
+                                                    : 'mb-6 p-3 rounded-[10px] border border-amber-400/30 bg-amber-500/5'
+                                            }
+                                        >
+                                            {allBenign ? (
+                                                // All-benign: a single quiet line, no header, no alarm.
+                                                <>
+                                                    <Info className="w-3.5 h-3.5 text-text-tertiary mt-0.5 shrink-0" strokeWidth={2} />
+                                                    <ul className="space-y-0.5">
+                                                        {warnings.map((warning, i) => (
+                                                            <li key={i} className="text-[12px] text-text-tertiary leading-relaxed">{warning}</li>
+                                                        ))}
+                                                    </ul>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <div className="flex items-center gap-2 mb-1.5">
+                                                        <span className="inline-flex items-center justify-center w-5 h-5 rounded-md bg-amber-500/15 text-amber-400 shrink-0">
+                                                            <AlertTriangle className="w-3.5 h-3.5" strokeWidth={2} />
+                                                        </span>
+                                                        <p className="text-sm font-semibold text-text-primary">Quality warning</p>
+                                                    </div>
+                                                    <ul className="space-y-1 pl-7">
+                                                        {warnings.map((warning, i) => {
+                                                            const benign = isBenignQualityNote(warning);
+                                                            return (
+                                                                <li
+                                                                    key={i}
+                                                                    className={`flex items-start gap-2 leading-relaxed ${benign ? 'text-[12px] text-text-tertiary' : 'text-[12.5px] text-text-secondary'}`}
+                                                                >
+                                                                    {benign
+                                                                        ? <Info className="w-3 h-3 text-text-tertiary mt-[3px] shrink-0" strokeWidth={2} />
+                                                                        : <AlertTriangle className="w-3 h-3 text-amber-400/80 mt-[3px] shrink-0" strokeWidth={2} />}
+                                                                    <span>{warning}</span>
+                                                                </li>
+                                                            );
+                                                        })}
+                                                    </ul>
+                                                </>
+                                            )}
+                                        </motion.section>
+                                    );
+                                })()}
+
+                                {/* 2. Toolbar — segmented control matching the Follow-up draft group: cohesive pill,
+                                    icon+label buttons, whileTap, RefreshCw spin, real Eye/EyeOff evidence toggle. */}
                                 {isV3Summary && (
-                                    <div className="mb-6 flex flex-wrap items-center gap-2">
-                                        <button
-                                            type="button"
-                                            onClick={() => handleRegenerate()}
-                                            disabled={isRegenerating}
-                                            className="text-[11px] px-2.5 py-1 rounded-md bg-white/5 hover:bg-white/10 disabled:opacity-50 text-text-secondary border border-white/10 transition-colors"
-                                        >
-                                            {isRegenerating ? 'Regenerating…' : 'Regenerate notes'}
-                                        </button>
-                                        <button
-                                            type="button"
-                                            onClick={() => setShowEvidence(v => !v)}
-                                            className="text-[11px] px-2.5 py-1 rounded-md bg-white/5 hover:bg-white/10 text-text-secondary border border-white/10 transition-colors"
-                                        >
-                                            {showEvidence ? 'Hide evidence' : 'Show evidence'}
-                                        </button>
+                                    <motion.div
+                                        initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 12 }}
+                                        animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
+                                        transition={{ duration: 0.22, ease: [0.23, 1, 0.32, 1], delay: prefersReducedMotion ? 0 : 0.05 }}
+                                        className="mb-6 flex flex-wrap items-center gap-2"
+                                    >
+                                        <div className="flex items-center gap-1 p-1 rounded-lg bg-white/[0.03] border border-border-subtle">
+                                            {/* Regenerate — icon spins while working; on hover it rotates a half-turn as a
+                                                preview of the action. */}
+                                            <motion.button
+                                                type="button"
+                                                onClick={() => handleRegenerate()}
+                                                disabled={isRegenerating}
+                                                initial="rest"
+                                                whileHover={prefersReducedMotion || isRegenerating ? undefined : 'hover'}
+                                                whileTap={prefersReducedMotion || isRegenerating ? undefined : { scale: 0.96 }}
+                                                transition={{ duration: 0.16, ease: [0.23, 1, 0.32, 1] }}
+                                                className="h-7 inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 rounded-md text-text-secondary hover:text-text-primary hover:bg-white/[0.06] disabled:opacity-50 disabled:hover:bg-transparent transition-colors"
+                                            >
+                                                <motion.span
+                                                    className="w-3.5 h-3.5 shrink-0 inline-flex"
+                                                    variants={prefersReducedMotion ? undefined : { rest: { rotate: 0 }, hover: { rotate: -180 } }}
+                                                    transition={{ duration: 0.4, ease: [0.23, 1, 0.32, 1] }}
+                                                >
+                                                    <RefreshCw
+                                                        className={`w-3.5 h-3.5 ${isRegenerating && !prefersReducedMotion ? 'animate-spin' : ''}`}
+                                                        strokeWidth={2}
+                                                    />
+                                                </motion.span>
+                                                <span>{isRegenerating ? 'Regenerating…' : 'Regenerate notes'}</span>
+                                            </motion.button>
+
+                                            <div className="w-px h-4 bg-border-subtle shrink-0" aria-hidden="true" />
+
+                                            {/* Evidence toggle — animated icon crossfade + a width-animated label so the
+                                                pressed (active) state reads clearly. */}
+                                            <motion.button
+                                                type="button"
+                                                onClick={() => setShowEvidence(v => !v)}
+                                                whileTap={prefersReducedMotion ? undefined : { scale: 0.96 }}
+                                                transition={{ duration: 0.16, ease: [0.23, 1, 0.32, 1] }}
+                                                aria-pressed={showEvidence}
+                                                className={`h-7 inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 rounded-md transition-colors ${showEvidence ? 'text-accent-primary bg-accent-primary/10' : 'text-text-secondary hover:text-text-primary hover:bg-white/[0.06]'}`}
+                                            >
+                                                <span className="relative w-3.5 h-3.5 shrink-0">
+                                                    <AnimatePresence initial={false} mode="wait">
+                                                        <motion.span
+                                                            key={showEvidence ? 'eye' : 'eyeoff'}
+                                                            initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.6 }}
+                                                            animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, scale: 1 }}
+                                                            exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.6 }}
+                                                            transition={{ duration: 0.16, ease: [0.23, 1, 0.32, 1] }}
+                                                            className="absolute inset-0 flex items-center justify-center"
+                                                        >
+                                                            {showEvidence
+                                                                ? <Eye className="w-3.5 h-3.5" strokeWidth={2} />
+                                                                : <EyeOff className="w-3.5 h-3.5" strokeWidth={2} />}
+                                                        </motion.span>
+                                                    </AnimatePresence>
+                                                </span>
+                                                <span>{showEvidence ? 'Hide evidence' : 'Show evidence'}</span>
+                                            </motion.button>
+                                        </div>
                                         {v3SummaryStatus && v3SummaryStatus !== 'completed' && (
-                                            <span className="text-[11px] text-amber-400">Status: {v3SummaryStatus.replace(/_/g, ' ')}</span>
+                                            <span className="inline-flex items-center gap-1.5 text-[11px] text-amber-400">
+                                                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
+                                                {v3SummaryStatus.replace(/_/g, ' ')}
+                                            </span>
                                         )}
-                                    </div>
+                                    </motion.div>
                                 )}
 
-                                {/* Mode auto-detect suggestion: only when detected differs from selected with confidence. */}
+                                {/* 3. Mode auto-detect suggestion — the smart, high-value card. Refined blue accent,
+                                    sparkle glyph, clear primary action. Appears after processing detects a better mode. */}
                                 {isV3Summary && v3Mode?.detectedModeName && v3Mode?.detectedConfidence != null && v3Mode.detectedConfidence >= 0.5 &&
                                   v3Mode.detectedModeName !== v3Mode.selectedModeName && (
-                                    <section className="mb-6 p-3 rounded-[10px] border border-blue-400/30 bg-blue-500/5 flex items-center justify-between gap-3">
-                                        <p className="text-[12.5px] text-text-secondary leading-relaxed">
-                                            This looks like a <span className="font-semibold text-text-primary">{v3Mode.detectedModeName}</span> meeting
-                                            {v3Mode.selectedModeName ? <> (notes used {v3Mode.selectedModeName})</> : null}.
-                                        </p>
-                                        <button
+                                    <motion.section
+                                        initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 12 }}
+                                        animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
+                                        transition={{ duration: 0.24, ease: [0.23, 1, 0.32, 1], delay: prefersReducedMotion ? 0 : 0.1 }}
+                                        className="mb-6 p-3.5 rounded-[10px] border border-blue-400/30 bg-gradient-to-br from-blue-500/[0.09] to-blue-500/[0.02] flex items-center justify-between gap-3"
+                                    >
+                                        <div className="flex items-start gap-2.5 min-w-0">
+                                            <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-blue-500/15 text-blue-300 shrink-0">
+                                                <Sparkles className="w-3.5 h-3.5" strokeWidth={2} />
+                                            </span>
+                                            <div className="min-w-0">
+                                                <p className="text-[10px] font-semibold uppercase tracking-wide text-blue-300/80 mb-0.5">Suggestion</p>
+                                                <p className="text-[12.5px] text-text-secondary leading-relaxed">
+                                                    This looks like a <span className="font-semibold text-text-primary">{v3Mode.detectedModeName}</span> meeting
+                                                    {v3Mode.selectedModeName ? <> (notes used {v3Mode.selectedModeName})</> : null}.
+                                                </p>
+                                            </div>
+                                        </div>
+                                        <motion.button
                                             type="button"
                                             onClick={() => handleRegenerate(v3Mode.detectedModeId ? undefined : (v3Mode.detectedModeName || '').toLowerCase())}
                                             disabled={isRegenerating}
-                                            className="shrink-0 text-[11px] px-2.5 py-1 rounded-md bg-blue-500/15 hover:bg-blue-500/25 disabled:opacity-50 text-blue-300 border border-blue-400/30 transition-colors"
+                                            whileTap={prefersReducedMotion || isRegenerating ? undefined : { scale: 0.96 }}
+                                            transition={{ duration: 0.16, ease: [0.23, 1, 0.32, 1] }}
+                                            className="shrink-0 h-7 inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 rounded-md bg-blue-500/20 hover:bg-blue-500/30 disabled:opacity-50 text-blue-200 border border-blue-400/30 transition-colors"
                                         >
-                                            Regenerate as {v3Mode.detectedModeName}
-                                        </button>
-                                    </section>
+                                            <RefreshCw
+                                                className={`w-3.5 h-3.5 shrink-0 ${isRegenerating && !prefersReducedMotion ? 'animate-spin' : ''}`}
+                                                strokeWidth={2}
+                                            />
+                                            <span>Regenerate as {v3Mode.detectedModeName}</span>
+                                        </motion.button>
+                                    </motion.section>
                                 )}
 
-                                {/* Cross-meeting recall: still-open carryover from prior meetings (Phase 13). */}
+                                {/* 4. Cross-meeting recall — still-open carryover from prior meetings (Phase 13). */}
                                 {isV3Summary && meeting.detailedSummary?.crossMeeting?.stillOpen && meeting.detailedSummary.crossMeeting.stillOpen.length > 0 && (
-                                    <section className="mb-6 p-3 rounded-[10px] border border-purple-400/30 bg-purple-500/5">
-                                        <p className="text-sm font-semibold text-text-primary mb-1">Carried over from earlier meetings</p>
-                                        <ul className="space-y-1">
+                                    <motion.section
+                                        initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 12 }}
+                                        animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
+                                        transition={{ duration: 0.22, ease: [0.23, 1, 0.32, 1], delay: prefersReducedMotion ? 0 : 0.15 }}
+                                        className="mb-6 p-3 rounded-[10px] border border-purple-400/30 bg-purple-500/5"
+                                    >
+                                        <div className="flex items-center gap-2 mb-1.5">
+                                            <span className="inline-flex items-center justify-center w-5 h-5 rounded-md bg-purple-500/15 text-purple-300 shrink-0">
+                                                <History className="w-3.5 h-3.5" strokeWidth={2} />
+                                            </span>
+                                            <p className="text-sm font-semibold text-text-primary">Carried over from earlier meetings</p>
+                                        </div>
+                                        <ul className="space-y-1 pl-7">
                                             {meeting.detailedSummary.crossMeeting.stillOpen.map((line, i) => (
-                                                <li key={i} className="text-[12.5px] text-text-secondary leading-relaxed">{line}</li>
+                                                <li key={i} className="flex items-start gap-2 text-[12.5px] text-text-secondary leading-relaxed">
+                                                    <span className="mt-[7px] w-1 h-1 rounded-full bg-purple-400/70 shrink-0" />
+                                                    <span>{line}</span>
+                                                </li>
                                             ))}
                                         </ul>
-                                    </section>
+                                    </motion.section>
                                 )}
 
                                 {/* Summary on top — outcome-first, grounded. Then the mode's template sections below. */}
@@ -786,20 +929,87 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                                     <section className="mb-8">
                                         <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
                                             <h2 className="text-lg font-semibold text-text-primary">Follow-up draft</h2>
-                                            <div className="flex items-center gap-2">
-                                                <button type="button" onClick={() => copyRecipe((followUpSubject ? `Subject: ${followUpSubject}\n\n` : '') + followUpBody)} className="text-[11px] px-2.5 py-1 rounded-md bg-white/5 hover:bg-white/10 text-text-secondary border border-white/10 transition-colors">Copy</button>
-                                                <button type="button" onClick={() => handleRegenerateFollowUp()} disabled={isRegeneratingFollowUp} className="text-[11px] px-2.5 py-1 rounded-md bg-white/5 hover:bg-white/10 disabled:opacity-50 text-text-secondary border border-white/10 transition-colors">{isRegeneratingFollowUp ? 'Regenerating…' : 'Regenerate'}</button>
-                                                <select
-                                                    value={followUpTone}
-                                                    onChange={(e) => { const t = e.target.value as 'professional' | 'warm' | 'concise' | 'friendly'; setFollowUpTone(t); handleRegenerateFollowUp(t); }}
-                                                    className="text-[11px] px-1.5 py-1 rounded-md bg-white/5 text-text-secondary border border-white/10"
-                                                    title="Regenerate with tone"
+                                            <div className="flex items-center gap-1 p-1 rounded-lg bg-white/[0.03] border border-border-subtle">
+                                                {/* Copy — with a real copied-confirmation state. */}
+                                                <motion.button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        copyRecipe((followUpSubject ? `Subject: ${followUpSubject}\n\n` : '') + followUpBody);
+                                                        setFollowUpCopied(true);
+                                                        setTimeout(() => setFollowUpCopied(false), 1500);
+                                                    }}
+                                                    whileTap={prefersReducedMotion ? undefined : { scale: 0.96 }}
+                                                    transition={{ duration: 0.16, ease: [0.23, 1, 0.32, 1] }}
+                                                    aria-label={followUpCopied ? 'Copied' : 'Copy follow-up draft'}
+                                                    className="h-7 inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 rounded-md text-text-secondary hover:text-text-primary hover:bg-white/[0.06] transition-colors"
                                                 >
-                                                    <option value="professional">Professional</option>
-                                                    <option value="warm">Warm</option>
-                                                    <option value="concise">Concise</option>
-                                                    <option value="friendly">Friendly</option>
-                                                </select>
+                                                    <span className="relative w-3.5 h-3.5 shrink-0">
+                                                        <AnimatePresence initial={false} mode="wait">
+                                                            {followUpCopied ? (
+                                                                <motion.span
+                                                                    key="check"
+                                                                    initial={prefersReducedMotion ? { opacity: 0 } : { scale: 0.6, opacity: 0 }}
+                                                                    animate={prefersReducedMotion ? { opacity: 1 } : { scale: 1, opacity: 1 }}
+                                                                    exit={prefersReducedMotion ? { opacity: 0 } : { scale: 0.6, opacity: 0 }}
+                                                                    transition={{ duration: 0.18, ease: [0.23, 1, 0.32, 1] }}
+                                                                    className="absolute inset-0 flex items-center justify-center text-accent-primary"
+                                                                >
+                                                                    <Check className="w-3.5 h-3.5" strokeWidth={2.5} />
+                                                                </motion.span>
+                                                            ) : (
+                                                                <motion.span
+                                                                    key="copy"
+                                                                    initial={prefersReducedMotion ? { opacity: 0 } : { scale: 0.6, opacity: 0 }}
+                                                                    animate={prefersReducedMotion ? { opacity: 1 } : { scale: 1, opacity: 1 }}
+                                                                    exit={prefersReducedMotion ? { opacity: 0 } : { scale: 0.6, opacity: 0 }}
+                                                                    transition={{ duration: 0.18, ease: [0.23, 1, 0.32, 1] }}
+                                                                    className="absolute inset-0 flex items-center justify-center"
+                                                                >
+                                                                    <Copy className="w-3.5 h-3.5" strokeWidth={2} />
+                                                                </motion.span>
+                                                            )}
+                                                        </AnimatePresence>
+                                                    </span>
+                                                    <span className="min-w-[30px] text-left">{followUpCopied ? 'Copied' : 'Copy'}</span>
+                                                </motion.button>
+
+                                                <div className="w-px h-4 bg-border-subtle shrink-0" aria-hidden="true" />
+
+                                                {/* Regenerate — icon spins while regenerating. */}
+                                                <motion.button
+                                                    type="button"
+                                                    onClick={() => handleRegenerateFollowUp()}
+                                                    disabled={isRegeneratingFollowUp}
+                                                    whileTap={prefersReducedMotion || isRegeneratingFollowUp ? undefined : { scale: 0.96 }}
+                                                    transition={{ duration: 0.16, ease: [0.23, 1, 0.32, 1] }}
+                                                    className="h-7 inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 rounded-md text-text-secondary hover:text-text-primary hover:bg-white/[0.06] disabled:opacity-50 disabled:hover:bg-transparent transition-colors"
+                                                >
+                                                    <RefreshCw
+                                                        className={`w-3.5 h-3.5 shrink-0 ${isRegeneratingFollowUp && !prefersReducedMotion ? 'animate-spin' : ''}`}
+                                                        strokeWidth={2}
+                                                    />
+                                                    <span>{isRegeneratingFollowUp ? 'Regenerating…' : 'Regenerate'}</span>
+                                                </motion.button>
+
+                                                <div className="w-px h-4 bg-border-subtle shrink-0" aria-hidden="true" />
+
+                                                {/* Tone — styled native select for full keyboard accessibility. */}
+                                                <div className="relative inline-flex items-center h-7">
+                                                    <select
+                                                        value={followUpTone}
+                                                        onChange={(e) => { const t = e.target.value as 'professional' | 'warm' | 'concise' | 'friendly'; setFollowUpTone(t); handleRegenerateFollowUp(t); }}
+                                                        disabled={isRegeneratingFollowUp}
+                                                        className="h-7 leading-none appearance-none text-[11px] font-medium pl-2.5 pr-7 rounded-md bg-transparent hover:bg-white/[0.06] text-text-secondary hover:text-text-primary disabled:opacity-50 transition-colors cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-primary"
+                                                        title="Regenerate with tone"
+                                                        aria-label="Follow-up tone"
+                                                    >
+                                                        <option value="professional" className="bg-bg-secondary text-text-primary">Professional</option>
+                                                        <option value="warm" className="bg-bg-secondary text-text-primary">Warm</option>
+                                                        <option value="concise" className="bg-bg-secondary text-text-primary">Concise</option>
+                                                        <option value="friendly" className="bg-bg-secondary text-text-primary">Friendly</option>
+                                                    </select>
+                                                    <ChevronDown className="w-3 h-3 text-text-tertiary absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" strokeWidth={2.5} />
+                                                </div>
                                             </div>
                                         </div>
                                         {followUpSubject && <p className="text-[12.5px] text-text-tertiary mb-1">Subject: {followUpSubject}</p>}
@@ -1014,37 +1224,69 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                                     if (speakers.length === 0) return null;
                                     return (
                                         <div className="mb-5 flex flex-wrap items-center gap-2">
-                                            <span className="text-[11px] text-text-tertiary">Speakers:</span>
+                                            <span className="text-[11px] font-medium text-text-tertiary uppercase tracking-wide mr-0.5">Speakers</span>
+                                            <AnimatePresence initial={false} mode="popLayout">
                                             {speakers.map((sp) => {
                                                 const display = resolveSpeakerName(sp);
                                                 const id = (sp || '').toLowerCase().replace(/^(user|me)$/, 'me').replace(/^(interviewer|them|other|system|assistant)$/, 'speaker_1').replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'unknown';
                                                 if (editingSpeaker === id) {
                                                     return (
-                                                        <span key={id} className="flex items-center gap-1">
+                                                        <motion.span
+                                                            key={id}
+                                                            layout
+                                                            initial={prefersReducedMotion ? undefined : { opacity: 0, scale: 0.96 }}
+                                                            animate={prefersReducedMotion ? undefined : { opacity: 1, scale: 1 }}
+                                                            transition={{ duration: 0.16, ease: [0.23, 1, 0.32, 1] }}
+                                                            className="inline-flex items-center gap-1 h-7 pl-2 pr-1 rounded-full bg-bg-secondary border border-accent-primary/50 ring-1 ring-accent-primary/20"
+                                                        >
                                                             <input
                                                                 autoFocus
                                                                 value={speakerDraft}
                                                                 onChange={e => setSpeakerDraft(e.target.value)}
                                                                 onKeyDown={e => { if (e.key === 'Enter') handleSaveSpeakerLabel(id, speakerDraft); if (e.key === 'Escape') setEditingSpeaker(null); }}
-                                                                onBlur={() => handleSaveSpeakerLabel(id, speakerDraft)}
                                                                 placeholder={display}
-                                                                className="text-[11px] px-2 py-1 rounded-md bg-white/10 text-text-primary border border-blue-400/40 w-36"
+                                                                className="text-[11px] bg-transparent text-text-primary placeholder:text-text-tertiary outline-none w-28"
                                                             />
-                                                        </span>
+                                                            <motion.button
+                                                                type="button"
+                                                                onMouseDown={e => e.preventDefault()}
+                                                                onClick={() => handleSaveSpeakerLabel(id, speakerDraft)}
+                                                                whileTap={prefersReducedMotion ? undefined : { scale: 0.9 }}
+                                                                className="inline-flex items-center justify-center w-5 h-5 rounded-full text-accent-primary hover:bg-accent-primary/15 transition-colors"
+                                                                title="Save"
+                                                            >
+                                                                <Check className="w-3 h-3" strokeWidth={2.5} />
+                                                            </motion.button>
+                                                            <motion.button
+                                                                type="button"
+                                                                onMouseDown={e => e.preventDefault()}
+                                                                onClick={() => setEditingSpeaker(null)}
+                                                                whileTap={prefersReducedMotion ? undefined : { scale: 0.9 }}
+                                                                className="inline-flex items-center justify-center w-5 h-5 rounded-full text-text-tertiary hover:text-text-primary hover:bg-white/[0.08] transition-colors"
+                                                                title="Cancel"
+                                                            >
+                                                                <X className="w-3 h-3" strokeWidth={2.5} />
+                                                            </motion.button>
+                                                        </motion.span>
                                                     );
                                                 }
                                                 return (
-                                                    <button
+                                                    <motion.button
                                                         key={id}
+                                                        layout
                                                         type="button"
                                                         onClick={() => { setEditingSpeaker(id); setSpeakerDraft(display); }}
-                                                        className="text-[11px] px-2 py-1 rounded-md bg-white/5 hover:bg-white/10 text-text-secondary border border-white/10 transition-colors"
+                                                        whileTap={prefersReducedMotion ? undefined : { scale: 0.96 }}
+                                                        transition={{ duration: 0.16, ease: [0.23, 1, 0.32, 1] }}
+                                                        className="group inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full bg-white/[0.04] hover:bg-white/[0.08] text-text-secondary hover:text-text-primary border border-border-subtle transition-colors"
                                                         title="Rename speaker"
                                                     >
-                                                        {display} ✎
-                                                    </button>
+                                                        <span className="text-[11px] font-medium">{display}</span>
+                                                        <Pencil className="w-2.5 h-2.5 text-text-tertiary opacity-0 group-hover:opacity-100 transition-opacity shrink-0" strokeWidth={2} />
+                                                    </motion.button>
                                                 );
                                             })}
+                                            </AnimatePresence>
                                         </div>
                                     );
                                 })()}
