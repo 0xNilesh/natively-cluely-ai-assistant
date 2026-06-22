@@ -3654,17 +3654,21 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
-  // Shared guard for STT key saves: when OS-level encryption is unavailable the
-  // setter only updates the in-memory copy — the key works this session but is
-  // gone on restart. Returning success:false here surfaces a real error in the
-  // settings UI instead of a misleading "Saved" badge (the root cause behind
-  // "STT keys reset to none after restart" reports). Only flagged when a non-empty
-  // key was provided (clearing a key has nothing to persist).
+  // Shared guard for STT key saves. Keys now persist via the OS keyring or, when
+  // that is unavailable, an app-managed encrypted fallback — so isPersistenceAvailable()
+  // is effectively always true. This only trips on a genuinely unwritable disk, where
+  // even the fallback write fails; we surface a real error instead of a misleading
+  // "Saved" badge. Only flagged when a non-empty key was provided (clearing has
+  // nothing to persist).
   const sttPersistError =
-    'API key saved for this session only — your system blocked secure storage, so it will not survive a restart. See Help → STT setup.';
+    'Could not save your API key to disk — it will work this session but may not survive a restart. Check that the app has permission to write its data folder.';
   const sttKeyPersistenceWarning = (apiKey: string): { success: false; error: string } | null => {
     const { CredentialsManager } = require('./services/CredentialsManager');
     if (apiKey && apiKey.trim().length > 0 && !CredentialsManager.getInstance().isPersistenceAvailable()) {
+      // Correlate the actual save failure with the environment (platform /
+      // linux storage backend / packaged) so we can tell the expected
+      // no-keyring case from a signing regression. Metadata only, never the key.
+      CredentialsManager.getInstance().emitStorageStatusDiagnostic('stt_save_failed');
       return { success: false, error: sttPersistError };
     }
     return null;
@@ -3933,7 +3937,7 @@ export function initializeIpcHandlers(appState: AppState): void {
               ws.send(
                 JSON.stringify({
                   api_key: apiKey,
-                  model: 'stt-rt-v4',
+                  model: 'stt-rt-v5',
                   audio_format: 'pcm_s16le',
                   sample_rate: 16000,
                   num_channels: 1,

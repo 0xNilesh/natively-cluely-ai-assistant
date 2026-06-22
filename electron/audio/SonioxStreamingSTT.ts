@@ -251,7 +251,7 @@ export class SonioxStreamingSTT extends EventEmitter {
             // Send initial configuration as first message
             const config: any = {
                 api_key: this.apiKey,
-                model: 'stt-rt-v4',
+                model: 'stt-rt-v5',
                 audio_format: 'pcm_s16le',
                 sample_rate: this.sampleRate,
                 num_channels: this.numChannels,

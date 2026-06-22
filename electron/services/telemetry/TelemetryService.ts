@@ -3,6 +3,11 @@ import path from 'path';
 
 export type TelemetryEventName =
   | 'app_start'
+  // OS secure-storage availability snapshot. Metadata only (booleans/enums/
+  // platform) — NEVER any key contents. Lets us confirm whether a missing
+  // STT-key persistence is the expected Linux-no-keyring case (backend=
+  // basic_text) or a real signing/keyring regression on packaged macOS/Windows.
+  | 'credential_storage_status'
   | 'meeting_start'
   | 'meeting_stop'
   | 'mode_selected'

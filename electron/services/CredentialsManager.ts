@@ -5,9 +5,18 @@
 
 import { app, safeStorage } from 'electron';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
+import * as crypto from 'crypto';
+import { deriveFallbackKey, encryptCredentialBlob, decryptCredentialBlob } from './credentialFallbackCrypto';
 
 const CREDENTIALS_PATH = path.join(app.getPath('userData'), 'credentials.enc');
+// App-managed AES fallback, used ONLY when the OS keyring (safeStorage) is
+// unavailable so keys still survive a restart. See credentialFallbackCrypto.ts for
+// the (honest) security posture: obfuscation-grade, machine-bound, never plaintext.
+const FALLBACK_PATH = path.join(app.getPath('userData'), 'credentials.fallback.enc');
+// Per-install random salt for the fallback key derivation (32 raw bytes, 0600).
+const SALT_PATH = path.join(app.getPath('userData'), 'credentials.salt');
 
 export interface CustomProvider {
     id: string;
@@ -93,6 +102,8 @@ export interface StoredCredentials {
 export class CredentialsManager {
     private static instance: CredentialsManager;
     private credentials: StoredCredentials = {};
+    /** Memoized AES-256 key for the app-managed fallback (derived once per process). */
+    private fallbackKey?: Buffer;
 
     private constructor() {
         // Load on construction after app ready
@@ -112,6 +123,64 @@ export class CredentialsManager {
     public init(): void {
         this.loadCredentials();
         console.log('[CredentialsManager] Initialized');
+        // One-shot diagnostic so we can confirm, from real telemetry, WHICH
+        // population hits the "key not persisted" path: the expected Linux-
+        // without-keyring case vs a signing/keyring regression on packaged
+        // macOS/Windows. Metadata only — never key contents.
+        this.emitStorageStatusDiagnostic('startup');
+    }
+
+    /**
+     * Emit a privacy-safe snapshot of OS secure-storage availability via the
+     * shared TelemetryService. Carries ONLY booleans/enums/platform — never any
+     * key material. Called once at startup and again when an STT key save fails
+     * to persist (so the failure can be correlated with the environment).
+     *
+     * Fields:
+     *  - available:   safeStorage.isEncryptionAvailable() — false ⇒ keys won't survive restart
+     *  - platform:    process.platform (darwin/win32/linux)
+     *  - backend:     (linux only) safeStorage.getSelectedStorageBackend() — the
+     *                 key signal: 'basic_text' ⇒ no keyring (expected failure),
+     *                 'gnome_libsecret'/'kwallet*' ⇒ keyring present
+     *  - packaged:    app.isPackaged — distinguishes the unsigned/dev-build hypothesis
+     *
+     * Never throws and never blocks; a telemetry/env edge can at worst drop the
+     * event. Respects the telemetry consent gate (the service no-ops when the
+     * user disabled telemetry).
+     */
+    public emitStorageStatusDiagnostic(phase: 'startup' | 'stt_save_failed'): void {
+        try {
+            let available = false;
+            try { available = safeStorage.isEncryptionAvailable(); } catch { available = false; }
+
+            const properties: Record<string, unknown> = {
+                phase,
+                available,
+                platform: process.platform,
+                packaged: (() => { try { return app.isPackaged === true; } catch { return false; } })(),
+                // Which persistence path keys actually take: the OS keyring, or the
+                // app-managed AES fallback. Lets us size the keyring-less population and
+                // judge whether signing/keyring follow-up is warranted. Never key material.
+                mode: available ? 'keyring' : 'fallback',
+                usedFallback: !available,
+            };
+
+            // Linux is the only platform where the backend enum is meaningful and
+            // available — it tells basic_text (no keyring) from gnome_libsecret/kwallet.
+            if (process.platform === 'linux') {
+                try {
+                    const getBackend = (safeStorage as unknown as { getSelectedStorageBackend?: () => string }).getSelectedStorageBackend;
+                    if (typeof getBackend === 'function') {
+                        properties.backend = getBackend.call(safeStorage);
+                    }
+                } catch { /* backend probe unavailable — leave it off */ }
+            }
+
+            const { telemetryService } = require('./telemetry/TelemetryService');
+            telemetryService.record('credential_storage_status', properties);
+        } catch {
+            // Diagnostics must never break credential loading or key saves.
+        }
     }
 
     // =========================================================================
@@ -607,6 +676,14 @@ export class CredentialsManager {
         if (fs.existsSync(plaintextPath)) {
             fs.unlinkSync(plaintextPath);
         }
+        // App-managed fallback + its salt, and the cached derived key.
+        this.removeFallbackFile();
+        try {
+            if (fs.existsSync(SALT_PATH)) fs.unlinkSync(SALT_PATH);
+        } catch (err) {
+            console.warn('[CredentialsManager] Could not remove device salt:', err);
+        }
+        this.fallbackKey = undefined;
         console.log('[CredentialsManager] All credentials cleared');
     }
 
@@ -631,39 +708,98 @@ export class CredentialsManager {
     // =========================================================================
 
     /**
-     * True when credentials can actually be written to disk (OS-level encryption
-     * is available). When false, every setter still updates the in-memory copy —
-     * so keys work for the current session — but nothing is persisted, and they
-     * are gone on the next launch. Callers that want to warn the user (e.g. the
-     * STT-key save IPC handlers) check this so we never report a false "Saved".
+     * True when credentials can actually be written to disk so they survive a
+     * restart — via EITHER the OS keyring (safeStorage) OR the app-managed AES
+     * fallback. The fallback only needs a writable userData dir, which is
+     * effectively always true, so the only way this returns false is a genuinely
+     * unwritable disk. Callers (the STT-key save handlers) use it to decide whether
+     * to warn the user; with the fallback in place that warning is now rare.
      */
     public isPersistenceAvailable(): boolean {
         try {
-            return safeStorage.isEncryptionAvailable();
+            if (safeStorage.isEncryptionAvailable()) return true;
+        } catch {
+            // fall through to the fallback check
+        }
+        // Fallback path: usable as long as we can derive a key and write the file.
+        try {
+            return !!this.getFallbackKey();
         } catch {
             return false;
         }
     }
 
     /**
-     * Persist the in-memory credentials to the encrypted file.
-     * Returns true when the write actually reached disk, false when it was a
-     * memory-only no-op (encryption unavailable) or the write threw. Most callers
-     * ignore the return; the STT-key handlers use it to surface a real error
-     * instead of a misleading success.
+     * Load (or create) the per-install 32-byte random salt that anchors the
+     * fallback key derivation. Stored as raw bytes at 0600. A fresh salt per
+     * install is what makes the fallback file machine/install-bound.
+     */
+    private getOrCreateDeviceSalt(): Buffer {
+        try {
+            if (fs.existsSync(SALT_PATH)) {
+                const existing = fs.readFileSync(SALT_PATH);
+                if (existing.length === 32) return existing;
+                // Wrong length → treat as corrupt and regenerate.
+            }
+        } catch (err) {
+            console.warn('[CredentialsManager] Could not read device salt, regenerating:', err);
+        }
+        const salt = crypto.randomBytes(32);
+        const tmp = SALT_PATH + '.tmp';
+        fs.writeFileSync(tmp, salt, { mode: 0o600 });
+        fs.renameSync(tmp, SALT_PATH);
+        return salt;
+    }
+
+    /**
+     * Derive (once) and memoize the AES key for the app-managed fallback. The key
+     * is bound to stable machine/install attributes plus the per-install salt, so
+     * the encrypted file is meaningless if copied to another machine.
+     */
+    private getFallbackKey(): Buffer {
+        if (this.fallbackKey) return this.fallbackKey;
+        const salt = this.getOrCreateDeviceSalt();
+        let username = '';
+        try { username = os.userInfo().username; } catch { username = ''; }
+        const materialParts = [
+            os.hostname(),
+            username,
+            app.getPath('userData'),
+            process.platform,
+        ];
+        this.fallbackKey = deriveFallbackKey(materialParts, salt);
+        return this.fallbackKey;
+    }
+
+    /**
+     * Persist the in-memory credentials. Prefers the OS keyring (safeStorage); when
+     * that is unavailable, falls back to an app-managed AES-256-GCM file so keys
+     * still survive a restart (the fix for "STT keys reset to none"). Returns true
+     * when the write reached disk by either path, false only when even the fallback
+     * write threw (a genuinely unwritable disk). The STT-key handlers use the return
+     * to decide whether to warn.
      */
     private saveCredentials(): boolean {
         try {
-            if (!safeStorage.isEncryptionAvailable()) {
-                console.warn('[CredentialsManager] Encryption not available; credentials kept in memory only (will NOT survive restart)');
-                return false;
+            if (safeStorage.isEncryptionAvailable()) {
+                const data = JSON.stringify(this.credentials);
+                const encrypted = safeStorage.encryptString(data);
+                const tmpEnc = CREDENTIALS_PATH + '.tmp';
+                fs.writeFileSync(tmpEnc, encrypted);
+                fs.renameSync(tmpEnc, CREDENTIALS_PATH);
+                // Keyring is the source of truth now — drop any stale fallback file.
+                this.removeFallbackFile();
+                return true;
             }
 
-            const data = JSON.stringify(this.credentials);
-            const encrypted = safeStorage.encryptString(data);
-            const tmpEnc = CREDENTIALS_PATH + '.tmp';
-            fs.writeFileSync(tmpEnc, encrypted);
-            fs.renameSync(tmpEnc, CREDENTIALS_PATH);
+            // OS keyring unavailable — use the app-managed encrypted fallback so the
+            // key is not silently lost on restart. Weaker than the keyring (see
+            // credentialFallbackCrypto.ts) but never plaintext at rest.
+            const blob = encryptCredentialBlob(JSON.stringify(this.credentials), this.getFallbackKey());
+            const tmpFb = FALLBACK_PATH + '.tmp';
+            fs.writeFileSync(tmpFb, blob, { mode: 0o600 });
+            fs.renameSync(tmpFb, FALLBACK_PATH);
+            console.warn('[CredentialsManager] OS keyring unavailable; saved via app-managed encrypted fallback (machine-bound, will survive restart)');
             return true;
         } catch (error) {
             console.error('[CredentialsManager] Failed to save credentials:', error);
@@ -671,53 +807,93 @@ export class CredentialsManager {
         }
     }
 
+    /** Remove the app-managed fallback file (best-effort). */
+    private removeFallbackFile(): void {
+        try {
+            if (fs.existsSync(FALLBACK_PATH)) {
+                fs.unlinkSync(FALLBACK_PATH);
+            }
+        } catch (err) {
+            console.warn('[CredentialsManager] Could not remove stale fallback file:', err);
+        }
+    }
+
+    /** Remove any leftover legacy plaintext credential file (security invariant). */
+    private removePlaintextFile(): void {
+        const plaintextPath = CREDENTIALS_PATH + '.json';
+        if (fs.existsSync(plaintextPath)) {
+            try {
+                fs.unlinkSync(plaintextPath);
+                console.log('[CredentialsManager] Removed plaintext credential file');
+            } catch (cleanupErr) {
+                console.warn('[CredentialsManager] Could not remove plaintext credential file:', cleanupErr);
+            }
+        }
+    }
+
     private loadCredentials(): void {
         try {
-            // Try encrypted file first
+            // 1) Encrypted keyring file is authoritative when the keyring is available.
             if (fs.existsSync(CREDENTIALS_PATH)) {
-                if (!safeStorage.isEncryptionAvailable()) {
-                    console.warn('[CredentialsManager] Encryption not available for load');
+                let keyringAvailable = false;
+                try { keyringAvailable = safeStorage.isEncryptionAvailable(); } catch { keyringAvailable = false; }
+
+                if (keyringAvailable) {
+                    const encrypted = fs.readFileSync(CREDENTIALS_PATH);
+                    const decrypted = safeStorage.decryptString(encrypted);
+                    try {
+                        const parsed = JSON.parse(decrypted);
+                        if (typeof parsed === 'object' && parsed !== null) {
+                            this.credentials = parsed;
+                            console.log('[CredentialsManager] Loaded encrypted credentials');
+                        } else {
+                            throw new Error('Decrypted credentials is not a valid object');
+                        }
+                    } catch (parseError) {
+                        console.error('[CredentialsManager] Failed to parse decrypted credentials — file may be corrupted. Starting fresh:', parseError);
+                        this.credentials = {};
+                    }
+                    // Keyring is authoritative — clean up any stale fallback + plaintext.
+                    this.removeFallbackFile();
+                    this.removePlaintextFile();
                     return;
                 }
+                // Keyring file exists but keyring is unavailable: fall through to try
+                // the app-managed fallback below (we cannot decrypt the keyring file).
+                console.warn('[CredentialsManager] Encrypted credentials present but keyring unavailable; trying app-managed fallback');
+            }
 
-                const encrypted = fs.readFileSync(CREDENTIALS_PATH);
-                const decrypted = safeStorage.decryptString(encrypted);
+            // 2) App-managed encrypted fallback.
+            if (fs.existsSync(FALLBACK_PATH)) {
                 try {
+                    const blob = fs.readFileSync(FALLBACK_PATH);
+                    const decrypted = decryptCredentialBlob(blob, this.getFallbackKey());
                     const parsed = JSON.parse(decrypted);
                     if (typeof parsed === 'object' && parsed !== null) {
                         this.credentials = parsed;
-                        console.log('[CredentialsManager] Loaded encrypted credentials');
+                        console.log('[CredentialsManager] Loaded credentials from app-managed fallback');
                     } else {
-                        throw new Error('Decrypted credentials is not a valid object');
+                        throw new Error('Fallback credentials is not a valid object');
                     }
-                } catch (parseError) {
-                    console.error('[CredentialsManager] Failed to parse decrypted credentials — file may be corrupted. Starting fresh:', parseError);
+                } catch (fbErr) {
+                    console.error('[CredentialsManager] Failed to read app-managed fallback — starting fresh:', fbErr);
                     this.credentials = {};
                 }
 
-                // Clean up any leftover plaintext fallback file to eliminate the data leak
-                const plaintextPath = CREDENTIALS_PATH + '.json';
-                if (fs.existsSync(plaintextPath)) {
-                    try {
-                        fs.unlinkSync(plaintextPath);
-                        console.log('[CredentialsManager] Removed stale plaintext credential file');
-                    } catch (cleanupErr) {
-                        console.warn('[CredentialsManager] Could not remove stale plaintext file:', cleanupErr);
-                    }
+                // Migrate up: if the keyring is now available, re-persist via safeStorage
+                // (saveCredentials prefers the keyring and deletes the fallback).
+                let keyringNow = false;
+                try { keyringNow = safeStorage.isEncryptionAvailable(); } catch { keyringNow = false; }
+                if (keyringNow && Object.keys(this.credentials).length > 0) {
+                    console.log('[CredentialsManager] Keyring now available — migrating fallback credentials to keyring');
+                    this.saveCredentials();
                 }
+                this.removePlaintextFile();
                 return;
             }
 
-            const plaintextPath = CREDENTIALS_PATH + '.json';
-            if (fs.existsSync(plaintextPath)) {
-                try {
-                    fs.unlinkSync(plaintextPath);
-                    console.log('[CredentialsManager] Removed plaintext credential file');
-                } catch (cleanupErr) {
-                    console.warn('[CredentialsManager] Could not remove plaintext credential file:', cleanupErr);
-                }
-            }
-
+            // 3) Nothing stored. Clean up any legacy plaintext file regardless.
+            this.removePlaintextFile();
             console.log('[CredentialsManager] No stored credentials found');
         } catch (error) {
             console.error('[CredentialsManager] Failed to load credentials:', error);

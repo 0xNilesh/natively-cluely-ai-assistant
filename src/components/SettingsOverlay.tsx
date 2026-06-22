@@ -990,28 +990,41 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
             setSttTestStatus('success');
             setTimeout(() => setSttTestStatus('idle'), 3000);
 
+            let saveResult: { success?: boolean; error?: string } | undefined;
             if (provider === 'groq') {
                 // @ts-ignore
-                await window.electronAPI?.setGroqSttApiKey?.(key.trim());
+                saveResult = await window.electronAPI?.setGroqSttApiKey?.(key.trim());
             } else if (provider === 'openai') {
                 // @ts-ignore
-                await window.electronAPI?.setOpenAiSttApiKey?.(key.trim());
+                saveResult = await window.electronAPI?.setOpenAiSttApiKey?.(key.trim());
             } else if (provider === 'elevenlabs') {
                 // @ts-ignore
-                await window.electronAPI?.setElevenLabsApiKey?.(key.trim());
+                saveResult = await window.electronAPI?.setElevenLabsApiKey?.(key.trim());
             } else if (provider === 'azure') {
                 // @ts-ignore
-                await window.electronAPI?.setAzureApiKey?.(key.trim());
+                saveResult = await window.electronAPI?.setAzureApiKey?.(key.trim());
             } else if (provider === 'ibmwatson') {
                 // @ts-ignore
-                await window.electronAPI?.setIbmWatsonApiKey?.(key.trim());
+                saveResult = await window.electronAPI?.setIbmWatsonApiKey?.(key.trim());
             } else if (provider === 'soniox') {
                 // @ts-ignore
-                await window.electronAPI?.setSonioxApiKey?.(key.trim());
+                saveResult = await window.electronAPI?.setSonioxApiKey?.(key.trim());
             } else {
                 // @ts-ignore
-                await window.electronAPI?.setDeepgramApiKey?.(key.trim());
+                saveResult = await window.electronAPI?.setDeepgramApiKey?.(key.trim());
             }
+
+            // The key validated, but the OS blocked secure storage so it was only
+            // kept in memory for this session. Surface the real error instead of a
+            // false "Saved" badge — this is what made STT keys silently reset after
+            // restart. The provider stays selected (it works this session).
+            if (saveResult && saveResult.success === false) {
+                setSttTestStatus('error');
+                setSttTestError(saveResult.error || 'API key could not be saved to disk and will not survive a restart.');
+                setSttSaving(false);
+                return;
+            }
+
             if (provider === 'groq') setHasStoredSttGroqKey(true);
             else if (provider === 'openai') setHasStoredSttOpenaiKey(true);
             else if (provider === 'elevenlabs') setHasStoredElevenLabsKey(true);
