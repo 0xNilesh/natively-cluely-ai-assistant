@@ -253,6 +253,13 @@ export const IntelligenceSettings: React.FC = () => {
   const [showDev, setShowDev] = useState(false);
   const [showCustomize, setShowCustomize] = useState(false);
   const [masterBusy, setMasterBusy] = useState(false);
+  // While the panel first opens, the auto-started local server may still be loading its
+  // embedding models (~15-20s). Treat a not-yet-healthy server as "starting up" (→ Checking…)
+  // during this grace window instead of alarming the user with "Can't connect". After it
+  // elapses, a still-down server correctly reads as unreachable. `tick` forces a re-render
+  // when the window expires so the chip updates even if no poll lands exactly then.
+  const [graceUntil] = useState(() => Date.now() + 25000);
+  const [, setTick] = useState(0);
   // "Try it" feature runners (lecture notes / diagram / in-meeting search). These call the
   // real IPCs against the CURRENT meeting transcript, so they need an active meeting + the
   // matching flag; the handlers return { enabled:false } when the flag is off.
@@ -314,6 +321,17 @@ export const IntelligenceSettings: React.FC = () => {
   }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  // The local memory server can take ~15-20s to load its embedding models before /health
+  // answers, and the app auto-starts it at launch. So when the panel opens with a baseUrl
+  // configured but not yet healthy, poll every 4s until it connects — the chip flips to
+  // "Connected" on its own without the user hitting Retry. Stops once healthy or unmounted.
+  useEffect(() => {
+    if (healthy === true) return;            // already connected — nothing to poll
+    if (!baseUrl.trim()) return;             // not configured — nothing to wait for
+    const id = setInterval(() => { void refresh(); }, 4000);
+    return () => clearInterval(id);
+  }, [healthy, baseUrl, refresh]);
 
   const onToggleFlag = useCallback(async (row: FlagRow) => {
     // Optimistic flip; reconcile from the round-trip.
@@ -390,14 +408,28 @@ export const IntelligenceSettings: React.FC = () => {
   // Connection status as a discrete state, so "never set up" reads differently from
   // "set up but unreachable" (the old single chip showed "Not running" for both).
   //   not-configured → no server URL saved yet (the common first-run case)
-  //   checking       → a URL exists but health hasn't resolved this load
+  //   checking       → a URL exists but health hasn't resolved (incl. the startup grace window
+  //                    while the auto-started server loads its embedding models)
   //   connected      → last health check passed
-  //   unreachable    → a URL exists but the server didn't answer
+  //   unreachable    → a URL exists, the grace window elapsed, and the server still didn't answer
   const status: 'not-configured' | 'checking' | 'connected' | 'unreachable' = useMemo(() => {
     if (healthy === true) return 'connected';
     if (!baseUrl.trim()) return 'not-configured';
-    return healthy === null ? 'checking' : 'unreachable';
-  }, [healthy, baseUrl]);
+    if (healthy === null) return 'checking';
+    // Down, but still within the startup grace window → show "Checking…" (it's likely booting),
+    // not the alarming "Can't connect". After the window, report the real unreachable state.
+    return Date.now() < graceUntil ? 'checking' : 'unreachable';
+  }, [healthy, baseUrl, graceUntil]);
+
+  // When the grace window expires, force one re-render so a still-down server flips from
+  // "Checking…" to "Can't connect" promptly (otherwise it'd wait for the next 4s poll).
+  useEffect(() => {
+    if (healthy === true || !baseUrl.trim()) return;
+    const ms = graceUntil - Date.now();
+    if (ms <= 0) return;
+    const id = setTimeout(() => setTick((n) => n + 1), ms + 50);
+    return () => clearTimeout(id);
+  }, [healthy, baseUrl, graceUntil]);
 
   const openExternal = useCallback((url: string) => {
     try { window.electronAPI.openExternal?.(url); } catch { /* noop */ }

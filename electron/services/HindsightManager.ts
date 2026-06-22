@@ -13,11 +13,15 @@
 //
 // Config-from-settings + cached health-gating: the retain/recall paths gate on
 // isAvailable(), so a running (local or Cloud) server works in a packaged build — config
-// flows from SettingsManager, not just shell env. Auto-spawn IS implemented: when the
-// memory flag is on + a baseUrl is configured + the server is not already healthy + a
-// hindsightServerCommand is set (autoStart defaults on), start() spawns it (detached,
-// group-killed on quit via stopSync) and polls for readiness. Cloud / a user-run server
-// stays healthy → no spawn.
+// flows from SettingsManager, not just shell env. Auto-spawn IS implemented and ZERO-CONFIG:
+// when the memory flag is on + a baseUrl is configured + the server is not already healthy +
+// autoStart is on (default), start() spawns the server (detached, group-killed on quit via
+// stopSync) and polls for readiness. The launch command resolves from
+// HINDSIGHT_SERVER_COMMAND env → the hindsightServerCommand setting → a DEFAULT that runs the
+// bundled `scripts/hindsight-start.sh` — but the default is gated on that script actually
+// existing on disk, so in dev it auto-starts out-of-the-box while a packaged build (which does
+// NOT bundle the script) stays Noop instead of spawning a broken command. Cloud / a user-run
+// server stays healthy → no spawn.
 //
 // LLM credential forwarding: when spawning a local server, buildCredentialEnv() reads
 // CredentialsManager and maps every configured AI provider key into the env vars that
@@ -54,6 +58,8 @@ export class HindsightManager {
   private serverProcess: ChildProcess | null = null;
   private pollInterval: NodeJS.Timeout | null = null;
   private spawnAttempts = 0;
+  /** Where the spawned server's stdout/stderr is written (for failure diagnostics). */
+  private logPath: string | null = null;
 
   /** Lazily read SettingsManager — avoids a hard import cycle + works headless (returns null). */
   private settings(): SettingsLike | null {
@@ -160,19 +166,125 @@ export class HindsightManager {
     }
   }
 
-  /** Should we auto-spawn a local server? Resolve the launch command + autoStart toggle. */
+  /**
+   * Locate the bundled `scripts/hindsight-start.sh` launcher on disk, returning its absolute
+   * path or null if it isn't present.
+   *
+   * DEV vs PACKAGED — this is the crux of the zero-config default:
+   *   • DEV (`npm start`): the compiled manager lives at
+   *     <root>/dist-electron/electron/services/HindsightManager.js and app.getAppPath()
+   *     === <root>, so <appPath>/scripts/hindsight-start.sh resolves and exists.
+   *   • PACKAGED (.app): the script + python dev-server are NOT bundled into the asar
+   *     (deliberately — Hindsight is a heavy user-provisioned sidecar, see file header), so
+   *     <appPath>/scripts/... does NOT exist. We MUST detect that and NOT spawn a broken
+   *     `bash <missing>` command; instead the caller stays Noop and graceful-degrades.
+   *
+   * We probe a few candidate roots and return the first that actually exists on disk. Using
+   * fs.existsSync is what makes the default safe: the zero-config `bash <script>` default is
+   * ONLY produced when the script is genuinely present, so a packaged build with no script
+   * never gets a defaulted (and doomed) command.
+   */
+  private locateLauncherScript(): string | null {
+    try {
+      const fs = require('fs') as typeof import('fs');
+      const path = require('path') as typeof import('path');
+      const candidateRoots: string[] = [];
+      // 1. Electron app root (project root in dev; asar/Resources in packaged).
+      try {
+        const { app } = require('electron') as typeof import('electron');
+        const appPath = app?.getAppPath?.();
+        if (appPath) candidateRoots.push(appPath);
+      } catch { /* electron not available (headless/test) — fall through to other roots */ }
+      // 2. Walk up from this compiled module: dist-electron/electron/services → <root>.
+      //    Robust if app.getAppPath() is unavailable but the on-disk layout is intact.
+      candidateRoots.push(path.resolve(__dirname, '..', '..', '..'));
+      // 3. Process cwd (dev `npm start` runs from the project root).
+      candidateRoots.push(process.cwd());
+
+      const seen = new Set<string>();
+      for (const root of candidateRoots) {
+        if (!root || seen.has(root)) continue;
+        seen.add(root);
+        const scriptPath = path.join(root, 'scripts', 'hindsight-start.sh');
+        try { if (fs.existsSync(scriptPath)) return scriptPath; } catch { /* keep probing */ }
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Should we auto-spawn a local server? Resolve the launch command + autoStart toggle.
+   *
+   * Precedence: explicit HINDSIGHT_SERVER_COMMAND env → persisted hindsightServerCommand
+   * setting → ZERO-CONFIG DEFAULT (`bash <abs path to scripts/hindsight-start.sh>`).
+   *
+   * The zero-config default is what makes auto-start work out-of-the-box: the renderer never
+   * persists a serverCommand, so without this the command was always empty → auto-start
+   * no-op on every launch (the reported bug). The default is gated on the launcher script
+   * actually existing on disk (locateLauncherScript), so a packaged build that doesn't bundle
+   * the script returns null here and the caller stays Noop instead of spawning a broken
+   * `bash <missing-path>`.
+   */
   private autoStartCommand(): string | null {
     try {
       const s = this.settings();
       // Default ON (auto-start-when-installed, per the design) unless explicitly disabled.
       const autoStart = (s?.get('hindsightAutoStart') as boolean | undefined) ?? true;
       if (!autoStart) return null;
-      const cmd = (process.env.HINDSIGHT_SERVER_COMMAND
+      const explicit = (process.env.HINDSIGHT_SERVER_COMMAND
         || (s?.get('hindsightServerCommand') as string | undefined)
         || '').trim();
-      return cmd || null;
+      if (explicit) return explicit;
+      // Zero-config fallback: run the bundled launcher IFF it exists on disk. Quote the path
+      // (it's absolute and may contain spaces, e.g. "/Users/.../Application Support/...").
+      const script = this.locateLauncherScript();
+      return script ? `bash "${script}"` : null;
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * Build a PATH that works when the app is launched from Finder (GUI), not a terminal.
+   *
+   * macOS GUI apps inherit a MINIMAL PATH (typically just /usr/bin:/bin:/usr/sbin:/sbin),
+   * NOT the user's interactive shell PATH. So a spawned `bash scripts/hindsight-start.sh`
+   * can fail to find `python3`/`node`/`hindsight` even though they work in the user's
+   * terminal. We prepend the common install locations (Homebrew Intel + Apple Silicon,
+   * the python.org framework bins, /usr/local) to whatever PATH we inherited so the child
+   * can resolve them. No-op on non-darwin. Never throws.
+   */
+  private augmentPath(): string {
+    const existing = process.env.PATH || '';
+    if (process.platform !== 'darwin') return existing;
+    try {
+      const fs = require('fs') as typeof import('fs');
+      const path = require('path') as typeof import('path');
+      const extras: string[] = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin'];
+      // python.org installs to /Library/Frameworks/Python.framework/Versions/<x.y>/bin —
+      // glob the versions that actually exist (newest first), e.g. the user's 3.12.
+      try {
+        const fwBase = '/Library/Frameworks/Python.framework/Versions';
+        if (fs.existsSync(fwBase)) {
+          const versions = fs.readdirSync(fwBase)
+            .filter((v) => /^\d/.test(v))
+            .sort()
+            .reverse()
+            .map((v) => path.join(fwBase, v, 'bin'));
+          extras.push(...versions);
+        }
+      } catch { /* framework dir not present — skip */ }
+      const parts = existing ? existing.split(':') : [];
+      // Prepend extras that aren't already present, preserving the inherited PATH after them.
+      const merged: string[] = [];
+      for (const p of [...extras, ...parts]) {
+        if (p && !merged.includes(p)) merged.push(p);
+      }
+      return merged.join(':');
+    } catch {
+      return existing;
     }
   }
 
@@ -288,6 +400,40 @@ export class HindsightManager {
     return extra;
   }
 
+  /** Resolve a writable path for the spawned server's log. Prefers the app's userData dir
+   *  (works in a packaged build); falls back to the OS temp dir. Null only if both fail. */
+  private resolveServerLogPath(): string | null {
+    try {
+      const path = require('path') as typeof import('path');
+      let dir: string | null = null;
+      try {
+        const { app } = require('electron') as typeof import('electron');
+        dir = app?.getPath?.('userData') || null;
+      } catch { /* electron unavailable (headless/test) */ }
+      if (!dir) {
+        try { dir = (require('os') as typeof import('os')).tmpdir(); } catch { dir = null; }
+      }
+      return dir ? path.join(dir, 'hindsight-server.log') : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** On a non-zero server exit, tail the captured log into the app log so the failure cause
+   *  (missing module, bad key, port in use) is visible instead of a bare exit code. */
+  private logServerFailureTail(): void {
+    try {
+      if (!this.logPath) return;
+      const fs = require('fs') as typeof import('fs');
+      const raw = fs.readFileSync(this.logPath, 'utf8');
+      const tail = raw.split('\n').filter(Boolean).slice(-12).join('\n');
+      if (tail) {
+        console.error('[HindsightManager] server launcher failed — last log lines:\n' + tail);
+        console.error(`[HindsightManager] full log: ${this.logPath}`);
+      }
+    } catch { /* no log / unreadable — nothing more we can surface */ }
+  }
+
   /** Spawn the configured server command (shell form, like `bash scripts/hindsight-start.sh`).
    *  Degrades gracefully on error ("python/script not found") — app unaffected. */
   private spawnServer(command: string): void {
@@ -301,17 +447,46 @@ export class HindsightManager {
       // is async and the app can exit before it finishes, orphaning Postgres. (Windows has
       // no process groups; we fall back to taskkill /T in stopSync.)
       const isWin = process.platform === 'win32';
+      // cwd: prefer the directory CONTAINING scripts/ (the project root) so the launcher's
+      // internal relative calls (`node scripts/hindsight-llm-config.mjs`) resolve. The script
+      // itself also cd's to its own ../, so this is belt-and-braces; fall back to cwd().
+      const script = this.locateLauncherScript();
+      let spawnCwd = process.cwd();
+      if (script) {
+        try {
+          const path = require('path') as typeof import('path');
+          spawnCwd = path.resolve(path.dirname(script), '..');
+        } catch { /* keep process.cwd() */ }
+      }
+      // Capture the child's stdout+stderr to a log file rather than discarding it (the old
+      // stdio:'ignore' made spawn failures invisible — a crash showed only "exited {code:1}"
+      // with no reason). On a non-zero exit we tail this file into the app log so the cause
+      // (e.g. "No module named 'hindsight'", bad API key) is diagnosable. Best-effort: if the
+      // log can't be opened we fall back to 'ignore' so spawning still works.
+      this.logPath = this.resolveServerLogPath();
+      let outFd: number | null = null;
+      try {
+        if (this.logPath) {
+          const fs = require('fs') as typeof import('fs');
+          outFd = fs.openSync(this.logPath, 'a');
+        }
+      } catch { outFd = null; }
+      const stdio: any = outFd !== null ? ['ignore', outFd, outFd] : 'ignore';
+
       this.serverProcess = spawn(command, {
         shell: true,
         detached: !isWin,   // own process group on POSIX for group-kill on quit
         windowsHide: true,
-        stdio: 'ignore',
-        cwd: process.cwd(),
+        stdio,
+        cwd: spawnCwd,
         // Forward credentials from CredentialsManager into the child's env so the
         // packaged app doesn't need .env or manual GEMINI_API_KEY exports. The shell
         // script (hindsight-start.sh) picks these up and builds the litellm router.
-        env: { ...process.env, ...this.buildCredentialEnv() },
+        // augmentPath() fixes the Finder-launch minimal-PATH caveat (python3 not found).
+        env: { ...process.env, PATH: this.augmentPath(), ...this.buildCredentialEnv() },
       });
+      // The parent no longer needs the fd once the child owns it.
+      if (outFd !== null) { try { require('fs').closeSync(outFd); } catch { /* noop */ } }
       // Don't let the detached child keep the parent event loop alive.
       this.serverProcess.unref?.();
       this.serverProcess.on('error', (err: any) => {
@@ -322,6 +497,9 @@ export class HindsightManager {
       });
       this.serverProcess.on('close', (code: number | null) => {
         console.log('[HindsightManager] server process exited', { code });
+        // A non-zero exit before readiness means the launcher failed — surface the tail of its
+        // log so the reason is visible in the app log instead of a bare exit code.
+        if (code && code !== 0) this.logServerFailureTail();
         this.serverProcess = null;
       });
     } catch (e: any) {

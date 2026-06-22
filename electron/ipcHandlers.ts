@@ -2415,7 +2415,11 @@ export function initializeIpcHandlers(appState: AppState): void {
     try {
       const sm = SettingsManager.getInstance();
       const { HindsightManager } = require('./services/HindsightManager') as typeof import('./services/HindsightManager');
-      const available = HindsightManager.getInstance().isAvailable();
+      // Fresh probe (not the cached isAvailable): the settings panel polls this while open, and
+      // the local server takes ~15-20s to load embedding models before /health answers. A cached
+      // value would leave the chip stuck on "Can't connect" even after the server comes up.
+      const hm = HindsightManager.getInstance();
+      const available = (sm.get('hindsightBaseUrl') ? await hm.healthCheck() : false) || hm.isAvailable();
       return {
         baseUrl: String(sm.get('hindsightBaseUrl') || ''),
         hasApiKey: Boolean(sm.get('hindsightApiKey')),
