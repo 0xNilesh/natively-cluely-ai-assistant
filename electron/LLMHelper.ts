@@ -154,7 +154,7 @@ const NATIVELY_TEXT_TTFT_MS = 8_000;
 // run-to-run variance and keeps the race winner's STYLE consistent with the
 // primary. Vision/multimodal temps are left untouched.
 const INTERACTIVE_TEMPERATURE = 0.2; // "very low" per report; avoids degenerate-0 loops some models show
-const INTERACTIVE_SEED = 7;          // fixed seed where the SDK supports it (Groq/OpenAI; Gemini via config)
+const INTERACTIVE_SEED = 7;          // fixed seed where the SDK supports it (Groq/DeepSeek; Gemini via config). NOT sent to OpenAI: reasoning models (gpt-5/o-series) reject non-default seed/temperature with a 400.
 
 // ── Gemini thinking budget (THE dominant TTFT lever on Gemini 3.x Flash) ─────
 // Measured: gemini-3.5-flash with default (dynamic) thinking spent ~5.3s
@@ -2598,6 +2598,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       this.withRetry(() => this.openaiClient!.chat.completions.create({
         model,
         messages,
+        // OPENAI_NO_SAMPLING_PARAMS — do NOT add temperature/seed/top_p here (gpt-5/o-series 400 on them).
         max_completion_tokens: model.toLowerCase().includes('claude') ? this.getClaudeMaxOutput(model) : getOpenAiMaxOutput(model, MAX_OUTPUT_TOKENS),
         ...openaiReasoningParam(model), // minimal reasoning for gpt-5/o-series (fast TTFT)
         ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
@@ -4788,8 +4789,9 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       model,
       messages,
       stream: true,
-      temperature: INTERACTIVE_TEMPERATURE,
-      seed: INTERACTIVE_SEED, // OpenAI honors seed for near-deterministic output
+      // OPENAI_NO_SAMPLING_PARAMS — do NOT add temperature/seed/top_p here. gpt-5/o-series
+      // reasoning models (incl. default gpt-5.4) 400 on non-default sampling; use API default
+      // for ALL OpenAI models. Steer via reasoning_effort only. Guarded by OpenAiNoSamplingParams.test.mjs.
       max_completion_tokens: model.toLowerCase().includes('claude') ? this.getClaudeMaxOutput(model) : getOpenAiMaxOutput(model, MAX_OUTPUT_TOKENS),
       ...openaiReasoningParam(model), // minimal reasoning for gpt-5/o-series (fast TTFT)
       ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
@@ -4961,6 +4963,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       model,
       messages,
       stream: true,
+      // OPENAI_NO_SAMPLING_PARAMS — do NOT add temperature/seed/top_p here (gpt-5/o-series 400 on them).
       max_completion_tokens: model.toLowerCase().includes('claude') ? this.getClaudeMaxOutput(model) : getOpenAiMaxOutput(model, MAX_OUTPUT_TOKENS),
       ...openaiReasoningParam(model), // minimal reasoning for gpt-5/o-series (fast TTFT)
       ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
