@@ -5,7 +5,6 @@
 
 import { app, safeStorage } from 'electron';
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 import * as crypto from 'crypto';
 import { deriveFallbackKey, encryptCredentialBlob, decryptCredentialBlob } from './credentialFallbackCrypto';
@@ -440,22 +439,28 @@ export class CredentialsManager {
         console.log(`[CredentialsManager] STT Provider set to: ${provider}`);
     }
 
-    public setDeepgramApiKey(key: string): void {
+    // NOTE: the STT key setters return saveCredentials()'s boolean (true = the write
+    // actually reached disk) so the IPC layer can surface a REAL error instead of a
+    // false "Saved" when a write fails. Do not change these back to void.
+    public setDeepgramApiKey(key: string): boolean {
         this.credentials.deepgramApiKey = key;
-        this.saveCredentials();
+        const persisted = this.saveCredentials();
         console.log('[CredentialsManager] Deepgram API Key updated');
+        return persisted;
     }
 
-    public setGroqSttApiKey(key: string): void {
+    public setGroqSttApiKey(key: string): boolean {
         this.credentials.groqSttApiKey = key;
-        this.saveCredentials();
+        const persisted = this.saveCredentials();
         console.log('[CredentialsManager] Groq STT API Key updated');
+        return persisted;
     }
 
-    public setOpenAiSttApiKey(key: string): void {
+    public setOpenAiSttApiKey(key: string): boolean {
         this.credentials.openAiSttApiKey = key;
-        this.saveCredentials();
+        const persisted = this.saveCredentials();
         console.log('[CredentialsManager] OpenAI STT API Key updated');
+        return persisted;
     }
 
     public setOpenAiSttBaseUrl(url: string): void {
@@ -473,16 +478,18 @@ export class CredentialsManager {
         console.log(`[CredentialsManager] Groq STT Model set to: ${model}`);
     }
 
-    public setElevenLabsApiKey(key: string): void {
+    public setElevenLabsApiKey(key: string): boolean {
         this.credentials.elevenLabsApiKey = key;
-        this.saveCredentials();
+        const persisted = this.saveCredentials();
         console.log('[CredentialsManager] ElevenLabs API Key updated');
+        return persisted;
     }
 
-    public setAzureApiKey(key: string): void {
+    public setAzureApiKey(key: string): boolean {
         this.credentials.azureApiKey = key;
-        this.saveCredentials();
+        const persisted = this.saveCredentials();
         console.log('[CredentialsManager] Azure API Key updated');
+        return persisted;
     }
 
     public setAzureRegion(region: string): void {
@@ -491,10 +498,11 @@ export class CredentialsManager {
         console.log(`[CredentialsManager] Azure Region set to: ${region}`);
     }
 
-    public setIbmWatsonApiKey(key: string): void {
+    public setIbmWatsonApiKey(key: string): boolean {
         this.credentials.ibmWatsonApiKey = key;
-        this.saveCredentials();
+        const persisted = this.saveCredentials();
         console.log('[CredentialsManager] IBM Watson API Key updated');
+        return persisted;
     }
 
     public setIbmWatsonRegion(region: string): void {
@@ -503,10 +511,11 @@ export class CredentialsManager {
         console.log(`[CredentialsManager] IBM Watson Region set to: ${region}`);
     }
 
-    public setSonioxApiKey(key: string): void {
+    public setSonioxApiKey(key: string): boolean {
         this.credentials.sonioxApiKey = key;
-        this.saveCredentials();
+        const persisted = this.saveCredentials();
         console.log('[CredentialsManager] Soniox API Key updated');
+        return persisted;
     }
 
     public setTavilyApiKey(key: string): void {
@@ -731,18 +740,28 @@ export class CredentialsManager {
 
     /**
      * Load (or create) the per-install 32-byte random salt that anchors the
-     * fallback key derivation. Stored as raw bytes at 0600. A fresh salt per
-     * install is what makes the fallback file machine/install-bound.
+     * fallback key derivation. Stored as raw bytes at 0600. A fresh, random salt
+     * per install is the ONLY machine/install-binding input — see getFallbackKey()
+     * for why we deliberately avoid volatile attributes like hostname.
+     *
+     * Read errors are handled carefully: a *missing* salt (first run) creates one;
+     * a *wrong-length* salt (truncated/corrupt, unrecoverable anyway) regenerates;
+     * but a *transient* read error (EIO/EACCES on an existing file) FAILS CLOSED —
+     * we must not regenerate a salt that would orphan a still-recoverable fallback.
      */
     private getOrCreateDeviceSalt(): Buffer {
-        try {
-            if (fs.existsSync(SALT_PATH)) {
-                const existing = fs.readFileSync(SALT_PATH);
-                if (existing.length === 32) return existing;
-                // Wrong length → treat as corrupt and regenerate.
+        if (fs.existsSync(SALT_PATH)) {
+            let existing: Buffer;
+            try {
+                existing = fs.readFileSync(SALT_PATH);
+            } catch (err) {
+                // The salt file exists but we couldn't read it right now. Regenerating
+                // would permanently strand any existing encrypted fallback, so refuse.
+                throw new Error(`device salt exists but is unreadable (transient): ${(err as Error)?.message || err}`);
             }
-        } catch (err) {
-            console.warn('[CredentialsManager] Could not read device salt, regenerating:', err);
+            if (existing.length === 32) return existing;
+            console.warn('[CredentialsManager] Device salt has wrong length; regenerating (existing fallback, if any, becomes unrecoverable)');
+            // fall through to regenerate
         }
         const salt = crypto.randomBytes(32);
         const tmp = SALT_PATH + '.tmp';
@@ -752,19 +771,25 @@ export class CredentialsManager {
     }
 
     /**
-     * Derive (once) and memoize the AES key for the app-managed fallback. The key
-     * is bound to stable machine/install attributes plus the per-install salt, so
-     * the encrypted file is meaningless if copied to another machine.
+     * Derive (once) and memoize the AES key for the app-managed fallback.
+     *
+     * IMPORTANT — key-material stability: the key is derived from the per-install
+     * RANDOM salt only, with `process.platform` as a cheap constant tag. We
+     * deliberately do NOT mix in os.hostname(), os.userInfo().username, or
+     * app.getPath('userData'): all three legitimately CHANGE on the same machine
+     * (hostname flips with Wi-Fi/DHCP/mDNS `.lan`↔`.local` and machine renames;
+     * userData moves when the disguise feature calls app.setName()). Any change
+     * would alter the derived key and render the existing fallback permanently
+     * undecryptable — silently reintroducing the very "STT key reset to none" bug
+     * this fallback exists to fix. The random, file-bound salt already provides the
+     * machine/install binding (it never leaves this box and differs per install),
+     * so a copied/cloud-synced fallback file is still useless elsewhere.
      */
     private getFallbackKey(): Buffer {
         if (this.fallbackKey) return this.fallbackKey;
         const salt = this.getOrCreateDeviceSalt();
-        let username = '';
-        try { username = os.userInfo().username; } catch { username = ''; }
         const materialParts = [
-            os.hostname(),
-            username,
-            app.getPath('userData'),
+            'natively-credential-fallback-v1', // stable domain/version tag
             process.platform,
         ];
         this.fallbackKey = deriveFallbackKey(materialParts, salt);

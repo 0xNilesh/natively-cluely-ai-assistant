@@ -91,13 +91,21 @@ test('CredentialsManager exposes isPersistenceAvailable for the STT-key save gua
   assert.match(source, /if \(safeStorage\.isEncryptionAvailable\(\)\) return true;/);
 });
 
-test('STT key IPC handlers warn the user when keys cannot be persisted', () => {
+test('STT key IPC handlers warn on the ACTUAL write result, not a capability probe', () => {
   const source = read('electron/ipcHandlers.ts');
-  // The shared guard must gate on persistence availability and a non-empty key.
-  assert.match(source, /isPersistenceAvailable\(\)/);
   assert.match(source, /const sttKeyPersistenceWarning/);
-  // Every STT key save handler must route through the guard instead of an
-  // unconditional { success: true } (the false-"Saved" bug).
+  // The guard must branch on the real persisted boolean (`!persisted`), NOT on
+  // isPersistenceAvailable() — a capability probe can't see a disk-write failure,
+  // which is how the original false-"Saved" bug slipped through.
+  const guardStart = source.indexOf('const sttKeyPersistenceWarning');
+  const guardBlock = source.slice(guardStart, guardStart + 700);
+  assert.match(guardBlock, /apiKey: string, persisted: boolean/);
+  assert.match(guardBlock, /apiKey\.trim\(\)\.length > 0 && !persisted/);
+  assert.doesNotMatch(guardBlock, /isPersistenceAvailable\(\)/,
+    'guard must use the real write result, not the capability probe');
+
+  // Every STT key save handler must capture the setter's boolean and pass it to
+  // the guard, so a failed disk write surfaces a real error instead of "Saved".
   const handlers = [
     'set-groq-stt-api-key',
     'set-openai-stt-api-key',
@@ -111,8 +119,22 @@ test('STT key IPC handlers warn the user when keys cannot be persisted', () => {
     const start = source.indexOf(`'${id}'`);
     assert.ok(start >= 0, `${id} handler should exist`);
     const block = source.slice(start, start + 1000);
-    assert.match(block, /sttKeyPersistenceWarning\(apiKey\) \?\? \{ success: true \}/,
+    assert.match(block, /const persisted = CredentialsManager\.getInstance\(\)\.set\w+\(apiKey\)/,
+      `${id} should capture the setter's persisted result`);
+    assert.match(block, /sttKeyPersistenceWarning\(apiKey, persisted\) \?\? \{ success: true \}/,
       `${id} should return the persistence-aware result`);
+  }
+});
+
+test('STT key setters return the saveCredentials() boolean (not void)', () => {
+  const source = read('electron/services/CredentialsManager.ts');
+  const setters = [
+    'setDeepgramApiKey', 'setGroqSttApiKey', 'setOpenAiSttApiKey',
+    'setElevenLabsApiKey', 'setAzureApiKey', 'setIbmWatsonApiKey', 'setSonioxApiKey',
+  ];
+  for (const name of setters) {
+    const re = new RegExp(`public ${name}\\(key: string\\): boolean`);
+    assert.match(source, re, `${name} must return boolean`);
   }
 });
 
