@@ -193,8 +193,9 @@ export function validateUrlForSsrf(urlString: string): { isValid: boolean; reaso
 
     const hostname = url.hostname.toLowerCase();
 
-    // Block localhost variants
-    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '0.0.0.0') {
+    // Block localhost variants (the entire 127.0.0.0/8 range is loopback, not
+    // just 127.0.0.1 — e.g. 127.0.0.2 also routes to the local machine).
+    if (hostname === 'localhost' || hostname.startsWith('127.') || hostname === '::1' || hostname === '0.0.0.0') {
         return { isValid: false, reason: 'Loopback addresses are not allowed' };
     }
 
@@ -227,9 +228,10 @@ export function validateUrlForSsrf(urlString: string): { isValid: boolean; reaso
         return { isValid: false, reason: 'Path traversal sequences are not allowed' };
     }
 
-    // Require HTTPS for external URLs (allow http://localhost for dev testing only)
-    if (url.protocol !== 'https:' && !hostname.startsWith('127.')) {
-        return { isValid: false, reason: 'Only HTTPS URLs are allowed (except localhost)' };
+    // Require HTTPS for external URLs. All loopback/localhost hosts are already
+    // rejected above, so no http exemption is needed here.
+    if (url.protocol !== 'https:') {
+        return { isValid: false, reason: 'Only HTTPS URLs are allowed' };
     }
 
     return { isValid: true };
