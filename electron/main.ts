@@ -480,6 +480,21 @@ import { ReleaseNotesManager } from "./update/ReleaseNotesManager"
 import { OllamaManager } from './services/OllamaManager'
 import { decideToggle, decideDockTransition } from './services/toggleStateReducer'
 
+// Valid disguise modes. The persisted setting is untyped on disk and historical
+// builds wrote values that are no longer part of the union (e.g. 'service'),
+// which then match NO case in _applyDisguise() — leaving the dock app with no
+// icon/name set (the "Disguise icon not found:" empty-path warning) while the
+// window falls back to the terminal icon. That identity mismatch reads as an
+// extra/duplicate dock tile. Coerce any out-of-union value to 'none' on load
+// and at the runtime entry point so app, dock, and window always agree.
+type DisguiseMode = 'terminal' | 'settings' | 'activity' | 'none'
+const VALID_DISGUISE_MODES: readonly DisguiseMode[] = ['terminal', 'settings', 'activity', 'none'] as const
+function normalizeDisguiseMode(value: unknown): DisguiseMode {
+  return (VALID_DISGUISE_MODES as readonly string[]).includes(value as string)
+    ? (value as DisguiseMode)
+    : 'none'
+}
+
 export class AppState {
   private static instance: AppState | null = null
 
@@ -595,7 +610,7 @@ export class AppState {
     // 1. Load boot-critical settings first (used by WindowHelpers)
     const settingsManager = SettingsManager.getInstance();
     this.isUndetectable = settingsManager.get('isUndetectable') ?? false;
-    this.disguiseMode = settingsManager.get('disguiseMode') ?? 'none';
+    this.disguiseMode = normalizeDisguiseMode(settingsManager.get('disguiseMode'));
     this._verboseLogging = settingsManager.get('verboseLogging') ?? false;
     setVerboseLoggingFlag(this._verboseLogging);
     console.log(`[AppState] Initialized with isUndetectable=${this.isUndetectable}, disguiseMode=${this.disguiseMode}, verboseLogging=${this._verboseLogging}`);
@@ -5388,50 +5403,32 @@ export class AppState {
   }
 
   public setDisguise(mode: 'terminal' | 'settings' | 'activity' | 'none'): void {
+    mode = normalizeDisguiseMode(mode);
     this.disguiseMode = mode;
     SettingsManager.getInstance().set('disguiseMode', mode);
 
-    // DUAL-DOCK-ICON FIX (runtime half): _applyDisguise() performs the same
-    // app.setName() + setProcessDisplayName() LaunchServices re-registration that
-    // duplicates the dock tile at startup. At runtime the app is on 'regular'
-    // with a tile already showing, so a live disguise change can paint a second
-    // tile too. Bracket the rename in accessory→regular (no visible tile during
-    // re-registration) exactly like the startup path. macOS-only; skipped in
-    // stealth (the dock is already hidden and must stay hidden — never promote).
-    const bracketDock =
-      process.platform === 'darwin' && !this.isUndetectable;
-
-    // Capture which Natively window currently holds focus BEFORE the bracket.
-    // The accessory→regular activation-policy churn deactivates the app and
-    // resigns key-window status (AppKit does not auto-restore it on the way
-    // back to 'regular'), which would silently hand control to the app behind
-    // Natively — the same hazard the stealth dock-hide path guards against via
-    // win.focus() (see _enforceDockState). setDisguise runs while the user is
-    // foregrounded in Settings, so we restore focus to the same surface after.
-    const focusWin = bracketDock
-      ? (this.settingsWindowHelper.getSettingsWindow()
-          ?? this.windowHelper.getMainWindow())
-      : null;
-    const nativelyWasFocused =
-      !!focusWin && !focusWin.isDestroyed() && focusWin.isFocused();
-
-    if (bracketDock) {
-      app.setActivationPolicy('accessory');
-    }
-
-    // Apply the disguise regardless of undetectable state
-    // (disguise affects Activity Monitor name via process.title,
-    //  dock icon only updates when NOT in stealth)
+    // NO runtime activation-policy churn here — and this is deliberate.
+    //
+    // The dual-dock-icon bug is a STARTUP phenomenon: the app is born, paints a
+    // tile, THEN renames via app.setName()+CFBundleName, and the LaunchServices
+    // re-registration races into a second tile. That path is fully handled at
+    // startup by LSUIElement (the bundle is born tile-less) plus the one-shot
+    // accessory→regular promotion after createWindow() — see the whenReady block.
+    //
+    // At RUNTIME the app already owns a single stable 'regular' dock tile, and
+    // app.setName() updates that tile's label in place rather than spawning a
+    // duplicate. The old code still bracketed this rename in accessory→regular
+    // "to be safe", but that round-trip deactivates the whole application for a
+    // tick — the always-on-top overlay/launcher windows leave the foreground
+    // layer and snap back, producing a visible disappear/reappear flicker on
+    // every disguise switch. Trading a guaranteed flicker for a hypothetical
+    // duplicate tile is the wrong deal, so the bracket is gone. With no policy
+    // change the app never deactivates, so there is also nothing to re-focus.
+    //
+    // Stealth is unaffected: _applyDisguise() already skips app.setName() and
+    // app.dock.setIcon() when isUndetectable (the dock stays hidden), and we
+    // never promote activation policy here.
     this._applyDisguise(mode);
-
-    if (bracketDock) {
-      app.setActivationPolicy('regular');
-      // Restore key-window so the live disguise switch doesn't drop Natively
-      // behind the previously-active app. win.focus(), not app.focus().
-      if (nativelyWasFocused && focusWin && !focusWin.isDestroyed()) {
-        focusWin.focus();
-      }
-    }
   }
 
   public applyInitialDisguise(): void {
@@ -5483,6 +5480,7 @@ export class AppState {
         }
         break;
       case 'none':
+      default:
         appName = "Natively";
         if (isMac) {
           iconPath = app.isPackaged

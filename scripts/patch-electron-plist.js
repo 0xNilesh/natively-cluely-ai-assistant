@@ -62,6 +62,36 @@ if (!content.includes('NSAudioCaptureUsageDescription')) {
   console.log('[patch-electron-plist] NSAudioCaptureUsageDescription already present — skipping.');
 }
 
+// Patch LSUIElement — make the dev Electron.app launch as an agent (no dock
+// tile at process spawn).
+//
+// In dev we run the loose node_modules `Electron.app`, whose stock Info.plist
+// has CFBundleName=Electron and NO LSUIElement, so macOS paints a generic
+// "Electron" dock tile the instant `electron .` launches — before any JS runs.
+// The app then renames itself to "Natively" (app.setName + CFBundleName),
+// triggering a LaunchServices re-registration that can leave the original tile
+// behind alongside the renamed one. With LSUIElement set, the process starts
+// agent-style (no tile), and the app's existing setActivationPolicy('regular')
+// promotion at startup paints exactly one correctly-timed "Natively" tile.
+//
+// Scope: this only touches the DEV node_modules bundle. Packaged/signed builds
+// use their own production plist (package.json build.mac.extendInfo /
+// electron-builder.signed.cjs), which does NOT set LSUIElement — so packaged
+// builds still spawn as 'regular'. They rely instead on the runtime
+// accessory→regular activation-policy fix in electron/main.ts. If the dual-tile
+// bug ever resurfaces in a packaged build, mirroring LSUIElement into extendInfo
+// is the next lever (decide deliberately — it changes production launch).
+if (!content.includes('LSUIElement')) {
+  content = content.replace(
+    '<key>LSMinimumSystemVersion</key>',
+    '<key>LSUIElement</key>\n\t<string>1</string>\n\t<key>LSMinimumSystemVersion</key>'
+  );
+  modified = true;
+  console.log('[patch-electron-plist] Added LSUIElement (dev launches without a dock tile until promoted).');
+} else {
+  console.log('[patch-electron-plist] LSUIElement already present — skipping.');
+}
+
 // Patch NSMicrophoneUsageDescription if it has the generic stock text
 if (content.includes('This app needs access to the microphone')) {
   content = content.replace(

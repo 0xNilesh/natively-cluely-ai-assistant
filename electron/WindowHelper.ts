@@ -339,10 +339,28 @@ export class WindowHelper {
           }
         }
 
-        // Disguise mode icons
-        let iconName = 'terminal.png';
+        // Disguise mode icons. Only the three known disguise modes map to a
+        // fake icon; any unexpected value falls through to 'none' above, so we
+        // never silently paint a terminal icon for an unrecognized mode.
+        let iconName: string | null = null;
+        if (mode === 'terminal') iconName = 'terminal.png';
         if (mode === 'settings') iconName = 'settings.png';
         if (mode === 'activity') iconName = 'activity.png';
+        if (!iconName) {
+          // Defensive: unknown mode — use the real app icon, matching 'none'.
+          if (isMac) {
+            return app.isPackaged
+              ? path.join(process.resourcesPath, 'natively.icns')
+              : path.resolve(__dirname, '../../assets/natively.icns');
+          } else if (isWin) {
+            return app.isPackaged
+              ? path.join(process.resourcesPath, 'assets/icons/win/icon.ico')
+              : path.resolve(__dirname, '../../assets/icons/win/icon.ico');
+          }
+          return app.isPackaged
+            ? path.join(process.resourcesPath, 'icon.png')
+            : path.resolve(__dirname, '../../assets/icon.png');
+        }
 
         const platformDir = isWin ? 'win' : 'mac';
         return app.isPackaged

@@ -80,38 +80,48 @@ test('non-stealth cold launch stays on accessory until the disguised window is p
   );
 });
 
-test('runtime setDisguise brackets the rename in accessory→regular and restores focus', () => {
-  // The runtime disguise switch performs the SAME app.setName()/setProcessDisplayName()
-  // LaunchServices re-registration as startup; on the already-foregrounded app it must
-  // (a) drop to accessory before the rename and promote back to regular after (no 2nd
-  // dock tile), and (b) restore key-window focus, because the activation-policy churn
-  // deactivates the app and AppKit does not auto-restore focus on the way back to
-  // regular — without the restore, a live disguise switch hands control to the app
-  // behind Natively.
+test('runtime setDisguise applies the rename WITHOUT churning activation policy', () => {
+  // Runtime disguise switching must NOT bracket the rename in accessory→regular.
+  // The dual-dock-icon bug is a STARTUP-only phenomenon (born tile → rename →
+  // LaunchServices re-registration races a 2nd tile), already handled by
+  // LSUIElement + the one-shot startup promotion. At runtime the app owns one
+  // stable 'regular' tile and app.setName() updates it in place. The old runtime
+  // bracket round-tripped activation policy, which deactivates the whole app for
+  // a tick — the always-on-top overlay/launcher windows leave the foreground
+  // layer and snap back, producing a visible disappear/reappear flicker on every
+  // disguise switch. The bracket has been removed; this test locks that in so it
+  // is not "helpfully" reintroduced.
   const body = extractIfElseBlock('public setDisguise(');
 
-  // Ordering: accessory ... _applyDisguise(mode) ... regular
-  const accIdx = body.search(/setActivationPolicy\s*\(\s*['"]accessory['"]\s*\)/);
-  const applyIdx = body.indexOf('_applyDisguise(mode)');
-  const regIdx = body.search(/setActivationPolicy\s*\(\s*['"]regular['"]\s*\)/);
-  assert.ok(accIdx >= 0, 'BUG: runtime setDisguise must drop to accessory before the rename.');
-  assert.ok(applyIdx >= 0, 'sanity: setDisguise must call _applyDisguise(mode).');
-  assert.ok(regIdx >= 0, 'BUG: runtime setDisguise must promote back to regular after the rename.');
-  assert.ok(accIdx < applyIdx, 'BUG: accessory clamp must precede _applyDisguise().');
-  assert.ok(applyIdx < regIdx, 'BUG: regular promotion must follow _applyDisguise().');
-
-  // The bracket must be gated so stealth (undetectable) never promotes to regular.
+  // It must still actually apply the disguise.
   assert.ok(
-    /!\s*this\.isUndetectable/.test(body),
-    'BUG: runtime bracket must be gated on !this.isUndetectable so stealth stays dock-hidden.',
+    body.includes('_applyDisguise(mode)'),
+    'sanity: setDisguise must call _applyDisguise(mode).',
   );
 
-  // Focus restore: a .focus() call must exist AFTER the regular promotion so the
-  // live disguise switch does not drop Natively behind the previously-active app.
-  const afterPromotion = body.slice(regIdx);
+  // And it must NOT touch activation policy — neither accessory nor regular.
+  // A runtime accessory→regular round-trip is exactly the flicker we removed.
   assert.ok(
-    /\.focus\s*\(\s*\)/.test(afterPromotion),
-    'BUG: runtime setDisguise must restore window focus after promoting back to regular, ' +
-    'otherwise the activation-policy churn hands key-window to the app behind Natively.',
+    !/setActivationPolicy\s*\(/.test(body),
+    'BUG: runtime setDisguise must not call setActivationPolicy() — the accessory→regular ' +
+    'round-trip deactivates the app and causes a visible disappear/reappear flicker on every ' +
+    'disguise switch. Startup handles the dual-tile case; runtime renames in place.',
+  );
+});
+
+test('startup promotion to regular still exists exactly once (runtime bracket removal did not touch it)', () => {
+  // Guard against over-removal: the STARTUP accessory→regular promotion is the
+  // load-bearing half of the dual-tile fix and must survive, gated on
+  // darwin && !undetectable, after createWindow().
+  const createWindowIndex = mainSource.indexOf('appState.createWindow()');
+  const promoteIndex = mainSource.indexOf("setActivationPolicy('regular')", createWindowIndex);
+  assert.ok(
+    createWindowIndex >= 0 && promoteIndex >= 0,
+    'BUG: startup setActivationPolicy(regular) promotion after createWindow() is missing.',
+  );
+  const promotionRegion = mainSource.slice(createWindowIndex, promoteIndex + 200);
+  assert.ok(
+    /process\.platform\s*===\s*['"]darwin['"][\s\S]*!\s*appState\.getUndetectable\s*\(\s*\)/.test(promotionRegion),
+    'BUG: startup promotion must stay gated on darwin && !undetectable so stealth never promotes.',
   );
 });
