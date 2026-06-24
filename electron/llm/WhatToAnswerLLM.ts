@@ -66,7 +66,7 @@ type ModesManagerType = {
         // compatible — older builds without this method still work via the
         // sync lexical fallback. `answerType` (Phase 3) scopes the mode's
         // customContext so sensitive chunks can't leak into the wrong answer.
-        buildRetrievedActiveModeContextBlockHybrid?: (query: string, transcript?: string, tokenBudget?: number, answerType?: AnswerType, excludeCustomContext?: boolean, pinnedModeId?: string) => Promise<string>;
+        buildRetrievedActiveModeContextBlockHybrid?: (query: string, transcript?: string, tokenBudget?: number, answerType?: AnswerType, excludeCustomContext?: boolean, pinnedModeId?: string, allowRerank?: boolean) => Promise<string>;
         // PI v3 (W2): the always-pinned "Real-time prompt". Optional for older
         // module shapes (tests/stubs) — absence simply skips pinning.
         getActiveModePinnedInstructions?: (answerType?: AnswerType, pinnedModeId?: string) => string;
@@ -260,9 +260,18 @@ ANSWER SHAPE: ${intentResult.answerShape}
                             // retriever below, which needs no embedding round-trip.
                             // pinnedModeId (#6): retrieve from the SAME mode the
                             // answer was planned from, not a mid-request switch.
+                            // Phase 3: allowRerank on the live inline path only when
+                            // ragSpeculativeRerank is on — prewarmed + inside this same
+                            // budget race, so an overrun just falls through to lexical.
+                            let allowRerank = false;
+                            try {
+                                // eslint-disable-next-line @typescript-eslint/no-var-requires
+                                const { isRagSpeculativeRerankEnabled } = require('../intelligence/intelligenceFlags');
+                                allowRerank = isRagSpeculativeRerankEnabled();
+                            } catch { /* flag module unavailable → no rerank */ }
                             const { value, timedOut } = await raceWithBudget(
                                 modesManager.buildRetrievedActiveModeContextBlockHybrid(
-                                    cleanedTranscript, cleanedTranscript, 1800, answerPlan?.answerType, true, requestSnapshot?.modeUniqueId,
+                                    cleanedTranscript, cleanedTranscript, 1800, answerPlan?.answerType, true, requestSnapshot?.modeUniqueId, allowRerank,
                                 ),
                                 HYBRID_RETRIEVAL_BUDGET_MS,
                                 '',

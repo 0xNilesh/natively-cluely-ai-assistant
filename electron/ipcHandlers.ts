@@ -57,13 +57,19 @@ import { buildManualProfileBackendAnswer } from './llm/profileAnswerBackend';
 // sets `import_meta = {}`, breaking the
 // `createRequire(import.meta.url)` call that loads @napi-rs/canvas. The
 // ModeUploadHardening.test.mjs suite asserts both halves of the fix.
+//
+// The pin itself uses dynamic import() (not require()) because pdfjs-dist
+// is an ESM-only package (.mjs). Node 20 throws
+// "require() of ES Module ... not supported" when you require() an .mjs
+// file, so the function must be async and awaited at its call site.
 let pdfjsWorkerSrcPinned = false;
-function pinPdfjsWorkerSrcOnce(): void {
+async function pinPdfjsWorkerSrcOnce(): Promise<void> {
   if (pdfjsWorkerSrcPinned) return;
   try {
-    // pdf-parse@2.x dynamically imports pdfjs-dist at runtime; require here
-    // so the cost is paid only when a PDF is actually uploaded.
-    const pdfjsLib: any = require('pdfjs-dist/legacy/build/pdf.mjs');
+    // pdfjs-dist is external (not bundled) so its .mjs entry point must be
+    // loaded via dynamic import() — Node 20 forbids synchronous require() of
+    // ESM modules and throws "require() of ES Module ... not supported".
+    const pdfjsLib: any = await import('pdfjs-dist/legacy/build/pdf.mjs');
     // The pdfjs-dist legacy build sets `GlobalWorkerOptions.workerSrc` to
     // `"./pdf.worker.mjs"` (relative string) at class-init time. In the
     // bundled electron main, pdfjs-dist's class init runs once, then
@@ -4185,6 +4191,40 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
+  // In-app recovery path for "app crashed after I selected model X and now
+  // won't open" scenarios. Resets the active model to the safe fallback
+  // (Xenova/whisper-tiny.en, always present in MODEL_CATALOG_IDS) and clears
+  // any per-channel overrides + the preloader cooldown for the bad id.
+  safeHandle('local-whisper-reset-to-default', async () => {
+    try {
+      const DEFAULT_MODEL = 'Xenova/whisper-tiny.en';
+      const sm = SettingsManager.getInstance();
+      // Capture the bad ids BEFORE overwriting so we can clear their
+      // preloader cooldowns — otherwise the user re-selects the broken
+      // model in Settings and gets silently blocked by the 5-min TTL.
+      const badGlobal = sm.get('localWhisperModel');
+      const badMic = sm.get('localWhisperModelMic');
+      const badSystem = sm.get('localWhisperModelSystem');
+      sm.set('localWhisperModel', DEFAULT_MODEL);
+      if (badMic) sm.set('localWhisperModelMic', DEFAULT_MODEL);
+      if (badSystem) sm.set('localWhisperModelSystem', DEFAULT_MODEL);
+      // Drop the recent-failure cooldown for every id we just replaced.
+      // Without this, the user can re-select the bad model and the
+      // preloader will silently skip the preload for 5 minutes.
+      try {
+        const { modelPreloader } = require('./audio/whisper/modelPreloader');
+        for (const badId of [badGlobal, badMic, badSystem]) {
+          if (badId && badId !== DEFAULT_MODEL) {
+            modelPreloader.clearRecentFailure(badId);
+          }
+        }
+      } catch { /* advisory */ }
+      return { success: true, modelId: DEFAULT_MODEL };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  });
+
   // Per-channel model overrides (mic / system audio). When enabled, the two
   // STT instances pick their own model via these slots. When disabled, both
   // fall back to localWhisperModel (the existing global setting).
@@ -4489,24 +4529,151 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle('test-codex-cli', async (_, config?: any) => {
     try {
+      // The new implementation is HTTP-direct — there is no CLI binary to
+      // validate. The test is now "do we have a valid OAuth token + a
+      // reachable model?". A lightweight probe is a status read; the
+      // Settings UI also has a "Try it" button that issues a real chat
+      // call. This handler returns success=true with the current
+      // normalized config so the Settings UI's "Test" button keeps
+      // working without an error state.
       const current = appState.processingHelper.getLLMHelper().getCodexCliConfig();
       const normalized = CodexCliService.normalizeConfig({ ...current, ...(config || {}) });
-      const result = await CodexCliService.validateExecutable(normalized.path);
-      // If auto-detection found a different working path, persist it so
-      // subsequent chat calls don't re-ENOENT.
-      if (result.success && result.resolvedPath && result.resolvedPath !== normalized.path) {
-        const updated = CodexCliService.normalizeConfig({
-          ...normalized,
-          path: result.resolvedPath,
-        });
-        const sm = SettingsManager.getInstance();
-        sm.set('codexCliPath', updated.path);
-        appState.processingHelper.getLLMHelper().setCodexCliConfig(updated);
-        return { success: true, resolvedPath: result.resolvedPath, config: updated };
-      }
-      return result;
+      const { CodexOAuthService } = require('./services/CodexOAuthService');
+      const status = CodexOAuthService.getInstance().getStatus();
+      return {
+        success: true,
+        resolvedPath: normalized.path, // legacy field; ignored
+        config: normalized,
+        signedIn: status.signedIn,
+        email: status.email,
+      };
     } catch (error: any) {
       return { success: false, error: error.message };
+    }
+  });
+
+  const runCodexAuthAction = async (action: 'status' | 'logout' | 'login' | 'doctor', config?: any) => {
+    // Legacy wrapper. The OAuth-direct implementation does not use
+    // CLI subprocesses for auth, so the old action map is reimplemented
+    // against CodexOAuthService. The renderer-facing shape is unchanged
+    // so the Settings UI keeps working without changes.
+    try {
+      const { CodexOAuthService } = require('./services/CodexOAuthService');
+      const oauth = CodexOAuthService.getInstance();
+      const current = appState.processingHelper.getLLMHelper().getCodexCliConfig();
+      const normalized = CodexCliService.normalizeConfig({ ...current, ...(config || {}) });
+      if (action === 'status') {
+        const status = oauth.getStatus();
+        return {
+          success: status.signedIn,
+          action,
+          output: status.signedIn ? `Logged in with ChatGPT account (${status.email || 'unknown'})` : 'Not signed in',
+          config: normalized,
+        };
+      }
+      if (action === 'logout') {
+        oauth.signOut();
+        return { success: true, action, output: 'Logged out', config: normalized };
+      }
+      if (action === 'login') {
+        // For backwards-compat: the new flow uses codex:start-login IPC
+        // + a callback IPC, but if a legacy caller invokes
+        // codex-cli:login we still kick off the new flow so the
+        // Settings UI works.
+        try {
+          const result = await oauth.startLogin();
+          return {
+            success: true,
+            action,
+            output: `Logged in with ChatGPT account (${result.email || 'unknown'})`,
+            config: normalized,
+          };
+        } catch (e: any) {
+          return { success: false, action, error: e?.message || 'Codex login failed', config: normalized };
+        }
+      }
+      if (action === 'doctor') {
+        const status = oauth.getStatus();
+        return {
+          success: true,
+          action,
+          output: status.signedIn
+            ? `Codex doctor OK — signed in as ${status.email || 'unknown'}`
+            : 'Codex doctor OK — not signed in (run `codex:start-login`)',
+          config: normalized,
+        };
+      }
+      return { success: false, action, error: `Unknown auth action: ${action}`, config: normalized };
+    } catch (error: any) {
+      return { success: false, action, error: error.message || `Codex CLI ${action} failed.` };
+    }
+  };
+
+  safeHandle('codex-cli:auth-status', async (_, config?: any) => runCodexAuthAction('status', config));
+  safeHandle('codex-cli:logout', async (_, config?: any) => runCodexAuthAction('logout', config));
+  safeHandle('codex-cli:login', async (_, config?: any) => runCodexAuthAction('login', config));
+  safeHandle('codex-cli:doctor', async (_, config?: any) => runCodexAuthAction('doctor', config));
+
+  // ── ChatGPT OAuth (new — replaces `codex login` CLI subprocess) ──────────
+  // The renderer calls codex:start-login, which kicks off the PKCE flow,
+  // opens the system browser, and waits for the loopback callback. When
+  // the user completes (or denies) the auth in the browser, the
+  // CodexOAuthService emits 'login:complete' or 'login:failed', which we
+  // rebroadcast on the IPC bus as 'codex:login:complete' / ':failed' so
+  // the renderer can update its UI without polling.
+  const { CodexOAuthService: CodexOAuthServiceClass } = require('./services/CodexOAuthService');
+  const codexOAuth = CodexOAuthServiceClass.getInstance();
+  const broadcastCodexLoginEvent = (event: 'login:complete' | 'login:failed' | 'tokens:refreshed' | 'signed-out', payload: any) => {
+    try {
+      BrowserWindow.getAllWindows().forEach((win) => {
+        if (win.isDestroyed()) return;
+        win.webContents.send(`codex:${event}`, payload);
+      });
+    } catch { /* broadcast best-effort */ }
+  };
+  codexOAuth.on('login:complete', (info: any) => broadcastCodexLoginEvent('login:complete', info));
+  codexOAuth.on('login:failed', (err: Error) => broadcastCodexLoginEvent('login:failed', { message: err?.message || String(err) }));
+  codexOAuth.on('tokens:refreshed', (info: any) => broadcastCodexLoginEvent('tokens:refreshed', info));
+  codexOAuth.on('signed-out', () => broadcastCodexLoginEvent('signed-out', undefined));
+
+  safeHandle('codex:login-status', () => {
+    try {
+      return { success: true, ...codexOAuth.getStatus() };
+    } catch (error: any) {
+      return { success: false, error: error.message };
+    }
+  });
+
+  safeHandle('codex:start-login', async () => {
+    try {
+      const result = await codexOAuth.startLogin();
+      return { success: true, email: result.email, expiresAt: result.tokens.expiresAt };
+    } catch (error: any) {
+      return { success: false, error: error?.message || String(error) };
+    }
+  });
+
+  safeHandle('codex:sign-out', () => {
+    try {
+      codexOAuth.signOut();
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error.message };
+    }
+  });
+
+  // Force-refresh — used by the Settings UI's "Refresh now" button so the
+  // user can confirm the stored refresh token still works without waiting
+  // for a 401 from a chat call.
+  safeHandle('codex:refresh-tokens', async () => {
+    try {
+      const tokens = await codexOAuth.refreshTokens();
+      if (!tokens) {
+        return { success: false, error: 'Codex session expired. Please sign in again from Settings → AI Providers.' };
+      }
+      return { success: true, expiresAt: tokens.expiresAt, email: tokens.email };
+    } catch (error: any) {
+      return { success: false, error: error?.message || String(error) };
     }
   });
 
@@ -6762,10 +6929,14 @@ export function initializeIpcHandlers(appState: AppState): void {
         // message. Removing from the allow-list means the dedicated catch
         // below produces a friendly "convert to .docx" error instead.
       ]);
-      // 10 MiB per file. Anything larger is almost always a database dump,
-      // a media file, or a misclicked archive; the modes layer would just
-      // truncate it to ~40 KB anyway via MAX_TOTAL_CHARS.
-      const MAX_FILE_BYTES = 10 * 1024 * 1024;
+      // 50 MiB per file. PDF/DOCX files are dominated by images, fonts, and
+      // compression metadata — a 50 MB PDF typically yields only 300 KB–2 MB
+      // of extracted text. The extracted text is indexed into mode_reference_chunks
+      // and only the top-6 chunks are retrieved per query (never sent whole),
+      // so there is no prompt-size risk from large files. The old 10 MB limit
+      // was calibrated for the legacy full-text-dump path (MAX_TOTAL_CHARS=40KB)
+      // which is no longer used on the live answer path.
+      const MAX_FILE_BYTES = 50 * 1024 * 1024;
 
       const result: any = await dialog.showOpenDialog({
         properties: ['openFile'],
@@ -6845,14 +7016,14 @@ export function initializeIpcHandlers(appState: AppState): void {
         const mb = (stats.size / (1024 * 1024)).toFixed(1);
         return {
           success: false,
-          error: `File is ${mb} MB; the maximum is 10 MB. Trim the file or split it into smaller reference documents.`,
+          error: `File is ${mb} MB; the maximum is 50 MB. Trim the file or split it into smaller reference documents.`,
         };
       }
 
       // Wrap the parser branches in a per-call timeout. pdf-parse and mammoth
-      // have both hung historically on malformed input or zip-bomb DOCX —
-      // 15 s is generous for a 10 MiB document.
-      const PARSE_TIMEOUT_MS = 15_000;
+      // have both hung historically on malformed input or zip-bomb DOCX.
+      // 30 s covers a 50 MiB image-heavy PDF on a slow machine.
+      const PARSE_TIMEOUT_MS = 30_000;
       function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
         return Promise.race([
           p,
@@ -6870,7 +7041,7 @@ export function initializeIpcHandlers(appState: AppState): void {
           // `new PDFParse(...)` and not at module top level. Skipping this
           // call leaves the broken default workerSrc in place and the parse
           // fails with "Setting up fake worker failed" on every PDF.
-          pinPdfjsWorkerSrcOnce();
+          await pinPdfjsWorkerSrcOnce();
           const { PDFParse } = require('pdf-parse');
           const buffer = await fs.promises.readFile(filePath);
           const parser = new PDFParse({ data: buffer });

@@ -69,7 +69,9 @@ describe('the prompt builders forward the pinned id to resolveMode (source guard
     assert.match(src, /getActiveModeSystemPromptSuffix\(pinnedModeId\?: string\)/);
     assert.match(src, /getActiveModePinnedInstructions\(answerType\?: AnswerType, pinnedModeId\?: string\)/);
     assert.match(src, /buildRetrievedActiveModeContextBlock\([^)]*pinnedModeId\?: string\)/);
-    assert.match(src, /buildRetrievedActiveModeContextBlockHybrid\([^)]*pinnedModeId\?: string\)/);
+    // Hybrid takes pinnedModeId; a trailing `allowRerank?: boolean` (Phase 1
+    // smart-retrieval) may follow it, so don't require it to be the LAST param.
+    assert.match(src, /buildRetrievedActiveModeContextBlockHybrid\([^)]*pinnedModeId\?: string(, allowRerank\?: boolean)?\)/);
     // Each must resolve via the pin, not a bare getActiveMode().
     const suffix = src.slice(src.indexOf('getActiveModeSystemPromptSuffix(pinnedModeId'));
     assert.match(suffix.slice(0, 200), /this\.resolveMode\(pinnedModeId\)/);

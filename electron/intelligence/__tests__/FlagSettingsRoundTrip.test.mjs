@@ -73,6 +73,10 @@ const EXPECTED_KEYS = [
   'hindsightMemory',
   'hindsightLiveRecall',
   'hindsightPostMeetingRetain',
+  'ragConfidenceGate',
+  'ragLocalRerank',
+  'ragRrfFusion',
+  'ragSpeculativeRerank',
 ];
 
 // All NATIVELY_* env vars these flags read — cleared before/after so a leaked env from the

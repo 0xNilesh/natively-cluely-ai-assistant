@@ -442,6 +442,19 @@ export class ModesManager {
                 await this.modeContextRetriever.indexReferenceFile(file).catch(() => { /* logged inside */ });
             }
         }
+        // Phase 3: warm the local cross-encoder reranker at activation so the
+        // first LIVE transcript turn never pays the cold-load cost inside its
+        // retrieval budget. Only when the reranker is actually enabled — never
+        // load a model nobody will use. Fire-and-forget, best-effort.
+        try {
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
+            const { isRagLocalRerankEnabled } = require('../intelligence/intelligenceFlags');
+            if (files.length > 0 && isRagLocalRerankEnabled()) {
+                // eslint-disable-next-line @typescript-eslint/no-var-requires
+                const { getLocalReranker } = require('../rag/LocalReranker');
+                void getLocalReranker().prewarm?.();
+            }
+        } catch { /* non-fatal — prewarm is an optimization, not a requirement */ }
     }
 
     /** Per-file index status for the Modes Manager UI badges. */
@@ -679,7 +692,7 @@ export class ModesManager {
      * we fall back to the existing sync lexical path so the answer flow
      * never breaks. Telemetry distinguishes hybrid hits from lexical fallback.
      */
-    public async buildRetrievedActiveModeContextBlockHybrid(query: string, transcript?: string, tokenBudget?: number, answerType?: AnswerType, excludeCustomContext?: boolean, pinnedModeId?: string): Promise<string> {
+    public async buildRetrievedActiveModeContextBlockHybrid(query: string, transcript?: string, tokenBudget?: number, answerType?: AnswerType, excludeCustomContext?: boolean, pinnedModeId?: string, allowRerank?: boolean): Promise<string> {
         const mode = this.resolveMode(pinnedModeId);
         if (!mode) return '';
         const files = this.getReferenceFiles(mode.id);
@@ -703,6 +716,7 @@ export class ModesManager {
                 transcript,
                 tokenBudget,
                 answerType,
+                allowRerank,
             });
             usedHybrid = result.usedHybrid;
             usedFallback = result.usedFallback;

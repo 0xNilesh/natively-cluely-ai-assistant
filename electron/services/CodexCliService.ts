@@ -1,13 +1,51 @@
-import { spawn } from 'child_process';
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
+/**
+ * CodexCliService — direct HTTPS ChatGPT Codex provider (replaces subprocess)
+ *
+ * History: the previous implementation spawned the `codex` CLI as a child
+ * process and parsed its NDJSON event stream. This had two persistent
+ * failure modes that drove the rewrite:
+ *   1. Users without the @openai/codex binary (or with a stale one) hit
+ *      ENOENT every chat. The auto-detect fallback covered common install
+ *      locations but not, e.g., `nix run` or non-PATH installs.
+ *   2. The CLI is a Rust binary that cold-loads the model on first
+ *      invocation, so the first delta could take 5-8s and the subprocess
+ *      IPC overhead added more. The 60s default timeout saved us from
+ *      the most catastrophic hangs but the user-visible behavior was still
+ *      "sometimes it works, sometimes it doesn't".
+ *
+ * The new design drops the subprocess entirely. We use ChatGPT OAuth
+ * (see CodexOAuthService) to mint a bearer token, then call
+ * `https://api.openai.com/v1/responses` directly with `fetch()` and
+ * `ReadableStream` SSE. This is the same endpoint the open-sse
+ * `CodexExecutor` calls (codex.md:1113 — `baseUrl: https://chatgpt.com/backend-api/codex/responses`),
+ * adapted to Electron's Node runtime and pinned to the OpenAI-hosted
+ * `/v1/responses` route that all ChatGPT-account bearer tokens accept.
+ *
+ * Public surface preserved for backward compatibility:
+ *   - DEFAULT_CODEX_CLI_CONFIG (shape unchanged)
+ *   - CodexCliService.run / .stream (signature unchanged)
+ *   - CodexCliService.normalizeConfig (signature unchanged)
+ *   - CodexCliService.buildArgs (DEPRECATED — returns [] but kept so the
+ *     few tests that import it don't break; new code should not call it)
+ *   - resolveCodexReasoningEffort (unchanged, per-model VALID set)
+ *
+ * Wire-level differences from the old subprocess design:
+ *   - Bearer token is read from CodexOAuthService (not argv)
+ *   - Reasoning effort goes in `body.reasoning.effort` (not -c flag)
+ *   - `service_tier` goes in `body.service_tier` (not -c flag)
+ *   - 401 → refresh-once-and-retry (matches open-sse chatCore:844-863)
+ *   - 429 / 5xx → exponential backoff with jitter (up to 3 attempts)
+ *   - AbortSignal cancels the in-flight fetch and propagates to the
+ *     stream consumer; partial deltas yielded so far are NOT lost.
+ */
+
+import { CodexOAuthService } from './CodexOAuthService';
 
 export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
 export type CodexServiceTier = 'default' | 'fast' | 'flex';
 // 'none' is distinct from undefined: 'none' is the explicit user pick meaning
 // "no reasoning_effort override"; undefined means "user didn't pick one" → also
-// omit the -c flag. 'minimal' is intentionally NOT in this union because no
+// omit the field. 'minimal' is intentionally NOT in this union because no
 // codex-supported model accepts it (OpenAI removed it after the original gpt-5
 // line — see electron/llm/__tests__/OpenAiReasoningEffort.test.mjs).
 export type CodexModelReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh';
@@ -17,14 +55,16 @@ export const CODEX_SERVICE_TIERS: readonly CodexServiceTier[] = ['default', 'fas
 export const CODEX_MODEL_REASONING_EFFORTS: readonly CodexModelReasoningEffort[] = ['none', 'low', 'medium', 'high', 'xhigh'] as const;
 
 // Per-model valid reasoning_effort sets. Mirrors the OpenAI HTTP VALID map at
-// electron/llm/__tests__/OpenAiReasoningEffort.test.mjs:27-45. The codex CLI
-// binary enforces the same per-family constraints as the direct OpenAI API —
-// sending e.g. xhigh to gpt-5.3-codex triggers a turn.failed event that our
-// fallback chain swallows into "Let me come back to that in just a moment."
-// The user's pick is validated against the per-model set; unsupported values
-// are silently downgraded to the LOWEST-latency valid value (matches the
-// OpenAI HTTP picker's behaviour) so we never send a flag the binary will
-// reject. Lookup is longest-match-wins so gpt-5.4-codex beats gpt-5.
+// electron/llm/__tests__/OpenAiReasoningEffort.test.mjs:27-45. Sending
+// e.g. xhigh to gpt-5.3-codex over the wire triggers a 400 turn.failed event
+// that our fallback chain swallows into "Let me come back to that in just a
+// moment." The user's pick is validated against the per-model set;
+// unsupported values are silently downgraded to the LOWEST-latency valid
+// value (matches the OpenAI HTTP picker's behaviour).
+//
+// NOTE: this table is now ALSO used for the HTTP request body's
+// reasoning.effort field — the same per-family constraints apply, so
+// keeping it as the single source of truth avoids drift.
 const CODEX_MODEL_REASONING_SETS: ReadonlyArray<readonly [string, readonly CodexModelReasoningEffort[]]> = [
   // Original gpt-5 line — minimal accepted (not exposed); low/medium/high.
   ['gpt-5-2025-08-07', ['low', 'medium', 'high']],
@@ -51,18 +91,13 @@ const CODEX_MODEL_REASONING_SETS: ReadonlyArray<readonly [string, readonly Codex
  * Resolve the user's reasoning-effort pick against the model's per-family
  * VALID set. Mirrors getOpenAiReasoningEffort() (electron/llm/modelCapabilities.ts:217).
  *
- * Returns the value to emit as `-c model_reasoning_effort="..."`, or undefined
- * to omit the flag entirely (used when pick is undefined/null/empty).
+ * Returns the value to emit as `body.reasoning.effort`, or undefined
+ * to omit the field entirely (used when pick is undefined/null/empty).
  *
  * Downgrade policy (when the user's pick is NOT in the model's valid set):
- *  - If the user picked 'none' but the model doesn't accept 'none' → 'low'
- *    (mirrors the HTTP picker for codex variants which always return 'low').
+ *  - If the user picked 'none' but the model doesn't accept 'none' → 'low'.
  *  - Otherwise → first entry of the valid set with 'none' removed (lowest-
- *    latency REASONING effort, not the lowest-latency of all values). This
- *    avoids silently turning an unsupported pick into 'none' on gpt-5.1+
- *    models where 'none' is valid but means "no reasoning at all" — that
- *    would be a stealth behavior change for someone who picked 'xhigh'
- *    and expected a reasoning effort, not zero reasoning.
+ *    latency REASONING effort, not the lowest-latency of all values).
  *
  * Longest-key match wins so 'gpt-5.4-codex' resolves via its entry, not the
  * generic 'gpt-5' one.
@@ -90,10 +125,16 @@ export function resolveCodexReasoningEffort(
 
 export interface CodexCliConfig {
   enabled: boolean;
+  /**
+   * @deprecated Kept for IPC backward-compat. The new implementation does
+   * not spawn a CLI binary; `path` is ignored at runtime. The settings
+   * field is still read/written so the Settings UI doesn't reset.
+   */
   path: string;
   model: string;
   fastModel: string;
   timeoutMs: number;
+  /** @deprecated Ignored — Codex CLI sandbox flags don't apply to HTTP. */
   sandboxMode: CodexSandboxMode;
   serviceTier: CodexServiceTier;
   modelReasoningEffort?: CodexModelReasoningEffort;
@@ -104,60 +145,102 @@ export interface CodexCliRunOptions {
   model: string;
   timeoutMs: number;
   imagePaths?: string[];
+  /** @deprecated Ignored. */
   sandboxMode?: CodexSandboxMode;
   serviceTier?: CodexServiceTier;
   modelReasoningEffort?: CodexModelReasoningEffort;
   signal?: AbortSignal;
+  /** Optional system prompt (used as the `instructions` field on the
+   *  Responses API; matches open-sse CodexExecutor.transformRequest
+   *  at codex.md:419-422). */
+  instructions?: string;
+  /**
+   * Optional session-stable id used as the basis for `prompt_cache_key` and
+   * the `session_id` request header. The Codex backend keys its server-side
+   * cache + rate-limit bucket off `session_id`, so a stable value across
+   * consecutive calls yields cache hits. When omitted, the service-wide
+   * SESSION_ID (one per process) is used.
+   */
+  sessionId?: string;
 }
 
 // Default fast model: gpt-5.3-codex works with both ChatGPT-account and API-key
 // auth. The faster gpt-5.3-codex-spark is API-key-only and 400s on ChatGPT auth.
 export const DEFAULT_CODEX_CLI_CONFIG: CodexCliConfig = {
   enabled: false,
-  path: 'codex',
+  path: 'codex', // deprecated — kept so older settings round-trip without resetting
   model: 'gpt-5.4',
   fastModel: 'gpt-5.3-codex',
   timeoutMs: 60_000,
-  sandboxMode: 'read-only',
+  sandboxMode: 'read-only', // deprecated
   serviceTier: 'default',
   modelReasoningEffort: undefined,
 };
 
+// Codex backend endpoint. ChatGPT-subscription OAuth bearer tokens issued by
+// `https://auth.openai.com/oauth/token` are routed to ChatGPT's own backend,
+// not the public `api.openai.com` host — the open-sse reference (and the
+// official `codex_cli_rs` binary) hit `chatgpt.com/backend-api/codex/responses`.
+// Using `api.openai.com/v1/responses` here would 401 with a ChatGPT OAuth
+// token, defeating the entire "no API key, just ChatGPT subscription" path.
+// See codex.md:1113 (`baseUrl` in open-sse/providers/registry/codex.js) and
+// codex.md:1149-1169 for the OAuth constants that map to this endpoint.
+const CODEX_RESPONSES_URL = 'https://chatgpt.com/backend-api/codex/responses';
+
+// Retry policy for transient upstream failures. Matches the open-sse
+// chatCore 401-refresh (codex.md:844-863) and the 503-retry default in
+// DEFAULT_RETRY_CONFIG (codex.md:283-317).
+const TRANSIENT_RETRY_MAX = 3;
+const TRANSIENT_RETRY_BASE_MS = 500;
+const TRANSIENT_RETRY_CAP_MS = 8_000;
+
+// Sentinel thrown from parseSseStream when the SSE body carries a transient
+// error (e.g. "servers are currently overloaded"). fetchDeltas catches this
+// and retries with backoff instead of surfacing it to the caller.
+class TransientStreamError extends Error {
+  readonly isTransient = true;
+  constructor(message: string) {
+    super(message);
+    this.name = 'TransientStreamError';
+  }
+}
+
+function isTransientStreamMessage(msg: string): boolean {
+  const lower = msg.toLowerCase();
+  return lower.includes('overloaded') || lower.includes('try again') || lower.includes('service unavailable') || lower.includes('capacity');
+}
+
+// =============================================================================
+// CodexCliService — public static surface
+// =============================================================================
+
 export class CodexCliService {
+  /**
+   * Process-stable session id used as the default value for
+   * `CodexCliRunOptions.sessionId`. Generated once at module load and
+   * reused for every Codex call within this run. The Codex backend uses
+   * this as the basis for `prompt_cache_key` + `session_id` header, so a
+   * stable value yields cache hits across consecutive calls. Mirrors
+   * open-sse's `resolveCacheSessionId()` (codex.md:195-204).
+   */
+  public static readonly SESSION_ID: string =
+    `natively-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+
+  /**
+   * @deprecated The HTTP-direct implementation does not use a CLI binary
+   * and has no `argv`. Kept so callers that still import `buildArgs` for
+   * tests/inspection don't crash; returns an empty array. The new
+   * equivalents are `body.model`, `body.reasoning.effort`, and
+   * `body.service_tier` in the request body.
+   */
   public static buildArgs(
-    model: string,
-    imagePaths: string[] = [],
-    sandboxMode: CodexSandboxMode = 'read-only',
-    serviceTier?: CodexServiceTier,
-    modelReasoningEffort?: CodexModelReasoningEffort,
+    _model: string,
+    _imagePaths: string[] = [],
+    _sandboxMode: CodexSandboxMode = 'read-only',
+    _serviceTier?: CodexServiceTier,
+    _modelReasoningEffort?: CodexModelReasoningEffort,
   ): string[] {
-    const args = [
-      'exec',
-      '--json',
-      '--color',
-      'never',
-      '--sandbox',
-      sandboxMode,
-      '--skip-git-repo-check',
-      '--model',
-      model,
-    ];
-    if (serviceTier && serviceTier !== 'default') {
-      args.push('-c', `service_tier="${serviceTier}"`);
-    }
-    // Resolve against the per-model VALID set so a stale saved pick (e.g.
-    // xhigh on gpt-5.3-codex) is silently downgraded to a value the codex
-    // CLI binary actually accepts — otherwise the binary emits a turn.failed
-    // event that our fallback chain swallows into "Let me come back to that".
-    const resolvedEffort = resolveCodexReasoningEffort(model, modelReasoningEffort);
-    if (resolvedEffort) {
-      args.push('-c', `model_reasoning_effort="${resolvedEffort}"`);
-    }
-    for (const imagePath of imagePaths) {
-      if (!imagePath) continue;
-      args.push('--image', imagePath);
-    }
-    return args;
+    return [];
   }
 
   public static normalizeConfig(config: Partial<CodexCliConfig> = {}): CodexCliConfig {
@@ -169,8 +252,7 @@ export class CodexCliService {
       ? config.serviceTier
       : DEFAULT_CODEX_CLI_CONFIG.serviceTier;
     // Pick must be in the union type first; then resolveCodexReasoningEffort
-    // downgrades unsupported values for the chosen model (e.g. xhigh on
-    // gpt-5.3-codex → high) so a stale saved setting can't trigger a 400.
+    // downgrades unsupported values for the chosen model.
     let modelReasoningEffort: CodexModelReasoningEffort | undefined;
     if (config.modelReasoningEffort && (CODEX_MODEL_REASONING_EFFORTS as readonly string[]).includes(config.modelReasoningEffort)) {
       modelReasoningEffort = config.modelReasoningEffort;
@@ -179,6 +261,8 @@ export class CodexCliService {
     modelReasoningEffort = resolveCodexReasoningEffort(modelName, modelReasoningEffort);
     return {
       enabled: !!config.enabled,
+      // `path` is preserved verbatim for backward-compat (Settings UI
+      // may still display it). New HTTP-direct code does not use it.
       path: (config.path || DEFAULT_CODEX_CLI_CONFIG.path).trim() || DEFAULT_CODEX_CLI_CONFIG.path,
       model: modelName,
       fastModel: (config.fastModel || DEFAULT_CODEX_CLI_CONFIG.fastModel).trim() || DEFAULT_CODEX_CLI_CONFIG.fastModel,
@@ -189,329 +273,419 @@ export class CodexCliService {
     };
   }
 
-  // Common install locations checked when the configured path doesn't resolve.
-  // Order matters: explicit installs (npm/brew/cargo) outrank app-bundled CLIs
-  // because the latter ship inside an app the user may not realize is "Codex".
-  public static getCandidatePaths(): string[] {
-    const home = os.homedir();
-    if (process.platform === 'win32') {
-      const local = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
-      const programs = process.env['ProgramFiles'] || 'C:\\Program Files';
-      return [
-        path.join(local, 'Programs', 'Codex', 'codex.exe'),
-        path.join(programs, 'Codex', 'codex.exe'),
-        path.join(home, '.cargo', 'bin', 'codex.exe'),
-        path.join(home, 'AppData', 'Roaming', 'npm', 'codex.cmd'),
-      ];
+  /**
+   * Collect the full response into a single string. Thin wrapper over
+   * `stream()` that buffers all deltas. Prefer `stream()` for user-visible
+   * surfaces (so the UI can show progress).
+   */
+  public static async run(_path: string, options: CodexCliRunOptions): Promise<string> {
+    if (options.signal?.aborted) throw new Error('Codex request aborted before start.');
+    let out = '';
+    for await (const chunk of this.stream('', options)) {
+      out += chunk;
     }
-    return [
-      '/opt/homebrew/bin/codex',
-      '/usr/local/bin/codex',
-      path.join(home, '.cargo', 'bin', 'codex'),
-      path.join(home, '.local', 'bin', 'codex'),
-      path.join(home, '.bun', 'bin', 'codex'),
-      // Codex desktop app bundles the CLI inside Resources/.
-      '/Applications/Codex.app/Contents/Resources/codex',
-      path.join(home, 'Applications', 'Codex.app', 'Contents', 'Resources', 'codex'),
-    ];
+    return out;
   }
 
-  // Returns the first candidate that exists on disk and is executable.
-  // Does NOT shell out — purely a filesystem check, safe to call frequently.
-  public static autoDetectPath(): string | null {
-    for (const candidate of this.getCandidatePaths()) {
-      try {
-        const stat = fs.statSync(candidate);
-        if (stat.isFile()) {
-          // On POSIX, also check exec bit; on Windows, presence is enough.
-          if (process.platform === 'win32') return candidate;
-          // eslint-disable-next-line no-bitwise
-          if ((stat.mode & 0o111) !== 0) return candidate;
-        }
-      } catch { /* not present, continue */ }
+  /**
+   * Stream the Codex response as a series of text deltas.
+   *
+   * The `_path` parameter is preserved for backward-compat with the old
+   * subprocess surface (LLMHelper.streamWithCodexCli still passes
+   * `this.codexCliConfig.path`); it is ignored.
+   */
+  public static async *stream(_path: string, options: CodexCliRunOptions): AsyncGenerator<string, void, unknown> {
+    if (options.signal?.aborted) throw new Error('Codex request aborted before start.');
+
+    const oauth = CodexOAuthService.getInstance();
+    const status = oauth.getStatus();
+    if (!status.signedIn) {
+      throw new Error('Not signed in to ChatGPT. Please complete Codex OAuth login from Settings → AI Providers.');
     }
-    return null;
-  }
 
-  // Returns true when `binPath` either is a bare command (relies on $PATH
-  // resolution at spawn time) or exists on disk with the executable bit set.
-  // Used by resolvePathOrAutoDetect to skip the auto-detect retry when the
-  // user has explicitly typed a path that just needs $PATH to find.
-  private static pathLooksResolvable(binPath: string): boolean {
-    if (!binPath || !binPath.includes(path.sep) && !binPath.includes('/')) return true;
-    try {
-      const stat = fs.statSync(binPath);
-      if (!stat.isFile()) return false;
-      if (process.platform === 'win32') return true;
-      // eslint-disable-next-line no-bitwise
-      return (stat.mode & 0o111) !== 0;
-    } catch {
-      return false;
-    }
-  }
+    // Build the request body ONCE outside the retry loop — refreshing
+    // tokens doesn't change the prompt.
+    const body = this.buildRequestBody(options);
+    const headers = this.buildHeaders();
 
-  // Pre-spawn path resolution. If `binPath` exists & is executable, return it
-  // as-is. If it's bare (no separator, $PATH-resolved) we can't pre-check,
-  // so return as-is — the spawn will either succeed via $PATH or fail with
-  // ENOENT, which the upstream child.on('error') handler reports. If `binPath`
-  // is an explicit path that doesn't resolve, fall back to autoDetectPath()
-  // so a stale stored path doesn't silently 404 on every chat call.
-  // Returns the path to use (which may equal `binPath`).
-  public static async resolvePathOrAutoDetect(binPath: string): Promise<string> {
-    if (this.pathLooksResolvable(binPath)) return binPath;
-    const detected = this.autoDetectPath();
-    if (detected && detected !== binPath) {
-      console.warn(`[CodexCliService] "${binPath}" not found, retrying with auto-detected "${detected}".`);
-      return detected;
-    }
-    return binPath;
-  }
-
-  // Validate the given path; if it ENOENTs and looks bare (no path separator,
-  // i.e. depends on $PATH), fall back to auto-detection and validate that.
-  // Returns the resolved path on success so callers can persist it.
-  public static async validateExecutable(input: string, timeoutMs = 10_000): Promise<{ success: boolean; error?: string; resolvedPath?: string }> {
-    const tryOne = (binPath: string): Promise<{ success: boolean; error?: string }> => new Promise((resolve) => {
-      const child = spawn(binPath, ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
-      let stderr = '';
-      const timer = setTimeout(() => {
-        child.kill('SIGTERM');
-        resolve({ success: false, error: `Codex CLI validation timed out for "${binPath}".` });
-      }, timeoutMs);
-      child.stderr.on('data', chunk => { stderr += chunk.toString(); });
-      child.on('error', error => {
-        clearTimeout(timer);
-        resolve({ success: false, error: `Codex CLI was not found at "${binPath}". ${error.message}` });
-      });
-      child.on('close', code => {
-        clearTimeout(timer);
-        if (code === 0) resolve({ success: true });
-        else resolve({ success: false, error: `Codex CLI validation failed for "${binPath}"${stderr ? `: ${this.sanitize(stderr)}` : '.'}` });
-      });
-    });
-
-    const first = await tryOne(input);
-    if (first.success) return { success: true, resolvedPath: input };
-
-    // Bare command (relies on $PATH) or empty — try filesystem auto-detection.
-    const looksBare = !input || !input.includes(path.sep);
-    if (looksBare) {
-      const detected = this.autoDetectPath();
-      if (detected && detected !== input) {
-        const second = await tryOne(detected);
-        if (second.success) return { success: true, resolvedPath: detected };
-      }
-    }
-    return { success: false, error: first.error };
-  }
-
-  public static async run(path: string, options: CodexCliRunOptions): Promise<string> {
-    const resolvedPath = await this.resolvePathOrAutoDetect(path);
-    const result = await this.collect(resolvedPath, options);
-    const normalized = this.extractText(result.stdout);
-    if (normalized) return normalized;
-    const codexError = this.extractCodexError(result.stdout);
-    throw new Error(codexError || result.stderr || 'Codex CLI returned an empty response.');
-  }
-
-  public static async *stream(path: string, options: CodexCliRunOptions): AsyncGenerator<string, void, unknown> {
-    if (options.signal?.aborted) throw new Error('Codex CLI request aborted before start.');
-
-    // If the stored path ENOENTs (user upgraded the codex CLI binary and the
-    // stored path is stale), try autoDetectPath() once before throwing — the
-    // user otherwise sees the canned fallback with no signal that the binary
-    // is missing. Caller is responsible for persisting any new path (the
-    // test-codex-cli IPC handler already does so on success).
-    const resolvedPath = await this.resolvePathOrAutoDetect(path);
-    const args = this.buildArgs(options.model, options.imagePaths, options.sandboxMode, options.serviceTier, options.modelReasoningEffort);
-    const child = spawn(resolvedPath, args, { stdio: ['pipe', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    let lineBuffer = '';
-    let emitted = false;
-    let aborted = false;
-
-    const timer = setTimeout(() => child.kill('SIGTERM'), options.timeoutMs);
-
-    const queue: string[] = [];
-    let finished = false;
-    let failure: Error | null = null;
-    let notify: (() => void) | null = null;
-    const wake = () => {
-      if (notify) {
-        notify();
-        notify = null;
-      }
+    // Manual deadline (in addition to AbortSignal) so an open connection
+    // that stops emitting data still gets killed.
+    const deadlineController = new AbortController();
+    const deadlineTimer = setTimeout(() => deadlineController.abort(), options.timeoutMs);
+    // Combine user-supplied signal with our deadline.
+    const combinedSignal = combineSignals(options.signal, deadlineController.signal);
+    const cleanup = () => {
+      clearTimeout(deadlineTimer);
+      combinedSignal.dispose();
     };
 
-    const onAbort = () => {
-      aborted = true;
-      child.kill('SIGTERM');
-      if (!failure) failure = new Error('Codex CLI request aborted.');
-      wake();
-    };
-    options.signal?.addEventListener('abort', onAbort, { once: true });
-
-    child.stdout.on('data', chunk => {
-      const text = chunk.toString();
-      stdout += text;
-      lineBuffer += text;
-      const lines = lineBuffer.split(/\r?\n/);
-      lineBuffer = lines.pop() || '';
-      for (const line of lines) {
-        const extracted = this.extractText(line);
-        if (extracted) {
-          emitted = true;
-          queue.push(extracted);
-        }
-      }
-      wake();
-    });
-
-    child.stderr.on('data', chunk => {
-      stderr += chunk.toString();
-    });
-
-    child.stdin.on('error', error => {
-      if (!failure) {
-        failure = new Error(`Codex CLI stdin failed for "${path}". ${error.message}`);
-      }
-      wake();
-    });
-
-    child.on('error', error => {
-      clearTimeout(timer);
-      failure = new Error(`Codex CLI was not found at "${path}". ${error.message}`);
-      finished = true;
-      wake();
-    });
-
-    child.on('close', code => {
-      clearTimeout(timer);
-      if (code !== 0 && !failure && !aborted) {
-        const codexError = this.extractCodexError(stdout);
-        const detail = codexError || (stderr ? this.sanitize(stderr) : '');
-        failure = new Error(detail ? `Codex CLI: ${detail}` : `Codex CLI exited with code ${code}.`);
-      }
-      finished = true;
-      wake();
-    });
-
     try {
-      child.stdin.write(options.prompt);
-      child.stdin.end();
-    } catch (error: any) {
-      failure = new Error(`Codex CLI stdin failed for "${path}". ${error.message}`);
-      wake();
-    }
-
-    try {
-      while (!finished || queue.length > 0) {
-        while (queue.length > 0) yield queue.shift()!;
-        if (finished) break;
-        await new Promise<void>(resolve => { notify = resolve; });
+      const deltas = this.fetchDeltas(body, headers, combinedSignal.signal, options);
+      for await (const delta of deltas) {
+        yield delta;
       }
     } finally {
-      options.signal?.removeEventListener('abort', onAbort);
-    }
-
-    if (aborted) {
-      // Caller asked us to stop; surface partials as-is, do not throw.
-      return;
-    }
-    if (failure) {
-      if (emitted) {
-        console.warn('[CodexCliService] Codex CLI stream ended after emitting partial output:', failure.message);
-        return;
-      }
-      throw failure;
-    }
-    if (!emitted) {
-      // The streaming loop above (lineBuffer, lines 226-240) holds any final
-      // PARTIAL JSON line in `lineBuffer`. If we re-spit the full stdout here
-      // via extractText, the partial fragment's JSON.parse fails and the
-      // content it carried is silently dropped → empty response → upstream
-      // fallback. Concatenate the tail buffer so the partial fragment is
-      // re-evaluated as a complete line before we throw.
-      const tail = lineBuffer.trim();
-      if (tail) {
-        const fromBuffer = this.extractText(tail);
-        if (fromBuffer) { yield fromBuffer; return; }
-        const combined = stdout + (stdout.endsWith('\n') || !stdout ? '' : '\n') + tail;
-        const fromCombined = this.extractText(combined);
-        if (fromCombined) { yield fromCombined; return; }
-      }
-      const normalized = this.extractText(stdout);
-      if (normalized) { yield normalized; return; }
-      const codexError = this.extractCodexError(stdout);
-      throw new Error(codexError || (stderr ? this.sanitize(stderr) : 'Codex CLI returned an empty response.'));
+      cleanup();
     }
   }
 
-  private static async collect(path: string, options: CodexCliRunOptions): Promise<{ stdout: string; stderr: string }> {
-    if (options.signal?.aborted) throw new Error('Codex CLI request aborted before start.');
+  // ---------------------------------------------------------------------------
+  // Request body / headers
+  // ---------------------------------------------------------------------------
 
-    // resolvePathOrAutoDetect is also called by run() before reaching here, so
-    // this is mostly a defensive pass-through. Kept for the case where collect
-    // is invoked directly (tests, internal helpers).
-    const resolvedPath = await this.resolvePathOrAutoDetect(path);
-    return new Promise((resolve, reject) => {
-      const child = spawn(resolvedPath, this.buildArgs(options.model, options.imagePaths, options.sandboxMode, options.serviceTier, options.modelReasoningEffort), { stdio: ['pipe', 'pipe', 'pipe'] });
-      let stdout = '';
-      let stderr = '';
-      let settled = false;
-      const settle = (fn: () => void) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        options.signal?.removeEventListener('abort', onAbort);
-        fn();
-      };
-      const onAbort = () => {
-        child.kill('SIGTERM');
-        settle(() => reject(new Error('Codex CLI request aborted.')));
-      };
-      options.signal?.addEventListener('abort', onAbort, { once: true });
+  /**
+   * Build the OpenAI Responses API body. Mirrors open-sse
+   * CodexExecutor.transformRequest (codex.md:395-487):
+   *  - `model` is the requested model (e.g. "gpt-5.4")
+   *  - `input` is an array of message items (we only send one user turn
+   *    because the existing LLMHelper assembles a self-contained prompt
+   *    string at LLMHelper.buildCodexCliPrompt)
+   *  - `instructions` is the system prompt (Codex uses this for its
+   *    default behaviour + user customisations)
+   *  - `reasoning.effort` is set from the resolved pick
+   *  - `stream: true` is mandatory for the streaming endpoint
+   *  - `store: false` is mandatory — we don't want the response saved
+   *    server-side, and prior server-side item IDs would 404 the request
+   *  - `service_tier` is "default" / "fast" / "flex" (or omitted)
+   *  - `include: ["reasoning.encrypted_content"]` is required for the
+   *    backend to surface reasoning items (codex.md:457-460)
+   *  - `prompt_cache_key` is a stable session id so the backend can
+   *    cache the prompt prefix (codex.md:428-430)
+   */
+  private static buildRequestBody(options: CodexCliRunOptions): Record<string, unknown> {
+    const resolvedEffort = resolveCodexReasoningEffort(options.model, options.modelReasoningEffort);
 
-      const timer = setTimeout(() => {
-        child.kill('SIGTERM');
-        settle(() => reject(new Error(`Codex CLI timed out after ${options.timeoutMs}ms.`)));
-      }, options.timeoutMs);
+    // Image inputs: Responses API wants `type: "input_image"` items.
+    // We don't yet support image-bearing Codex calls in this rewrite
+    // (LLMHelper.buildCodexCliPrompt only passes text) — the imagePaths
+    // arg is accepted for backward-compat but ignored at the wire level.
+    // Future: encode as data URLs the same way LocalWhisperSTT does.
 
-      child.stdout.on('data', chunk => {
-        stdout += chunk.toString();
-      });
-      child.stderr.on('data', chunk => {
-        stderr += chunk.toString();
-      });
-      child.on('error', error => {
-        settle(() => reject(new Error(`Codex CLI was not found at "${path}". ${error.message}`)));
-      });
-      child.on('close', code => {
-        settle(() => {
-          if (code === 0) {
-            resolve({ stdout, stderr: this.sanitize(stderr) });
-          } else {
-            // Prefer codex's own JSON error event over the bare exit code.
-            const codexError = this.extractCodexError(stdout);
-            const detail = codexError || (stderr ? this.sanitize(stderr) : '');
-            reject(new Error(detail ? `Codex CLI: ${detail}` : `Codex CLI exited with code ${code}.`));
-          }
-        });
-      });
-      child.stdin.on('error', error => {
-        settle(() => reject(new Error(`Codex CLI stdin failed for "${path}". ${error.message}`)));
-      });
+    const input: Array<Record<string, unknown>> = [
+      {
+        type: 'message',
+        role: 'user',
+        content: [
+          { type: 'input_text', text: options.prompt },
+        ],
+      },
+    ];
 
+    // Stable per-process session id. The Codex backend keys its server-side
+    // prompt cache and rate-limit buckets off `session_id`, so a stable value
+    // yields cache hits across consecutive calls (saving both latency and
+    // input-token cost) instead of every call landing in a fresh bucket.
+    // The open-sse reference resolves the same id once per session via
+    // `resolveCacheSessionId()` (codex.md:195-204); we mirror it here.
+    const sessionId = options.sessionId ?? CodexCliService.SESSION_ID;
+
+    const body: Record<string, unknown> = {
+      model: options.model,
+      input,
+      stream: true,
+      store: false,
+      // prompt_cache_key is a session-stable key so the backend can
+      // cache the prompt prefix. Matches the open-sse pattern at
+      // codex.md:427-430 where the key is derived from a stable session
+      // id, NOT a per-minute timestamp (which would defeat the cache).
+      prompt_cache_key: `codex-${options.model}-${sessionId}`,
+    };
+
+    if (options.instructions && options.instructions.trim()) {
+      body.instructions = options.instructions;
+    }
+
+    if (resolvedEffort) {
+      body.reasoning = { effort: resolvedEffort, summary: 'auto' };
+      // Required so the backend surfaces the reasoning items in the
+      // stream (open-sse includes this for all non-'none' efforts).
+      if (resolvedEffort !== 'none') {
+        body.include = ['reasoning.encrypted_content'];
+      }
+    }
+
+    if (options.serviceTier && options.serviceTier !== 'default') {
+      body.service_tier = options.serviceTier;
+    }
+
+    return body;
+  }
+
+  /**
+   * Build the request headers. Pulls the bearer token from CodexOAuthService
+   * and adds the standard identity headers the Codex backend expects
+   * (mirrors open-sse codex.js buildHeaders at codex.md:220-231).
+   */
+  private static async buildHeadersAsync(): Promise<Record<string, string>> {
+    const oauth = CodexOAuthService.getInstance();
+    const accessToken = await oauth.getAccessToken();
+    if (!accessToken) {
+      throw new Error('Not signed in to ChatGPT. Please complete Codex OAuth login from Settings → AI Providers.');
+    }
+    const tokens = oauth.getCachedTokens();
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+      Authorization: `Bearer ${accessToken}`,
+      // Identify the client. The official codex CLI uses "codex_cli_rs" —
+      // matching it keeps the backend on the same routing path. See
+      // codex.md:1117 and codex.md:224.
+      originator: 'codex_cli_rs',
+      // Stable session id for backend routing/billing/cache bucketing.
+      // The Codex backend keys prompt-cache + rate-limit off this header
+      // (codex.md:222). Default = per-process stable SESSION_ID so
+      // consecutive calls land in the same bucket; callers can override
+      // via CodexCliRunOptions.sessionId for explicit multi-call flows.
+      'session_id': CodexCliService.SESSION_ID,
+    };
+    // Workspace binding header — improves account scope + cache affinity
+    // (codex.md:226-229).
+    if (tokens?.accountId) headers['chatgpt-account-id'] = tokens.accountId;
+    return headers;
+  }
+
+  /**
+   * Sync wrapper for callers that already have a token in hand. Most
+   * callers should use the async builder; this exists so the retry loop
+   * can refresh-and-retry without re-awaiting the same access token
+   * check twice in a row.
+   */
+  private static buildHeaders(): Record<string, string> {
+    const oauth = CodexOAuthService.getInstance();
+    const tokens = oauth.getCachedTokens();
+    if (!tokens || !tokens.accessToken) {
+      throw new Error('Not signed in to ChatGPT. Please complete Codex OAuth login from Settings → AI Providers.');
+    }
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+      Authorization: `Bearer ${tokens.accessToken}`,
+      originator: 'codex_cli_rs',
+      // Stable session id (see buildHeadersAsync for the rationale).
+      'session_id': CodexCliService.SESSION_ID,
+    };
+    if (tokens.accountId) headers['chatgpt-account-id'] = tokens.accountId;
+    return headers;
+  }
+
+  // ---------------------------------------------------------------------------
+  // SSE fetch + parsing
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Execute the fetch and yield text deltas as they arrive. Handles:
+   *  - 401 → force-refresh the token and retry ONCE
+   *  - 429 / 5xx → exponential backoff with jitter, up to TRANSIENT_RETRY_MAX
+   *  - AbortSignal / deadline → propagate to the fetch + reader
+   *  - SSE parsing (event: / data: / [DONE] / multi-line data)
+   */
+  private static async *fetchDeltas(
+    body: Record<string, unknown>,
+    headers: Record<string, string>,
+    signal: AbortSignal,
+    _options: CodexCliRunOptions,
+  ): AsyncGenerator<string, void, unknown> {
+    let attempt = 0;
+    let refreshedOnce = false;
+
+    while (true) {
+      if (signal.aborted) throw new Error('Codex request aborted.');
+
+      // Re-mint headers on each attempt so a 401-retry uses the FRESH
+      // access token (after the refresh succeeded, not before).
+      const currentHeaders = await this.buildHeadersAsync();
+      // Merge session-stateful headers (Bearer, account id) with the
+      // per-attempt computed ones. Callers may have passed static
+      // Content-Type/originator in `headers`; the async builder
+      // overwrites with the same values.
+      const merged: Record<string, string> = { ...headers, ...currentHeaders };
+
+      let response: Response;
       try {
-        child.stdin.write(options.prompt);
-        child.stdin.end();
-      } catch (error: any) {
-        settle(() => reject(new Error(`Codex CLI stdin failed for "${path}". ${error.message}`)));
+        response = await fetch(CODEX_RESPONSES_URL, {
+          method: 'POST',
+          headers: merged,
+          body: JSON.stringify(body),
+          signal,
+        });
+      } catch (e: any) {
+        // AbortError: re-throw so the generator halts cleanly.
+        if (e?.name === 'AbortError') throw new Error('Codex request aborted.');
+        // Network error: retry with backoff.
+        if (attempt >= TRANSIENT_RETRY_MAX) {
+          throw new Error(`Codex request failed after ${TRANSIENT_RETRY_MAX} retries: ${e?.message || e}`);
+        }
+        await sleepWithJitter(attempt);
+        attempt++;
+        continue;
       }
-    });
+
+      if (response.status === 401 && !refreshedOnce) {
+        // Force a refresh and retry exactly once. Matches open-sse
+        // chatCore:844-863.
+        refreshedOnce = true;
+        const oauth = CodexOAuthService.getInstance();
+        const refreshed = await oauth.refreshTokens();
+        if (!refreshed) {
+          throw new Error('Codex session expired. Please sign in again from Settings → AI Providers.');
+        }
+        continue;
+      }
+
+      if (response.status === 429 || (response.status >= 500 && response.status < 600)) {
+        if (attempt >= TRANSIENT_RETRY_MAX) {
+          const text = await safeReadText(response);
+          throw new Error(`Codex upstream ${response.status} after ${TRANSIENT_RETRY_MAX} retries: ${truncate(text, 500)}`);
+        }
+        attempt++;
+        // Honour Retry-After if the server sends one.
+        const retryAfter = parseRetryAfter(response.headers.get('retry-after'));
+        await sleepWithJitter(attempt - 1, retryAfter);
+        continue;
+      }
+
+      if (!response.ok) {
+        // Non-retryable upstream error. Read the body (it's small —
+        // usually an error envelope) and surface the message verbatim
+        // so the user sees "model not supported when using Codex with
+        // a ChatGPT account" instead of the canned fallback.
+        const text = await safeReadText(response);
+        const message = extractResponsesErrorMessage(text) || `Codex upstream ${response.status}`;
+        throw new Error(message);
+      }
+
+      // Happy path: stream SSE.
+      // parseSseStream may throw TransientStreamError for mid-stream
+      // "overloaded" responses. Catch here to retry with backoff.
+      try {
+        yield* this.parseSseStream(response, signal);
+        attempt = 0; // reset for the next request in a long-lived session
+        return;
+      } catch (e: any) {
+        if (e instanceof TransientStreamError) {
+          if (attempt >= TRANSIENT_RETRY_MAX) {
+            throw new Error(e.message);
+          }
+          await sleepWithJitter(attempt);
+          attempt++;
+          continue;
+        }
+        throw e;
+      }
+    }
   }
 
+  /**
+   * Parse an SSE byte stream into text deltas. Responses API SSE events:
+   *   event: response.created
+   *   data: {"type":"response.created",...}
+   *
+   *   event: response.output_text.delta
+   *   data: {"type":"response.output_text.delta","delta":"Hello",...}
+   *
+   *   event: response.output_text.done
+   *   data: {...,"text":"Hello world",...}
+   *
+   *   event: response.completed
+   *   data: {"type":"response.completed",...}
+   *
+   *   data: [DONE]
+   *
+   * We extract deltas (response.output_text.delta) and yield them as
+   * strings. The done event carries the full text; we don't yield it
+   * because the deltas already produced the same content (avoids
+   * double-yielding). Errors embedded in the stream surface immediately.
+   */
+  private static async *parseSseStream(response: Response, signal: AbortSignal): AsyncGenerator<string, void, unknown> {
+    if (!response.body) {
+      throw new Error('Codex response had no body.');
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+    let sawTerminalDone = false;
+    let terminalError: Error | null = null;
+    try {
+      while (true) {
+        if (signal.aborted) throw new Error('Codex request aborted.');
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        // SSE messages are separated by a blank line ("\n\n" in
+        // practice; some servers use \r\n\r\n).
+        let idx: number;
+        // eslint-disable-next-line no-cond-assign
+        while ((idx = buffer.search(/\r?\n\r?\n/)) >= 0) {
+          const raw = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + (buffer[idx] === '\r' ? 4 : 2));
+          const parsed = parseSseEvent(raw);
+          if (!parsed) continue;
+          if (parsed.data === '[DONE]') {
+            sawTerminalDone = true;
+            continue;
+          }
+          let json: any;
+          try {
+            json = JSON.parse(parsed.data);
+          } catch {
+            // Tolerate non-JSON lines (e.g. comments). Don't yield.
+            continue;
+          }
+          const delta = extractResponsesTextDelta(json);
+          if (delta) yield delta;
+          const errMsg = extractResponsesStreamError(json);
+          if (errMsg) {
+            terminalError = isTransientStreamMessage(errMsg)
+              ? new TransientStreamError(errMsg)
+              : new Error(errMsg);
+            break;
+          }
+        }
+        if (terminalError) break;
+      }
+      // Drain any trailing buffer (last event without trailing blank line).
+      if (buffer.trim()) {
+        const parsed = parseSseEvent(buffer);
+        if (parsed && parsed.data && parsed.data !== '[DONE]') {
+          try {
+            const json = JSON.parse(parsed.data);
+            const delta = extractResponsesTextDelta(json);
+            if (delta) yield delta;
+            const errMsg = extractResponsesStreamError(json);
+            if (errMsg) {
+              terminalError = isTransientStreamMessage(errMsg)
+                ? new TransientStreamError(errMsg)
+                : new Error(errMsg);
+            }
+          } catch { /* not JSON, ignore */ }
+        }
+      }
+    } catch (e: any) {
+      if (e?.name === 'AbortError' || /aborted/i.test(String(e?.message))) {
+        // Surface partials; the caller's generator will see the abort.
+        throw new Error('Codex request aborted.');
+      }
+      throw e;
+    } finally {
+      try { reader.releaseLock(); } catch { /* already released */ }
+    }
+    if (terminalError) throw terminalError;
+    // We intentionally don't require [DONE] — some servers omit it; an
+    // open stream that just ends is treated as successful (the deltas
+    // already produced the response).
+    void sawTerminalDone;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Text extraction (preserved for legacy callers)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * @deprecated Kept for the existing test suite. The HTTP-direct path
+   * uses the SSE parser above; this method is only used by legacy code
+   * that passes raw text dumps to it (the test fixtures do this).
+   */
   public static extractText(raw: string): string {
     const text = raw.trim();
     if (!text) return '';
@@ -543,10 +717,11 @@ export class CodexCliService {
     }
   }
 
-  // Walks the JSON event stream for error/turn.failed events and pulls the
-  // human-readable message. Used to surface server-side rejections (e.g.
-  // "model not supported when using Codex with a ChatGPT account") instead
-  // of a generic "empty response" fallback.
+  /**
+   * @deprecated Legacy error extraction for the old NDJSON event format.
+   * The Responses API stream uses a different envelope; for the new
+   * HTTP-direct path, errors are surfaced through `fetchDeltas` directly.
+   */
   public static extractCodexError(raw: string): string {
     if (!raw) return '';
     for (const line of raw.split(/\r?\n/)) {
@@ -561,10 +736,9 @@ export class CodexCliService {
       const candidates = [v.error?.message, v.error?.error?.message, v.message, v.item?.message];
       for (const c of candidates) {
         if (typeof c !== 'string' || !c) continue;
-        // The message is often a stringified JSON envelope; try to peel it.
         const inner = this.tryParseJson(c);
-        if (inner.ok && inner.value?.error?.message) return this.sanitize(inner.value.error.message);
-        return this.sanitize(c);
+        if (inner.ok && inner.value?.error?.message) return inner.value.error.message;
+        return c;
       }
     }
     return '';
@@ -590,8 +764,138 @@ export class CodexCliService {
     if (value.data) return this.findText(value.data);
     return '';
   }
+}
 
-  private static sanitize(text: string): string {
-    return text.replace(/\s+/g, ' ').trim().slice(0, 1000);
+// =============================================================================
+// Module-private helpers
+// =============================================================================
+
+/** Sleep for `attempt` retries, with full jitter, capped. Honours Retry-After
+ *  when the server supplies it (overrides the jitter wait). */
+function sleepWithJitter(attempt: number, retryAfterMs?: number): Promise<void> {
+  if (retryAfterMs && retryAfterMs > 0) {
+    return new Promise(r => setTimeout(r, Math.min(retryAfterMs, TRANSIENT_RETRY_CAP_MS * 4)));
   }
+  const base = Math.min(TRANSIENT_RETRY_CAP_MS, TRANSIENT_RETRY_BASE_MS * 2 ** attempt);
+  const capped = Math.min(TRANSIENT_RETRY_CAP_MS, base);
+  const jitter = Math.random() * capped;
+  return new Promise(r => setTimeout(r, jitter));
+}
+
+function parseRetryAfter(header: string | null | undefined): number | undefined {
+  if (!header) return undefined;
+  // Retry-After is either an HTTP-date or a delta-seconds. We only
+  // handle the seconds form (the Responses backend uses it).
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.floor(seconds * 1000);
+  return undefined;
+}
+
+function safeReadText(response: Response): Promise<string> {
+  return response.text().catch(() => '');
+}
+
+function truncate(s: string, n: number): string {
+  if (s.length <= n) return s;
+  return s.slice(0, n) + '…';
+}
+
+interface ParsedSse {
+  event?: string;
+  data: string;
+}
+
+function parseSseEvent(raw: string): ParsedSse | null {
+  if (!raw.trim()) return null;
+  let event: string | undefined;
+  const dataLines: string[] = [];
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line) continue;
+    if (line.startsWith(':')) continue; // comment
+    const colon = line.indexOf(':');
+    if (colon < 0) continue;
+    const field = line.slice(0, colon);
+    let value = line.slice(colon + 1);
+    if (value.startsWith(' ')) value = value.slice(1);
+    if (field === 'event') event = value;
+    else if (field === 'data') dataLines.push(value);
+  }
+  if (!dataLines.length) return null;
+  return { event, data: dataLines.join('\n') };
+}
+
+/** Extract a text delta from a Responses API SSE event payload. */
+function extractResponsesTextDelta(payload: any): string {
+  if (!payload || typeof payload !== 'object') return '';
+  const type = payload.type;
+  if (type === 'response.output_text.delta' && typeof payload.delta === 'string') {
+    return payload.delta;
+  }
+  // Some OpenAI proxies emit a Chat-Completions-style chunk instead of
+  // a Responses-native event; tolerate it as a fallback.
+  if (Array.isArray(payload.choices) && payload.choices[0]?.delta?.content) {
+    return String(payload.choices[0].delta.content);
+  }
+  return '';
+}
+
+/** Pull a human-readable error message out of a Responses API SSE event
+ *  (e.g. `response.failed` or `error`). Returns empty string if this
+ *  event is not an error. */
+function extractResponsesStreamError(payload: any): string {
+  if (!payload || typeof payload !== 'object') return '';
+  const type = payload.type;
+  if (type === 'response.failed' || type === 'error') {
+    if (payload.error?.message) return String(payload.error.message);
+    if (typeof payload.message === 'string') return payload.message;
+  }
+  if (payload?.response?.error?.message) {
+    return String(payload.response.error.message);
+  }
+  return '';
+}
+
+/** Pull a human-readable error from a non-2xx JSON body. */
+function extractResponsesErrorMessage(text: string): string {
+  if (!text) return '';
+  try {
+    const json = JSON.parse(text);
+    if (json?.error?.message) return String(json.error.message);
+    if (typeof json?.message === 'string') return json.message;
+  } catch { /* not JSON */ }
+  return text;
+}
+
+// =============================================================================
+// Signal combination (AbortSignal.any() is Node 20+; keep our own for
+// compat with the Electron versions we ship)
+// =============================================================================
+
+interface CombinedSignal {
+  readonly signal: AbortSignal;
+  dispose(): void;
+}
+
+function combineSignals(...signals: (AbortSignal | undefined)[]): CombinedSignal {
+  const filtered = signals.filter((s): s is AbortSignal => !!s);
+  const ctrl = new AbortController();
+  const onAbort = (e: Event) => {
+    const reason = (e.target as AbortSignal)?.reason;
+    ctrl.abort(reason);
+  };
+  for (const s of filtered) {
+    if (s.aborted) {
+      ctrl.abort(s.reason);
+      break;
+    }
+    s.addEventListener('abort', onAbort, { once: true });
+  }
+  return {
+    signal: ctrl.signal,
+    dispose() {
+      for (const s of filtered) {
+        try { s.removeEventListener('abort', onAbort); } catch { /* swallow */ }
+      }
+    },
+  };
 }

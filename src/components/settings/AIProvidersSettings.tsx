@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Plus, Trash2, Edit2, AlertCircle, CheckCircle, Save, ChevronDown, Check, RefreshCw, ExternalLink, Loader2 } from 'lucide-react';
+import { Plus, Trash2, Edit2, AlertCircle, CheckCircle, Save, ChevronDown, Check, RefreshCw, ExternalLink, Loader2, LogOut } from 'lucide-react';
 import { CODEX_CLI_MODEL, CODEX_CLI_MODEL_PRESETS, codexCliSelectorId, STANDARD_CLOUD_MODELS, prettifyModelId } from '../../utils/modelUtils';
 import { validateCurl } from '../../lib/curl-validator';
 import { ProviderCard } from './ProviderCard';
@@ -213,12 +213,23 @@ export const AIProvidersSettings: React.FC = () => {
     const [codexCliConfig, setCodexCliConfig] = useState({ enabled: false, path: 'codex', model: 'gpt-5.4', fastModel: 'gpt-5.3-codex-spark', timeoutMs: 60000, sandboxMode: 'read-only' as string, serviceTier: 'default', modelReasoningEffort: undefined as string | undefined });
     const [codexCliStatus, setCodexCliStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
     const [codexCliError, setCodexCliError] = useState('');
+    const [codexAuthAction, setCodexAuthAction] = useState<'idle' | 'status' | 'logout' | 'login' | 'doctor'>('idle');
+    const [codexAuthStatus, setCodexAuthStatus] = useState<'idle' | 'success' | 'error'>('idle');
+    const [codexAuthMessage, setCodexAuthMessage] = useState('');
+
+    // --- ChatGPT OAuth (new — replaces `codex login` CLI subprocess) ---
+    // The OAuth flow runs entirely in the main process; the renderer just
+    // kicks it off and listens for IPC events. We keep the auth state
+    // visible so the user can see who's signed in and re-auth / sign out
+    // without leaving Settings.
+    const [codexOauthStatus, setCodexOauthStatus] = useState<{ signedIn: boolean; email?: string; expiresAt?: number }>({ signedIn: false });
+    const [codexOauthInProgress, setCodexOauthInProgress] = useState(false);
 
     // --- Default Model ---
     const [defaultModel, setDefaultModel] = useState<string>('gemini-3.5-flash');
     const [fastResponseMode, setFastResponseMode] = useState(false);
     const [credentialsLoaded, setCredentialsLoaded] = useState(false);
-    const canUseFastMode = !!(hasStoredKey.groq || hasStoredKey.natively || codexCliConfig.enabled);
+    const canUseFastMode = !!(hasStoredKey.groq || hasStoredKey.natively || codexOauthStatus.signedIn);
 
     // --- Dynamic Model Discovery ---
     const [preferredModels, setPreferredModels] = useState<Record<string, string>>({});
@@ -269,6 +280,18 @@ export const AIProvidersSettings: React.FC = () => {
                 // @ts-ignore
                 const cliConfig = await window.electronAPI?.getCodexCliConfig?.();
                 if (cliConfig) setCodexCliConfig(cliConfig as typeof codexCliConfig);
+
+                // Codex OAuth status — read once on mount so the Settings UI
+                // shows the right state without waiting for a user click.
+                // @ts-ignore
+                const oauthStatus = await window.electronAPI?.codexLoginStatus?.();
+                if (oauthStatus?.success) {
+                    setCodexOauthStatus({
+                        signedIn: !!oauthStatus.signedIn,
+                        email: oauthStatus.email,
+                        expiresAt: oauthStatus.expiresAt,
+                    });
+                }
 
                 const fastMode = await window.electronAPI?.getGroqFastTextMode();
                 if (fastMode) setFastResponseMode(fastMode.enabled);
@@ -333,6 +356,51 @@ export const AIProvidersSettings: React.FC = () => {
             checkOllama(false);
         }, 3000);
         return () => clearInterval(interval);
+    }, []);
+
+    // Wire up Codex OAuth IPC events. The main process emits these as
+    // login progresses (or fails, or refreshes in the background) and
+    // we mirror the state into the React tree. Each subscription
+    // returns an unsubscribe function; clean up on unmount.
+    useEffect(() => {
+        const api = window.electronAPI as any;
+        const unsubs: Array<() => void> = [];
+        try {
+            if (api?.onCodexLoginComplete) {
+                unsubs.push(api.onCodexLoginComplete((info: any) => {
+                    setCodexOauthInProgress(false);
+                    setCodexOauthStatus(prev => ({ ...prev, signedIn: true, email: info?.email || prev.email }));
+                    setCodexAuthStatus('success');
+                    setCodexAuthMessage(`Signed in to ChatGPT${info?.email ? ` as ${info.email}` : ''}.`);
+                    // Auto-enable codex now that we're signed in.
+                    setCodexCliConfig(prev => {
+                        const next = { ...prev, enabled: true };
+                        window.electronAPI?.setCodexCliConfig?.(next);
+                        return next;
+                    });
+                }));
+            }
+            if (api?.onCodexLoginFailed) {
+                unsubs.push(api.onCodexLoginFailed((info: any) => {
+                    setCodexOauthInProgress(false);
+                    setCodexAuthStatus('error');
+                    setCodexAuthMessage(info?.message || 'Codex sign-in failed.');
+                }));
+            }
+            if (api?.onCodexSignedOut) {
+                unsubs.push(api.onCodexSignedOut(() => {
+                    setCodexOauthStatus({ signedIn: false });
+                    setCodexAuthStatus('idle');
+                    setCodexAuthMessage('Signed out of ChatGPT.');
+                }));
+            }
+            if (api?.onCodexTokensRefreshed) {
+                unsubs.push(api.onCodexTokensRefreshed((info: any) => {
+                    setCodexOauthStatus(prev => ({ ...prev, expiresAt: info?.expiresAt || prev.expiresAt }));
+                }));
+            }
+        } catch { /* subscriptions are best-effort */ }
+        return () => { for (const u of unsubs) try { u(); } catch { /* noop */ } };
     }, []);
 
     // Load Screen Understanding (vision routing) settings
@@ -437,7 +505,9 @@ export const AIProvidersSettings: React.FC = () => {
     };
 
     const saveCodexCliConfig = async (next = codexCliConfig) => {
-        const normalized = { ...next, timeoutMs: Number(next.timeoutMs) || 60000 };
+        // Auto-enable when signed in; no manual toggle needed.
+        const enabled = codexOauthStatus.signedIn || next.enabled;
+        const normalized = { ...next, enabled, timeoutMs: Number(next.timeoutMs) || 60000 };
         setCodexCliConfig(normalized);
         const result = await window.electronAPI?.setCodexCliConfig?.(normalized);
         if (result?.config) setCodexCliConfig(result.config as typeof codexCliConfig);
@@ -464,6 +534,100 @@ export const AIProvidersSettings: React.FC = () => {
         } catch (e: any) {
             setCodexCliStatus('error');
             setCodexCliError(e.message || 'Codex CLI test failed');
+        }
+    };
+
+    const handleCodexAuthAction = async (action: 'status' | 'logout' | 'login' | 'doctor') => {
+        setCodexAuthAction(action);
+        setCodexAuthStatus('idle');
+        setCodexAuthMessage('');
+        try {
+            const saveResult = await saveCodexCliConfig();
+            const configToUse = saveResult?.config || codexCliConfig;
+            const api = window.electronAPI as any;
+            // The new OAuth flow uses dedicated IPCs: codexStartLogin opens
+            // the system browser and resolves when the callback fires.
+            // For 'login' we kick that off and let the IPC events drive
+            // the UI; the other actions still go through the legacy
+            // wrappers (which are now OAuth-aware).
+            if (action === 'login' && api?.codexStartLogin) {
+                setCodexOauthInProgress(true);
+                setCodexAuthMessage('Opening browser — complete sign-in there, then return here.');
+                const result = await api.codexStartLogin();
+                // The actual UI update happens via the onCodexLoginComplete
+                // / onCodexLoginFailed events; this is the success/fail
+                // path in case the events miss (e.g. the renderer reloaded
+                // mid-flow).
+                setCodexOauthInProgress(false);
+                if (result?.success) {
+                    setCodexAuthStatus('success');
+                    setCodexAuthMessage(`Signed in to ChatGPT${result.email ? ` as ${result.email}` : ''}.`);
+                    setCodexOauthStatus({ signedIn: true, email: result.email, expiresAt: result.expiresAt });
+                } else {
+                    setCodexAuthStatus('error');
+                    setCodexAuthMessage(result?.error || 'Codex sign-in failed.');
+                }
+                return;
+            }
+            const fn = action === 'status'
+                ? api?.codexCliAuthStatus
+                : action === 'logout'
+                    ? api?.codexCliLogout
+                    : action === 'login'
+                        ? api?.codexCliLogin
+                        : api?.codexCliDoctor;
+            const result = await fn?.(configToUse);
+            if (result?.config) setCodexCliConfig(result.config as typeof codexCliConfig);
+            if (result?.success) {
+                setCodexAuthStatus('success');
+                setCodexAuthMessage(result.output || `Codex ${action} succeeded.`);
+                // Sync OAuth status after status/logout IPCs.
+                if (action === 'status' || action === 'logout') {
+                    const status = await api?.codexLoginStatus?.();
+                    if (status?.success) {
+                        setCodexOauthStatus({ signedIn: !!status.signedIn, email: status.email, expiresAt: status.expiresAt });
+                    }
+                }
+            } else {
+                setCodexAuthStatus('error');
+                const msg = result?.error || result?.output || `Codex ${action} failed.`;
+                setCodexAuthMessage(msg);
+            }
+        } catch (e: any) {
+            setCodexAuthStatus('error');
+            setCodexAuthMessage(e.message || `Codex ${action} failed.`);
+        } finally {
+            setCodexAuthAction('idle');
+        }
+    };
+
+    // Convenience: one-click "Sign in with ChatGPT" — same as clicking
+    // the "Login / Reconnect" button, but with a primary-style highlight
+    // and the email field prominent when already signed in.
+    const handleCodexSignOut = async () => {
+        const api = window.electronAPI as any;
+        try {
+            await api?.codexSignOut?.();
+            setCodexOauthStatus({ signedIn: false });
+        } catch { /* noop */ }
+    };
+
+    const handleCodexRefresh = async () => {
+        const api = window.electronAPI as any;
+        setCodexAuthMessage('Refreshing tokens…');
+        try {
+            const result = await api?.codexRefreshTokens?.();
+            if (result?.success) {
+                setCodexAuthStatus('success');
+                setCodexAuthMessage('Tokens refreshed.');
+                setCodexOauthStatus(prev => ({ ...prev, expiresAt: result.expiresAt, email: result.email || prev.email }));
+            } else {
+                setCodexAuthStatus('error');
+                setCodexAuthMessage(result?.error || 'Refresh failed.');
+            }
+        } catch (e: any) {
+            setCodexAuthStatus('error');
+            setCodexAuthMessage(e?.message || 'Refresh failed.');
         }
     };
 
@@ -705,7 +869,7 @@ export const AIProvidersSettings: React.FC = () => {
                                     opts.push({ id: pm, name: prettifyModelId(pm) });
                                 }
                             }
-                            if (codexCliConfig.enabled) {
+                            if (codexOauthStatus.signedIn || codexCliConfig.enabled) {
                                 opts.push({ id: CODEX_CLI_MODEL.id, name: `${CODEX_CLI_MODEL.name} (${prettifyModelId(codexCliConfig.model)})` });
                                 CODEX_CLI_MODEL_PRESETS.forEach(model => {
                                     const id = codexCliSelectorId(model.id);
@@ -740,7 +904,7 @@ export const AIProvidersSettings: React.FC = () => {
                             <label className="block text-xs font-medium text-text-primary uppercase tracking-wide mb-0">Fast Response Mode</label>
                             <span className="bg-orange-500/10 text-orange-500 text-[9px] font-bold px-1.5 py-0.5 rounded border border-orange-500/20">NEW</span>
                         </div>
-                        <p className="text-[10px] text-text-secondary mt-0.5">Super fast responses using the Codex CLI fast model, Groq, or Natively. Turn this off to use the selected normal model.</p>
+                        <p className="text-[10px] text-text-secondary mt-0.5">Routes responses through the fastest available provider (Codex fast mode model, Groq, or Natively). Turn off to use your selected model above.</p>
                         {!canUseFastMode && (
                             <p className="text-[10px] text-orange-500 mt-0.5 font-medium">Requires Groq, Natively API, or Codex CLI to be configured.</p>
                         )}
@@ -952,156 +1116,184 @@ export const AIProvidersSettings: React.FC = () => {
                 </div>
             </div>
 
-            {/* Local (Codex CLI) Provider */}
+            {/* Codex — ChatGPT subscription proxy */}
             <div className="space-y-5">
                 <div>
-                    <h3 className="text-sm font-bold text-text-primary mb-1">Local Provider (Codex CLI)</h3>
-                    <p className="text-xs text-text-secondary">Route text and screenshot responses through a locally authenticated Codex CLI.</p>
+                    <h3 className="text-sm font-bold text-text-primary mb-1">ChatGPT (Codex)</h3>
+                    <p className="text-xs text-text-secondary">Use your ChatGPT Plus/Pro subscription as an AI provider — no API key needed.</p>
                 </div>
 
                 <div className="bg-bg-item-surface rounded-xl p-5 border border-border-subtle space-y-4">
-                    <div className="flex items-center justify-between">
-                        <div>
-                            <label className="block text-xs font-medium text-text-primary uppercase tracking-wide mb-0">Enable Codex CLI</label>
-                            <p className="text-[10px] text-text-secondary">Adds Codex CLI as a selectable local backend and fallback.</p>
-                        </div>
-                        <button
-                            type="button"
-                            onClick={async () => {
-                                const next = { ...codexCliConfig, enabled: !codexCliConfig.enabled };
-                                await saveCodexCliConfig(next);
-                            }}
-                            className={`w-11 h-6 rounded-full relative transition-colors ${codexCliConfig.enabled ? 'bg-accent-primary' : 'bg-bg-toggle-switch border border-border-muted'}`}
-                        >
-                            <span className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${codexCliConfig.enabled ? 'translate-x-5' : 'translate-x-0'}`} />
-                        </button>
-                    </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        <label className="space-y-1">
-                            <span className="text-[10px] font-medium text-text-secondary uppercase tracking-wide">Executable</span>
-                            <input
-                                value={codexCliConfig.path}
-                                onChange={e => setCodexCliConfig(prev => ({ ...prev, path: e.target.value }))}
-                                onBlur={() => saveCodexCliConfig()}
-                                className="w-full bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-xs text-text-primary font-mono focus:outline-none focus:border-accent-primary"
-                                placeholder="codex"
-                            />
-                        </label>
-                        <label className="space-y-1">
-                            <span className="text-[10px] font-medium text-text-secondary uppercase tracking-wide">Timeout (ms)</span>
-                            <input
-                                type="number"
-                                value={codexCliConfig.timeoutMs}
-                                onChange={e => setCodexCliConfig(prev => ({ ...prev, timeoutMs: Number(e.target.value) }))}
-                                onBlur={() => saveCodexCliConfig()}
-                                className="w-full bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-xs text-text-primary font-mono focus:outline-none focus:border-accent-primary"
-                                min={1000}
-                            />
-                        </label>
-                        <CodexCliModelField
-                            label="Normal Model"
-                            value={codexCliConfig.model}
-                            placeholder="gpt-5.5"
-                            onChange={(model) => setCodexCliConfig(prev => ({ ...prev, model }))}
-                            onSelect={(model) => saveCodexCliConfig({ ...codexCliConfig, model })}
-                            onSave={() => saveCodexCliConfig()}
-                        />
-                        <CodexCliModelField
-                            label="Fast Model"
-                            value={codexCliConfig.fastModel}
-                            placeholder="gpt-5.3-codex-spark"
-                            onChange={(fastModel) => setCodexCliConfig(prev => ({ ...prev, fastModel }))}
-                            onSelect={(fastModel) => saveCodexCliConfig({ ...codexCliConfig, fastModel })}
-                            onSave={() => saveCodexCliConfig()}
-                        />
-                    </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        <label className="space-y-1">
-                            <span className="text-[10px] font-medium text-text-secondary uppercase tracking-wide">Service Tier</span>
-                            <ModelSelect
-                                value={codexCliConfig.serviceTier ?? 'default'}
-                                options={CODEX_SERVICE_TIERS.map(t => ({ id: t, name: t.charAt(0).toUpperCase() + t.slice(1) }))}
-                                onChange={(serviceTier) => saveCodexCliConfig({ ...codexCliConfig, serviceTier: serviceTier as typeof CODEX_SERVICE_TIERS[number] })}
-                                placeholder="default"
-                            />
-                            <p className="text-[9px] text-text-tertiary">Use faster service tier if available. Codex Cloud only.</p>
-                        </label>
-                        <label className="space-y-1">
-                            <span className="text-[10px] font-medium text-text-secondary uppercase tracking-wide">Reasoning Effort</span>
-                            <ModelSelect
-                                value={(() => {
-                                    // If the saved value is no longer valid for the
-                                    // currently-selected model (e.g. user switched
-                                    // from gpt-5.4 to gpt-5.3-codex while xhigh was
-                                    // selected), surface 'None' in the dropdown but
-                                    // keep the stale value below so we can warn.
-                                    const valid = getValidCodexReasoningEfforts(codexCliConfig.model);
-                                    if (!codexCliConfig.modelReasoningEffort) return '';
-                                    return valid.includes(codexCliConfig.modelReasoningEffort)
-                                        ? codexCliConfig.modelReasoningEffort
-                                        : '';
-                                })()}
-                                options={(() => {
-                                    const valid = getValidCodexReasoningEfforts(codexCliConfig.model);
-                                    return [
-                                        { id: '', name: 'None (default)' },
-                                        ...CODEX_MODEL_REASONING_EFFORTS
-                                            .filter(e => e !== 'none' && valid.includes(e))
-                                            .map(e => ({ id: e, name: e.charAt(0).toUpperCase() + e.slice(1) })),
-                                    ];
-                                })()}
-                                onChange={(effort) => saveCodexCliConfig({ ...codexCliConfig, modelReasoningEffort: effort || undefined })}
-                                placeholder="None (default)"
-                            />
-                            <p className="text-[9px] text-text-tertiary">How much reasoning effort the model uses. Model-dependent — options are filtered to what the selected model actually accepts.</p>
-                            {(() => {
-                                // Inline warning when the saved value was downgraded
-                                // because the user changed models. The backend
-                                // (CodexCliService.normalizeConfig) silently corrects
-                                // this on next load — we surface it here so the user
-                                // understands what happened.
-                                const valid = getValidCodexReasoningEfforts(codexCliConfig.model);
-                                const saved = codexCliConfig.modelReasoningEffort;
-                                if (saved && !valid.includes(saved)) {
-                                    return (
-                                        <p className="text-[9px] text-amber-400 flex items-center gap-1">
-                                            <AlertCircle size={10} />
-                                            '{saved}' isn't supported by {codexCliConfig.model} — defaulted to 'low' on next save.
-                                        </p>
-                                    );
-                                }
-                                return null;
-                            })()}
-                        </label>
-                    </div>
-
-                    <div className="flex items-center justify-between gap-3">
-                        <div className="min-h-5">
-                            {codexCliStatus === 'success' && (
-                                <div className="flex items-center gap-2 text-xs text-green-400">
-                                    <CheckCircle size={14} />
-                                    <span>Codex CLI detected</span>
-                                </div>
+                    {/* Header row: title + sign-in state + actions — mirrors ProviderCard */}
+                    <div className="flex items-center justify-between mb-2">
+                        <label className="flex items-center text-xs font-medium text-text-primary uppercase tracking-wide">
+                            ChatGPT Account
+                            {codexOauthStatus.signedIn && (
+                                <span className="ml-2 text-green-500 normal-case">✓ Connected</span>
                             )}
-                            {codexCliStatus === 'error' && (
-                                <div className="flex items-center gap-2 text-xs text-red-400">
-                                    <AlertCircle size={14} />
-                                    <span>{codexCliError}</span>
-                                </div>
-                            )}
-                        </div>
-                        <button
-                            type="button"
-                            onClick={handleTestCodexCli}
-                            disabled={codexCliStatus === 'testing'}
-                            className="flex items-center gap-2 px-3 py-1.5 bg-bg-input hover:bg-bg-elevated border border-border-subtle rounded-lg text-xs font-medium text-text-primary transition-colors disabled:opacity-60"
-                        >
-                            {codexCliStatus === 'testing' ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle size={14} />}
-                            Test CLI
-                        </button>
+                        </label>
+                        {codexOauthStatus.signedIn ? (
+                            <div className="flex items-center gap-2">
+                                <button
+                                    type="button"
+                                    onClick={handleCodexRefresh}
+                                    disabled={codexOauthInProgress}
+                                    className="text-xs text-text-tertiary hover:text-text-primary flex items-center gap-1 transition-colors disabled:opacity-60"
+                                    title="Refresh session"
+                                >
+                                    <RefreshCw size={12} />
+                                    <span className="text-[10px] uppercase tracking-wide">Refresh</span>
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={handleCodexSignOut}
+                                    disabled={codexOauthInProgress}
+                                    className="text-xs text-text-tertiary hover:text-text-primary flex items-center gap-1 transition-colors disabled:opacity-60"
+                                >
+                                    <LogOut size={12} />
+                                    <span className="text-[10px] uppercase tracking-wide">Sign out</span>
+                                </button>
+                            </div>
+                        ) : null}
                     </div>
+
+                    {/* Sign-in area or signed-in account display */}
+                    {codexOauthStatus.signedIn ? (
+                        <div className="flex gap-2 mb-3">
+                            <div className="flex-1 bg-bg-input border border-border-subtle rounded-lg px-4 py-2.5 text-xs text-text-primary flex items-center gap-2">
+                                <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
+                                <span>{codexOauthStatus.email || 'ChatGPT account connected'}</span>
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="flex gap-2 mb-3">
+                            <button
+                                type="button"
+                                onClick={() => handleCodexAuthAction('login')}
+                                disabled={codexOauthInProgress || codexAuthAction !== 'idle'}
+                                className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-accent-primary hover:bg-accent-primary/90 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-60"
+                            >
+                                {codexOauthInProgress || codexAuthAction === 'login'
+                                    ? <><Loader2 size={13} className="animate-spin" /> Waiting for browser…</>
+                                    : <><ExternalLink size={13} /> Sign in with ChatGPT</>}
+                            </button>
+                        </div>
+                    )}
+
+                    {codexAuthMessage && (
+                        <p className={`text-[10px] mt-1.5 mb-2 ${codexAuthStatus === 'error' ? 'text-red-400' : 'text-green-400'}`}>
+                            {codexAuthMessage}
+                        </p>
+                    )}
+
+                    {/* Model + settings — only shown once signed in */}
+                    {codexOauthStatus.signedIn && (
+                        <>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                <CodexCliModelField
+                                    label="Model"
+                                    value={codexCliConfig.model}
+                                    placeholder="gpt-5.5"
+                                    onChange={(model) => setCodexCliConfig(prev => ({ ...prev, model }))}
+                                    onSelect={(model) => saveCodexCliConfig({ ...codexCliConfig, model })}
+                                    onSave={() => saveCodexCliConfig()}
+                                />
+                                <CodexCliModelField
+                                    label="Fast Mode Model"
+                                    value={codexCliConfig.fastModel}
+                                    placeholder="gpt-5.3-codex"
+                                    onChange={(fastModel) => setCodexCliConfig(prev => ({ ...prev, fastModel }))}
+                                    onSelect={(fastModel) => saveCodexCliConfig({ ...codexCliConfig, fastModel })}
+                                    onSave={() => saveCodexCliConfig()}
+                                />
+                                <label className="space-y-1">
+                                    <span className="text-[10px] font-medium text-text-secondary uppercase tracking-wide">Reasoning Effort</span>
+                                    <ModelSelect
+                                        value={(() => {
+                                            const valid = getValidCodexReasoningEfforts(codexCliConfig.model);
+                                            if (!codexCliConfig.modelReasoningEffort) return '';
+                                            return valid.includes(codexCliConfig.modelReasoningEffort)
+                                                ? codexCliConfig.modelReasoningEffort
+                                                : '';
+                                        })()}
+                                        options={(() => {
+                                            const valid = getValidCodexReasoningEfforts(codexCliConfig.model);
+                                            return [
+                                                { id: '', name: 'None (default)' },
+                                                ...CODEX_MODEL_REASONING_EFFORTS
+                                                    .filter(e => e !== 'none' && valid.includes(e))
+                                                    .map(e => ({ id: e, name: e.charAt(0).toUpperCase() + e.slice(1) })),
+                                            ];
+                                        })()}
+                                        onChange={(effort) => saveCodexCliConfig({ ...codexCliConfig, modelReasoningEffort: effort || undefined })}
+                                        placeholder="None (default)"
+                                        className="py-2"
+                                    />
+                                    {(() => {
+                                        const valid = getValidCodexReasoningEfforts(codexCliConfig.model);
+                                        const saved = codexCliConfig.modelReasoningEffort;
+                                        if (saved && !valid.includes(saved)) {
+                                            return (
+                                                <p className="text-[9px] text-amber-400 flex items-center gap-1">
+                                                    <AlertCircle size={10} />
+                                                    '{saved}' unsupported by this model — will default to 'low'.
+                                                </p>
+                                            );
+                                        }
+                                        return null;
+                                    })()}
+                                </label>
+                                <label className="space-y-1">
+                                    <span className="text-[10px] font-medium text-text-secondary uppercase tracking-wide">Service Tier</span>
+                                    <ModelSelect
+                                        value={codexCliConfig.serviceTier ?? 'default'}
+                                        options={CODEX_SERVICE_TIERS.map(t => ({ id: t, name: t.charAt(0).toUpperCase() + t.slice(1) }))}
+                                        onChange={(serviceTier) => saveCodexCliConfig({ ...codexCliConfig, serviceTier: serviceTier as typeof CODEX_SERVICE_TIERS[number] })}
+                                        placeholder="Default"
+                                        className="py-2"
+                                    />
+                                </label>
+                            </div>
+                            <div className="flex items-end justify-between gap-4 mt-1">
+                                <label className="space-y-1">
+                                    <span className="text-[10px] font-medium text-text-secondary uppercase tracking-wide">Timeout (ms)</span>
+                                    <input
+                                        type="number"
+                                        value={codexCliConfig.timeoutMs}
+                                        onChange={e => setCodexCliConfig(prev => ({ ...prev, timeoutMs: Number(e.target.value) }))}
+                                        onBlur={() => saveCodexCliConfig()}
+                                        className="w-full bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-xs text-text-primary font-mono focus:outline-none focus:border-accent-primary"
+                                        min={1000}
+                                    />
+                                    {codexCliStatus === 'error' && codexCliError && (
+                                        <p className="text-[10px] text-red-400 mt-1">{codexCliError}</p>
+                                    )}
+                                </label>
+                                <button
+                                    type="button"
+                                    onClick={handleTestCodexCli}
+                                    disabled={codexCliStatus === 'testing'}
+                                    className={`shrink-0 px-3 py-2 rounded-lg text-xs font-medium transition-all duration-300 border flex items-center gap-1.5 min-w-[110px] justify-center disabled:opacity-50 ${
+                                        codexCliStatus === 'success'
+                                            ? 'border-green-500/40 bg-green-500/10 text-green-400'
+                                            : codexCliStatus === 'error'
+                                            ? 'border-red-500/40 bg-red-500/10 text-red-400'
+                                            : 'border-border-subtle bg-bg-input hover:bg-bg-elevated text-text-primary'
+                                    }`}
+                                >
+                                    {codexCliStatus === 'testing' ? (
+                                        <><Loader2 size={12} className="animate-spin" /> Testing…</>
+                                    ) : codexCliStatus === 'success' ? (
+                                        <><CheckCircle size={12} /> Connected</>
+                                    ) : codexCliStatus === 'error' ? (
+                                        <><AlertCircle size={12} /> Failed</>
+                                    ) : (
+                                        'Test Connection'
+                                    )}
+                                </button>
+                            </div>
+                        </>
+                    )}
                 </div>
             </div>
 

@@ -438,6 +438,9 @@ interface ElectronAPI {
     model: string;
     fastModel: string;
     timeoutMs: number;
+    sandboxMode?: string;
+    serviceTier?: string;
+    modelReasoningEffort?: string;
   }>;
   setCodexCliConfig: (config: {
     enabled: boolean;
@@ -445,6 +448,9 @@ interface ElectronAPI {
     model: string;
     fastModel: string;
     timeoutMs: number;
+    sandboxMode?: string;
+    serviceTier?: string;
+    modelReasoningEffort?: string;
   }) => Promise<{
     success: boolean;
     error?: string;
@@ -454,6 +460,9 @@ interface ElectronAPI {
       model: string;
       fastModel: string;
       timeoutMs: number;
+      sandboxMode?: string;
+      serviceTier?: string;
+      modelReasoningEffort?: string;
     };
   }>;
   testCodexCli: (config?: {
@@ -462,6 +471,9 @@ interface ElectronAPI {
     model?: string;
     fastModel?: string;
     timeoutMs?: number;
+    sandboxMode?: string;
+    serviceTier?: string;
+    modelReasoningEffort?: string;
   }) => Promise<{
     success: boolean;
     error?: string;
@@ -472,8 +484,22 @@ interface ElectronAPI {
       model: string;
       fastModel: string;
       timeoutMs: number;
+      sandboxMode?: string;
+      serviceTier?: string;
+      modelReasoningEffort?: string;
     };
   }>;
+  codexCliAuthStatus: (config?: any) => Promise<{ success: boolean; action: string; output?: string; error?: string; resolvedPath?: string; config?: any }>;
+  codexCliLogout: (config?: any) => Promise<{ success: boolean; action: string; output?: string; error?: string; resolvedPath?: string; config?: any }>;
+  codexCliLogin: (config?: any) => Promise<{ success: boolean; action: string; output?: string; error?: string; resolvedPath?: string; config?: any }>;
+  codexCliDoctor: (config?: any) => Promise<{ success: boolean; action: string; output?: string; error?: string; resolvedPath?: string; config?: any }>;
+  // ChatGPT OAuth IPCs — replace the old `codex login` CLI subprocess flow.
+  // startLogin kicks off the PKCE flow + opens the system browser; the
+  // renderer listens for codex:login:complete / :failed events to update UI.
+  codexLoginStatus: () => Promise<{ success: boolean; signedIn: boolean; email?: string; expiresAt?: number; error?: string }>;
+  codexStartLogin: () => Promise<{ success: boolean; email?: string; expiresAt?: number; error?: string }>;
+  codexSignOut: () => Promise<{ success: boolean; error?: string }>;
+  codexRefreshTokens: () => Promise<{ success: boolean; email?: string; expiresAt?: number; error?: string }>;
 
   // Demo
   seedDemo: () => Promise<{ success: boolean }>;
@@ -1730,6 +1756,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     model: string;
     fastModel: string;
     timeoutMs: number;
+    sandboxMode?: string;
+    serviceTier?: string;
+    modelReasoningEffort?: string;
   }) => ipcRenderer.invoke('set-codex-cli-config', config),
   testCodexCli: (config?: {
     enabled?: boolean;
@@ -1737,7 +1766,41 @@ contextBridge.exposeInMainWorld('electronAPI', {
     model?: string;
     fastModel?: string;
     timeoutMs?: number;
+    sandboxMode?: string;
+    serviceTier?: string;
+    modelReasoningEffort?: string;
   }) => ipcRenderer.invoke('test-codex-cli', config),
+  codexCliAuthStatus: (config?: any) => ipcRenderer.invoke('codex-cli:auth-status', config),
+  codexCliLogout: (config?: any) => ipcRenderer.invoke('codex-cli:logout', config),
+  codexCliLogin: (config?: any) => ipcRenderer.invoke('codex-cli:login', config),
+  codexCliDoctor: (config?: any) => ipcRenderer.invoke('codex-cli:doctor', config),
+  // ChatGPT OAuth (PKCE) — replaces the old `codex login` CLI subprocess.
+  // The renderer listens for `codex:login:complete` / `:failed` /
+  // `:signed-out` / `:tokens:refreshed` events for live UI updates.
+  codexLoginStatus: () => ipcRenderer.invoke('codex:login-status'),
+  codexStartLogin: () => ipcRenderer.invoke('codex:start-login'),
+  codexSignOut: () => ipcRenderer.invoke('codex:sign-out'),
+  codexRefreshTokens: () => ipcRenderer.invoke('codex:refresh-tokens'),
+  onCodexLoginComplete: (callback: (info: { email?: string }) => void) => {
+    const subscription = (_: any, info: any) => callback(info || {});
+    ipcRenderer.on('codex:login:complete', subscription);
+    return () => { ipcRenderer.removeListener('codex:login:complete', subscription); };
+  },
+  onCodexLoginFailed: (callback: (info: { message: string }) => void) => {
+    const subscription = (_: any, info: any) => callback(info || { message: 'Unknown error' });
+    ipcRenderer.on('codex:login:failed', subscription);
+    return () => { ipcRenderer.removeListener('codex:login:failed', subscription); };
+  },
+  onCodexSignedOut: (callback: () => void) => {
+    const subscription = () => callback();
+    ipcRenderer.on('codex:signed-out', subscription);
+    return () => { ipcRenderer.removeListener('codex:signed-out', subscription); };
+  },
+  onCodexTokensRefreshed: (callback: (info: { expiresAt: number }) => void) => {
+    const subscription = (_: any, info: any) => callback(info || {});
+    ipcRenderer.on('codex:tokens:refreshed', subscription);
+    return () => { ipcRenderer.removeListener('codex:tokens:refreshed', subscription); };
+  },
 
   // Demo
   seedDemo: () => ipcRenderer.invoke('seed-demo'),

@@ -19,11 +19,40 @@ export interface ModeRetrievedChunk {
     trustLevel: 'untrusted_reference';
 }
 
+/**
+ * Phase 0 (smart-retrieval rollout) — OBSERVE-ONLY retrieval-confidence signal.
+ * Computed from the existing combined-score distribution of the scored
+ * candidates; it does NOT change which chunks are returned. Used to measure how
+ * often a low-confidence escalation gate WOULD fire, so the later local-reranker
+ * thresholds can be tuned from real traffic before any behavior change ships.
+ *
+ * `topScore`/`secondScore` are combined scores of the best two SCORED
+ * candidates (pre-dedup — for a single large doc the meaningful "is there a
+ * clear best passage" margin is between two chunks of the SAME file, which
+ * dedup would collapse). `lowConfidence` is the OR of `reasons`.
+ */
+export interface RetrievalConfidence {
+    topScore: number;
+    secondScore: number;
+    margin: number;
+    clearedCount: number;
+    candidateCount: number;
+    queryTokenCount: number;
+    usedFallback: boolean;
+    lowConfidence: boolean;
+    reasons: Array<'weak_top' | 'flat_margin' | 'thin_results' | 'lexical_degraded' | 'no_candidates'>;
+}
+
 export interface ModeRetrievedContext {
     chunks: ModeRetrievedChunk[];
     formattedContext: string;
     usedFallback: boolean;
     usedHybrid: boolean;
+    /**
+     * Present only when the `ragConfidenceGate` flag is on (Phase 0, observe
+     * only). Optional so the default-OFF path is byte-for-byte unchanged.
+     */
+    confidence?: RetrievalConfidence;
 }
 
 // Index state for tracking which files have been embedded
@@ -46,6 +75,24 @@ const CHUNK_WORDS = 140;
 const CHUNK_OVERLAP = 30;
 const MIN_COMBINED_SCORE = 0.15;
 const FTS_WEIGHT = 0.4;  // alpha for combined score: alpha * fts + (1-alpha) * vector
+
+// ── Phase 0 confidence-gate thresholds (OBSERVE ONLY) ───────────────────────
+// Tunable starting points for the low-confidence gate. These are deliberately
+// CONSERVATIVE so the gate fires on a small fraction of queries; the whole
+// point of Phase 0 is to emit telemetry and re-tune these from real traffic
+// BEFORE any reranker escalation is wired (Phase 1). Changing them affects only
+// the `lowConfidence` boolean + telemetry — never which chunks are returned.
+const CONF_TOP_SCORE_FLOOR = 0.30;   // best chunk barely above the admit floor → retrieval is guessing
+const CONF_MARGIN_MIN = 0.05;        // top-2 too close → no clear winner …
+const CONF_CONFIDENT_FLOOR = 0.45;   // … but only count it low-confidence when the top itself isn't strong
+const CONF_MIN_QUERY_TOKENS = 3;     // ignore trivially short queries for the "thin results" reason
+
+// ── Phase 1 local-rerank widen pool (manual/follow-up only) ─────────────────
+// When the gate trips, the cross-encoder reranks a WIDER candidate pool than
+// the final top-K so it can rescue an answer-bearing chunk that cosine ranked
+// low (the whole point — cosine over 140-word chunks is noisy at 100-page
+// scale). Bounded so the local forward-pass stays in the tens-of-ms range.
+const RERANK_CANDIDATE_POOL = 30;
 
 // Escape XML special characters in text content
 function escapeXmlText(value: string): string {
@@ -104,6 +151,13 @@ interface ChunkCandidate {
     chunkIndex: number;
     ftsScore: number;
     vectorScore: number;
+    /**
+     * Phase 1: cross-encoder relevance logit, present ONLY on candidates that
+     * went through the local rerank escalation. When set, dedup/budget order by
+     * it instead of the combined cosine/FTS score. Undefined on the default
+     * path (rerank off / high-confidence) so the legacy ordering is unchanged.
+     */
+    rerankScore?: number;
 }
 
 export class ModeHybridRetriever {
@@ -119,11 +173,23 @@ export class ModeHybridRetriever {
     // which is already a small, user-curated set.
     private chunkCache = new Map<string, { hash: string; chunks: string[] }>();
 
+    /**
+     * Phase 1: injectable cross-encoder reranker. Defaults to the lazy
+     * `getLocalReranker()` singleton in production; tests inject a fake so the
+     * rerank wiring is verifiable without loading the (unbundled) ONNX model.
+     */
+    private rerankerOverride: { rerank: (q: string, passages: string[]) => Promise<Array<{ index: number; score: number }> | null> } | null = null;
+
     constructor(db: Database.Database, vectorStore: VectorStore, embeddingPipeline: EmbeddingPipeline) {
         this.db = db;
         this.vectorStore = vectorStore;
         this.embeddingPipeline = embeddingPipeline;
         this.ensureIndexTable();
+    }
+
+    /** Test-only: inject a fake reranker (bypasses the ONNX model load). */
+    public __setRerankerForTests(r: { rerank: (q: string, passages: string[]) => Promise<Array<{ index: number; score: number }> | null> } | null): void {
+        this.rerankerOverride = r;
     }
 
     /**
@@ -526,6 +592,102 @@ export class ModeHybridRetriever {
         ModeHybridRetriever.fallbackEmittedAtByKey.clear();
     }
 
+    // ── Phase 0: observe-only retrieval-confidence signal ───────────────────
+
+    /**
+     * Compute the low-confidence gate from the SCORED + sorted (desc) candidate
+     * list. OBSERVE ONLY — never changes which chunks are returned. `sorted` is
+     * the post-threshold candidate set (chunks that cleared the adaptive floor),
+     * sorted by combined score descending; for a single large doc the two best
+     * may be chunks of the same file, which is exactly the "is there a clear
+     * winning passage" signal we want (so this runs on the PRE-dedup list).
+     */
+    private computeConfidence(
+        sorted: ChunkCandidate[],
+        queryTokenCount: number,
+        candidateCount: number,
+        usedFallback: boolean
+    ): RetrievalConfidence {
+        const scoreOf = (c: ChunkCandidate) => this.combinedScore(c.ftsScore, c.vectorScore, FTS_WEIGHT);
+        const topScore = sorted.length > 0 ? scoreOf(sorted[0]) : 0;
+        const secondScore = sorted.length > 1 ? scoreOf(sorted[1]) : 0;
+        const margin = topScore - secondScore;
+        const clearedCount = sorted.length;
+        const reasons: RetrievalConfidence['reasons'] = [];
+
+        if (clearedCount === 0) {
+            reasons.push('no_candidates');
+        } else {
+            // Weak top: even the best chunk barely cleared the admit floor.
+            if (topScore < CONF_TOP_SCORE_FLOOR) reasons.push('weak_top');
+            // Flat margin: top-2 nearly tied AND the top isn't strong on its own.
+            if (sorted.length > 1 && margin < CONF_MARGIN_MIN && topScore < CONF_CONFIDENT_FLOOR) {
+                reasons.push('flat_margin');
+            }
+            // Thin results: a content-bearing query returned <2 usable chunks.
+            if (clearedCount < 2 && queryTokenCount >= CONF_MIN_QUERY_TOKENS) {
+                reasons.push('thin_results');
+            }
+        }
+        // Lexical-degraded: vectors were unavailable on a non-trivial query, so
+        // ranking confidence is lower regardless of the score shape. High-value
+        // escalation case for a LOCAL reranker (needs no embedder) in Phase 1.
+        if (usedFallback && queryTokenCount >= CONF_MIN_QUERY_TOKENS) {
+            reasons.push('lexical_degraded');
+        }
+
+        return {
+            topScore,
+            secondScore,
+            margin,
+            clearedCount,
+            candidateCount,
+            queryTokenCount,
+            usedFallback,
+            lowConfidence: reasons.length > 0,
+            reasons,
+        };
+    }
+
+    /**
+     * Emit the observe-only `rag_confidence` telemetry. Shares the same 60s
+     * (modeId, reason) throttle family as the fallback emitter so a sticky
+     * low-confidence condition during a long meeting cannot spam the JSONL —
+     * keyed by modeId + a coarse `low|high` bucket, not the full reason set.
+     * Never throws; telemetry must never block retrieval.
+     */
+    private emitConfidenceTelemetry(modeId: string | undefined, conf: RetrievalConfidence): void {
+        try {
+            const now = Date.now();
+            const bucket = conf.lowConfidence ? 'low' : 'high';
+            const key = `${modeId ?? '_'}::confidence_${bucket}`;
+            const last = ModeHybridRetriever.fallbackEmittedAtByKey.get(key) ?? 0;
+            if (now - last < ModeHybridRetriever.FALLBACK_THROTTLE_MS) return;
+            ModeHybridRetriever.fallbackEmittedAtByKey.set(key, now);
+
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
+            const { telemetryService } = require('../telemetry/TelemetryService');
+            telemetryService.track({
+                name: 'rag_confidence',
+                modeId,
+                properties: {
+                    lowConfidence: conf.lowConfidence,
+                    reasons: conf.reasons,
+                    // Round scores so the JSONL stays compact and queries group.
+                    topScore: Math.round(conf.topScore * 1000) / 1000,
+                    margin: Math.round(conf.margin * 1000) / 1000,
+                    clearedCount: conf.clearedCount,
+                    candidateCount: conf.candidateCount,
+                    queryTokenCount: conf.queryTokenCount,
+                    usedFallback: conf.usedFallback,
+                    testRunId: process.env.NATIVELY_TELEMETRY_TEST_RUN_ID || undefined,
+                },
+            });
+        } catch {
+            // Never block retrieval.
+        }
+    }
+
     /**
      * Static emitter for callers outside this class (e.g.
      * ModeContextRetriever's db-unavailable branch) that still need to
@@ -585,13 +747,22 @@ export class ModeHybridRetriever {
          * docs/testing/MODES_PROFILE_INTELLIGENCE_BUGFIX_LOG.md.
          */
         hasTranscript?: boolean;
+        /**
+         * Phase 1: when true AND the confidence gate trips AND `ragLocalRerank`
+         * is on, escalate a low-confidence query to the local cross-encoder
+         * reranker. Set ONLY by manual/typed/follow-up callers — live transcript
+         * turns leave it false so first-token latency is never gated on a
+         * (cold) model load. Default false → today's behavior exactly.
+         */
+        allowRerank?: boolean;
     }): Promise<ModeRetrievedContext> {
         const {
             query,
             files,
             tokenBudget = DEFAULT_TOKEN_BUDGET,
             topK = DEFAULT_TOP_K,
-            hasTranscript = false
+            hasTranscript = false,
+            allowRerank = false
         } = params;
 
         // If no files, return empty
@@ -673,11 +844,49 @@ export class ModeHybridRetriever {
             return scoreB - scoreA;
         });
 
+        const usedFallback = !this.isEmbeddingAvailable();
+
+        // Phase 0 (observe only): compute the low-confidence signal from the
+        // SCORED + sorted, PRE-dedup candidate list. Gated entirely behind the
+        // ragConfidenceGate flag — when off this is skipped and the result is
+        // byte-for-byte the legacy shape (no `confidence` field).
+        const confidence = this.maybeComputeConfidence(
+            candidates,
+            queryWords.size,
+            allCandidates.length,
+            usedFallback,
+            params.modeId
+        );
+
+        // Phase 1: low-confidence MANUAL/follow-up escalation. When the caller
+        // permits rerank, the gate trips low-confidence, and the local model is
+        // available, re-order the (pre-dedup) candidate pool with the
+        // cross-encoder so an answer-bearing chunk that cosine ranked low can
+        // still surface. Never changes the result when the gate is
+        // high-confidence or the model is unavailable.
+        //
+        // The trip signal reuses computeConfidence(). The `ragConfidenceGate`
+        // telemetry flag and the `ragLocalRerank` escalation flag are
+        // INDEPENDENT: rerank computes its own gate locally here, so enabling
+        // only `ragLocalRerank` works without also turning on telemetry.
+        let reranked = false;
+        if (allowRerank) {
+            const gate = confidence
+                ?? this.computeConfidence(candidates, queryWords.size, allCandidates.length, usedFallback);
+            if (gate.lowConfidence) {
+                const escalated = await this.maybeRerankCandidates(queryText, candidates);
+                if (escalated) {
+                    candidates = escalated;
+                    reranked = true;
+                }
+            }
+        }
+
         // Deduplicate: keep highest-scoring chunk per file
-        const deduped = this.deduplicateChunks(candidates);
+        const deduped = this.deduplicateChunks(candidates, reranked);
 
         // Enforce token budget
-        const selected = this.enforceTokenBudget(deduped, tokenBudget);
+        const selected = this.enforceTokenBudget(deduped, tokenBudget, reranked);
 
         // Format output with citations
         const formattedContext = this.formatContext(selected);
@@ -694,9 +903,105 @@ export class ModeHybridRetriever {
                 trustLevel: 'untrusted_reference'
             })),
             formattedContext,
-            usedFallback: !this.isEmbeddingAvailable(),
-            usedHybrid: this.isEmbeddingAvailable()
+            usedFallback,
+            usedHybrid: this.isEmbeddingAvailable(),
+            ...(confidence ? { confidence } : {})
         };
+    }
+
+    /**
+     * Phase 1 helper: rerank a low-confidence candidate pool with the local
+     * cross-encoder, ONLY when the `ragLocalRerank` flag is on. Returns a NEW
+     * candidate array re-ordered by the cross-encoder's relevance, with each
+     * chunk's `rerankScore` stamped so the downstream dedup/budget order by it.
+     * Returns null (caller keeps the original order) when the flag is off, the
+     * model is unavailable, or rerank fails — rerank must never make retrieval
+     * worse than the cosine baseline.
+     *
+     * The pool is capped to RERANK_CANDIDATE_POOL by the existing combined-score
+     * order first (so the cross-encoder sees the most plausible chunks within
+     * its latency budget), then re-ordered.
+     */
+    private async maybeRerankCandidates(
+        queryText: string,
+        sorted: ChunkCandidate[],
+    ): Promise<ChunkCandidate[] | null> {
+        let enabled = false;
+        try {
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
+            const { isRagLocalRerankEnabled } = require('../../intelligence/intelligenceFlags');
+            enabled = isRagLocalRerankEnabled();
+        } catch {
+            return null;
+        }
+        if (!enabled) return null;
+        if (sorted.length < 2) return null; // nothing to re-order
+
+        try {
+            let reranker = this.rerankerOverride;
+            if (!reranker) {
+                // eslint-disable-next-line @typescript-eslint/no-var-requires
+                const { getLocalReranker } = require('../../rag/LocalReranker');
+                reranker = getLocalReranker();
+            }
+
+            const pool = sorted.slice(0, RERANK_CANDIDATE_POOL);
+            const results = await reranker.rerank(queryText, pool.map((c: ChunkCandidate) => c.text));
+            if (!results || results.length === 0) return null;
+
+            // Re-order the pool by the cross-encoder result; stamp rerankScore so
+            // dedup/budget can sort by it. Any pool item missing from results
+            // (defensive) keeps its place after the reranked ones.
+            const reordered: ChunkCandidate[] = [];
+            const used = new Set<number>();
+            for (const r of results) {
+                const c = pool[r.index];
+                if (!c) continue;
+                used.add(r.index);
+                reordered.push({ ...c, rerankScore: r.score });
+            }
+            for (let i = 0; i < pool.length; i++) {
+                if (!used.has(i)) reordered.push({ ...pool[i] });
+            }
+            // Append the un-pooled tail (beyond RERANK_CANDIDATE_POOL) unchanged
+            // so we never DROP candidates the budget step might still want.
+            for (let i = RERANK_CANDIDATE_POOL; i < sorted.length; i++) {
+                reordered.push(sorted[i]);
+            }
+            return reordered;
+        } catch (e) {
+            console.warn('[ModeHybridRetriever] rerank escalation failed (keeping cosine order):', e instanceof Error ? e.message : e);
+            return null;
+        }
+    }
+
+    /**
+     * Phase 0 helper: compute + emit the confidence signal ONLY when the
+     * `ragConfidenceGate` flag is on. Returns undefined (and does nothing) when
+     * the flag is off, so the default path adds zero work and an unchanged
+     * result shape. Flag read is lazy-required so this file stays unit-testable
+     * from compiled dist-electron without pulling the intelligence barrel.
+     */
+    private maybeComputeConfidence(
+        sorted: ChunkCandidate[],
+        queryTokenCount: number,
+        candidateCount: number,
+        usedFallback: boolean,
+        modeId?: string
+    ): RetrievalConfidence | undefined {
+        let enabled = false;
+        try {
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
+            const { isRagConfidenceGateEnabled } = require('../../intelligence/intelligenceFlags');
+            enabled = isRagConfidenceGateEnabled();
+        } catch {
+            // Flag module unavailable (early boot / minimal test harness) → off.
+            return undefined;
+        }
+        if (!enabled) return undefined;
+        const conf = this.computeConfidence(sorted, queryTokenCount, candidateCount, usedFallback);
+        this.emitConfidenceTelemetry(modeId, conf);
+        return conf;
     }
 
     /**
@@ -807,19 +1112,34 @@ export class ModeHybridRetriever {
     }
 
     /**
-     * Deduplicate chunks from the same file, keeping highest-scoring
+     * Ranking score for ordering. On the default path this is the combined
+     * cosine/FTS score (unchanged). When `byRerank` is true (Phase 1
+     * escalation), candidates carrying a cross-encoder `rerankScore` order by
+     * it instead; a candidate without one (the un-pooled tail) sorts below all
+     * reranked ones via -Infinity, preserving "reranked chunks win".
      */
-    private deduplicateChunks(candidates: ChunkCandidate[]): ChunkCandidate[] {
+    private rankScore(c: ChunkCandidate, byRerank: boolean): number {
+        if (byRerank) {
+            return typeof c.rerankScore === 'number' ? c.rerankScore : Number.NEGATIVE_INFINITY;
+        }
+        return this.combinedScore(c.ftsScore, c.vectorScore, FTS_WEIGHT);
+    }
+
+    /**
+     * Deduplicate chunks from the same file, keeping highest-scoring. When
+     * `byRerank` is true the "highest" is by cross-encoder score.
+     */
+    private deduplicateChunks(candidates: ChunkCandidate[], byRerank: boolean = false): ChunkCandidate[] {
         const bestByFile = new Map<string, ChunkCandidate>();
 
         for (const candidate of candidates) {
             const existing = bestByFile.get(candidate.sourceId);
-            const currentScore = this.combinedScore(candidate.ftsScore, candidate.vectorScore, FTS_WEIGHT);
 
             if (!existing) {
                 bestByFile.set(candidate.sourceId, candidate);
             } else {
-                const existingScore = this.combinedScore(existing.ftsScore, existing.vectorScore, FTS_WEIGHT);
+                const currentScore = this.rankScore(candidate, byRerank);
+                const existingScore = this.rankScore(existing, byRerank);
                 if (currentScore > existingScore) {
                     bestByFile.set(candidate.sourceId, candidate);
                 }
@@ -830,14 +1150,11 @@ export class ModeHybridRetriever {
     }
 
     /**
-     * Enforce token budget by selecting highest-scoring chunks that fit
+     * Enforce token budget by selecting highest-scoring chunks that fit. When
+     * `byRerank` is true, "highest" is the cross-encoder order.
      */
-    private enforceTokenBudget(candidates: ChunkCandidate[], budget: number): ChunkCandidate[] {
-        const sorted = [...candidates].sort((a, b) => {
-            const scoreA = this.combinedScore(a.ftsScore, a.vectorScore, FTS_WEIGHT);
-            const scoreB = this.combinedScore(b.ftsScore, b.vectorScore, FTS_WEIGHT);
-            return scoreB - scoreA;
-        });
+    private enforceTokenBudget(candidates: ChunkCandidate[], budget: number, byRerank: boolean = false): ChunkCandidate[] {
+        const sorted = [...candidates].sort((a, b) => this.rankScore(b, byRerank) - this.rankScore(a, byRerank));
 
         const selected: ChunkCandidate[] = [];
         let totalTokens = 0;

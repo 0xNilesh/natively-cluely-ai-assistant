@@ -371,3 +371,7 @@ meetily.md
 testengineer.prompt
 cluely/
 docs/
+
+# Large model binary files
+*.onnx
+*.onnx_data

@@ -142,6 +142,23 @@ export class SearchOrchestrator {
         byMeeting.set(c.meetingId, arr);
       }
 
+      // Phase 2 (smart-retrieval): when ragRrfFusion is on, fuse the per-source
+      // RANKED lists by Reciprocal Rank Fusion instead of weighted-summing
+      // incomparable native scores. This is exactly the scale-mismatch this
+      // path has today — local lexical scores live on a different scale than
+      // Hindsight's flat 0.85 memory score, so a weighted sum systematically
+      // over/under-weights memory hits. RRF ranks by POSITION (scale-agnostic)
+      // and lets a meeting corroborated by multiple sources rise. Default OFF →
+      // the exact weighted-sum path below is unchanged. Pure, never throws.
+      let rrfByMeeting: Map<string, number> | null = null;
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { isRagRrfFusionEnabled } = require('./intelligenceFlags');
+        if (isRagRrfFusionEnabled()) {
+          rrfByMeeting = this.rrfFuseMeetingRanks(scoped, filters, recencyAnchorMs);
+        }
+      } catch { /* flag/module unavailable → weighted-sum path */ }
+
       const results: GlobalSearchResult[] = [];
       for (const [meetingId, group] of byMeeting) {
         const best = (type: SearchSourceType) =>
@@ -153,12 +170,18 @@ export class SearchOrchestrator {
         const recency = recencyScore(rep.date, recencyAnchorMs);
         const metaScore = metadataMatchScore(rep, filters);
 
-        const confidence =
-          WEIGHTS.lexical * lexical +
-          WEIGHTS.vector * vector +
-          WEIGHTS.memory * memory +
-          WEIGHTS.recency * recency +
-          WEIGHTS.metadata * metaScore;
+        // When RRF is active the fused score IS the confidence — recency and
+        // metadata are folded into the fusion AS RANKED SOURCES (see
+        // rrfFuseMeetingRanks), not added out-of-band, so no scale-mixing
+        // re-buries the rank signal. When off, the original spec weighted-sum
+        // is used unchanged.
+        const confidence = rrfByMeeting
+          ? (rrfByMeeting.get(meetingId) ?? 0)
+          : WEIGHTS.lexical * lexical +
+            WEIGHTS.vector * vector +
+            WEIGHTS.memory * memory +
+            WEIGHTS.recency * recency +
+            WEIGHTS.metadata * metaScore;
 
         const sourceTypes = [...new Set(group.map((g) => g.source))];
         const whyParts: string[] = [];
@@ -176,7 +199,11 @@ export class SearchOrchestrator {
           matchedSnippet: rep.snippet,
           whyMatched: whyParts.join(', ') || 'relevant',
           sourceTypes,
-          confidence: Math.round(confidence * 1000) / 1000,
+          // RRF scores live on a ~1/(k+rank) scale (≈0.016 at rank 0), so 3
+          // decimals would collapse adjacent ranks — round finer when fused.
+          confidence: rrfByMeeting
+            ? Math.round(confidence * 1e6) / 1e6
+            : Math.round(confidence * 1000) / 1000,
           timestampMs: rep.timestampMs,
         });
       }
@@ -185,6 +212,83 @@ export class SearchOrchestrator {
     } catch {
       return [];
     }
+  }
+
+  /**
+   * Phase 2 (smart-retrieval): build per-source RANKED meeting lists and fuse
+   * them by Reciprocal Rank Fusion, returning meetingId → fused RRF score.
+   *
+   * For each source type (lexical/vector/memory), meetings are ranked by their
+   * BEST candidate score from that source (descending), so only the rank
+   * position feeds RRF — the incomparable native scores never mix. A meeting
+   * that ranks well in several sources accumulates contributions and rises.
+   * Pure; returns an empty map on any error (caller then keeps weighted-sum).
+   */
+  private rrfFuseMeetingRanks(
+    scoped: SearchCandidate[],
+    filters: GlobalSearchFilters,
+    recencyAnchorMs: number,
+  ): Map<string, number> {
+    const out = new Map<string, number>();
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { fuseRanked } = require('./RrfFusion');
+
+      // Best score per meeting per source, plus a representative candidate per
+      // meeting (highest-scoring) for the recency/metadata ranked lists.
+      const repByMeeting = new Map<string, SearchCandidate>();
+      for (const c of scoped) {
+        const cur = repByMeeting.get(c.meetingId);
+        if (!cur || c.score > cur.score) repByMeeting.set(c.meetingId, c);
+      }
+
+      const sources: Array<{ source: string; weight: number; items: Array<{ id: string; text: string }> }> = [];
+      const addRankedSource = (
+        source: string,
+        scoreByMeeting: Map<string, number>,
+        weight: number,
+      ) => {
+        const ranked = [...scoreByMeeting.entries()]
+          .filter(([, s]) => s > 0)          // a 0 score = not a real hit for that signal
+          .sort((a, b) => b[1] - a[1]);      // rank by the signal's native value
+        if (ranked.length === 0) return;
+        sources.push({ source, weight, items: ranked.map(([id]) => ({ id, text: id })) });
+      };
+
+      // Retrieval sources keep the spec's relative emphasis as RRF weights
+      // (lexical/vector dominant, memory secondary) — but applied to RANK, not
+      // to incomparable native scores, so a #1 memory hit is never buried.
+      for (const [type, weight] of [
+        ['lexical', WEIGHTS.lexical],
+        ['vector', WEIGHTS.vector],
+        ['memory', WEIGHTS.memory],
+      ] as Array<[SearchSourceType, number]>) {
+        const bestByMeeting = new Map<string, number>();
+        for (const c of scoped) {
+          if (c.source !== type) continue;
+          bestByMeeting.set(c.meetingId, Math.max(bestByMeeting.get(c.meetingId) ?? 0, c.score));
+        }
+        addRankedSource(type, bestByMeeting, weight);
+      }
+
+      // Recency + metadata fold in as their OWN ranked sources (weighted like
+      // the spec) — so the existing filters still bias ordering, but on the same
+      // rank scale as everything else (no out-of-band additive that swamps RRF).
+      const recencyByMeeting = new Map<string, number>();
+      const metaByMeeting = new Map<string, number>();
+      for (const [meetingId, rep] of repByMeeting) {
+        recencyByMeeting.set(meetingId, recencyScore(rep.date, recencyAnchorMs));
+        metaByMeeting.set(meetingId, metadataMatchScore(rep, filters));
+      }
+      addRankedSource('recency', recencyByMeeting, WEIGHTS.recency);
+      addRankedSource('metadata', metaByMeeting, WEIGHTS.metadata);
+
+      const { fused } = fuseRanked(sources);
+      for (const f of fused) out.set(f.id, f.rrfScore);
+    } catch {
+      return out;
+    }
+    return out;
   }
 
   /**

@@ -896,8 +896,19 @@ export class IntelligenceEngine extends EventEmitter {
                         if (typeof mm.buildRetrievedActiveModeContextBlockHybrid === 'function') {
                             // pinnedModeId (#6): parallel-prefetch reads the SAME mode captured
                             // at t0, so a mid-request mode switch can't mismatch retrieval.
+                            // Phase 3: allowRerank on the LIVE prefetch path only when
+                            // ragSpeculativeRerank is on. The reranker is prewarmed at
+                            // mode activation and this prefetch is consumed under the
+                            // caller's raceWithBudget — so a (warm) rerank costs ~tens of
+                            // ms and an overrun falls through to the non-reranked block.
+                            let allowRerank = false;
+                            try {
+                                // eslint-disable-next-line @typescript-eslint/no-var-requires
+                                const { isRagSpeculativeRerankEnabled } = require('./intelligence/intelligenceFlags');
+                                allowRerank = isRagSpeculativeRerankEnabled();
+                            } catch { /* flag module unavailable → no rerank */ }
                             return await mm.buildRetrievedActiveModeContextBlockHybrid(
-                                preparedTranscript, preparedTranscript, 1800, undefined, true, snapshotModeInfo?.id,
+                                preparedTranscript, preparedTranscript, 1800, undefined, true, snapshotModeInfo?.id, allowRerank,
                             );
                         }
                         return '';

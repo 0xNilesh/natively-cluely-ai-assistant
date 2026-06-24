@@ -649,16 +649,58 @@ export class AppState {
           // to the safest fallback BEFORE preload — otherwise the worker
           // crashes on init with a confusing "model not found" and the user
           // is locked out of audio until they manually clear settings.
-          const rawModelId = settingsManager.get('localWhisperModel') ?? 'Xenova/whisper-tiny.en';
-          const modelId = MODEL_CATALOG_IDS.has(rawModelId) ? rawModelId : 'Xenova/whisper-tiny.en';
+          //
+          // Validate BOTH the global setting AND the per-channel overrides
+          // (when per-channel mode is enabled). Per-channel validation runs
+          // here because the per-channel id is read at meeting-start time
+          // (main.ts:1721-1726), not at this preload block — leaving it
+          // un-validated here means a corrupt per-channel id would still
+          // crash the meeting even though the global gate passes.
+          const FALLBACK = 'Xenova/whisper-tiny.en';
+          const rawModelId = settingsManager.get('localWhisperModel') ?? FALLBACK;
+          const modelId = MODEL_CATALOG_IDS.has(rawModelId) ? rawModelId : FALLBACK;
           if (modelId !== rawModelId) {
             console.warn(`[AppState] Persisted localWhisperModel "${rawModelId}" not in catalog — resetting to ${modelId}`);
             settingsManager.set('localWhisperModel', modelId);
           }
+          if (settingsManager.get('localWhisperPerChannelEnabled')) {
+            for (const key of ['localWhisperModelMic', 'localWhisperModelSystem'] as const) {
+              const raw = settingsManager.get(key);
+              if (raw && !MODEL_CATALOG_IDS.has(raw)) {
+                console.warn(`[AppState] Persisted ${key} "${raw}" not in catalog — resetting to ${FALLBACK}`);
+                settingsManager.set(key, FALLBACK);
+              }
+            }
+          }
           const { dtype } = resolveInferenceConfig();
-          if (isModelCached(modelId, dtype)) {
-            console.log(`[AppState] Preloading local Whisper model: ${modelId}`);
-            modelPreloader.preload(modelId);
+
+          // Collect every model ID the user has selected (global + per-channel)
+          // so we can auto-repair each one that's missing or corrupt.
+          const modelIds = new Set<string>([modelId]);
+          if (settingsManager.get('localWhisperPerChannelEnabled')) {
+            const mic = settingsManager.get('localWhisperModelMic');
+            const sys = settingsManager.get('localWhisperModelSystem');
+            if (mic && MODEL_CATALOG_IDS.has(mic)) modelIds.add(mic);
+            if (sys && MODEL_CATALOG_IDS.has(sys)) modelIds.add(sys);
+          }
+
+          for (const id of modelIds) {
+            if (isModelCached(id, dtype)) {
+              if (id === modelId) {
+                console.log(`[AppState] Preloading local Whisper model: ${id}`);
+                modelPreloader.preload(id);
+              }
+            } else {
+              // Files are missing or corrupt — auto-download in the background
+              // so the user doesn't have to open Settings and click Download.
+              console.log(`[AppState] Local Whisper model "${id}" not cached — starting background download`);
+              try {
+                const { LocalModelDownloadService } = require('./services/LocalModelDownloadService');
+                LocalModelDownloadService.getInstance().start('whisper', id);
+              } catch (dlErr: any) {
+                console.warn(`[AppState] Auto-download for "${id}" failed to start:`, dlErr?.message);
+              }
+            }
           }
         }
       } catch (e) {

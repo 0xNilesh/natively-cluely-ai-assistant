@@ -96,6 +96,32 @@ export interface StoredCredentials {
      * (Field name retained for backward-compat with already-persisted credentials.)
      */
     phoneMirrorToken?: string;
+    /**
+     * ChatGPT Codex OAuth tokens. Persisted (encrypted via safeStorage) so the
+     * user only signs in once per device. Written by CodexOAuthService on a
+     * successful PKCE callback+exchange and on each refresh-token rotation;
+     * cleared on signOut or on permanent refresh failure (invalid_grant).
+     * Shape: { accessToken, refreshToken, idToken?, expiresAt, email?, accountId? }.
+     */
+    codexOAuthTokens?: {
+        accessToken: string;
+        refreshToken: string;
+        idToken?: string;
+        expiresAt: number;
+        email?: string;
+        accountId?: string;
+        /**
+         * Epoch ms of the last successful token exchange (initial login OR
+         * refresh). Used by the 8-day proactive re-auth check: OpenAI may
+         * silently invalidate refresh tokens that have been aging in storage
+         * for too long, and the result is a sudden `invalid_grant` mid-use.
+         * Tracking the last-exchange time lets us clear credentials and
+         * prompt the user to re-auth BEFORE the user hits a broken call.
+         * Mirrors open-sse `trackRefreshAt: true` + `maxRefreshAgeMs:
+         * 691200000` (8 days) at codex.md:1167 / 1329.
+         */
+        lastRefreshAt?: number;
+    };
 }
 
 export class CredentialsManager {
@@ -209,6 +235,29 @@ export class CredentialsManager {
     /** Persisted loopback-scoped companion-extension token (stable across restarts). */
     public getPhoneMirrorToken(): string | undefined {
         return this.credentials.phoneMirrorToken;
+    }
+
+    /**
+     * Persisted ChatGPT Codex OAuth tokens. Read by CodexOAuthService.getAccessToken()
+     * to refresh-and-retry on a 401 from the Codex API. Returns a defensive deep
+     * copy so callers can't mutate the stored bundle by accident.
+     */
+    public getCodexOAuthTokens(): { accessToken: string; refreshToken: string; idToken?: string; expiresAt: number; email?: string; accountId?: string; lastRefreshAt?: number } | null {
+        const t = this.credentials.codexOAuthTokens;
+        if (!t || typeof t.accessToken !== 'string' || typeof t.refreshToken !== 'string') return null;
+        return { ...t };
+    }
+
+    public setCodexOAuthTokens(tokens: { accessToken: string; refreshToken: string; idToken?: string; expiresAt: number; email?: string; accountId?: string; lastRefreshAt?: number }): void {
+        this.credentials.codexOAuthTokens = { ...tokens };
+        this.saveCredentials();
+        console.log('[CredentialsManager] Codex OAuth tokens updated');
+    }
+
+    public clearCodexOAuthTokens(): void {
+        this.credentials.codexOAuthTokens = undefined;
+        this.saveCredentials();
+        console.log('[CredentialsManager] Codex OAuth tokens cleared');
     }
 
     public getLitellmApiKey(): string | undefined {

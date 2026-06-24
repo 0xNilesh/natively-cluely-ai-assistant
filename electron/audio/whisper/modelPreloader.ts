@@ -51,7 +51,15 @@ function saveRecentFailures(m: Map<string, number>): void {
     try {
         const obj: Record<string, number> = {};
         for (const [k, v] of m.entries()) obj[k] = v;
-        fs.writeFileSync(recentFailuresPath(), JSON.stringify(obj), 'utf-8');
+        // Atomic write (tmp + rename) so a process kill mid-write doesn't
+        // leave the JSON half-written. Matches the pattern in
+        // SettingsManager.saveSettings(). Without this, loadRecentFailures
+        // catches the JSON.parse error and returns an empty map — which
+        // silently forgets the cooldown and allows immediate retries.
+        const finalPath = recentFailuresPath();
+        const tmpPath = `${finalPath}.tmp`;
+        fs.writeFileSync(tmpPath, JSON.stringify(obj), 'utf-8');
+        fs.renameSync(tmpPath, finalPath);
     } catch {
         // best-effort; failure to persist is non-fatal
     }
@@ -170,10 +178,24 @@ class ModelPreloader {
     /**
      * Hand off the warm worker to a caller and clear the cache.
      * Returns null if no warm worker is available for that model ID.
+     *
+     * IMPORTANT: removes the preloader's `message` / `error` listeners
+     * before handoff. Otherwise, when the receiving LocalWhisperSTT
+     * instance drives the worker and a transient error fires during
+     * recording, the preloader's `error` handler would ALSO fire and
+     * call `recordFailure(modelId)` — silently poisoning the recent-
+     * failure cooldown for the modelId the user is actively using. The
+     * cooldown would then block the next preload of the same model for
+     * 5 minutes, manifesting as a "transcription silently stops"
+     * regression. Mirrors the listener-cleanup pattern in
+     * LocalWhisperSTT.beginWorkerTermination.
      */
     takeWarmWorker(modelId: string): Worker | null {
         if (this.warmModelId === modelId && this.warmWorker) {
             const w = this.warmWorker;
+            w.removeAllListeners('message');
+            w.removeAllListeners('error');
+            w.removeAllListeners('exit');
             this.warmWorker = null;
             this.warmModelId = null;
             console.log(`[ModelPreloader] Handing off warm worker for ${modelId}`);

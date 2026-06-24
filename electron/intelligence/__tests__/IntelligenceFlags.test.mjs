@@ -32,6 +32,7 @@ const ALL_FLAG_KEYS = [
   'meetingNotesStructuredOutput', 'meetingSummaryLlmPolish', 'speakerDiarizationV1',
   'globalSearchV2', 'inMeetingSearchV2', 'conversationMemoryV2', 'lectureIntelligenceV2', 'diagramIntelligence',
   'hindsightMemory', 'hindsightLiveRecall', 'hindsightPostMeetingRetain',
+  'ragConfidenceGate', 'ragLocalRerank', 'ragRrfFusion', 'ragSpeculativeRerank',
 ];
 
 const DEFAULT_ON_KEYS = new Set([

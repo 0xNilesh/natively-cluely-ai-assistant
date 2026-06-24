@@ -58,7 +58,37 @@ export type IntelligenceFlagKey =
   | 'diagramIntelligence'          // Phase 15
   | 'hindsightMemory'              // Phase 16 — long-term memory provider on at all
   | 'hindsightLiveRecall'          // Phase 16 — last to enable (live recall in answers)
-  | 'hindsightPostMeetingRetain';  // Phase 16 — async retain after meetings/lectures
+  | 'hindsightPostMeetingRetain'   // Phase 16 — async retain after meetings/lectures
+  // ── Smart Retrieval / confidence-gated rerank (large-doc RAG) ───────────
+  // Phase 0 — OBSERVE ONLY. Computes a per-query retrieval-confidence signal
+  // from the existing combined-score distribution and emits `rag_confidence`
+  // telemetry. Changes NO answer and NO retrieved context — it only measures
+  // how often a low-confidence gate would fire, so the thresholds for the
+  // (later) local-reranker escalation can be tuned from real traffic first.
+  | 'ragConfidenceGate'
+  // Phase 1 — local cross-encoder rerank escalation. When the confidence gate
+  // trips on a MANUAL/typed/follow-up query (looser latency than a live
+  // transcript turn), widen the candidate pool and re-order it with an
+  // on-device bge-reranker. Default OFF. Requires ragConfidenceGate to also be
+  // on (the gate provides the trip signal). No-ops if the model can't load
+  // (e.g. not bundled in a packaged build) → falls through to today's top-K.
+  | 'ragLocalRerank'
+  // Phase 2 — Reciprocal Rank Fusion across the heterogeneous retrieval
+  // sources (modes RAG + Profile Tree + Hindsight). Merges each source's
+  // RANKED list by rank position (scale-agnostic — Hindsight 0.8.2 returns no
+  // score), so a unified confidence can be computed over the merged set
+  // ("RAG missed but Hindsight has it" no longer looks like a global miss).
+  // Default OFF. The fusion module is pure + additive; no live path consumes it
+  // until a consumer is wired in a follow-up.
+  | 'ragRrfFusion'
+  // Phase 3 — allow the local rerank escalation on the LIVE transcript path
+  // (not just manual/follow-up). Safe by construction: the reranker is
+  // PREWARMED at mode activation so it's never cold, and the rerank runs inside
+  // the existing raceWithBudget(1500ms) retrieval envelope — if it ever
+  // overruns, the race already falls through to the non-reranked block, so
+  // first-token latency can never regress. Default OFF. Requires ragLocalRerank
+  // (the reranker itself) to also be on.
+  | 'ragSpeculativeRerank';
 
 interface FlagSpec {
   /** env var name (NATIVELY_* convention). */
@@ -112,6 +142,14 @@ const FLAGS: Record<IntelligenceFlagKey, FlagSpec> = {
   hindsightMemory: { env: 'NATIVELY_HINDSIGHT_MEMORY', setting: 'hindsightMemoryEnabled', default: false },
   hindsightLiveRecall: { env: 'NATIVELY_HINDSIGHT_LIVE_RECALL', setting: 'hindsightLiveRecallEnabled', default: false },
   hindsightPostMeetingRetain: { env: 'NATIVELY_HINDSIGHT_POST_MEETING_RETAIN', setting: 'hindsightPostMeetingRetainEnabled', default: false },
+  // Phase 0 — observe-only confidence telemetry. Default OFF.
+  ragConfidenceGate: { env: 'NATIVELY_RAG_CONFIDENCE_GATE', setting: 'ragConfidenceGateEnabled', default: false },
+  // Phase 1 — local cross-encoder rerank escalation (manual/follow-up). Default OFF.
+  ragLocalRerank: { env: 'NATIVELY_RAG_LOCAL_RERANK', setting: 'ragLocalRerankEnabled', default: false },
+  // Phase 2 — Reciprocal Rank Fusion across heterogeneous retrieval sources. Default OFF.
+  ragRrfFusion: { env: 'NATIVELY_RAG_RRF_FUSION', setting: 'ragRrfFusionEnabled', default: false },
+  // Phase 3 — allow rerank on the live transcript path (prewarmed + budget-guarded). Default OFF.
+  ragSpeculativeRerank: { env: 'NATIVELY_RAG_SPECULATIVE_RERANK', setting: 'ragSpeculativeRerankEnabled', default: false },
 };
 
 const ON_VALUES = new Set(['1', 'true', 'on', 'enabled', 'yes']);
@@ -177,6 +215,46 @@ export const isDurableMemoryWindowEnabled = (): boolean =>
  * still gates its own behavior; this is just the master switch a rollout can use.
  */
 export const isIntelligenceOsEnabled = (): boolean => isIntelligenceFlagEnabled('intelligenceOsEnabled');
+
+/**
+ * True when the observe-only retrieval-confidence telemetry should be computed
+ * and emitted (Phase 0 of the smart-retrieval rollout). Default OFF. This flag
+ * NEVER changes retrieval output — it only gates the extra `rag_confidence`
+ * telemetry + the optional `confidence` field on ModeRetrievedContext, so the
+ * low-confidence thresholds for the later local-reranker escalation can be
+ * tuned from real traffic before any behavior change ships.
+ */
+export const isRagConfidenceGateEnabled = (): boolean =>
+  isIntelligenceFlagEnabled('ragConfidenceGate');
+
+/**
+ * True when the local cross-encoder rerank escalation (Phase 1) may run on a
+ * manual/follow-up query whose confidence gate tripped. Default OFF. Requires
+ * `ragConfidenceGate` to also be on — the gate provides the low-confidence trip
+ * signal that this escalation reacts to. No-ops gracefully if the reranker
+ * model can't load.
+ */
+export const isRagLocalRerankEnabled = (): boolean =>
+  isIntelligenceFlagEnabled('ragLocalRerank');
+
+/**
+ * True when Reciprocal Rank Fusion across the heterogeneous retrieval sources
+ * (modes RAG + Profile Tree + Hindsight) may run (Phase 2). Default OFF. The
+ * fusion module is pure + additive; this flag gates whether a (future) consumer
+ * consults it — turning it on changes nothing until a caller is wired.
+ */
+export const isRagRrfFusionEnabled = (): boolean =>
+  isIntelligenceFlagEnabled('ragRrfFusion');
+
+/**
+ * True when the local rerank escalation may run on the LIVE transcript path
+ * (Phase 3), not just manual/follow-up. Safe by construction (prewarmed +
+ * inside the existing retrieval budget race). Default OFF. Requires
+ * `ragLocalRerank` to also be on — this flag only widens WHERE that reranker
+ * is permitted to run.
+ */
+export const isRagSpeculativeRerankEnabled = (): boolean =>
+  isIntelligenceFlagEnabled('ragSpeculativeRerank');
 
 /**
  * A snapshot of every flag's resolved state — handy for the IntelligenceTrace and

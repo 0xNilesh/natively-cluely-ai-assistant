@@ -61,6 +61,13 @@ interface RetrieveOptions {
      * surface the same text a second time. Reference files are unaffected.
      */
     excludeCustomContext?: boolean;
+    /**
+     * Phase 1 (smart-retrieval): manual/typed/follow-up callers set this to
+     * permit the local cross-encoder rerank escalation when the confidence gate
+     * trips. Live transcript turns leave it false so first-token latency is
+     * never gated on a (cold) reranker load. Default false.
+     */
+    allowRerank?: boolean;
 }
 
 const DEFAULT_TOKEN_BUDGET = 1800;
@@ -313,7 +320,8 @@ export class ModeContextRetriever {
             files,
             tokenBudget: options.tokenBudget,
             topK: options.topK,
-            hasTranscript
+            hasTranscript,
+            allowRerank: options.allowRerank,
         });
 
         return result;

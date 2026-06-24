@@ -207,10 +207,12 @@ export class LocalModelDownloadService {
     if (existing && (existing.status === 'downloading' || existing.status === 'verifying')) {
       return { success: true, alreadyDownloading: true };
     }
-    // If a prior attempt left cancelled/error state, the caller wanted a
-    // fresh start — purge partial bytes so transformers doesn't try to
-    // "resume" a half-file from byte 0 (we don't implement HTTP Range).
-    if (existing && (existing.status === 'cancelled' || existing.status === 'error')) {
+    // If a prior attempt left cancelled/error/interrupted state, purge
+    // partial bytes — transformers can't resume from byte 0 (no HTTP Range).
+    // 'interrupted' is included because a mid-download process kill can leave
+    // a corrupt partial that passes the size>0 check in isModelCached but
+    // triggers "Protobuf parsing failed" when ORT tries to load it.
+    if (existing && (existing.status === 'cancelled' || existing.status === 'error' || existing.status === 'interrupted')) {
       try { provider.deletePartial(modelId); } catch { /* best-effort */ }
     }
     let worker: Worker;
