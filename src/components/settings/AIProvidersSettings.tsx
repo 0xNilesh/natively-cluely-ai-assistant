@@ -5,7 +5,42 @@ import { validateCurl } from '../../lib/curl-validator';
 import { ProviderCard } from './ProviderCard';
 
 const CODEX_SERVICE_TIERS = ['default', 'fast', 'flex'] as const;
-const CODEX_MODEL_REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh'] as const;
+// Must mirror CodexCliService.CODEX_MODEL_REASONING_EFFORTS in
+// electron/services/CodexCliService.ts. Kept in sync manually because the
+// Settings UI runs in the renderer (no direct module access to main).
+const CODEX_MODEL_REASONING_EFFORTS = ['none', 'low', 'medium', 'high', 'xhigh'] as const;
+
+// Per-model valid reasoning-effort sets (mirrors CodexCliService's
+// CODEX_MODEL_REASONING_SETS). Longest-match wins so gpt-5.4-codex beats
+// gpt-5. The dropdown hides unsupported values per the currently-selected
+// model so a user can't pick e.g. xhigh for gpt-5.3-codex (which the codex
+// CLI binary rejects with a 400).
+const CODEX_MODEL_REASONING_SETS: ReadonlyArray<readonly [string, readonly string[]]> = [
+    ['gpt-5-2025-08-07', ['low', 'medium', 'high']],
+    ['gpt-5-mini',       ['low', 'medium', 'high']],
+    ['gpt-5-nano',       ['low', 'medium', 'high']],
+    ['gpt-5',            ['low', 'medium', 'high']],
+    ['gpt-5.1',          ['none', 'low', 'medium', 'high']],
+    ['gpt-5.2',          ['none', 'low', 'medium', 'high', 'xhigh']],
+    ['gpt-5.4',          ['none', 'low', 'medium', 'high', 'xhigh']],
+    ['gpt-5.5',          ['none', 'low', 'medium', 'high', 'xhigh']],
+    ['gpt-5.5-codex',    ['low', 'medium', 'high', 'xhigh']],
+    ['gpt-5.4-codex',    ['low', 'medium', 'high', 'xhigh']],
+    ['gpt-5.3-codex-spark', ['low', 'medium', 'high']],
+    ['gpt-5.3-codex',    ['low', 'medium', 'high']],
+    ['gpt-5.2-codex',    ['low', 'medium', 'high', 'xhigh']],
+    ['gpt-5.1-codex',    ['low', 'medium', 'high']],
+    ['gpt-5-codex',      ['low', 'medium', 'high']],
+];
+
+function getValidCodexReasoningEfforts(modelId: string): readonly string[] {
+    const id = (modelId || '').toLowerCase();
+    let best: readonly [string, readonly string[]] | null = null;
+    for (const entry of CODEX_MODEL_REASONING_SETS) {
+        if (id.includes(entry[0]) && (!best || entry[0].length > best[0].length)) best = entry;
+    }
+    return best ? best[1] : ['low', 'medium', 'high'];
+}
 
 // LiteLLM max-output-token presets — the standard per-model output budgets
 // (powers of two used across the LiteLLM model registry). '' = Auto: resolve
@@ -996,15 +1031,49 @@ export const AIProvidersSettings: React.FC = () => {
                         <label className="space-y-1">
                             <span className="text-[10px] font-medium text-text-secondary uppercase tracking-wide">Reasoning Effort</span>
                             <ModelSelect
-                                value={codexCliConfig.modelReasoningEffort ?? ''}
-                                options={[
-                                    { id: '', name: 'None' },
-                                    ...CODEX_MODEL_REASONING_EFFORTS.map(e => ({ id: e, name: e.charAt(0).toUpperCase() + e.slice(1) })),
-                                ]}
+                                value={(() => {
+                                    // If the saved value is no longer valid for the
+                                    // currently-selected model (e.g. user switched
+                                    // from gpt-5.4 to gpt-5.3-codex while xhigh was
+                                    // selected), surface 'None' in the dropdown but
+                                    // keep the stale value below so we can warn.
+                                    const valid = getValidCodexReasoningEfforts(codexCliConfig.model);
+                                    if (!codexCliConfig.modelReasoningEffort) return '';
+                                    return valid.includes(codexCliConfig.modelReasoningEffort)
+                                        ? codexCliConfig.modelReasoningEffort
+                                        : '';
+                                })()}
+                                options={(() => {
+                                    const valid = getValidCodexReasoningEfforts(codexCliConfig.model);
+                                    return [
+                                        { id: '', name: 'None (default)' },
+                                        ...CODEX_MODEL_REASONING_EFFORTS
+                                            .filter(e => e !== 'none' && valid.includes(e))
+                                            .map(e => ({ id: e, name: e.charAt(0).toUpperCase() + e.slice(1) })),
+                                    ];
+                                })()}
                                 onChange={(effort) => saveCodexCliConfig({ ...codexCliConfig, modelReasoningEffort: effort || undefined })}
-                                placeholder="None"
+                                placeholder="None (default)"
                             />
-                            <p className="text-[9px] text-text-tertiary">How much reasoning effort the model uses. Model-dependent.</p>
+                            <p className="text-[9px] text-text-tertiary">How much reasoning effort the model uses. Model-dependent — options are filtered to what the selected model actually accepts.</p>
+                            {(() => {
+                                // Inline warning when the saved value was downgraded
+                                // because the user changed models. The backend
+                                // (CodexCliService.normalizeConfig) silently corrects
+                                // this on next load — we surface it here so the user
+                                // understands what happened.
+                                const valid = getValidCodexReasoningEfforts(codexCliConfig.model);
+                                const saved = codexCliConfig.modelReasoningEffort;
+                                if (saved && !valid.includes(saved)) {
+                                    return (
+                                        <p className="text-[9px] text-amber-400 flex items-center gap-1">
+                                            <AlertCircle size={10} />
+                                            '{saved}' isn't supported by {codexCliConfig.model} — defaulted to 'low' on next save.
+                                        </p>
+                                    );
+                                }
+                                return null;
+                            })()}
                         </label>
                     </div>
 

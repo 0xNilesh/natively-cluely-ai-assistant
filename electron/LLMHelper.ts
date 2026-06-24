@@ -1961,11 +1961,15 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
       // GROQ FAST TEXT OVERRIDE (Text-Only) — gated on picked model so Gemini/Claude/OpenAI
       // selections aren't silently routed to Groq. See streamChat() for matching gate.
+      // !this.isCodexCliModel(this.currentModelId) prevents fast-mode from
+      // overriding an EXPLICITLY-PICKED codex-cli:<model> (which would otherwise
+      // call getSelectedCodexCliModel(true) → fastModel → 0 tokens → fallback).
+      // Fixes issue #315.
       const fastModeAppliesNS = this.groqFastTextMode && !isMultimodal && (
         this.codexCliConfig.enabled ||
         this.isGroqModel(this.currentModelId) ||
         this.currentModelId === 'natively'
-      );
+      ) && !this.isCodexCliModel(this.currentModelId);
       if (fastModeAppliesNS && this.codexCliConfig.enabled) {
         console.log(`[LLMHelper] ⚡️ Fast Text Mode Active. Routing to Codex CLI...`);
         try {
@@ -4074,7 +4078,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       this.codexCliConfig.enabled ||
       this.isGroqModel(this.currentModelId) ||
       this.currentModelId === 'natively'
-    );
+    ) && !this.isCodexCliModel(this.currentModelId);
     if (fastModeApplies) {
       if (this.codexCliConfig.enabled) {
         console.log(`[LLMHelper] ⚡️ Fast Text Mode Active (Streaming). Routing to Codex CLI...`);
@@ -5566,6 +5570,20 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
   public isUsingOllama(): boolean {
     return this.useOllama;
+  }
+
+  /**
+   * Codex CLI is a LOCAL subprocess transport (child_process.spawn → stdin) that
+   * cold-loads the model before emitting the first `agent_message.delta` event —
+   * the same latency profile as Ollama. The live-deadline contract treats Ollama
+   * as local (30s first-useful) but had no codex equivalent, so a cold codex
+   * call was raced against the 7s cloud cap and aborted to the canned fallback
+   * ("Let me come back to that in just a moment."). Mirrors isUsingOllama().
+   */
+  public isUsingCodexCli(): boolean {
+    return Boolean(this.codexCliConfig?.enabled) && (
+      this.isCodexCliModel(this.currentModelId) || this.groqFastTextMode === true
+    );
   }
 
   public async getOllamaModels(): Promise<string[]> {

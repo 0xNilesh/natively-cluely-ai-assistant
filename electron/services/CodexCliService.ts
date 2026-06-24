@@ -5,11 +5,88 @@ import * as path from 'path';
 
 export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
 export type CodexServiceTier = 'default' | 'fast' | 'flex';
-export type CodexModelReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
+// 'none' is distinct from undefined: 'none' is the explicit user pick meaning
+// "no reasoning_effort override"; undefined means "user didn't pick one" → also
+// omit the -c flag. 'minimal' is intentionally NOT in this union because no
+// codex-supported model accepts it (OpenAI removed it after the original gpt-5
+// line — see electron/llm/__tests__/OpenAiReasoningEffort.test.mjs).
+export type CodexModelReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh';
 
 export const CODEX_SANDBOX_MODES: readonly CodexSandboxMode[] = ['read-only', 'workspace-write', 'danger-full-access'] as const;
 export const CODEX_SERVICE_TIERS: readonly CodexServiceTier[] = ['default', 'fast', 'flex'] as const;
-export const CODEX_MODEL_REASONING_EFFORTS: readonly CodexModelReasoningEffort[] = ['low', 'medium', 'high', 'xhigh'] as const;
+export const CODEX_MODEL_REASONING_EFFORTS: readonly CodexModelReasoningEffort[] = ['none', 'low', 'medium', 'high', 'xhigh'] as const;
+
+// Per-model valid reasoning_effort sets. Mirrors the OpenAI HTTP VALID map at
+// electron/llm/__tests__/OpenAiReasoningEffort.test.mjs:27-45. The codex CLI
+// binary enforces the same per-family constraints as the direct OpenAI API —
+// sending e.g. xhigh to gpt-5.3-codex triggers a turn.failed event that our
+// fallback chain swallows into "Let me come back to that in just a moment."
+// The user's pick is validated against the per-model set; unsupported values
+// are silently downgraded to the LOWEST-latency valid value (matches the
+// OpenAI HTTP picker's behaviour) so we never send a flag the binary will
+// reject. Lookup is longest-match-wins so gpt-5.4-codex beats gpt-5.
+const CODEX_MODEL_REASONING_SETS: ReadonlyArray<readonly [string, readonly CodexModelReasoningEffort[]]> = [
+  // Original gpt-5 line — minimal accepted (not exposed); low/medium/high.
+  ['gpt-5-2025-08-07', ['low', 'medium', 'high']],
+  ['gpt-5-mini',       ['low', 'medium', 'high']],
+  ['gpt-5-nano',       ['low', 'medium', 'high']],
+  // Bare 'gpt-5' (NOT 5.x) — must come AFTER 5.x entries to avoid swallowing them.
+  ['gpt-5',            ['low', 'medium', 'high']],
+  // gpt-5.1+ chat — `none` accepted; `xhigh` only on 5.2+.
+  ['gpt-5.1',          ['none', 'low', 'medium', 'high']],
+  ['gpt-5.2',          ['none', 'low', 'medium', 'high', 'xhigh']],
+  ['gpt-5.4',          ['none', 'low', 'medium', 'high', 'xhigh']],
+  ['gpt-5.5',          ['none', 'low', 'medium', 'high', 'xhigh']],
+  // codex variants — `none` not supported; `xhigh` only on 5.2-codex+.
+  ['gpt-5.5-codex',    ['low', 'medium', 'high', 'xhigh']],
+  ['gpt-5.4-codex',    ['low', 'medium', 'high', 'xhigh']],
+  ['gpt-5.3-codex-spark', ['low', 'medium', 'high']],
+  ['gpt-5.3-codex',    ['low', 'medium', 'high']],
+  ['gpt-5.2-codex',    ['low', 'medium', 'high', 'xhigh']],
+  ['gpt-5.1-codex',    ['low', 'medium', 'high']],
+  ['gpt-5-codex',      ['low', 'medium', 'high']],
+];
+
+/**
+ * Resolve the user's reasoning-effort pick against the model's per-family
+ * VALID set. Mirrors getOpenAiReasoningEffort() (electron/llm/modelCapabilities.ts:217).
+ *
+ * Returns the value to emit as `-c model_reasoning_effort="..."`, or undefined
+ * to omit the flag entirely (used when pick is undefined/null/empty).
+ *
+ * Downgrade policy (when the user's pick is NOT in the model's valid set):
+ *  - If the user picked 'none' but the model doesn't accept 'none' → 'low'
+ *    (mirrors the HTTP picker for codex variants which always return 'low').
+ *  - Otherwise → first entry of the valid set with 'none' removed (lowest-
+ *    latency REASONING effort, not the lowest-latency of all values). This
+ *    avoids silently turning an unsupported pick into 'none' on gpt-5.1+
+ *    models where 'none' is valid but means "no reasoning at all" — that
+ *    would be a stealth behavior change for someone who picked 'xhigh'
+ *    and expected a reasoning effort, not zero reasoning.
+ *
+ * Longest-key match wins so 'gpt-5.4-codex' resolves via its entry, not the
+ * generic 'gpt-5' one.
+ */
+export function resolveCodexReasoningEffort(
+  modelId: string,
+  pick?: CodexModelReasoningEffort | string | null,
+): CodexModelReasoningEffort | undefined {
+  if (!pick) return undefined;
+  const id = (modelId || '').toLowerCase();
+  let bestEntry: readonly [string, readonly CodexModelReasoningEffort[]] | null = null;
+  for (const entry of CODEX_MODEL_REASONING_SETS) {
+    if (id.includes(entry[0]) && (!bestEntry || entry[0].length > bestEntry[0].length)) {
+      bestEntry = entry;
+    }
+  }
+  const valid = bestEntry ? bestEntry[1] : (['low', 'medium', 'high'] as const);
+  // Exact match → honour the user's pick.
+  if ((valid as readonly string[]).includes(pick)) return pick as CodexModelReasoningEffort;
+  // Unsupported pick. Pick the lowest-latency REASONING effort (skip 'none').
+  const reasoningOnly = (valid as readonly string[]).filter(v => v !== 'none');
+  const fallback = reasoningOnly[0] || valid[0];
+  return fallback as CodexModelReasoningEffort;
+}
 
 export interface CodexCliConfig {
   enabled: boolean;
@@ -68,8 +145,13 @@ export class CodexCliService {
     if (serviceTier && serviceTier !== 'default') {
       args.push('-c', `service_tier="${serviceTier}"`);
     }
-    if (modelReasoningEffort) {
-      args.push('-c', `model_reasoning_effort="${modelReasoningEffort}"`);
+    // Resolve against the per-model VALID set so a stale saved pick (e.g.
+    // xhigh on gpt-5.3-codex) is silently downgraded to a value the codex
+    // CLI binary actually accepts — otherwise the binary emits a turn.failed
+    // event that our fallback chain swallows into "Let me come back to that".
+    const resolvedEffort = resolveCodexReasoningEffort(model, modelReasoningEffort);
+    if (resolvedEffort) {
+      args.push('-c', `model_reasoning_effort="${resolvedEffort}"`);
     }
     for (const imagePath of imagePaths) {
       if (!imagePath) continue;
@@ -86,13 +168,19 @@ export class CodexCliService {
     const serviceTier = (config.serviceTier && (CODEX_SERVICE_TIERS as readonly string[]).includes(config.serviceTier))
       ? config.serviceTier
       : DEFAULT_CODEX_CLI_CONFIG.serviceTier;
-    const modelReasoningEffort = (config.modelReasoningEffort && (CODEX_MODEL_REASONING_EFFORTS as readonly string[]).includes(config.modelReasoningEffort))
-      ? config.modelReasoningEffort
-      : DEFAULT_CODEX_CLI_CONFIG.modelReasoningEffort;
+    // Pick must be in the union type first; then resolveCodexReasoningEffort
+    // downgrades unsupported values for the chosen model (e.g. xhigh on
+    // gpt-5.3-codex → high) so a stale saved setting can't trigger a 400.
+    let modelReasoningEffort: CodexModelReasoningEffort | undefined;
+    if (config.modelReasoningEffort && (CODEX_MODEL_REASONING_EFFORTS as readonly string[]).includes(config.modelReasoningEffort)) {
+      modelReasoningEffort = config.modelReasoningEffort;
+    }
+    const modelName = (config.model || DEFAULT_CODEX_CLI_CONFIG.model).trim() || DEFAULT_CODEX_CLI_CONFIG.model;
+    modelReasoningEffort = resolveCodexReasoningEffort(modelName, modelReasoningEffort);
     return {
       enabled: !!config.enabled,
       path: (config.path || DEFAULT_CODEX_CLI_CONFIG.path).trim() || DEFAULT_CODEX_CLI_CONFIG.path,
-      model: (config.model || DEFAULT_CODEX_CLI_CONFIG.model).trim() || DEFAULT_CODEX_CLI_CONFIG.model,
+      model: modelName,
       fastModel: (config.fastModel || DEFAULT_CODEX_CLI_CONFIG.fastModel).trim() || DEFAULT_CODEX_CLI_CONFIG.fastModel,
       timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_CODEX_CLI_CONFIG.timeoutMs,
       sandboxMode,
@@ -145,6 +233,40 @@ export class CodexCliService {
     return null;
   }
 
+  // Returns true when `binPath` either is a bare command (relies on $PATH
+  // resolution at spawn time) or exists on disk with the executable bit set.
+  // Used by resolvePathOrAutoDetect to skip the auto-detect retry when the
+  // user has explicitly typed a path that just needs $PATH to find.
+  private static pathLooksResolvable(binPath: string): boolean {
+    if (!binPath || !binPath.includes(path.sep) && !binPath.includes('/')) return true;
+    try {
+      const stat = fs.statSync(binPath);
+      if (!stat.isFile()) return false;
+      if (process.platform === 'win32') return true;
+      // eslint-disable-next-line no-bitwise
+      return (stat.mode & 0o111) !== 0;
+    } catch {
+      return false;
+    }
+  }
+
+  // Pre-spawn path resolution. If `binPath` exists & is executable, return it
+  // as-is. If it's bare (no separator, $PATH-resolved) we can't pre-check,
+  // so return as-is — the spawn will either succeed via $PATH or fail with
+  // ENOENT, which the upstream child.on('error') handler reports. If `binPath`
+  // is an explicit path that doesn't resolve, fall back to autoDetectPath()
+  // so a stale stored path doesn't silently 404 on every chat call.
+  // Returns the path to use (which may equal `binPath`).
+  public static async resolvePathOrAutoDetect(binPath: string): Promise<string> {
+    if (this.pathLooksResolvable(binPath)) return binPath;
+    const detected = this.autoDetectPath();
+    if (detected && detected !== binPath) {
+      console.warn(`[CodexCliService] "${binPath}" not found, retrying with auto-detected "${detected}".`);
+      return detected;
+    }
+    return binPath;
+  }
+
   // Validate the given path; if it ENOENTs and looks bare (no path separator,
   // i.e. depends on $PATH), fall back to auto-detection and validate that.
   // Returns the resolved path on success so callers can persist it.
@@ -184,7 +306,8 @@ export class CodexCliService {
   }
 
   public static async run(path: string, options: CodexCliRunOptions): Promise<string> {
-    const result = await this.collect(path, options);
+    const resolvedPath = await this.resolvePathOrAutoDetect(path);
+    const result = await this.collect(resolvedPath, options);
     const normalized = this.extractText(result.stdout);
     if (normalized) return normalized;
     const codexError = this.extractCodexError(result.stdout);
@@ -194,8 +317,14 @@ export class CodexCliService {
   public static async *stream(path: string, options: CodexCliRunOptions): AsyncGenerator<string, void, unknown> {
     if (options.signal?.aborted) throw new Error('Codex CLI request aborted before start.');
 
+    // If the stored path ENOENTs (user upgraded the codex CLI binary and the
+    // stored path is stale), try autoDetectPath() once before throwing — the
+    // user otherwise sees the canned fallback with no signal that the binary
+    // is missing. Caller is responsible for persisting any new path (the
+    // test-codex-cli IPC handler already does so on success).
+    const resolvedPath = await this.resolvePathOrAutoDetect(path);
     const args = this.buildArgs(options.model, options.imagePaths, options.sandboxMode, options.serviceTier, options.modelReasoningEffort);
-    const child = spawn(path, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(resolvedPath, args, { stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     let lineBuffer = '';
@@ -298,6 +427,20 @@ export class CodexCliService {
       throw failure;
     }
     if (!emitted) {
+      // The streaming loop above (lineBuffer, lines 226-240) holds any final
+      // PARTIAL JSON line in `lineBuffer`. If we re-spit the full stdout here
+      // via extractText, the partial fragment's JSON.parse fails and the
+      // content it carried is silently dropped → empty response → upstream
+      // fallback. Concatenate the tail buffer so the partial fragment is
+      // re-evaluated as a complete line before we throw.
+      const tail = lineBuffer.trim();
+      if (tail) {
+        const fromBuffer = this.extractText(tail);
+        if (fromBuffer) { yield fromBuffer; return; }
+        const combined = stdout + (stdout.endsWith('\n') || !stdout ? '' : '\n') + tail;
+        const fromCombined = this.extractText(combined);
+        if (fromCombined) { yield fromCombined; return; }
+      }
       const normalized = this.extractText(stdout);
       if (normalized) { yield normalized; return; }
       const codexError = this.extractCodexError(stdout);
@@ -308,8 +451,12 @@ export class CodexCliService {
   private static async collect(path: string, options: CodexCliRunOptions): Promise<{ stdout: string; stderr: string }> {
     if (options.signal?.aborted) throw new Error('Codex CLI request aborted before start.');
 
+    // resolvePathOrAutoDetect is also called by run() before reaching here, so
+    // this is mostly a defensive pass-through. Kept for the case where collect
+    // is invoked directly (tests, internal helpers).
+    const resolvedPath = await this.resolvePathOrAutoDetect(path);
     return new Promise((resolve, reject) => {
-      const child = spawn(path, this.buildArgs(options.model, options.imagePaths, options.sandboxMode, options.serviceTier, options.modelReasoningEffort), { stdio: ['pipe', 'pipe', 'pipe'] });
+      const child = spawn(resolvedPath, this.buildArgs(options.model, options.imagePaths, options.sandboxMode, options.serviceTier, options.modelReasoningEffort), { stdio: ['pipe', 'pipe', 'pipe'] });
       let stdout = '';
       let stderr = '';
       let settled = false;

@@ -1395,11 +1395,13 @@ export function initializeIpcHandlers(appState: AppState): void {
           // stall guard (not a wall-clock cap, so long coding answers stream in
           // full). This is the no-134s / no-30s-hang guarantee (Issue 1, P0).
           //
-          // LOCAL PROVIDER: a local Ollama model cold-loads its weights (8-12s for
-          // a 7-9B model) before the first token, so it gets the far longer local
-          // first-useful budget — otherwise every cold local generation aborted to
-          // zero tokens and the user saw the canned fallback line below.
-          const usingLocalLlm = llmHelper.isUsingOllama();
+          // LOCAL PROVIDER (Ollama OR Codex CLI): a local model cold-loads its
+          // weights (8-12s for a 7-9B model) before the first token, so it gets
+          // the far longer local first-useful budget — otherwise every cold
+          // local generation aborted to zero tokens and the user saw the canned
+          // fallback line below. Codex CLI shares the cold-load profile
+          // (subprocess spawn → codex CLI loads the model → first delta).
+          const usingLocalLlm = llmHelper.isUsingOllama() || llmHelper.isUsingCodexCli();
           let manualFirstUseful = false;
           let manualSuperseded = false;
           await raceStreamWithDeadline({
