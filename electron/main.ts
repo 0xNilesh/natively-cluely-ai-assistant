@@ -684,9 +684,22 @@ export class AppState {
             if (sys && MODEL_CATALOG_IDS.has(sys)) modelIds.add(sys);
           }
 
+          // Which model to warm: mic-channel > global (mic is the user's own
+          // voice — most latency-critical). The preloader is single-slot so we
+          // pick the highest-priority cached candidate.
+          const micOverride = settingsManager.get('localWhisperPerChannelEnabled')
+            ? (settingsManager.get('localWhisperModelMic') ?? '')
+            : '';
+          const preloadPriority = [
+            micOverride && MODEL_CATALOG_IDS.has(micOverride) ? micOverride : '',
+            modelId,
+          ].filter(Boolean);
+          const primaryPreloadId = preloadPriority.find(id => isModelCached(id, dtype)) ?? '';
+
+          const { LocalModelDownloadService } = require('./services/LocalModelDownloadService');
           for (const id of modelIds) {
             if (isModelCached(id, dtype)) {
-              if (id === modelId) {
+              if (id === primaryPreloadId) {
                 console.log(`[AppState] Preloading local Whisper model: ${id}`);
                 modelPreloader.preload(id);
               }
@@ -695,8 +708,10 @@ export class AppState {
               // so the user doesn't have to open Settings and click Download.
               console.log(`[AppState] Local Whisper model "${id}" not cached — starting background download`);
               try {
-                const { LocalModelDownloadService } = require('./services/LocalModelDownloadService');
-                LocalModelDownloadService.getInstance().start('whisper', id);
+                const result = LocalModelDownloadService.getInstance().start('whisper', id);
+                if (!result.success && !result.alreadyDownloading) {
+                  console.warn(`[AppState] Auto-download for "${id}" rejected:`, result.error);
+                }
               } catch (dlErr: any) {
                 console.warn(`[AppState] Auto-download for "${id}" failed to start:`, dlErr?.message);
               }

@@ -175,9 +175,27 @@ export class LocalModelDownloadService {
   /**
    * Register a provider. Must be called before `start()` for that provider's
    * models. Idempotent — re-registering with the same name is a no-op.
+   *
+   * Also promotes any `interrupted` entries for this provider that are
+   * actually complete on disk. `rehydrate()` runs in the constructor before
+   * providers are registered, so the promotion check inside rehydrate() is
+   * a no-op (provider not found yet). We redo it here so the UI sees
+   * `complete` instead of a stale `interrupted` badge.
    */
   registerProvider(provider: LocalModelDownloadProvider): void {
     this.opts.providers.set(provider.name, provider);
+    for (const [key, entry] of this.entries) {
+      if (entry.provider !== provider.name || entry.status !== 'interrupted') continue;
+      try {
+        if (provider.isModelCached(entry.modelId)) {
+          this.entries.set(key, { ...entry, status: 'complete', progress: 100 });
+          // Broadcast so any open Settings panel sees the updated badge
+          // without waiting for the next user interaction.
+          queueMicrotask(() => this.broadcastToRenderers(key, this.entries.get(key)!));
+        }
+      } catch { /* best-effort */ }
+    }
+    this.schedulePersistence();
   }
 
   /**
