@@ -30,7 +30,7 @@ export type AnswerType =
   | 'general_meeting_answer'
   // Release 2026-06-06b (real manual-chat log fixes):
   // A request for a project's public link / repo / website. Shares a loaded URL
-  // (open-source/public/user-provided), or says the link isn't loaded — NEVER
+  // (source-available/public/user-provided), or says the link isn't loaded — NEVER
   // refuses with "I can't share that" and NEVER invents a URL.
   | 'project_link_answer'
   // A request for the ACTUAL source code of a loaded project ("a snippet you used
@@ -383,7 +383,7 @@ Be honest about what is and isn't available.`;
 // Release 2026-06-06b — questions ABOUT the product/project itself.
 const PRODUCT_ABOUT_TEMPLATE = `The user is asking about the product/project itself (what kind of app it is, its backend, architecture, or tech).
 
-Ground every concrete claim in the provided project/profile metadata. If the metadata describes it (e.g. "privacy-first, open-source, local RAG, Electron + Rust core, Ollama, SQLite"), you may state those. If a detail is NOT in the loaded context, do not invent it — say "from the loaded project description…" and stay within what's described, or note that a specific detail isn't in your loaded context. Distinguish the desktop app core from any local services and any separately-loaded cloud/API path. Keep it concise and concrete.`;
+Ground every concrete claim in the provided project/profile metadata. If the metadata describes it (e.g. "privacy-first, source-available, local RAG, Electron + Rust core, Ollama, SQLite"), you may state those. If a detail is NOT in the loaded context, do not invent it — say "from the loaded project description…" and stay within what's described, or note that a specific detail isn't in your loaded context. Distinguish the desktop app core from any local services and any separately-loaded cloud/API path. Keep it concise and concrete.`;
 
 const includesAny = (text: string, patterns: RegExp[]): boolean => patterns.some(pattern => pattern.test(text));
 
@@ -631,7 +631,7 @@ const SAFE_PRODUCT_PRIVACY_PATTERNS = [
 
 // ── PROJECT LINK / repo / public URL (release 2026-06-06b) ──
 // "can you give me the link", "share the github repo", "show the website",
-// "it's open source right, share the link". Routes to `project_link_answer`: share
+// "it's source available right, share the link". Routes to `project_link_answer`: share
 // a LOADED url, else say the link isn't loaded — never refuse, never invent.
 const PROJECT_LINK_PATTERNS = [
   /\b(give|share|send|show|drop|paste|provide|get) (me )?(the |a |your )?(git ?hub|gitlab|bitbucket|repo|repository|link|url|website|site|demo link|project link|source link|public link)\b/i,
@@ -643,16 +643,16 @@ const PROJECT_LINK_PATTERNS = [
   // "see the code ON GITHUB" / "find the source ON GITHUB" is asking for the repo.
   /\b(can|could|where) (i|we) (find|see|get|access) (the |your )?(link|repo|repository|github|gitlab|website|site|demo)\b/i,
   /\b(see|find|view|access) (the )?(code|source|repo|project)\b.{0,20}\b(on|at|in|via)\s+(git ?hub|gitlab|the repo)\b/i,
-  // "where can I find the source/repo" — an open-source PROJECT locator → link.
+  // "where can I find the source/repo" — a source-available PROJECT locator → link.
   // EXCLUDES "source code FOR <algorithm>" (a coding ask) via the negative
   // lookahead, and "the code" alone (that's coding). Only bare "the source"/"repo".
   /\bwhere(?:'?s| is| can i (?:find|see)) (the )?(source|repo|repository)\b(?!\s*code\s+(for|of|to))/i,
   /\bopen[- ]?source\b.{0,30}\b(link|repo|github|share|url)\b|\b(link|repo|github|url)\b.{0,30}\bopen[- ]?source\b/i,
-  // "it's an open-source project right [share it]" — the user is angling for the
-  // link. A BARE "is it open source" (no share/link cue) is a product-about
+  // "it's a source-available project right [share it]" — the user is angling for the
+  // link. A BARE "is it source available" (no share/link cue) is a product-about
   // yes/no and is handled by PRODUCT_ABOUT instead, so require a share/right cue.
   /\b(its|it'?s|so its|so it'?s)\s+an?\s+open[- ]?source\b|\bopensource (porject|project)\b|\bopen[- ]?source\b.{0,20}\bright\b/i,
-  /\bwhy (can'?t|cant|wont|won'?t) (you )?share\b/i,    // "why can't you share, it's open source"
+  /\bwhy (can'?t|cant|wont|won'?t) (you )?share\b/i,    // "why can't you share, it's source available"
 ];
 
 // ── ACTUAL SOURCE CODE evidence requests (release 2026-06-06b) ──

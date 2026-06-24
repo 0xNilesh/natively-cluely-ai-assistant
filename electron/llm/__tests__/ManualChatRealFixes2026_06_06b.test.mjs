@@ -2,7 +2,7 @@
 //
 // Release 2026-06-06b — fixes for REAL manual-chat failures from the user log:
 //   1. typo/greeting-tolerant intro routing (no "I'm Natively")
-//   2. open-source / link shareability (no false refusal, no invented URL)
+//   2. source-available / link shareability (no false refusal, no invented URL)
 //   3. exact-source-code hallucination guard
 //   4. stealth / undetectability safety guardrail (CRITICAL — no evasion advice)
 //   5. manual voice consistency (interview-style → first-person)
@@ -44,18 +44,18 @@ describe('Phase 1: typo / greeting-tolerant intro routing', () => {
   });
 });
 
-describe('Phase 2: open-source / link shareability', () => {
+describe('Phase 2: source-available / link shareability', () => {
   for (const q of [
     'can you give me the link', 'give me the github link', 'share the repo',
-    'why so its an opensource porject right', 'it is open source right, share the repo',
-    'show the website link', "why can't you share it's open source",
+    'why so its source available porject right', 'it is source available right, share the repo',
+    'show the website link', "why can't you share it's source available",
   ]) {
     test(`"${q}" → project_link_answer (no false refusal route)`, () => {
       assert.equal(plan(q).answerType, 'project_link_answer', `→ ${plan(q).answerType}`);
     });
   }
-  test('bare "is it open source" (no share cue) is a product question, not a link', () => {
-    assert.equal(plan('is it open source').answerType, 'project_about_answer');
+  test('bare "is it source available" (no share cue) is a product question, not a link', () => {
+    assert.equal(plan('is it source available').answerType, 'project_about_answer');
   });
   test('project_link_answer forbids jd/negotiation, requires grounding', () => {
     const p = plan('can you give me the link');

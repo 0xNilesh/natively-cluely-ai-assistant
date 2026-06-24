@@ -278,7 +278,7 @@ test('reference context skips empty files and truncates large files with complet
 test('isPremiumKnowledgeInterceptAllowed gates the whole premium intercept by active mode (issue #272)', () => {
   // No active mode — default to allowed so we never regress modes that
   // legitimately use the intercept (looking-for-work, sales, recruiting,
-  // general). The open-source side cannot inspect the premium tracker, so
+  // general). The source-available side cannot inspect the premium tracker, so
   // we fail open when nothing is selected.
   installDb(makeDb());
   assert.equal(

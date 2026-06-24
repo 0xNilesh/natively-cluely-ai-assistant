@@ -382,7 +382,7 @@ export const AboutSection: React.FC<AboutSectionProps> = () => {
                             </div>
                             <div>
                                 <h5 className="text-sm font-bold text-text-primary">Support Development</h5>
-                                <p className="text-xs text-text-secondary mt-0.5">Natively is independent open-source software.</p>
+                                <p className="text-xs text-text-secondary mt-0.5">Natively is independent source-available software.</p>
                             </div>
                         </div>
                         <a

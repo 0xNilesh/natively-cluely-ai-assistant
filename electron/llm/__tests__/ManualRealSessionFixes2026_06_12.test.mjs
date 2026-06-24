@@ -8,7 +8,7 @@
 //       explicit structure requests; WTA always speakable.
 //   P5  bullet/artifact cleanup: no orphan "*" lines.
 //   P6  sales voice: SALES_TEMPLATE seller voice, never assistant identity.
-//   P7  built-with / open-source routing to project_about (regression pins).
+//   P7  built-with / source-available routing to project_about (regression pins).
 //   +   formatIntro variants, project grammar fix, two-item list grammar.
 
 import { test, describe } from 'node:test';
@@ -191,14 +191,14 @@ describe('P6: sales template voice', () => {
     });
 });
 
-// ── P7: built-with / open-source routing pins ───────────────────────────────
+// ── P7: built-with / source-available routing pins ───────────────────────────────
 describe('P7: project tech-stack/source routing', () => {
     const route = (q) => planAnswer({ question: q, source: 'manual_input', speakerPerspective: 'user' }).answerType;
     test('"what is Natively built with?" → project_about (tech stack), never source-evidence refusal', () => {
         assert.equal(route('what is Natively built with?'), 'project_about_answer');
     });
-    test('"is Natively open source?" → project_about', () => {
-        assert.equal(route('is Natively open source?'), 'project_about_answer');
+    test('"is Natively source available?" → project_about', () => {
+        assert.equal(route('is Natively source available?'), 'project_about_answer');
     });
     test('"show me the exact source code" → source_code_evidence (refuse unless loaded)', () => {
         assert.equal(route('show me the exact source code of Natively'), 'source_code_evidence_answer');

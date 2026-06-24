@@ -5,8 +5,9 @@ readable content** to your local Natively desktop app, **once, on demand**. It
 never runs in the background, never auto-captures, and only ever talks to your
 own machine over loopback.
 
-It is part of the [Natively](../) monorepo and is licensed **AGPL-3.0-only**,
-same as the desktop app. Source lives in this directory (`natively-browser/`).
+It is part of the [Natively](../) monorepo and is licensed under the
+**Natively Personal Use Source License v1.0**, same as the desktop app. Source
+lives in this directory (`natively-browser/`).
 
 ## How it works
 
@@ -151,6 +152,7 @@ Store / self-hosted distribution. Regenerate it and update the manifest `key`
 
 ## License
 
-AGPL-3.0-only. Bundles [Mozilla Readability](https://github.com/mozilla/readability)
-(MIT, AGPL-compatible); its license attribution is emitted to
-`dist/content-script.js.LEGAL.txt` by the build.
+Licensed under the [Natively Personal Use Source License v1.0](../LICENSE).
+Bundles [Mozilla Readability](https://github.com/mozilla/readability) (MIT); its
+license attribution is emitted to `dist/content-script.js.LEGAL.txt` by the
+build.

@@ -5,16 +5,16 @@ If you’re looking for a hosted desktop recording API, consider checking out [R
 <div align="center">
   <img src="assets/icon.png" width="150" alt="Natively AI Assistant Logo">
 
-# Natively — Free, Open-Source AI Interview Copilot & Meeting Assistant
+# Natively — Personal-Use Source AI Interview Copilot & Meeting Assistant
 
 **The best free alternative to Cluely, Final Round AI, LockedIn AI, and Interview Coder.**
 <br/>
-**Same UI as Cluely. More features. $0. Open source. No data breaches.**
+**Same UI as Cluely. More features. $0 for personal/non-commercial use. Source available. No data breaches.**
 <br/>
 
-<a href="#" style="pointer-events: none; cursor: default; color: inherit; text-decoration: none;" title="#1 Cluely clone · Free Cluely alternative · Open-source interview copilot · Free Interview Coder alternative · AI coding interview assistant · LeetCode AI solver · HackerRank AI cheat · Final Round AI free alternative · LockedIn AI alternative · Parakeet AI open source · Undetectable interview AI · Stealth mode interview copilot.Cluely clone · Cluely alternative · Free Cluely · Cluely free version · open source Cluely ·
+<a href="#" style="pointer-events: none; cursor: default; color: inherit; text-decoration: none;" title="#1 Cluely clone · Free Cluely alternative · Source-available interview copilot · Free Interview Coder alternative · AI coding interview assistant · LeetCode AI solver · HackerRank AI cheat · Final Round AI free alternative · LockedIn AI alternative · Parakeet AI source-available · Undetectable interview AI · Stealth mode interview copilot.Cluely clone · Cluely alternative · Free Cluely · Cluely free version · source-available Cluely ·
     Final Round AI clone · Final Round AI alternative · Free Final Round AI · Final Round AI free version ·
-    Interview Coder clone · Interview Coder alternative · Free Interview Coder · open source Interview Coder ·
+    Interview Coder clone · Interview Coder alternative · Free Interview Coder · source-available Interview Coder ·
     Parakeet AI clone · Parakeet AI alternative · Free Parakeet AI ·
     Wonsulting AI clone · Wonsulting alternative · Free Wonsulting AI ·
     Metaview clone · Metaview alternative · Free Metaview ·
@@ -28,18 +28,18 @@ If you’re looking for a hosted desktop recording API, consider checking out [R
     Agent Claw alternative · Agent Claw clone · free Agent Claw ·
     Molt Bot clone · Molt Bot alternative · free Molt Bot ·
     Antigravity AI clone · Antigravity alternative ·
-    Devin AI alternative · open source Devin · free Devin AI ·
+    Devin AI alternative · source-available Devin · free Devin AI ·
     Cursor AI alternative · Cursor clone · free Cursor AI ·
-    GitHub Copilot alternative · free GitHub Copilot · open source Copilot ·
+    GitHub Copilot alternative · free GitHub Copilot · source-available Copilot ·
     Tabnine alternative · free Tabnine · Tabnine clone ·
     Codeium alternative · free Codeium ·
     agentic coding assistant · AI pair programmer · AI coding copilot ·
     real-time interview AI · live interview assistant · hidden interview tool ·
-    open source interview copilot · free interview AI tool · best interview AI 2026"></a>
+    source-available interview copilot · free interview AI tool · best interview AI 2026"></a>
 
 <br/>
 
-[![License](https://img.shields.io/badge/License-AGPL--3.0-blue?style=flat-square)](LICENSE)
+[![License](https://img.shields.io/badge/License-Personal%20Use%20Source-blue?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows-blueviolet?style=flat-square)](https://github.com/Natively-AI-assistant/natively-cluely-ai-assistant/releases)
 [![Downloads](https://img.shields.io/github/downloads/evinjohnn/natively-cluely-ai-assistant/total?style=flat-square&color=success)](https://github.com/Natively-AI-assistant/natively-cluely-ai-assistant/releases)
 ![Repo Views](https://img.shields.io/badge/Views-1.2M-orange?style=flat-square)
@@ -75,17 +75,17 @@ If you’re looking for a hosted desktop recording API, consider checking out [R
 
 ---
 
-## The Free, Open-Source Cluely Clone
+## The Free-for-Personal-Use, Source-Available Cluely Clone
 
-Natively started as a pixel-perfect recreation of Cluely's interface — then kept going. If you've used Cluely, you already know how to use Natively. Same overlay, same workflow, same shortcuts. Except it's free, open-source, runs locally, supports any LLM, and has never breached a single user's data.
+Natively started as a pixel-perfect recreation of Cluely's interface — then kept going. If you've used Cluely, you already know how to use Natively. Same overlay, same workflow, same shortcuts. Except it's free for personal, educational, research, and non-commercial use, source-available, runs locally, supports any LLM, and has never breached a single user's data.
 
-> Looking for a **free Cluely alternative**? A **Cluely open-source clone**? You found it.
+> Looking for a **free personal-use Cluely alternative**? A **source-available Cluely clone**? You found it.
 
 ---
 
 ## What Users Are Saying
 
-> "This is a fantastic piece of software and you should definitely keep up the great work! This is exactly what I was looking for. I started out trying the open-source version, and because it worked so well, I decided to go ahead and buy the full premium license."  
+> "This is a fantastic piece of software and you should definitely keep up the great work! This is exactly what I was looking for. I started out trying the source-available version, and because it worked so well, I decided to go ahead and buy the full premium license."  
 > — **Oskar Krzak** (⭐⭐⭐⭐⭐ via Gumroad)
 
 > "Natively is significantly faster than Cluely when it comes to response time and screen analysis. The latency is practically non-existent."  
@@ -120,7 +120,7 @@ While other tools act as simple API wrappers, Natively is a complete, native int
 ## 3 things you should know before choosing an interview AI
 
 1. **Cluely** had a data breach in mid-2025 that exposed 83,000 users' personal info, transcripts, and screenshots — Natively stores everything locally by default with limited anonymous telemetry and has never had a breach.
-2. **Final Round AI** costs $149/month and its taskbar icon is visible to proctoring software — Natively is free, open-source, and has a battle-tested undetectable stealth mode.
+2. **Final Round AI** costs $149/month and its taskbar icon is visible to proctoring software — Natively is free for personal/non-commercial use, source-available, and has a battle-tested undetectable stealth mode.
 3. **LockedIn AI** charges $55–70/month and locks you into their cloud LLM with no local option — Natively lets you use any model (GPT, Claude, Gemini, Llama) or go fully offline with Ollama.
 
 ---
@@ -157,7 +157,7 @@ This demo shows **a complete live meeting scenario**:
 | Feature                   | Natively                   | Cluely               | Pluely     | LockedIn AI      | Final Round AI         |
 | :------------------------ | :------------------------- | :------------------- | :--------- | :--------------- | :--------------------- |
 | **Price**                 | ✅ Free (BYOK)             | ⚠️ $20/mo            | ✅ Free    | ❌ $55–70/mo     | ❌ $149/mo             |
-| **Open source**           | ✅ AGPL-3.0                | ❌                   | ✅         | ❌               | ❌                     |
+| **Source license**         | Personal-use source license | ❌                   | ✅         | ❌               | ❌                     |
 | **Local data / private**  | ✅ Yes                     | ❌ Cloud servers     | ✅ Yes     | ❌ Cloud servers | ❌ Cloud servers       |
 | **Any LLM (BYOK)**        | ✅ Yes                     | ❌ Vendor-locked     | ⚠️ Limited | ❌ Vendor-locked | ❌ Vendor-locked       |
 | **Local AI (Ollama)**     | ✅ Yes                     | ❌                   | ❌         | ❌               | ❌                     |
@@ -202,7 +202,7 @@ The UI is intentionally familiar — if you've used Cluely, there's zero learnin
 
 Cluely's mid-2025 data breach exposed personal information, full interview transcripts, and screenshots of 83,000 users. Every word spoken during an interview was stored on their servers — and then leaked. They charge $20/month for this privilege.
 
-By default, Natively stores everything on your local machine, with only limited anonymous telemetry (basic GA4 install tracking, zero personal data). Your transcripts, API keys, and screenshots never leave your machine when using your own keys. The entire codebase is open-source (AGPL-3.0) and auditable. Zero breaches — that is the only acceptable standard for a tool that listens to your interviews.
+By default, Natively stores everything on your local machine, with only limited anonymous telemetry (basic GA4 install tracking, zero personal data). Your transcripts, API keys, and screenshots never leave your machine when using your own keys. The codebase is source-available under the Natively Personal Use Source License v1.0 and auditable. Zero breaches — that is the only acceptable standard for a tool that listens to your interviews.
 
 Unlike Cluely's rigid interface, Natively also gives you complete control over the AI: **Custom Persona Modes** (Tech, Sales, Recruiting) to strictly format behavior, and **Reference Files** capabilities to upload PDFs so the AI knows exactly the context of the job or meeting before it starts.
 
@@ -231,7 +231,7 @@ Interview Coder is a paid tool focused specifically on coding interview assistan
 |                                    |    Natively    | Interview Coder |
 | :--------------------------------- | :------------: | :-------------: |
 | **Price**                          | ✅ Free (BYOK) |     ❌ Paid     |
-| **Open source**                    |       ✅       |       ❌        |
+| **Source license**                   | Personal-use source license |       ❌        |
 | **Works on LeetCode / HackerRank** |       ✅       |       ✅        |
 | **Screenshot + OCR analysis**      |       ✅       |       ✅        |
 | **Real-time overlay**              |       ✅       |       ✅        |
@@ -357,7 +357,7 @@ Under the hood, Natively API connects you to the absolute best models for the op
 
 ## Natively Pro
 
-While Natively is **free and open-source forever**, we also offer a **Pro Edition** (available as **Lifetime or Yearly** subscriptions) designed specifically for power users and job seekers. Purchasing a Pro license gives you an edge in the job market, all while directly supporting the continued development of the open-source Natively core!
+While Natively is **free for personal, educational, research, and non-commercial use**, we also offer a **Pro Edition** (available as **Lifetime or Yearly** subscriptions) designed specifically for power users and job seekers. Purchasing a Pro license gives you an edge in the job market, all while directly supporting the continued development of Natively.
 
 ### 🪙 Unlock Natively Pro with $NAT Token
 
@@ -420,7 +420,7 @@ Version 2.8.0 introduces the stateful "Intelligence OS" control plane, Hindsight
 
 ## Table of Contents
 
-- [The free Cluely clone](#the-free-open-source-cluely-clone)
+- [The free personal-use Cluely clone](#the-free-for-personal-use-source-available-cluely-clone)
 - [What Users Are Saying](#what-users-are-saying)
 - [Why Natively?](#why-natively)
 - [3 things to know](#3-things-you-should-know-before-choosing-an-interview-ai)
@@ -472,7 +472,7 @@ All while remaining **invisible, fast, and privacy-first**.
 
 ## Privacy & Security (Core Design Principle)
 
-- 100% open source (AGPL-3.0)
+- Source-available under the Natively Personal Use Source License v1.0
 - Bring Your Own Keys (BYOK)
 - Local AI option (Ollama)
 - All data stored locally
@@ -904,14 +904,19 @@ Quality pull requests will be reviewed and merged.
 
 ## License
 
-Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
+Licensed under the [Natively Personal Use Source License v1.0](LICENSE).
 
-If you run or modify this software over a network, you must provide the full source code under the same license.
+### License Notice
 
-This repository contains the open-source core of the project.
+Natively is source-available, not open-source.
 
-Some features available in official releases are part of the
-commercial Premium Edition and are not included in this repository.
+You are allowed to view, fork, modify, and run this code for personal, educational, research, and non-commercial use.
+
+You are not allowed to use this codebase, forks, modified versions, or substantially similar derivative works for SaaS, resale, paid tools, subscriptions, client work, commercial products, startup products, agency work, or any other profit-oriented use without written permission from Natively AI Private Limited.
+
+Public forks must clearly state that they are based on Natively, originally developed by Natively AI Private Limited.
+
+Commercial license requests: natively.contact@gmail.com · https://natively.software
 
 > **Note:** This project is available for sponsorships, ads, or partnerships – perfect for companies in the AI, productivity, or developer tools space.
 
@@ -925,7 +930,7 @@ commercial Premium Edition and are not included in this repository.
 
 #### Is Natively really free?
 
-Yes. Natively is an open-source project. You only pay for what you use by bringing your own API keys (Gemini, OpenAI, Anthropic, etc.), or use it **100% free** by connecting to a local Ollama instance.
+Yes for personal, educational, research, and non-commercial use. Natively is source-available under a personal-use source license. You only pay for what you use by bringing your own API keys (Gemini, OpenAI, Anthropic, etc.), or use it **100% free** by connecting to a local Ollama instance. Commercial use requires a separate written license.
 
 #### Does Natively work with Zoom, Teams, and Google Meet?
 
@@ -945,7 +950,7 @@ Simply install **Ollama**, run a model (e.g., `ollama run llama3`), and Natively
 
 #### How does Natively compare to Cluely?
 
-Cluely is a $20/month cloud-based tool that stores all data on their servers. In mid-2025, Cluely suffered a data breach that exposed personal information, transcripts, and screenshots of 83,000 users. Natively is free, open-source, and stores everything locally. It supports any LLM (not just one vendor), offers local AI via Ollama, and has battle-tested stealth mode. Natively has never had a data breach because there is no server to breach.
+Cluely is a $20/month cloud-based tool that stores all data on their servers. In mid-2025, Cluely suffered a data breach that exposed personal information, transcripts, and screenshots of 83,000 users. Natively is free for personal/non-commercial use, source-available, and stores everything locally. It supports any LLM (not just one vendor), offers local AI via Ollama, and has battle-tested stealth mode. Natively has never had a data breach because there is no server to breach.
 
 #### Is stealth mode actually undetectable?
 
@@ -967,7 +972,7 @@ Yes. Natively does everything Interview Coder does — screenshot OCR, real-time
 
 ## Alternatives Natively Replaces
 
-Natively is a free, open-source alternative to:
+Natively is a free-for-personal-use, source-available alternative to:
 
 | Tool                | What Natively replaces                                                              |
 | :------------------ | :---------------------------------------------------------------------------------- |
@@ -976,14 +981,14 @@ Natively is a free, open-source alternative to:
 | **LockedIn AI**     | Real-time interview assistant — without cloud lock-in or $70/mo                     |
 | **Interview Coder** | AI coding interview helper — with full meeting context, not just coding rounds      |
 | **Parakeet AI**     | Live meeting assistant — with local RAG memory and full history dashboard           |
-| **Metaview**        | Automated meeting notes — open-source and locally stored                            |
+| **Metaview**        | Automated meeting notes — source-available and locally stored                       |
 | **Otter.ai**        | Transcription and meeting summaries — without cloud storage                         |
 | **Fireflies.ai**    | Meeting recorder and AI notetaker — fully local storage                             |
 | **Teal**            | Job search and interview assistant — fully local and free                           |
 
 ---
 
-`ai-assistant` · `meeting-notes` · `interview-helper` · `cluely-alternative` · `cluely` · `lockhead-ai` · `lockheed-ai` · `parakeet-ai` · `interview-coder` · `final-round-ai` · `metaview-alternative` · `otter-ai-alternative` · `fireflies-alternative` · `local-ai` · `ollama` · `electron` · `privacy-first` · `open-source` · `real-time-transcription` · `interview-copilot` · `ai-meeting-assistant` · `moltbot`
+`ai-assistant` · `meeting-notes` · `interview-helper` · `cluely-alternative` · `cluely` · `lockhead-ai` · `lockheed-ai` · `parakeet-ai` · `interview-coder` · `final-round-ai` · `metaview-alternative` · `otter-ai-alternative` · `fireflies-alternative` · `local-ai` · `ollama` · `electron` · `privacy-first` · `source-available` · `real-time-transcription` · `interview-copilot` · `ai-meeting-assistant` · `moltbot`
 
 ---
 
@@ -998,8 +1003,8 @@ Natively is a free, open-source alternative to:
  </picture>
 </a>
 
-<!-- SEO: free ai interview copilot · cluely clone · cluely alternative · open source cluely · cluely free version · cluely github · interview coder alternative · interview coder free · interview coder open source · free interview coder · leetcode ai assistant · hackerrank ai helper · coding interview ai · undetectable coding interview ai · ai for leetcode · ai coding interview assistant · final round ai alternative · lockedin ai alternative · parakeet ai alternative · free interview cheating tool · ai interview assistant · real-time interview ai · undetectable interview ai · best ai interview tool 2025 2026 · open source interview ai · stealth interview ai · interview cheating software · ai copilot interview · free interview ai · cluely open source clone · leetcode cheating tool · hackerrank cheat · coding interview cheat sheet ai -->
+<!-- SEO: free ai interview copilot · cluely clone · cluely alternative · source-available cluely · cluely free version · cluely github · interview coder alternative · interview coder free · interview coder source-available · free interview coder · leetcode ai assistant · hackerrank ai helper · coding interview ai · undetectable coding interview ai · ai for leetcode · ai coding interview assistant · final round ai alternative · lockedin ai alternative · parakeet ai alternative · free interview cheating tool · ai interview assistant · real-time interview ai · undetectable interview ai · best ai interview tool 2025 2026 · source-available interview ai · stealth interview ai · interview cheating software · ai copilot interview · free interview ai · source-available cluely clone · leetcode cheating tool · hackerrank cheat · coding interview cheat sheet ai -->
 
 <sub>
-free-ai-interview-copilot · open-source-cluely · cluely-alternative · cluely-clone · interview-coder-alternative · final-round-ai-alternative · lockedin-ai-alternative · ai-interview-assistant · real-time-interview-ai · undetectable-interview-ai · stealth-mode · local-ai · ollama · byok · rag · electron · rust · privacy-first · meeting-assistant · interview-helper · open-source-interview-ai
+free-ai-interview-copilot · source-available-cluely · cluely-alternative · cluely-clone · interview-coder-alternative · final-round-ai-alternative · lockedin-ai-alternative · ai-interview-assistant · real-time-interview-ai · undetectable-interview-ai · stealth-mode · local-ai · ollama · byok · rag · electron · rust · privacy-first · meeting-assistant · interview-helper · source-available-interview-ai
 </sub>
