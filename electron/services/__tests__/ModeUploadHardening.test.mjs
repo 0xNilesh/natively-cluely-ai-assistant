@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SOURCE = fs.readFileSync(path.resolve(__dirname, '../../ipcHandlers.ts'), 'utf8');
+const BUILD_SCRIPT = fs.readFileSync(path.resolve(__dirname, '../../../scripts/build-electron.js'), 'utf8');
 
 function handlerBody() {
   const start = findSafeHandle(SOURCE, 'modes:upload-reference-file');
@@ -31,11 +32,96 @@ describe('FIX-009: modes:upload-reference-file hardening', () => {
 
   test('declares an explicit server-side ALLOWED_EXTENSIONS allow-list', () => {
     assert.ok(body.includes('ALLOWED_EXTENSIONS'), 'Allow-list must be declared');
-    // Must include the plain-text formats the test plan promises (txt md json
-    // csv xml html) plus the parser-backed binary formats (pdf docx doc).
-    for (const ext of ['.txt', '.md', '.json', '.csv', '.xml', '.html', '.pdf', '.docx', '.doc']) {
+    // Must include every supported format. Plain-text family (txt md markdown
+    // json csv tsv xml html htm log) plus the parser-backed binary formats
+    // (pdf docx). Note: legacy .doc is intentionally EXCLUDED — see the
+    // dedicated "removes legacy .doc" test below.
+    for (const ext of [
+      '.txt',
+      '.md',
+      '.markdown',
+      '.json',
+      '.csv',
+      '.tsv',
+      '.xml',
+      '.html',
+      '.htm',
+      '.log',
+      '.pdf',
+      '.docx',
+    ]) {
       assert.ok(body.includes(`'${ext}'`), `Allow-list must contain ${ext}`);
     }
+  });
+
+  // Regression: legacy Word .doc (binary CFB format) used to be in the
+  // allow-list. mammoth@1.x is a .docx-only parser and would throw `unzip`
+  // errors on real .doc files, surfacing the misleading "PDF may be corrupt"
+  // message. The handler now removes .doc from the allow-list entirely and
+  // emits a dedicated "convert to .docx" error so users know the exact fix.
+  test('removes legacy .doc from allow-list — mammoth cannot read CFB', () => {
+    // The literal "'.doc'" entry must NOT appear in the ALLOWED_EXTENSIONS
+    // Set. The .docx literal ('.docx') is fine — it's a different prefix.
+    // We anchor on the comma-newline-whitespace pattern Set entries use.
+    assert.ok(
+      !/,\s*'\.doc'\s*,/.test(body) && !/'\.doc'\s*\]/.test(body) && !/'\.doc',/.test(body),
+      "Legacy .doc must not appear in the ALLOWED_EXTENSIONS Set (mammoth only handles .docx)",
+    );
+    // The handler must still special-case .doc with a friendly error so
+    // users who pick a .doc file via the "All Files" filter get an
+    // actionable message instead of "unsupported file type".
+    assert.ok(
+      /Save As \.docx/.test(body) || /Save as \.docx/.test(body) || /convert.*\.docx/i.test(body),
+      '.doc special-case error must instruct users to convert to .docx',
+    );
+    // The mammoth branch must only match .docx, not .doc — a guard
+    // against future regressions that re-add .doc to the parser dispatch.
+    assert.ok(
+      /else if \(ext === '\.docx'\)/.test(body),
+      'mammoth branch must match .docx only (not .doc)',
+    );
+    assert.ok(
+      !/ext === '\.docx' \|\| ext === '\.doc'/.test(body),
+      'mammoth branch must NOT also match .doc',
+    );
+  });
+
+  // Regression: the dialog filter MUST stay in sync with the allow-list, or
+  // users have to switch to "All Files" to pick any extension that's in the
+  // allow-list but missing from the filter. Previously the filter listed 9
+  // of the 12 allow-list entries — missing .markdown, .tsv, .log, .htm.
+  test('dialog filter lists every allow-list extension', () => {
+    // Find the showOpenDialog call and assert the filter covers all 12
+    // extensions. Match the entire filter `extensions: [ ... ]` array.
+    const filterMatch = body.match(/filters:\s*\[\s*\{[\s\S]*?extensions:\s*\[([\s\S]*?)\]/);
+    assert.ok(filterMatch, 'showOpenDialog must declare a filter with an extensions array');
+    const filterList = filterMatch[1];
+    const required = [
+      'txt',
+      'md',
+      'markdown',
+      'json',
+      'csv',
+      'tsv',
+      'xml',
+      'html',
+      'htm',
+      'log',
+      'pdf',
+      'docx',
+    ];
+    for (const ext of required) {
+      // Filter entries are bare strings (no leading dot), single-quoted.
+      assert.ok(
+        filterList.includes(`'${ext}'`),
+        `Dialog filter must include '${ext}' (otherwise users have to switch to "All Files")`,
+      );
+    }
+    // And the filter must NOT include 'doc' (legacy, removed).
+    assert.ok(
+      !/['"]doc['"]/.test(filterList),
+      "Dialog filter must NOT include 'doc' (legacy, removed from allow-list)",
+    );
   });
 
   test('declares a size cap (MAX_FILE_BYTES) and pre-flight checks lstat size + isFile', () => {
@@ -99,5 +185,89 @@ describe('FIX-009: modes:upload-reference-file hardening', () => {
     const showDialogIdx = body.indexOf('showOpenDialog');
     assert.ok(gateIdx >= 0 && showDialogIdx >= 0);
     assert.ok(gateIdx < showDialogIdx, 'Pro gate must run before opening the file dialog');
+  });
+
+  // Regression for "modes:upload-reference-file" PDF-parse "Setting up fake
+  // worker failed" error AND for the secondary "DOMMatrix is not defined"
+  // throw at pdfjs-dist module-init time. pdf-parse@2.x wraps
+  // pdfjs-dist@5.4.296's legacy build, which:
+  //   (a) defaults GlobalWorkerOptions.workerSrc to
+  //       `new URL("./pdf.worker.mjs", import.meta.url)` — broken under
+  //       esbuild because import.meta.url resolves to the bundle path
+  //       dist-electron/electron/main.js, where the worker file does not
+  //       exist. The fallback fake-worker import then fails and the user
+  //       sees the misleading "PDF may be corrupt / password-protected"
+  //       message.
+  //   (b) runs a `if (isNodeJS) { ... }` polyfill block at module-init
+  //       that calls `createRequire(import.meta.url)` to load
+  //       `@napi-rs/canvas`. esbuild's CJS bundle sets `import_meta = {}`,
+  //       so createRequire(undefined) throws, the canvas polyfill never
+  //       runs, and `new DOMMatrix()` later throws
+  //       "DOMMatrix is not a constructor".
+  //
+  // We assert against the full SOURCE (not the handler slice) because the
+  // pin lives in a module-scope helper (`pinPdfjsWorkerSrcOnce`) defined
+  // outside the handler block — sliceSafeHandleBlock intentionally excludes
+  // top-level declarations.
+  test('PDF branch pins pdfjs-dist workerSrc before constructing PDFParse', () => {
+    // 1. The source MUST mention pdfjs-dist (the underlying engine).
+    assert.ok(
+      SOURCE.includes("pdfjs-dist"),
+      'Source must reference pdfjs-dist to pin workerSrc before PDFParse construction',
+    );
+    // 2. The pin MUST resolve the real worker file inside node_modules
+    //    (not rely on the broken `new URL("./pdf.worker.mjs", ...)` default).
+    assert.ok(
+      /require\.resolve\(\s*['"]pdfjs-dist[^'"]*pdf\.worker[^'"]*['"]\s*\)/.test(SOURCE),
+      'Pin must require.resolve the pdfjs-dist worker file (not the ./pdf.worker.mjs default)',
+    );
+    // 3. The pin must convert to a file:// URL via pathToFileURL — required
+    //    because the legacy build feeds workerSrc to `new URL(...)` and then
+    //    `import(...)`, both of which need an absolute file:// scheme.
+    assert.ok(
+      /pathToFileURL\(/.test(SOURCE),
+      'Pin must convert the resolved worker path to a file:// URL via pathToFileURL',
+    );
+    // 4. The pin must be written to GlobalWorkerOptions.workerSrc — that's
+    //    the option pdfjs-dist's PDFWorker class reads at runtime.
+    assert.ok(
+      /GlobalWorkerOptions\.workerSrc\s*=/.test(SOURCE),
+      'Pin must assign to pdfjsLib.GlobalWorkerOptions.workerSrc',
+    );
+    // 5. The pin MUST be invoked BEFORE `new PDFParse(...)` is called inside
+    //    the handler — otherwise the broken default workerSrc is already
+    //    cached inside the bundled PDFWorker class and the fix is a no-op.
+    //    The invocation is `pinPdfjsWorkerSrcOnce();` which appears in the
+    //    handler body (within `body`). Match `new PDFParse(` followed by an
+    //    argument — not the bare comment `// new PDFParse(...)`.
+    const handlerPinIdx = body.indexOf('pinPdfjsWorkerSrcOnce()');
+    const parseIdx = body.search(/new PDFParse\(\s*\{/);
+    assert.ok(handlerPinIdx >= 0, 'Handler must call pinPdfjsWorkerSrcOnce()');
+    assert.ok(parseIdx >= 0, 'Handler must still construct PDFParse');
+    assert.ok(handlerPinIdx < parseIdx, 'pinPdfjsWorkerSrcOnce() call must come BEFORE new PDFParse(...)');
+  });
+
+  // The pin helper is a no-op if pdfjs-dist is bundled into main.js, because
+  // esbuild's CJS bundle sets `import_meta = {}` and the bundled
+  // canvas/DOMMatrix polyfill chain throws before GlobalWorkerOptions is even
+  // reachable. Keeping pdfjs-dist + pdf-parse + mammoth as esbuild externals
+  // means they load from real node_modules at runtime, where Node's ESM
+  // loader provides a real import.meta.url and @napi-rs/canvas polyfills the
+  // missing browser globals.
+  test('build:externalizes pdfjs-dist, pdf-parse, mammoth so the pin can run', () => {
+    const externalMatch = BUILD_SCRIPT.match(/external:\s*\[([\s\S]*?)\]/);
+    assert.ok(externalMatch, 'build-electron.js must declare an external list');
+    const externalList = externalMatch[1];
+    for (const pkg of ['pdfjs-dist', 'pdf-parse', 'mammoth']) {
+      // Match either single- or double-quoted strings containing the
+      // package name. Allow both exact and prefix matches (e.g. "pdf-parse"
+      // is fine, "pdf-parse/something" would also pass — but we only need
+      // to assert the bare module name is listed).
+      const re = new RegExp(`['"]${pkg.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}['"]`);
+      assert.ok(
+        re.test(externalList),
+        `build-electron.js externals must include '${pkg}' — otherwise the pdfjs-dist module-init polyfill chain throws "DOMMatrix is not defined" and the workerSrc pin is a no-op`,
+      );
+    }
   });
 });

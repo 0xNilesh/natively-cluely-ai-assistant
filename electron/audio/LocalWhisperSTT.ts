@@ -118,6 +118,14 @@ export class LocalWhisperSTT extends EventEmitter {
     // the next delay; reset to base on a successful dispatch.
     private streamingStallCount = 0;
     private streamingNextDelayMs = 0; // set in constructor from streamingIntervalBaseMs
+    // Watchdog: if the worker takes longer than this on an in-flight streaming
+    // task we assume it's stuck (hypothesis: GPU lock, deadlock, dead pointer)
+    // and force-clear the in-flight state so the loop can recover. Without
+    // this, a stuck worker permanently pins streamingTaskInFlight=true and
+    // every subsequent tick is a no-op stall (transcription appears to stop
+    // after 3-4 questions once the worker gets wedged).
+    private streamingWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
+    private static readonly STREAMING_WATCHDOG_MS = 30000;
 
     // LocalAgreement-2 state. We hold the last partial transcript, and when
     // the next partial arrives we emit the longest common prefix as the
@@ -328,10 +336,35 @@ export class LocalWhisperSTT extends EventEmitter {
             clearTimeout(this.streamingTimer);
             this.streamingTimer = null;
         }
+        this.clearStreamingWatchdog();
         this.streamingTaskInFlight = false;
         this.streamingTaskId = null;
         this.streamingStallCount = 0;
         this.streamingNextDelayMs = this.streamingIntervalBaseMs;
+    }
+
+    private armStreamingWatchdog(): void {
+        this.clearStreamingWatchdog();
+        this.streamingWatchdogTimer = setTimeout(() => {
+            this.streamingWatchdogTimer = null;
+            if (!this.streamingTaskInFlight) return;
+            console.warn(`[LocalWhisperSTT] Streaming watchdog fired after ${LocalWhisperSTT.STREAMING_WATCHDOG_MS}ms — worker is stuck, force-clearing in-flight task`);
+            const stuckTaskId = this.streamingTaskId;
+            this.streamingTaskInFlight = false;
+            this.streamingTaskId = null;
+            this.streamingStallCount = 0;
+            this.streamingNextDelayMs = this.streamingIntervalBaseMs;
+            this.emit('error', new Error(
+                `Local Whisper streaming task ${stuckTaskId ?? '?'} did not return within ${LocalWhisperSTT.STREAMING_WATCHDOG_MS}ms — worker likely stuck, unblocking next tick.`
+            ));
+        }, LocalWhisperSTT.STREAMING_WATCHDOG_MS);
+    }
+
+    private clearStreamingWatchdog(): void {
+        if (this.streamingWatchdogTimer) {
+            clearTimeout(this.streamingWatchdogTimer);
+            this.streamingWatchdogTimer = null;
+        }
     }
 
     private streamingTick(): void {
@@ -359,6 +392,7 @@ export class LocalWhisperSTT extends EventEmitter {
         const taskId = `s${++this.taskCounter}`;
         this.streamingTaskId = taskId;
         const copy = open.samples.slice();
+        this.armStreamingWatchdog();
         this.worker.postMessage(
             { type: 'transcribe', taskId, audio: copy, language: this.language, streaming: true },
             [copy.buffer]
@@ -385,6 +419,7 @@ export class LocalWhisperSTT extends EventEmitter {
      * emit only the *new* committed text as an interim transcript.
      */
     private handleStreamingPartial(text: string): void {
+        this.clearStreamingWatchdog();
         this.streamingTaskInFlight = false;
         // Worker just became free → recover from any backoff state so the
         // next dispatch fires at the base interval instead of waiting out
@@ -505,6 +540,7 @@ export class LocalWhisperSTT extends EventEmitter {
         // Invalidate any in-flight streaming task so its late `partial`
         // response is dropped by the taskId guard below instead of mutating
         // the next segment's agreement baseline.
+        this.clearStreamingWatchdog();
         this.streamingTaskId = null;
     }
 
@@ -516,6 +552,7 @@ export class LocalWhisperSTT extends EventEmitter {
         // A final pass closes the streaming window — clear agreement state so
         // the next segment starts clean.
         this.resetAgreementState();
+        this.clearStreamingWatchdog();
         this.streamingTaskInFlight = false;
 
         if (!this.workerReady) {
@@ -642,6 +679,13 @@ export class LocalWhisperSTT extends EventEmitter {
         });
 
         this.worker.on('error', (err) => {
+            // Reset all in-flight streaming state so a dead worker can never
+            // permanently pin streamingTaskInFlight=true (which would freeze
+            // the loop — symptom: transcription stops after 3-4 questions).
+            this.clearStreamingWatchdog();
+            this.streamingTaskInFlight = false;
+            this.streamingTaskId = null;
+            this.workerReady = false;
             const isOnnxSymbolError = err.message.includes('Symbol not found')
                 || err.message.includes('to_chars')
                 || err.message.includes('libonnxruntime');
@@ -651,6 +695,24 @@ export class LocalWhisperSTT extends EventEmitter {
                 ));
             } else {
                 this.emit('error', err);
+            }
+        });
+
+        // 'exit' fires whenever the worker terminates (voluntarily or not),
+        // including the 'error' path above. If the worker is gone, the
+        // streaming loop must be unblocked — otherwise streamingTaskInFlight
+        // stays true and the next tick silently stalls forever.
+        this.worker.on('exit', (code) => {
+            if (code === 0) return; // clean shutdown
+            this.clearStreamingWatchdog();
+            const hadInFlight = this.streamingTaskInFlight;
+            this.streamingTaskInFlight = false;
+            this.streamingTaskId = null;
+            this.workerReady = false;
+            if (hadInFlight) {
+                this.emit('error', new Error(
+                    `Local Whisper worker exited unexpectedly (code=${code}) — transcription stream has been unblocked.`
+                ));
             }
         });
     }

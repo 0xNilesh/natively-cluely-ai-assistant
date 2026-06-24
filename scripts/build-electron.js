@@ -49,7 +49,30 @@ build({
   target: 'node20',
   format: 'cjs',          // Electron loads package.json main as CommonJS in this repo
                           // (package.json has no "type": "module").
-  external: ['electron', 'better-sqlite3', 'keytar', 'sqlite-vec', '@vectorize-io/hindsight-client'],
+  external: [
+    'electron',
+    'better-sqlite3',
+    'keytar',
+    'sqlite-vec',
+    '@vectorize-io/hindsight-client',
+    // Heavy native ESM modules with `import.meta.url`-dependent init. Keeping
+    // them external lets Node's loader give them a real `import.meta.url`,
+    // which the bundled version can't (esbuild's CJS target sets
+    // `import_meta = {}`). pdfjs-dist's legacy build runs a canvas/DOMMatrix
+    // polyfill block at module-init that uses
+    // `createRequire(import.meta.url)` to load `@napi-rs/canvas`; the
+    // bundled version breaks this and `new DOMMatrix()` then throws
+    // "DOMMatrix is not a constructor" at line 15620 (`const SCALE_MATRIX
+    // = new DOMMatrix();`). The bundling also breaks pdf-parse@2.x's
+    // fake-worker bootstrap (workerSrc resolves to a non-existent
+    // dist-electron/electron/pdf.worker.mjs). Externalizing keeps them
+    // loadable from node_modules at runtime, where the real polyfill chain
+    // works and our pinPdfjsWorkerSrcOnce() helper can resolve the real
+    // worker file.
+    'pdfjs-dist',
+    'pdf-parse',
+    'mammoth',
+  ],
   sourcemap: true,
   jsx: 'automatic',
   loader: {

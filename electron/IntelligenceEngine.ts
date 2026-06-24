@@ -666,7 +666,7 @@ export class IntelligenceEngine extends EventEmitter {
      * Manual trigger - uses clean transcript pipeline for question inference
      * NEVER returns null - always provides a usable response
      */
-    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string }): Promise<string | null> {
+    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean }): Promise<string | null> {
         const now = Date.now();
         // Intelligence OS observe-only trace (Phase 1). Zero-cost NO-OP unless
         // intelligence_trace_enabled is on. Committed at the primary final-answer emit
@@ -676,6 +676,18 @@ export class IntelligenceEngine extends EventEmitter {
         const wtaTrace = beginTrace(typeof question === 'string' ? question : '');
         const isSpeculative = options?.speculative === true;
         const skipCooldown = options?.skipCooldown === true;
+        const forceFresh = options?.forceFresh === true;
+
+        // Manual user action (button press / hotkey) MUST start from a clean
+        // speculativeText slate. The previous answer arriving on a manual press
+        // was traced to the Jaccard-gated reuse in handleSuggestionTrigger —
+        // but defense in depth here: if a fresh manual press races with a
+        // speculative stream landing, clear the cache so the new run's
+        // emit('suggested_answer', …) can't be elided by a later gate check.
+        if (forceFresh && !isSpeculative) {
+            this.speculativeText = null;
+            this.speculativeTextExpiry = Infinity;
+        }
 
         // Cooldown bypass: explicit images (user intent), speculative pre-fetch, or
         // explicit skip (manual hotkey/button press, tests). The cooldown only

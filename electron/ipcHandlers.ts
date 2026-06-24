@@ -5,6 +5,7 @@ import { app, BrowserWindow, dialog, ipcMain, shell, systemPreferences } from 'e
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { pathToFileURL, fileURLToPath } from 'url';
 import { AudioDevices } from './audio/AudioDevices';
 import { DatabaseManager } from './db/DatabaseManager'; // Import Database Manager
 import { AppState } from './main';
@@ -33,6 +34,67 @@ import { SearchOrchestrator, type SearchCandidate } from './intelligence/SearchO
 import { CHAT_MODE_PROMPT } from './llm/prompts';
 import { isAssistantIdentityQuestion, profileFactsReady } from './llm/manualProfileIntelligence';
 import { buildManualProfileBackendAnswer } from './llm/profileAnswerBackend';
+
+// Module-scope: pdfjs-dist's legacy build defaults GlobalWorkerOptions.workerSrc
+// to `new URL("./pdf.worker.mjs", import.meta.url)`. Inside esbuild's bundle
+// for the electron main process, `import.meta.url` points at the bundled
+// main.js, so the runtime tries to load
+// `dist-electron/electron/pdf.worker.mjs` — a file that does not exist and
+// is not copied by scripts/build-electron.js. PDFParse then falls through to
+// the fake-worker bootstrap, which fails with
+// "Setting up fake worker failed: Cannot find module '.../pdf.worker.mjs'"
+// and the IPC surfaces that as the misleading "PDF may be corrupt /
+// password-protected" message. Pin workerSrc to the real pdfjs-dist worker
+// before the first PDFParse construction so the bundled PDFWorker resolves
+// the worker file regardless of where the bundle lives on disk. Guarded so
+// the require.resolve + file:// conversion runs at most once per process.
+//
+// REQUIRES `pdfjs-dist` (and `pdf-parse`/`mammoth`) to be listed in the
+// esbuild externals array in scripts/build-electron.js. If those packages
+// are bundled, the canvas/DOMMatrix polyfill chain in pdfjs-dist's module
+// init throws "DOMMatrix is not defined" at line 15620
+// (`const SCALE_MATRIX = new DOMMatrix();`) because esbuild's CJS bundle
+// sets `import_meta = {}`, breaking the
+// `createRequire(import.meta.url)` call that loads @napi-rs/canvas. The
+// ModeUploadHardening.test.mjs suite asserts both halves of the fix.
+let pdfjsWorkerSrcPinned = false;
+function pinPdfjsWorkerSrcOnce(): void {
+  if (pdfjsWorkerSrcPinned) return;
+  try {
+    // pdf-parse@2.x dynamically imports pdfjs-dist at runtime; require here
+    // so the cost is paid only when a PDF is actually uploaded.
+    const pdfjsLib: any = require('pdfjs-dist/legacy/build/pdf.mjs');
+    // The pdfjs-dist legacy build sets `GlobalWorkerOptions.workerSrc` to
+    // `"./pdf.worker.mjs"` (relative string) at class-init time. In the
+    // bundled electron main, pdfjs-dist's class init runs once, then
+    // PDFParse is built from inside `new PDFWorker(...)` — which resolves
+    // the relative string against `import.meta.url` of the bundle
+    // (dist-electron/electron/main.js) and produces a file:// URL that
+    // does not point at a real file. We check both the unset case and the
+    // "resolved to a missing file" case and pin in both situations. A
+    // previously-set working URL (e.g. from a parent app) is left alone.
+    const current = pdfjsLib?.GlobalWorkerOptions?.workerSrc;
+    let currentIsBroken = !current || current === './pdf.worker.mjs';
+    if (current && !currentIsBroken) {
+      try {
+        const candidatePath = current.startsWith('file://') ? fileURLToPath(current) : current;
+        if (!fs.existsSync(candidatePath)) currentIsBroken = true;
+      } catch {
+        currentIsBroken = true;
+      }
+    }
+    if (currentIsBroken) {
+      const workerPath = require.resolve('pdfjs-dist/legacy/build/pdf.worker.mjs');
+      pdfjsLib.GlobalWorkerOptions.workerSrc = pathToFileURL(workerPath).href;
+    }
+    pdfjsWorkerSrcPinned = true;
+  } catch (pinErr) {
+    // Non-fatal — if the pin fails the original fake-worker error path is
+    // still taken (and logged); the upload handler's catch block converts
+    // it to the user-facing message.
+    console.warn('[IPC] pdfjs-dist workerSrc pin failed (PDF parse may fail):', (pinErr as Error)?.message);
+  }
+}
 
 export function initializeIpcHandlers(appState: AppState): void {
   const safeHandle = (
@@ -5151,6 +5213,11 @@ export function initializeIpcHandlers(appState: AppState): void {
             // returning null ("What to answer stops responding after a few messages"
             // P0). The cooldown still throttles the automatic speculative path.
             skipCooldown: true,
+            // The user explicitly pressed the button — they want a fresh answer,
+            // not a cached speculative draft from a previous question (Jaccard
+            // gate can otherwise bleed a previous question's answer into the
+            // current manual press). See runWhatShouldISay.forceFresh branch.
+            forceFresh: true,
             screenContext,
             promptInstruction:
               typeof options?.promptInstruction === 'string'
@@ -6688,7 +6755,12 @@ export function initializeIpcHandlers(appState: AppState): void {
         '.log',
         '.pdf',
         '.docx',
-        '.doc',
+        // NOTE: legacy Word `.doc` (binary CFB, NOT the modern .docx ZIP)
+        // is intentionally NOT in the allow-list. mammoth@1.x only handles
+        // .docx and would throw `unzip` errors on real .doc files, which
+        // the user would see as the misleading "corrupt / password-protected"
+        // message. Removing from the allow-list means the dedicated catch
+        // below produces a friendly "convert to .docx" error instead.
       ]);
       // 10 MiB per file. Anything larger is almost always a database dump,
       // a media file, or a misclicked archive; the modes layer would just
@@ -6699,8 +6771,27 @@ export function initializeIpcHandlers(appState: AppState): void {
         properties: ['openFile'],
         filters: [
           {
+            // MUST stay in sync with ALLOWED_EXTENSIONS above. Users see
+            // the first matching filter as the selected type in the picker;
+            // any extension listed here but missing from ALLOWED_EXTENSIONS
+            // would be silently rejected by the server-side allow-list, and
+            // any extension in ALLOWED_EXTENSIONS but missing from this
+            // filter would force users to switch to "All Files" to pick it.
             name: 'Text & Documents',
-            extensions: ['txt', 'md', 'json', 'csv', 'xml', 'html', 'pdf', 'docx', 'doc'],
+            extensions: [
+              'txt',
+              'md',
+              'markdown',
+              'json',
+              'csv',
+              'tsv',
+              'xml',
+              'html',
+              'htm',
+              'log',
+              'pdf',
+              'docx',
+            ],
           },
           { name: 'All Files', extensions: ['*'] },
         ],
@@ -6713,10 +6804,21 @@ export function initializeIpcHandlers(appState: AppState): void {
       const ext = path.extname(filePath).toLowerCase();
 
       if (!ALLOWED_EXTENSIONS.has(ext)) {
+        // Special-case the legacy .doc extension: it's a real, common file
+        // type that users WILL try to upload, so a generic "unsupported"
+        // message is unhelpful. Give them the exact conversion instruction
+        // instead. mammoth can't read CFB; users need to "Save As .docx"
+        // in Word, Pages, or Google Docs.
+        if (ext === '.doc') {
+          return {
+            success: false,
+            error: `"${fileName}" is a legacy Word .doc file. Reference files only support the modern .docx format. Open the file in Word, Pages, or Google Docs and choose "Save As .docx" (or "File → Download → Word .docx"), then upload the new file.`,
+          };
+        }
         // Friendly, actionable message — UI surfaces this to the user.
         return {
           success: false,
-          error: `Unsupported file type "${ext || 'none'}". Supported formats: TXT, MD, JSON, CSV, XML, HTML, LOG, PDF, DOCX, DOC. For resumes and job descriptions, use Profile Intelligence under Settings instead.`,
+          error: `Unsupported file type "${ext || 'none'}". Supported formats: TXT, MD, MARKDOWN, JSON, CSV, TSV, XML, HTML, HTM, LOG, PDF, DOCX. For resumes and job descriptions, use Profile Intelligence under Settings instead.`,
         };
       }
 

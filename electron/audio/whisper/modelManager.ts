@@ -14,7 +14,13 @@ const MODEL_CATALOG: WhisperModelInfo[] = [
   // ── Distil-Whisper — same architecture as Whisper, distilled to 1/2 layers,
   //     ~6× faster CPU/GPU at near-equivalent WER. English-only.
   { id: 'distil-whisper/distil-small.en',    name: 'Distil Small EN',  sizeMb: 164,  speed: 'very-fast', accuracy: 'high',      multilingual: false, status: 'missing', distilled: true },
-  { id: 'distil-whisper/distil-medium.en',   name: 'Distil Medium EN', sizeMb: 383,  speed: 'fast',      accuracy: 'very-high', multilingual: false, status: 'missing', distilled: true },
+  //   distil-medium.en: declared here as external-data per the safe-side
+  //   audit. The repo's config.json may or may not self-declare; recording
+  //   it forces isModelCached to require the encoder_model.onnx_data
+  //   companion, avoiding the "stub downloads, ORT aborts at file_size"
+  //   failure mode that bit large-v3-turbo. Matches the distil-large-v*
+  //   pattern one block below.
+  { id: 'distil-whisper/distil-medium.en',   name: 'Distil Medium EN', sizeMb: 383,  speed: 'fast',      accuracy: 'very-high', multilingual: false, status: 'missing', distilled: true, externalDataFormat: { 'encoder_model.onnx': true } },
   //   distil-large-v* are external-data checkpoints (fp32 encoder weights in a
   //   sibling encoder_model.onnx_data). Their OWN config.json self-declares it,
   //   so transformers fetches it on download — but we still record the layout
@@ -49,6 +55,15 @@ const MODEL_CATALOG: WhisperModelInfo[] = [
   { id: 'Xenova/whisper-medium.en',  name: 'Medium English',  sizeMb: 1500, speed: 'slow',      accuracy: 'very-high', multilingual: false, status: 'missing', requiresAppleSilicon: true, externalDataFormat: { 'decoder_model_merged.onnx': true } },
   { id: 'Xenova/whisper-medium',     name: 'Medium Multilingual', sizeMb: 1530, speed: 'slow',  accuracy: 'very-high', multilingual: true,  status: 'missing', requiresAppleSilicon: true },
 ];
+
+/**
+ * Set of every modelId declared in MODEL_CATALOG above. Exported for startup
+ * validation gates: a persisted `localWhisperModel` / `localWhisperModelMic` /
+ * `localWhisperModelSystem` setting must be one of these, otherwise the
+ * worker crashes on init and the user is locked out of audio. Callers should
+ * fall back to `Xenova/whisper-tiny.en` (always present) on miss.
+ */
+export const MODEL_CATALOG_IDS: Set<string> = new Set(MODEL_CATALOG.map(m => m.id));
 
 /**
  * Returns the directory where Whisper models are stored.
