@@ -190,6 +190,7 @@ interface ElectronAPI {
   ) => Promise<{ success: boolean; error?: string }>;
   localWhisperGetModels: () => Promise<{ models: any[]; activeModelId: string }>;
   localWhisperSetModel: (modelId: string) => Promise<{ success: boolean }>;
+  localWhisperResetToDefault: () => Promise<{ success: boolean; error?: string; modelId?: string }>;
   localWhisperGetChannelConfig: () => Promise<{
     enabled: boolean;
     micModelId: string;
@@ -1216,6 +1217,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   ) => ipcRenderer.invoke('test-stt-connection', provider, apiKey, region),
   localWhisperGetModels: () => ipcRenderer.invoke('local-whisper-get-models'),
   localWhisperSetModel: (modelId: string) => ipcRenderer.invoke('local-whisper-set-model', modelId),
+  // In-app recovery: resets the active local-Whisper model + per-channel
+  // overrides back to the safe fallback. See electron/ipcHandlers.ts handler.
+  localWhisperResetToDefault: () => ipcRenderer.invoke('local-whisper-reset-to-default'),
   localWhisperGetChannelConfig: () => ipcRenderer.invoke('local-whisper-get-channel-config'),
   localWhisperSetChannelConfig: (cfg: {
     enabled?: boolean;

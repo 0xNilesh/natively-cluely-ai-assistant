@@ -641,10 +641,20 @@ export class AppState {
       try {
         const { CredentialsManager } = require('./services/CredentialsManager');
         if (CredentialsManager.getInstance().getSttProvider() === 'local-whisper') {
-          const { isModelCached } = require('./audio/whisper/modelManager');
+          const { isModelCached, MODEL_CATALOG_IDS } = require('./audio/whisper/modelManager');
           const { modelPreloader } = require('./audio/whisper/modelPreloader');
           const { resolveInferenceConfig } = require('./audio/whisper/inferenceConfig');
-          const modelId = settingsManager.get('localWhisperModel') ?? 'Xenova/whisper-tiny.en';
+          // Startup validation gate: if the persisted modelId isn't in the
+          // catalog (corrupted settings, model retired, fork diverged), reset
+          // to the safest fallback BEFORE preload — otherwise the worker
+          // crashes on init with a confusing "model not found" and the user
+          // is locked out of audio until they manually clear settings.
+          const rawModelId = settingsManager.get('localWhisperModel') ?? 'Xenova/whisper-tiny.en';
+          const modelId = MODEL_CATALOG_IDS.has(rawModelId) ? rawModelId : 'Xenova/whisper-tiny.en';
+          if (modelId !== rawModelId) {
+            console.warn(`[AppState] Persisted localWhisperModel "${rawModelId}" not in catalog — resetting to ${modelId}`);
+            settingsManager.set('localWhisperModel', modelId);
+          }
           const { dtype } = resolveInferenceConfig();
           if (isModelCached(modelId, dtype)) {
             console.log(`[AppState] Preloading local Whisper model: ${modelId}`);
