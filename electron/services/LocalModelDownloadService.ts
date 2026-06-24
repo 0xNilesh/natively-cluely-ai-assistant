@@ -624,7 +624,18 @@ export function createWhisperDownloadProvider(): LocalModelDownloadProvider {
     },
     spawnWorker(): Worker {
       const { Worker } = require('worker_threads');
-      const workerPath = path.join(__dirname, '..', 'audio', 'whisper', 'whisperWorker.js');
+      // Use the existing resolver that handles both bundling layouts:
+      //   - Unbundled: this service runs from dist-electron/electron/services/;
+      //     worker lives at dist-electron/electron/audio/whisper/whisperWorker.js.
+      //   - Bundled: this code is inlined into main.js (dist-electron/electron/);
+      //     worker lives at dist-electron/electron/audio/whisper/whisperWorker.js.
+      // In BOTH cases the worker is reachable as __dirname + 'audio/whisper/whisperWorker.js'
+      // because esbuild's `outbase: rootDir` preserves the `electron/` segment.
+      // The `..` was a leftover from an earlier draft that resolved wrongly when
+      // bundled (would produce dist-electron/audio/... — missing the `electron/`
+      // segment), manifesting at runtime as "Cannot find module" with no
+      // error in dev paths.
+      const workerPath = path.join(__dirname, 'audio', 'whisper', 'whisperWorker.js');
       return new Worker(workerPath);
     },
     buildInitMessage(modelId: string): unknown {

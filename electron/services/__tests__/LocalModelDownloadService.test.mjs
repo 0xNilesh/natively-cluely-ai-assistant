@@ -462,3 +462,36 @@ test('whisper provider factory builds a valid provider', () => {
   assert.equal(typeof p.spawnWorker, 'function');
   assert.equal(typeof p.buildInitMessage, 'function');
 });
+
+test('REGRESSION: whisper worker path resolves correctly under BOTH bundling layouts', () => {
+  // The "Cannot find module '.../dist-electron/audio/whisper/whisperWorker.js'"
+  // bug was caused by path.join(__dirname, '..', 'audio', 'whisper', 'whisperWorker.js')
+  // — when the service is bundled into main.js, __dirname is dist-electron/electron/
+  // and `..` strips the `electron/` segment, producing dist-electron/audio/...
+  //
+  // esbuild's `outbase: rootDir` preserves the `electron/` directory, so the
+  // worker is always at __dirname + 'audio/whisper/whisperWorker.js' regardless
+  // of whether the service is bundled or standalone.
+  const p = createWhisperDownloadProvider();
+
+  // Layout A (bundled): service is inlined into dist-electron/electron/main.js → __dirname = dist-electron/electron/
+  // This is what actually runs in the packaged app and is the layout the user
+  // hit the bug in.
+  // From the test file at electron/services/__tests__/, the dist-electron/electron/
+  // layout resolves at: 3 levels up to project root + dist-electron/electron/audio/whisper/whisperWorker.js.
+  const bundledPath = path.resolve(__dirname, '..', '..', '..', 'dist-electron', 'electron', 'audio', 'whisper', 'whisperWorker.js');
+  assert.ok(
+    fs.existsSync(bundledPath),
+    `Layout A (bundled) — worker must exist at ${bundledPath}. If this fails, ` +
+    `the spawnWorker path was broken at runtime with "Cannot find module '.../dist-electron/audio/whisper/whisperWorker.js'".`,
+  );
+
+  // CRITICAL NEGATIVE ASSERTION: the broken path (`..` + audio/whisper/...) must NOT
+  // be used. In the bundled layout, that resolves to dist-electron/audio/whisper/...
+  // which DOES NOT exist — that's exactly the error the user reported.
+  const brokenPath = path.resolve(__dirname, '..', '..', '..', 'dist-electron', 'audio', 'whisper', 'whisperWorker.js');
+  assert.ok(
+    !fs.existsSync(brokenPath),
+    `Broken path must not exist (otherwise the regression is back): ${brokenPath}`,
+  );
+});
