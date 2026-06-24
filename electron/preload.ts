@@ -1227,6 +1227,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('local-whisper-delete-model', modelId),
   localWhisperStartDownload: (modelId: string) =>
     ipcRenderer.invoke('local-whisper-start-download', modelId),
+  localWhisperCancelDownload: (modelId: string) =>
+    ipcRenderer.invoke('local-whisper-cancel-download', modelId),
+  localWhisperGetDownloadState: (modelId?: string) =>
+    ipcRenderer.invoke('local-whisper-get-download-state', modelId),
   onLocalWhisperDownloadProgress: (cb: (data: { modelId: string; progress: number }) => void) => {
     const listener = (_: any, data: any) => cb(data);
     ipcRenderer.on('local-whisper-download-progress', listener);

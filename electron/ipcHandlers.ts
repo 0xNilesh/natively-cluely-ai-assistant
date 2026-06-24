@@ -4100,8 +4100,6 @@ export function initializeIpcHandlers(appState: AppState): void {
   // Local Whisper STT Handlers
   // ==========================================
 
-  const activeWhisperDownloads = new Set<string>();
-
   safeHandle('local-whisper-get-models', async () => {
     try {
       const { getAvailableModels } = require('./audio/whisper/modelManager');
@@ -4162,50 +4160,47 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
-  safeHandle('local-whisper-start-download', async (event, modelId: string) => {
-    if (process.platform === 'darwin') {
-      const os = require('os') as typeof import('os');
-      const darwinMajor = parseInt(os.release().split('.')[0], 10);
-      if (Number.isNaN(darwinMajor) || darwinMajor < 22) {
-        return { success: false, error: 'Local Whisper models require macOS 13 Ventura or later.' };
-      }
-    }
-    if (activeWhisperDownloads.has(modelId)) {
-      return { success: false, error: 'already-downloading' };
-    }
-    activeWhisperDownloads.add(modelId);
+  // The actual download lifecycle is owned by LocalModelDownloadService
+  // (a process-wide singleton instantiated in main.ts). The IPC layer is
+  // a thin pass-through so the renderer can:
+  //   1. Start a download (idempotent — already-downloading returns success).
+  //   2. Cancel an in-flight download.
+  //   3. Query the live state (status + progress) for rehydration on remount.
+  // All event broadcasting (progress/complete/error) is performed BY THE
+  // SERVICE to all live webContents, so the previous bug where closing the
+  // Settings overlay severed the event channel is no longer possible.
+  safeHandle('local-whisper-start-download', async (_event, modelId: string) => {
     try {
-      const { Worker } = require('worker_threads');
-      const nodePath = require('path');
-      const { buildWorkerInitMessage } = require('./audio/whisper/inferenceConfig');
-      const workerPath = nodePath.join(__dirname, 'audio', 'whisper', 'whisperWorker.js');
-      const w = new Worker(workerPath);
-      const sender = event.sender;
-      w.on('message', (msg: any) => {
-        if (sender.isDestroyed()) return;
-        if (msg.type === 'progress') {
-          sender.send('local-whisper-download-progress', { modelId, progress: msg.progress });
-        } else if (msg.type === 'ready') {
-          activeWhisperDownloads.delete(modelId);
-          sender.send('local-whisper-download-complete', { modelId });
-          w.terminate();
-        } else if (msg.type === 'error') {
-          activeWhisperDownloads.delete(modelId);
-          sender.send('local-whisper-download-error', { modelId, error: msg.message });
-          w.terminate();
-        }
-      });
-      w.on('error', (err: Error) => {
-        activeWhisperDownloads.delete(modelId);
-        if (!sender.isDestroyed()) {
-          sender.send('local-whisper-download-error', { modelId, error: err.message });
-        }
-      });
-      w.postMessage(buildWorkerInitMessage(modelId));
-      return { success: true };
+      const { LocalModelDownloadService } = require('./services/LocalModelDownloadService');
+      const r = LocalModelDownloadService.getInstance().start('whisper', modelId);
+      // Preserve the original return shape: the panel treats 'already-downloading'
+      // as a non-error success.
+      if (r.alreadyDownloading) return { success: false, error: 'already-downloading' };
+      return r;
     } catch (e: any) {
-      activeWhisperDownloads.delete(modelId);
-      return { success: false, error: e.message };
+      return { success: false, error: e?.message ?? String(e) };
+    }
+  });
+
+  safeHandle('local-whisper-cancel-download', async (_event, modelId: string) => {
+    try {
+      const { LocalModelDownloadService } = require('./services/LocalModelDownloadService');
+      return LocalModelDownloadService.getInstance().cancel('whisper', modelId);
+    } catch (e: any) {
+      return { success: false, error: e?.message ?? String(e) };
+    }
+  });
+
+  // Read-only snapshot of every in-flight Whisper download. Called on
+  // mount by LocalWhisperModelPanel so a re-mounted panel sees an
+  // in-progress download even though the user closed the overlay
+  // mid-download.
+  safeHandle('local-whisper-get-download-state', async (_event, modelId?: string) => {
+    try {
+      const { LocalModelDownloadService } = require('./services/LocalModelDownloadService');
+      return LocalModelDownloadService.getInstance().getState('whisper', modelId);
+    } catch {
+      return modelId ? null : [];
     }
   });
 

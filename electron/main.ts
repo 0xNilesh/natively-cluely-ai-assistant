@@ -5738,6 +5738,20 @@ async function initializeApp() {
   // Initialize IPC handlers before window creation
   initializeIpcHandlers(appState)
 
+  // Generic, provider-agnostic local-model download service. Owns the
+  // in-flight state for Whisper (today) and any future local model family
+  // (vision, embeddings, …). Instantiated BEFORE createWindow so the
+  // Settings overlay can call `getDownloadState` on first mount without
+  // waiting for IPC registration. The service rehydrates from disk
+  // synchronously in its constructor.
+  try {
+    const { LocalModelDownloadService, createWhisperDownloadProvider } = require('./services/LocalModelDownloadService');
+    const downloadService = LocalModelDownloadService.getInstance();
+    downloadService.registerProvider(createWhisperDownloadProvider());
+  } catch (e: any) {
+    console.warn('[main] LocalModelDownloadService init failed (non-fatal):', e?.message);
+  }
+
   // Apply the full disguise payload (names, dock icon, AUMID) early
   appState.applyInitialDisguise();
 
@@ -6083,6 +6097,18 @@ if (process.env.THINKING_MATRIX === '1') {
     } catch (e) {
       console.error('[main] Failed to stop DefaultOutputWatcher during shutdown:', e);
     }
+
+    // Local-model download service: synchronously flush the in-flight state
+    // map to disk and terminate every live worker. Without this, a quit
+    // mid-download (e.g. user force-quits while a 1.5GB Whisper Medium is
+    // downloading) leaves the service's state file in a stale
+    // 'downloading' state forever, AND any workers keep running until the
+    // process is actually reaped. The next launch rehydrates to
+    // 'interrupted' (or 'complete' if the bytes actually landed).
+    try {
+      const { LocalModelDownloadService } = require('./services/LocalModelDownloadService');
+      LocalModelDownloadService.getInstance().pauseForShutdown();
+    } catch { /* optional */ }
 
     // ROUND 2 FIX (#9): synchronously stop the CGEventTap worker thread
     // BEFORE V8 starts tearing down. The tap callback holds an

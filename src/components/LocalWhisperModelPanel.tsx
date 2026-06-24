@@ -10,7 +10,13 @@ interface ModelInfo {
     speed: 'very-fast' | 'fast' | 'medium' | 'slow';
     accuracy: 'decent' | 'good' | 'high' | 'very-high';
     multilingual: boolean;
-    status: 'available' | 'missing' | 'downloading' | 'error';
+    // 'downloading'  — bytes arriving from the network
+    // 'available'    — files verified on disk; ready to use
+    // 'missing'      — not on disk
+    // 'error'        — last attempt failed (network, disk, dtype mismatch)
+    // 'cancelled'    — user explicitly cancelled; partial bytes cleared
+    // 'interrupted'  — process quit mid-download; service rehydrated state
+    status: 'available' | 'missing' | 'downloading' | 'error' | 'cancelled' | 'interrupted';
     errorMessage?: string;
     requiresAppleSilicon?: boolean;
 }
@@ -111,16 +117,59 @@ export function LocalWhisperModelPanel() {
 
     const loadData = useCallback(async () => {
         try {
-            const [modelsRes, hwRes, cfgRes] = await Promise.all([
+            const [modelsRes, hwRes, cfgRes, stateRes] = await Promise.all([
                 electronAPI?.localWhisperGetModels?.(),
                 electronAPI?.localWhisperGetHardware?.(),
-                electronAPI?.localWhisperGetChannelConfig?.()
+                electronAPI?.localWhisperGetChannelConfig?.(),
+                // NEW (2026-06-23): read the service's live download state so
+                // a re-mounted panel sees an in-flight download that started
+                // before the overlay was closed. Without this the panel
+                // would show 0% / "Install" even though the main process is
+                // still downloading.
+                electronAPI?.localWhisperGetDownloadState?.().catch(() => []),
             ]);
-            
+
             if (modelsRes) setModels(modelsRes.models ?? []);
             if (hwRes) setHardware(hwRes);
             if (cfgRes) setConfig(cfgRes);
-            
+
+            // Merge service state into UI state. We only mutate state for
+            // entries the service knows about — a 'complete' entry triggers
+            // a fresh `getModels` so the badge flips to "available" from
+            // the actual filesystem check.
+            if (Array.isArray(stateRes)) {
+                const nextProgress: Record<string, number> = {};
+                const nextDownloading = new Set<string>();
+                const interruptedIds: string[] = [];
+                const cancelledIds: string[] = [];
+                const errorIds: string[] = [];
+                for (const s of stateRes) {
+                    if (!s || !s.modelId) continue;
+                    if (s.status === 'downloading' || s.status === 'verifying') {
+                        nextDownloading.add(s.modelId);
+                        nextProgress[s.modelId] = typeof s.progress === 'number' ? s.progress : 0;
+                    } else if (s.status === 'interrupted') {
+                        interruptedIds.push(s.modelId);
+                    } else if (s.status === 'cancelled') {
+                        cancelledIds.push(s.modelId);
+                    } else if (s.status === 'error') {
+                        errorIds.push(s.modelId);
+                    }
+                    // 'complete' — handled below by re-fetching models so
+                    // the disk-verified badge is shown.
+                }
+                setDownloadingSet(nextDownloading);
+                setDownloadProgress(prev => ({ ...prev, ...nextProgress }));
+                if (interruptedIds.length || cancelledIds.length || errorIds.length) {
+                    setModels(prev => prev.map(m => {
+                        if (interruptedIds.includes(m.id)) return { ...m, status: 'interrupted' as const };
+                        if (cancelledIds.includes(m.id)) return { ...m, status: 'cancelled' as const };
+                        if (errorIds.includes(m.id)) return { ...m, status: 'error' as const, errorMessage: 'Download was interrupted.' };
+                        return m;
+                    }));
+                }
+            }
+
             // Auto-select initial models if none are set
             if (cfgRes && modelsRes && modelsRes.models) {
                 const list = modelsRes.models;
@@ -128,7 +177,7 @@ export function LocalWhisperModelPanel() {
                 if (avail.length > 0) {
                     let needsUpdate = false;
                     const newCfg = { ...cfgRes };
-                    
+
                     if (!cfgRes.globalModelId) {
                         newCfg.globalModelId = avail[0].id;
                         electronAPI?.localWhisperSetModel?.(avail[0].id);
@@ -142,7 +191,7 @@ export function LocalWhisperModelPanel() {
                         newCfg.systemModelId = avail[0].id;
                         needsUpdate = true;
                     }
-                    
+
                     if (needsUpdate) {
                         setConfig(newCfg);
                         electronAPI?.localWhisperSetChannelConfig?.(newCfg);
@@ -182,7 +231,7 @@ export function LocalWhisperModelPanel() {
         setDownloadingSet(prev => new Set([...prev, modelId]));
         setModels(prev => prev.map(m => m.id === modelId ? { ...m, status: 'downloading' } : m));
         setDownloadProgress(prev => ({ ...prev, [modelId]: 0 }));
-        
+
         const result = await electronAPI?.localWhisperStartDownload?.(modelId);
         if (!result?.success && result?.error !== 'already-downloading') {
             setDownloadingSet(prev => { const s = new Set(prev); s.delete(modelId); return s; });
@@ -192,6 +241,26 @@ export function LocalWhisperModelPanel() {
                 : m
             ));
         }
+    };
+
+    // NEW (2026-06-23): explicit user cancel. Stops the worker, clears
+    // partial bytes (the service calls provider.deletePartial on next
+    // start), and flips the badge so the user can re-install.
+    const handleCancel = async (modelId: string) => {
+        await electronAPI?.localWhisperCancelDownload?.(modelId);
+        // The service broadcasts 'cancelled' → onLocalWhisperDownloadError
+        // does NOT fire on cancel, but the next state event arrives via
+        // the loadData() rehydration on remount OR the next IPC. To keep
+        // the UI responsive immediately, optimistically clear local state.
+        setDownloadingSet(prev => { const s = new Set(prev); s.delete(modelId); return s; });
+        setDownloadProgress(prev => { const d = { ...prev }; delete d[modelId]; return d; });
+        setModels(prev => prev.map(m => m.id === modelId
+            ? { ...m, status: 'cancelled' as const, errorMessage: undefined }
+            : m
+        ));
+        // Re-fetch so the disk-truth badge (probably "missing" after
+        // deletePartial) is shown.
+        await loadData();
     };
 
     const handleDelete = async (modelId: string) => {
@@ -337,10 +406,19 @@ export function LocalWhisperModelPanel() {
                                         <div className="mt-3.5 pr-8">
                                             <div className="flex justify-between items-center text-[10px] text-text-secondary mb-1.5 uppercase tracking-wider font-semibold">
                                                 <span>Downloading...</span>
-                                                <span className="text-accent-primary tabular-nums">{Math.round(progress)}%</span>
+                                                <div className="flex items-center gap-2">
+                                                    <span className="text-accent-primary tabular-nums">{Math.round(progress)}%</span>
+                                                    <button
+                                                        onClick={(e) => { e.stopPropagation(); handleCancel(model.id); }}
+                                                        className="text-text-tertiary hover:text-red-500 transition-colors duration-200 px-1.5 py-0.5 rounded-md hover:bg-red-500/10 normal-case tracking-normal font-medium"
+                                                        title="Cancel download"
+                                                    >
+                                                        Cancel
+                                                    </button>
+                                                </div>
                                             </div>
                                             <div className="w-full h-1.5 bg-bg-input rounded-full overflow-hidden shadow-inner ring-1 ring-inset ring-black/5 dark:ring-white/5">
-                                                <div 
+                                                <div
                                                     className="h-full bg-accent-primary transition-all duration-300 ease-out relative"
                                                     style={{ width: `${progress}%` }}
                                                 >
@@ -350,22 +428,26 @@ export function LocalWhisperModelPanel() {
                                         </div>
                                     )}
                                     
-                                    {model.status === 'error' && (
+                                    {(model.status === 'error' || model.status === 'interrupted' || model.status === 'cancelled') && (
                                         <div className="mt-2.5 text-xs text-red-500 flex items-center gap-1.5 font-medium bg-red-500/10 px-2.5 py-1.5 rounded-md inline-flex">
                                             <AlertCircle size={14} />
-                                            {model.errorMessage || 'Failed to download model'}
+                                            {model.status === 'interrupted'
+                                                ? 'Download was interrupted. Click Install to retry.'
+                                                : model.status === 'cancelled'
+                                                  ? 'Download cancelled. Click Install to retry.'
+                                                  : (model.errorMessage || 'Failed to download model')}
                                         </div>
                                     )}
                                 </div>
                                 
                                 <div className="flex-shrink-0 flex items-center gap-2">
-                                    {!isAvailable && !isDownloading && !isError && (
+                                    {!isAvailable && !isDownloading && (
                                         <button
                                             onClick={() => handleDownload(model.id)}
                                             className="group/btn relative h-[34px] px-4 flex items-center gap-1.5 rounded-[10px] bg-accent-primary/10 hover:bg-accent-primary/20 text-accent-primary text-[13px] font-semibold transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] active:scale-[0.96] shadow-sm"
                                         >
-                                            <Download size={14} className="transition-transform duration-300 group-hover/btn:-translate-y-[2px]" /> 
-                                            <span>Install</span>
+                                            <Download size={14} className="transition-transform duration-300 group-hover/btn:-translate-y-[2px]" />
+                                            <span>{model.status === 'error' || model.status === 'interrupted' || model.status === 'cancelled' ? 'Retry' : 'Install'}</span>
                                         </button>
                                     )}
                                     
