@@ -6865,12 +6865,26 @@ export function initializeIpcHandlers(appState: AppState): void {
       let content = '';
       try {
         if (ext === '.pdf') {
+          // pdf-parse@2.x is a thin wrapper over pdfjs-dist's legacy build.
+          // See `pinPdfjsWorkerSrcOnce` above for why this MUST run before
+          // `new PDFParse(...)` and not at module top level. Skipping this
+          // call leaves the broken default workerSrc in place and the parse
+          // fails with "Setting up fake worker failed" on every PDF.
+          pinPdfjsWorkerSrcOnce();
           const { PDFParse } = require('pdf-parse');
           const buffer = await fs.promises.readFile(filePath);
           const parser = new PDFParse({ data: buffer });
           const data: any = await withTimeout<any>(parser.getText(), PARSE_TIMEOUT_MS, 'PDF parse');
           content = data.text;
-        } else if (ext === '.docx' || ext === '.doc') {
+        } else if (ext === '.docx') {
+          // mammoth@1.x only handles .docx (modern Office Open XML, a ZIP
+          // container). Legacy .doc (binary CFB) is rejected upstream in
+          // ALLOWED_EXTENSIONS — it never reaches this branch. The dispatch
+          // intentionally does NOT also match '.doc' (even though the
+          // upstream allow-list gate means it would be dead-code) — keeping
+          // the matcher narrow is a guard against future regressions that
+          // re-add .doc to the parser chain without updating the catch-block
+          // error messages.
           const mammoth = require('mammoth');
           const result2: any = await withTimeout<any>(
             mammoth.extractRawText({ path: filePath }),
