@@ -48,18 +48,6 @@ export class WindowHelper {
   private opacityTimeout: NodeJS.Timeout | null = null;
   private lastLauncherShowInactive: boolean | null = null;
 
-  // Hover-gated click-through state. Because the fixed-width (780) overlay
-  // window is WIDER than its painted panel when collapsed (600), the ~90px
-  // transparent side-margins must pass clicks through to the app behind rather
-  // than capturing dead clicks. The renderer hit-tests the pointer against the
-  // painted content rect and sets this flag: true = pointer over the painted
-  // panel/pill (window must capture), false = pointer over a transparent margin
-  // (window must pass through). This ONLY applies in INTERACTIVE mode — when the
-  // master stealth passthrough (overlayMousePassthrough) is on, the window is
-  // fully click-through regardless of hover. Default true so the window is
-  // interactive before the renderer's first hit-test report arrives.
-  private overlayHoverInteractive: boolean = true;
-
   // Constants
   // FIXED OVERLAY WINDOW WIDTH — the OS window is BORN at this width, SHOWN at
   // this width, and NEVER width-resized for the lifetime of the overlay. It
@@ -77,8 +65,10 @@ export class WindowHelper {
   // The startup-slide invariant still holds: window-created-width === shown-width
   // (both 780), so the first paint already sits at its final origin. When the
   // shell is collapsed (600 in a 780 window) the ~90px side margins are
-  // transparent and made CLICK-THROUGH by the hover-gated interaction policy
-  // (see setOverlayHoverInteractive / syncOverlayInteractionPolicy).
+  // transparent. The window is unconditionally interactive in non-stealth mode
+  // (see syncOverlayInteractionPolicy) so the overlay can always be dragged
+  // from the painted panel; the transparent margins remain dead-click zones
+  // during collapsed mode — an acceptable cost for a draggable overlay.
   private static readonly OVERLAY_DEFAULT_WIDTH = 780;
   private static readonly OVERLAY_MIN_HEIGHT = 216;
   // Vertical offset for the meeting overlay's initial position, expressed as
@@ -692,37 +682,26 @@ export class WindowHelper {
     this.isWindowVisible = false;
   }
 
-  // Renderer-driven hit-test result: is the pointer currently over the painted
-  // panel/pill (true) or over a transparent margin / outside (false)? The
-  // renderer debounces this to state changes only, so this is low-frequency.
-  // Re-applies the combined interaction policy, but only matters in interactive
-  // mode — stealth passthrough always wins (handled in sync below).
-  public setOverlayHoverInteractive(interactive: boolean): void {
-    if (this.overlayHoverInteractive === interactive) return;
-    this.overlayHoverInteractive = interactive;
-    this.syncOverlayInteractionPolicy();
-  }
-
-  // Apply the combined click-through (mouse passthrough) policy on the overlay
-  // window. There are TWO inputs:
-  //   1. overlayMousePassthrough (master stealth toggle): when ON the window is
-  //      ALWAYS fully click-through regardless of hover (user is in another app).
-  //   2. overlayHoverInteractive (renderer hit-test): in interactive mode, the
-  //      window captures clicks only when the pointer is over the painted panel;
-  //      over the transparent side-margins it passes clicks through so they hit
-  //      the app behind instead of being swallowed as dead clicks.
-  // Called whenever EITHER input changes.
+  // Apply the click-through (mouse passthrough) policy on the overlay window.
+  // The ONLY input is overlayMousePassthrough (master stealth toggle). When ON
+  // the window is fully click-through (user is in another app / stealth mode);
+  // otherwise it MUST be unconditionally interactive.
+  //
+  // Why no hover gate: setIgnoreMouseEvents(true) — with or without
+  // `forward: true` — prevents the OS from engaging the Chromium
+  // `app-region: drag` handler. A hover-gated system (renderer reports "pointer
+  // is over the painted panel → flip to interactive") would deadlock drags: the
+  // very first click on the drag handle, before any `mousemove` reports arrive,
+  // would be passed through to the app beneath. The transparent side-margins
+  // (~90px each side, collapsed shell inside a 780px window) remain dead-click
+  // zones during collapsed mode — that is an acceptable cost for an overlay
+  // that can actually be dragged.
   public syncOverlayInteractionPolicy(): void {
     if (!this.overlayWindow || this.overlayWindow.isDestroyed()) return;
 
     const passthrough = this.appState.getOverlayMousePassthrough();
 
-    // Click-through whenever stealth passthrough is on, OR (in interactive mode)
-    // the pointer is not over the painted content. forward:true keeps pointer
-    // events flowing to the OS layer beneath in either click-through case.
-    const ignoreMouse = passthrough || !this.overlayHoverInteractive;
-
-    if (ignoreMouse) {
+    if (passthrough) {
       // forward: true — pointer events are still delivered to the OS layer beneath.
       // NOTE: We intentionally do NOT call setFocusable(false) here.
       //
@@ -733,14 +712,12 @@ export class WindowHelper {
       // events to the process — silently breaking every globalShortcut binding.
       // Keeping the window focusable costs nothing.
       this.overlayWindow.setIgnoreMouseEvents(true, { forward: true });
-      console.log(
-        `[WindowHelper] Overlay click-through ON (passthrough=${passthrough}, hoverInteractive=${this.overlayHoverInteractive})`,
-      );
+      console.log(`[WindowHelper] Overlay click-through ON (stealth passthrough=${passthrough})`);
     } else {
       this.overlayWindow.setIgnoreMouseEvents(false);
       // Restore full interactivity when capturing clicks.
       this.overlayWindow.setFocusable(true);
-      console.log('[WindowHelper] Overlay click-through OFF (interactive, pointer over panel)');
+      console.log('[WindowHelper] Overlay click-through OFF (interactive)');
     }
   }
 

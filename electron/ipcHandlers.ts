@@ -2315,25 +2315,6 @@ export function initializeIpcHandlers(appState: AppState): void {
     return appState.getOverlayMousePassthrough();
   });
 
-  // Hover-gated click-through for the fixed-width overlay's transparent margins.
-  // The renderer hit-tests the pointer against the painted panel rect and reports
-  // whether the pointer is currently over interactive content (true) or over a
-  // transparent margin / outside it (false). This ONLY affects interactive mode —
-  // when the master stealth passthrough is on, the window stays fully
-  // click-through regardless (enforced in syncOverlayInteractionPolicy). Only the
-  // overlay window's own webContents may drive this.
-  safeHandle('set-overlay-interactive-region', async (event, overContent: boolean) => {
-    const overlayWin = appState.getWindowHelper().getOverlayWindow();
-    if (
-      overlayWin &&
-      !overlayWin.isDestroyed() &&
-      overlayWin.webContents.id === event.sender.id
-    ) {
-      appState.getWindowHelper().setOverlayHoverInteractive(!!overContent);
-    }
-    return { success: true };
-  });
-
   safeHandle('get-disguise', async () => {
     return appState.getDisguise();
   });
@@ -7129,13 +7110,21 @@ export function initializeIpcHandlers(appState: AppState): void {
       // persist vectors now so live retrieval never pays the embedding cost.
       // Status events let the UI show pending → ready.
       void (async () => {
+        // Signal "indexing started" BEFORE any work so the renderer can show
+        // the blue shimmer bar immediately (the DB writes status synchronously
+        // before the IPC response returns, so 'pending' is gone by the time the
+        // renderer queries — this push is the only durable signal).
+        BrowserWindow.getAllWindows().forEach((win) => {
+          if (!win.isDestroyed()) win.webContents.send('mode-file-index-status', { modeId, fileId: file.id, phase: 'indexing' });
+        });
         try {
           await ModesManager.getInstance().indexReferenceFile(file);
         } catch (idxErr: any) {
           console.warn('[IPC] reference-file indexing failed (lexical fallback remains):', idxErr?.message);
         }
+        // Signal "indexing done" — renderer re-fetches final status.
         BrowserWindow.getAllWindows().forEach((win) => {
-          if (!win.isDestroyed()) win.webContents.send('mode-file-index-status', { modeId, fileId: file.id });
+          if (!win.isDestroyed()) win.webContents.send('mode-file-index-status', { modeId, fileId: file.id, phase: 'done' });
         });
       })();
       return { success: true, file };

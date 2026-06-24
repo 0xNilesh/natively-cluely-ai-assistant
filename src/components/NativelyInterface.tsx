@@ -154,7 +154,6 @@ import { shouldAcceptIntelligenceIpc } from '../lib/overlayIntelligenceGeneratio
 import { shouldUseStreamingCodeUi } from '../lib/overlayStreamingCodeUi.mjs';
 import { widthDerivedScrollMax, verticalScrollCap } from '../lib/overlayScrollBudget.mjs';
 import { resolveChatStreamToken, resolveChatStreamDone, resolveLiveAnswerBatch } from '../lib/chatStreamGuard.mjs';
-import { isPointerOverContent } from '../lib/overlayHoverHitTest.mjs';
 import {
   applyFirstStreamingToken,
   commitStreamingFlush,
@@ -1865,62 +1864,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       }
     };
   }, [reportShellSize, measureVerticalCap, measureButtonTop]);
-
-  // ── Hover-gated click-through for the fixed-width window's transparent margins
-  // The OS window is a fixed 780px wide but the painted panel is only 600px when
-  // collapsed, leaving ~90px transparent margins each side. Those margins must
-  // pass clicks THROUGH to the app behind, not swallow them. We hit-test the
-  // pointer against the painted content rect and tell the main process whether
-  // the window should capture clicks (pointer over panel) or be click-through
-  // (pointer over a margin). The main process gates this on the master stealth
-  // passthrough — when stealth is on the window stays fully click-through
-  // regardless of hover (see WindowHelper.syncOverlayInteractionPolicy). We only
-  // IPC on STATE CHANGE (debounced), and report mouseleave as "off panel".
-  useEffect(() => {
-    const api = window.electronAPI as any;
-    if (typeof api?.setOverlayInteractiveRegion !== 'function') return;
-
-    // null = unknown (force first report). Tracks the last value we sent so we
-    // only round-trip to the main process when the over/off-panel state flips.
-    let lastSent: boolean | null = null;
-
-    const send = (overContent: boolean) => {
-      if (lastSent === overContent) return;
-      lastSent = overContent;
-      api.setOverlayInteractiveRegion(overContent);
-    };
-
-    const evaluate = (x: number, y: number) => {
-      const rect = contentRef.current?.getBoundingClientRect();
-      // Also keep the window interactive when the pointer is over the floating
-      // resize toggle (which lives outside contentRef as a fixed pill).
-      const btnRect = resizeToggleRef.current?.getBoundingClientRect();
-      send(
-        isPointerOverContent(rect ?? null, x, y) ||
-        isPointerOverContent(btnRect ?? null, x, y),
-      );
-    };
-
-    const onMove = (e: MouseEvent) => evaluate(e.clientX, e.clientY);
-    // Pointer left the window entirely → definitely over a margin / outside.
-    const onLeave = () => send(false);
-
-    window.addEventListener('mousemove', onMove, { passive: true });
-    document.addEventListener('mouseleave', onLeave);
-
-    // Initial report: until the pointer actually enters the painted panel, the
-    // window should be click-through so the transparent area is never a dead
-    // click. The first real mousemove inside the panel flips it to interactive.
-    send(false);
-
-    return () => {
-      window.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseleave', onLeave);
-      // Restore the interactive default on unmount so a future mount (or the
-      // main-process default) is not left stuck in click-through.
-      api.setOverlayInteractiveRegion(true);
-    };
-  }, []);
 
   // attachedContext (screenshots add/remove) and initial-sizing safety:
   // both re-derive the vertical cap (a screenshot strip grows chrome) and
