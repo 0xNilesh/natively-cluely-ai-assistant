@@ -15,6 +15,7 @@ import { FreeTrialBanner }      from "./components/trial/FreeTrialBanner"
 import { FreeTrialModal }       from "./components/trial/FreeTrialModal"
 import { TrialPromoToaster }    from "./components/trial/TrialPromoToaster"
 import { PermissionsToaster }   from "./components/onboarding/PermissionsToaster"
+import { BrowserExtensionToaster } from "./components/onboarding/BrowserExtensionToaster"
 import { AlertCircle, RefreshCw } from "lucide-react"
 import { clampOverlayOpacity, OVERLAY_OPACITY_DEFAULT, getDefaultOverlayOpacity } from "./lib/overlayAppearance"
 import { getMeetingInterfaceTheme, type MeetingInterfaceTheme } from './lib/meetingInterfaceTheme'
@@ -912,6 +913,11 @@ const App: React.FC = () => {
           }}
         />
       )}
+      {/* Browser extension onboarding toaster — 12s after launch, only on v2.8.0+ when not connected (self-gates) */}
+      {(isLauncherWindow || isDefault) && (
+        <BrowserExtensionToaster />
+      )}
+
       {/* Ad toasters */}
       {isLauncherMainView && !isSettingsOpen && (
         <NativelyApiPromoToaster

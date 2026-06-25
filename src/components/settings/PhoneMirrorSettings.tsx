@@ -2,6 +2,7 @@ import { Check, Copy, Lock, Puzzle, RefreshCw, ShieldAlert, ShieldCheck, Smartph
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { BrowserContextSettings, PhoneMirrorInfo } from '../../types/electron';
 import { isMac } from '../../utils/platformUtils';
+import { BrowserExtensionIcon } from '../onboarding/BrowserExtensionIcon';
 
 const EMPTY_BROWSER_CTX: BrowserContextSettings = {
   autoDetectCoding: true,
@@ -430,7 +431,7 @@ export const PhoneMirrorSettings: React.FC = () => {
       <div className="bg-bg-item-surface rounded-xl border border-border-subtle p-5 space-y-4">
         <div className="flex items-start gap-3">
           <div className="rounded-lg bg-bg-main p-2 border border-border-subtle flex-shrink-0">
-            <Puzzle size={16} className="text-indigo-400" />
+            <BrowserExtensionIcon color="rgb(129, 140, 248)" size={16} className="text-indigo-400" />
           </div>
           <div className="min-w-0 flex-1">
             <div className="flex items-center justify-between gap-2">
