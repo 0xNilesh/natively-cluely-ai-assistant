@@ -5908,6 +5908,38 @@ if (process.env.THINKING_MATRIX === '1') {
     console.warn('[Init] STT pre-warm threw (non-fatal):', err);
   }
 
+  // Mic-indicator discipline: at this point in the launch path we MUST NOT
+  // have any live MicrophoneCapture instances. microphoneCapture is the
+  // meeting-time capture (constructed in setupSystemAudioPipeline, gated on
+  // isMeetingActive). audioTestCapture is the Settings > Audio test capture
+  // (constructed in startAudioTest, user-initiated). If either is non-null
+  // at app launch — before any user has started a meeting or opened Audio
+  // settings — the macOS CoreAudio HAL is being touched prematurely, and the
+  // orange menu-bar mic-in-use indicator will be on for the lifetime of the
+  // process. This is a regression guard; log and continue (don't crash).
+  if (process.platform === 'darwin') {
+    try {
+      const mc = (appState as unknown as { microphoneCapture: unknown }).microphoneCapture;
+      const at = (appState as unknown as { audioTestCapture: unknown }).audioTestCapture;
+      if (mc !== null && mc !== undefined) {
+        console.warn(
+          '[INVARIANT] MicrophoneCapture exists at app launch (pre-meeting). ' +
+          'This will keep the macOS mic-in-use indicator on. Investigate the ' +
+          'construction site — setupSystemAudioPipeline must remain LAZY.'
+        );
+      }
+      if (at !== null && at !== undefined) {
+        console.warn(
+          '[INVARIANT] audioTestCapture exists at app launch. This means ' +
+          'Settings > Audio test was started without user action — investigate.'
+        );
+      }
+    } catch (e) {
+      // Non-fatal: this is a debug aid, not a safety check.
+      console.error('[INVARIANT] mic-capture invariant check threw:', e);
+    }
+  }
+
   appState.createWindow()
 
   // Defer the zero-shot intent classifier warmup until after the launcher has
@@ -6216,6 +6248,18 @@ if (process.env.THINKING_MATRIX === '1') {
 
     // Kill Ollama if we started it
     OllamaManager.getInstance().stop();
+
+    // Stop any in-flight Settings > Audio test so the OS mic indicator turns
+    // off cleanly on quit. Without this, a user who quits while on the Audio
+    // tab leaves `audioTestCapture` running on the deferred setImmediate path,
+    // and the CoreAudio HAL handle can outlive V8 teardown — keeping the
+    // orange mic-in-use indicator briefly visible in the macOS menu bar after
+    // the process exits. Idempotent (no-op if no test is running).
+    try {
+      appState.stopAudioTest();
+    } catch (e) {
+      console.error('[main] Failed to stop audio test during shutdown:', e);
+    }
 
     // Tear down the Phone Mirror service so the OS port is freed cleanly.
     PhoneMirrorService.getInstance().dispose().catch((err) =>
