@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { CheckCircle, FolderOpen, RefreshCw, Sparkles } from 'lucide-react';
+import { CheckCircle, FileCode, Folder, FolderOpen, RefreshCw } from 'lucide-react';
 import type { SkillSummary } from '../../types/electron';
 
 export const SkillsSettings: React.FC = () => {
@@ -98,7 +98,7 @@ export const SkillsSettings: React.FC = () => {
                         <div className="flex items-start justify-between gap-4">
                             <div className="min-w-0 flex items-start gap-3">
                                 <div className="w-8 h-8 rounded-lg bg-bg-input border border-border-subtle flex items-center justify-center shrink-0">
-                                    <Sparkles size={15} className="text-accent-primary" />
+                                    <Folder size={15} className="text-accent-primary" />
                                 </div>
                                 <div className="min-w-0">
                                     <div className="flex items-center gap-2 mb-1">
@@ -120,7 +120,7 @@ export const SkillsSettings: React.FC = () => {
 
                 {!loading && skills.length === 0 && (
                     <div className="bg-bg-card rounded-xl border border-border-subtle p-6 text-center">
-                        <Sparkles size={20} className="mx-auto mb-2 text-text-tertiary" />
+                        <FileCode size={20} className="mx-auto mb-2 text-text-tertiary" />
                         <p className="text-sm font-medium text-text-primary">No skills found</p>
                         <p className="text-xs text-text-secondary mt-1">Open the skills folder and add a folder with SKILL.md.</p>
                     </div>
