@@ -6,7 +6,6 @@ import {
     FileUp,
     Folder,
     FolderOpen,
-    FolderUp,
     RefreshCw,
     Upload,
     X,
@@ -35,9 +34,7 @@ const formatBytes = (n: number): string => {
 
 // Convert a single File into the (path, contentBase64) tuple the validator
 // expects. We always base64-encode (never raw text) so binary files
-// (references, assets) round-trip safely. `relPath` is what the renderer
-// sees in `webkitRelativePath` for folder uploads, or `file.name` for
-// single-file uploads.
+// (references, assets) round-trip safely.
 const readFileAsBase64 = (file: File): Promise<string> =>
     new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -59,31 +56,6 @@ const readFileAsBase64 = (file: File): Promise<string> =>
         };
         reader.readAsArrayBuffer(file);
     });
-
-// Flatten a FileList from `<input webkitdirectory multiple>` into the
-// `SkillUploadFile[]` shape. `webkitRelativePath` is what the browser gives
-// us for the relative-to-folder path; the validator expects that exact form.
-const buildFolderPayload = async (files: FileList): Promise<SkillUploadPayload> => {
-    const entries: { path: string; contentBase64: string }[] = [];
-    for (let i = 0; i < files.length; i++) {
-        const f = files[i];
-        // `webkitRelativePath` is the relative path inside the picked folder
-        // (e.g. `my-skill/SKILL.md`). On browsers that omit it (rare for
-        // webkitdirectory), fall back to file.name — the validator will then
-        // surface a 'structure' error if no SKILL.md is found, which is the
-        // right outcome.
-        const relPath = (f as any).webkitRelativePath || f.name;
-        // Defense-in-depth — reject paths containing parent-segments even
-        // though the OS picker shouldn't allow them. The validator also
-        // rejects, but doing it here means the user gets the error in their
-        // session, not as a downstream failure.
-        if (relPath.includes('..')) {
-            throw new Error(`Unsafe path in folder: ${relPath}`);
-        }
-        entries.push({ path: relPath, contentBase64: await readFileAsBase64(f) });
-    }
-    return { kind: 'folder', files: entries };
-};
 
 const buildFilePayload = async (file: File): Promise<SkillUploadPayload> => ({
     kind: 'file',
@@ -194,26 +166,12 @@ export const SkillsSettings: React.FC = () => {
         }
     };
 
-    const handleFolderPicked = async (files: FileList) => {
-        setUploading(true);
-        setSuccess(null);
-        try {
-            const payload = await buildFolderPayload(files);
-            const outcome = await runUpload(payload, false);
-            if (outcome?.stage === 'validated') {
-                setPreview({ payload, preview: outcome.preview });
-            }
-        } catch (error: any) {
-            setStatus(error?.message || 'Could not read folder.');
-        } finally {
-            setUploading(false);
-        }
-    };
-
-    // Drag-and-drop handler. v1 simplification: only FILE drops are
-    // accepted via drag-drop. Folder drops (which would need a recursive
-    // FileSystemDirectoryEntry walk) are NOT supported here — users should
-    // use the "Upload folder" button, which uses webkitdirectory and gives
+    // Drag-and-drop handler. v1: only FILE drops are accepted via drag-drop.
+    // Folder drops (which would need a recursive FileSystemDirectoryEntry walk)
+    // are NOT supported here — users wanting to install a folder of files
+    // should use the Advanced "open skills folder" escape hatch and drop files
+    // manually into the OS file explorer. This avoids the complexity of
+    // async-recursive DataTransferItem traversal in the renderer.
     // us a complete FileList in one shot. This avoids the complexity of
     // async-recursive DataTransferItem traversal in the renderer.
     const handleDrop = async (e: React.DragEvent) => {
@@ -241,33 +199,22 @@ export const SkillsSettings: React.FC = () => {
         }
         if (sawDirectory) {
             setStatus(
-                'Folder drag-and-drop is not supported in v1 — use the "Upload folder" button instead.',
+                'Folder drag-and-drop is not supported — use the Advanced "open skills folder" option to drop a folder manually.',
             );
         }
         if (fileItems.length === 0) return;
 
+        if (fileItems.length > 1) {
+            setStatus(
+                `Only one .md file can be uploaded at a time (got ${fileItems.length}). Pick a single SKILL.md file.`,
+            );
+            return;
+        }
+
         setUploading(true);
         setSuccess(null);
         try {
-            if (fileItems.length === 1) {
-                await handleFilePicked(fileItems[0]);
-            } else {
-                // Multi-file drop — package as a folder payload so the
-                // validator's folder-mode logic handles it (it will
-                // surface a 'no SKILL.md' error if no SKILL.md is in the
-                // drop, which is the right behavior).
-                const entries = await Promise.all(
-                    fileItems.map(async (f) => ({
-                        path: f.name,
-                        contentBase64: await readFileAsBase64(f),
-                    })),
-                );
-                const payload: SkillUploadPayload = { kind: 'folder', files: entries };
-                const outcome = await runUpload(payload, false);
-                if (outcome?.stage === 'validated') {
-                    setPreview({ payload, preview: outcome.preview });
-                }
-            }
+            await handleFilePicked(fileItems[0]);
         } finally {
             setUploading(false);
         }
@@ -358,7 +305,7 @@ export const SkillsSettings: React.FC = () => {
                     <div className="min-w-0">
                         <h4 className="text-sm font-semibold text-text-primary">Upload a skill</h4>
                         <p className="text-xs text-text-secondary leading-relaxed mt-0.5">
-                            Drop a <code className="text-[11px] font-mono">.md</code> file here, or use the buttons to pick a single file or a folder containing a <code className="text-[11px] font-mono">SKILL.md</code>.
+                            Drop a <code className="text-[11px] font-mono">SKILL.md</code> file here, or use the button below to pick one. To add a folder of skill files, use the Advanced "open skills folder" option.
                         </p>
                     </div>
                 </div>
@@ -382,32 +329,7 @@ export const SkillsSettings: React.FC = () => {
                             ].join(' ')}
                         >
                             <FileUp size={13} strokeWidth={2.5} />
-                            Upload .md file
-                        </span>
-                    </label>
-                    <label className="cursor-pointer">
-                        <input
-                            type="file"
-                            // The two attributes below are the React-friendly way
-                            // to spell webkitdirectory + multiple.
-                            {...({ webkitdirectory: '', directory: '' } as any)}
-                            multiple
-                            className="hidden"
-                            onChange={async (e) => {
-                                const files = e.target.files;
-                                if (files && files.length > 0) await handleFolderPicked(files);
-                                e.currentTarget.value = '';
-                            }}
-                            disabled={uploading}
-                        />
-                        <span
-                            className={[
-                                'inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-border-subtle bg-bg-input hover:bg-bg-elevated text-xs font-medium text-text-primary transition-colors',
-                                uploading ? 'opacity-60 pointer-events-none' : '',
-                            ].join(' ')}
-                        >
-                            <FolderUp size={13} strokeWidth={2.5} />
-                            Upload folder
+                            Upload SKILL.md
                         </span>
                     </label>
                     {uploading && (
@@ -541,7 +463,7 @@ export const SkillsSettings: React.FC = () => {
                         <FileCode size={20} className="mx-auto mb-2 text-text-tertiary" />
                         <p className="text-sm font-medium text-text-primary">No skills found</p>
                         <p className="text-xs text-text-secondary mt-1">
-                            Upload a SKILL.md file or folder using the controls above, or open the skills folder to add one manually.
+                            Upload a SKILL.md file using the controls above, or use the Advanced option to open the skills folder and add one manually.
                         </p>
                     </div>
                 )}
