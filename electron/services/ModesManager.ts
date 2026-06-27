@@ -540,6 +540,12 @@ export class ModesManager {
         }));
     }
 
+    /** Single-file index status lookup — used by IPC handlers to decide whether to
+     *  schedule a retry when a freshly-uploaded file lands in 'failed'/'lexical_only'. */
+    public getReferenceFileIndexStatus(fileId: string): { status: string; chunkCount: number } {
+        return this.modeContextRetriever.getReferenceFileIndexStatus(fileId);
+    }
+
     // ── Note Sections ─────────────────────────────────────────────
 
     public getNoteSections(modeId: string): ModeNoteSection[] {
