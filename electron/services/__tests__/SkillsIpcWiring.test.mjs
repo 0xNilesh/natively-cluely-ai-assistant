@@ -160,7 +160,8 @@ test('SkillsSettings renderer guards upload bridge methods and exposes the uploa
   // method itself) — this is the exact regression we protect against.
   assert.match(view, /await window\.electronAPI\.skillsUpload\(/);
 
-  // UI affordances — drag-and-drop zone, .md file picker, preview card.
+  // UI affordances — drag-and-drop zone, .md file picker, preview card,
+  // compact "Installed skills" list section.
   // Folder uploads were removed in favour of the Advanced "open skills
   // folder" escape hatch; only single-file (.md) uploads are in the
   // in-flow UI now.
@@ -169,6 +170,8 @@ test('SkillsSettings renderer guards upload bridge methods and exposes the uploa
     'must include a .md file picker');
   assert.match(view, /Install/, 'preview card must have an Install button');
   assert.match(view, /Cancel/, 'preview card must have a Cancel button');
+  assert.match(view, /Installed skills/,
+    'list section must be labeled "Installed skills"');
   // Advanced section still exposes the manual folder option.
   assert.match(view, /Advanced: open skills folder/,
     'Advanced escape hatch must remain so users can add folders via OS file explorer');

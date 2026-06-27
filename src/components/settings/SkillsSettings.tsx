@@ -4,11 +4,11 @@ import {
     CheckCircle,
     FileCode,
     FileUp,
-    Folder,
     FolderOpen,
     RefreshCw,
     Upload,
     X,
+    Zap,
 } from 'lucide-react';
 import type {
     SkillSummary,
@@ -432,41 +432,55 @@ export const SkillsSettings: React.FC = () => {
                 </div>
             )}
 
-            <div className="space-y-2">
-                {skills.map((skill) => (
-                    <div key={skill.id} className="bg-bg-card rounded-xl border border-border-subtle p-4">
-                        <div className="flex items-start justify-between gap-4">
-                            <div className="min-w-0 flex items-start gap-3">
-                                <div className="w-8 h-8 rounded-lg bg-bg-input border border-border-subtle flex items-center justify-center shrink-0">
-                                    <Folder size={15} className="text-accent-primary" />
+            <div>
+                <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-xs font-semibold uppercase tracking-wider text-text-tertiary">
+                        Installed skills
+                    </h4>
+                    {!loading && skills.length > 0 && (
+                        <span className="text-[11px] text-text-tertiary">
+                            {skills.length} {skills.length === 1 ? 'skill' : 'skills'}
+                        </span>
+                    )}
+                </div>
+                <div className="space-y-1.5">
+                    {skills.map((skill) => (
+                        <div
+                            key={skill.id}
+                            className="group bg-bg-card rounded-lg border border-border-subtle px-3 py-2.5 hover:border-border-muted transition-colors"
+                        >
+                            <div className="flex items-center justify-between gap-3">
+                                <div className="flex items-center gap-2 min-w-0">
+                                    <Zap size={13} className="text-accent-primary shrink-0" />
+                                    <span className="text-sm font-medium text-text-primary truncate">
+                                        {skill.name}
+                                    </span>
+                                    <span className="text-[10px] font-mono text-text-tertiary shrink-0">
+                                        /{skill.id}
+                                    </span>
                                 </div>
-                                <div className="min-w-0">
-                                    <div className="flex items-center gap-2 mb-1">
-                                        <h4 className="text-sm font-semibold text-text-primary truncate">{skill.name}</h4>
-                                        <span className="px-1.5 py-0.5 rounded-md border border-border-subtle bg-bg-input text-[10px] text-text-tertiary">
-                                            {skill.id}
-                                        </span>
-                                    </div>
-                                    <p className="text-xs text-text-secondary leading-relaxed">{skill.description}</p>
-                                </div>
+                                <span className="text-[10px] uppercase tracking-wider text-text-tertiary shrink-0 px-1.5 py-0.5 rounded bg-bg-input border border-border-subtle">
+                                    {skill.source === 'builtin' ? 'Built-in' : 'Local'}
+                                </span>
                             </div>
-                            <div className="flex items-center gap-1.5 shrink-0 text-[11px] text-text-tertiary">
-                                <CheckCircle size={13} className="text-green-500" />
-                                {skill.source === 'builtin' ? 'Built-in' : 'Local'}
-                            </div>
+                            {skill.description && (
+                                <p className="text-[11px] text-text-secondary mt-1 ml-5 leading-snug line-clamp-2">
+                                    {skill.description}
+                                </p>
+                            )}
                         </div>
-                    </div>
-                ))}
+                    ))}
 
-                {!loading && skills.length === 0 && (
-                    <div className="bg-bg-card rounded-xl border border-border-subtle p-6 text-center">
-                        <FileCode size={20} className="mx-auto mb-2 text-text-tertiary" />
-                        <p className="text-sm font-medium text-text-primary">No skills found</p>
-                        <p className="text-xs text-text-secondary mt-1">
-                            Upload a SKILL.md file using the controls above, or use the Advanced option to open the skills folder and add one manually.
-                        </p>
-                    </div>
-                )}
+                    {!loading && skills.length === 0 && (
+                        <div className="bg-bg-card rounded-lg border border-dashed border-border-subtle p-5 text-center">
+                            <FileCode size={18} className="mx-auto mb-1.5 text-text-tertiary" />
+                            <p className="text-xs font-medium text-text-primary">No skills installed</p>
+                            <p className="text-[11px] text-text-secondary mt-0.5">
+                                Upload a SKILL.md above, or use the Advanced option.
+                            </p>
+                        </div>
+                    )}
+                </div>
             </div>
 
             {/* Advanced escape hatch — preserved from the pre-upload UI so
