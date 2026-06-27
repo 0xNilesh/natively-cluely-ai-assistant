@@ -12,6 +12,9 @@
 
 require('dotenv').config({ path: require('path').resolve(__dirname, '..', '.env') });
 
+const fs = require('node:fs');
+const path = require('node:path');
+
 const GROQ_KEYS = [
   process.env.GROQ_API_KEY_1,
   process.env.GROQ_API_KEY_2,
@@ -87,6 +90,30 @@ Benchmark Results: On semantic relationship understanding, standard VLA scored 0
 
 Limitations: Limitations include sim-to-real transfer, dataset scale, hardware constraints, and robustness in open environments.`;
 
+// When SMOKE_USE_REAL_FIXTURE=1, load the actual fixture files from
+// tests/fixtures/modes/custom/seminar-presentation/ instead of using the
+// inline SEMINAR_FIXTURE blob. Each file is sent as a SEPARATE
+// `<uploaded_seminar_material>` block so the smoke harness exercises the
+// real production corpus shape (multiple small files competing for
+// retrieval slots) — not the single dense blob the inline fixture
+// represents. Inline fixture is the default for offline / CI runs.
+const REAL_FIXTURE_DIR = path.resolve(
+  __dirname, '..', 'tests', 'fixtures', 'modes', 'custom', 'seminar-presentation',
+);
+function loadRealFixtureFiles() {
+  if (!fs.existsSync(REAL_FIXTURE_DIR)) {
+    throw new Error(`real fixture dir missing: ${REAL_FIXTURE_DIR}`);
+  }
+  const files = fs.readdirSync(REAL_FIXTURE_DIR)
+    .filter((f) => /\.(txt|md|csv)$/i.test(f))
+    .sort();
+  return files.map((fileName) => ({
+    fileName,
+    content: fs.readFileSync(path.join(REAL_FIXTURE_DIR, fileName), 'utf8'),
+  }));
+}
+const USE_REAL_FIXTURE = process.env.SMOKE_USE_REAL_FIXTURE === '1';
+
 const SYSTEM_PROMPT = [
   'You are a Seminar Presentation Assistant.',
   'The uploaded seminar file is the source of truth.',
@@ -95,15 +122,25 @@ const SYSTEM_PROMPT = [
   'If the answer is not in the uploaded file, say: This is not directly mentioned in my seminar material, but based on the topic, the likely explanation is...',
 ].join(' ');
 
-function buildPrompt(question, retrievedBlock) {
+function buildPrompt(question, retrievedBlock, fixtureFiles) {
+  let uploadedMaterial;
+  if (Array.isArray(fixtureFiles) && fixtureFiles.length > 0) {
+    // Real-fixture mode: each file becomes its own <uploaded_seminar_material>
+    // block, matching how the production LLMHelper surfaces multiple
+    // reference files in the prompt. The model must retrieve the right one
+    // for the question instead of getting everything pre-bundled.
+    uploadedMaterial = fixtureFiles
+      .map((f) => `<uploaded_seminar_material file="${f.fileName}">\n${f.content}\n</uploaded_seminar_material>`)
+      .join('\n\n');
+  } else {
+    uploadedMaterial = `<uploaded_seminar_material>\n${SEMINAR_FIXTURE}\n</uploaded_seminar_material>`;
+  }
   return [
     '## ACTIVE MODE INSTRUCTIONS (user-configured)',
     SYSTEM_PROMPT,
     '',
     '## UPLOADED REFERENCE FILES',
-    '<uploaded_seminar_material>',
-    SEMINAR_FIXTURE,
-    '</uploaded_seminar_material>',
+    uploadedMaterial,
     '',
     retrievedBlock || '(retrieved blocks omitted)',
     '',
@@ -211,8 +248,8 @@ function logAnswer(label, question, expectedHint, answer) {
   console.log(`    ${text.slice(0, 320).replace(/\n/g, ' / ')}${text.length > 320 ? ' …' : ''}`);
 }
 
-async function liveCheck(label, question, retrievedBlock, expected, model, geminiModel) {
-  const userText = buildPrompt(question, retrievedBlock);
+async function liveCheck(label, question, retrievedBlock, expected, model, geminiModel, fixtureFiles) {
+  const userText = buildPrompt(question, retrievedBlock, fixtureFiles);
   const start = Date.now();
   try {
     const { text, provider, model: usedModel } = await callProvider(model, geminiModel, SYSTEM_PROMPT, userText);
@@ -309,14 +346,22 @@ async function main() {
     {
       label: '12 OpenVLA', question: 'What is OpenVLA?',
       expectMentions: ['OpenVLA', '7B'],
+      // Fixture-statement grounding: "7B-parameter" is specific to this thesis.
+      // A hallucinated "OpenVLA is a vision-language-action model" would
+      // satisfy the substring check but not the grounding check.
+      expectGrounding: ['7B-parameter', '7B parameter', '7B parameters'],
     },
     {
       label: '13 OpenVLA-OFT', question: 'What is OpenVLA-OFT?',
       expectMentions: ['OpenVLA-OFT', 'LoRA'],
+      // Grounding: at least one of the thesis-specific phrasings.
+      expectGrounding: ['on-robot data', 'fine-tuned with on-robot', 'fine-tuned from OpenVLA', 'finetuned with on-robot', 'optimized model'],
     },
     {
       label: '14 OpenVLA-OFT vs OpenVLA', question: 'How is OpenVLA-OFT different from OpenVLA?',
       expectMentions: ['OpenVLA-OFT', 'parallel decoding', 'action chunking', '43x'],
+      // Grounding: the 43x figure is the thesis-specific factual claim.
+      expectGrounding: ['43x faster', '43x', '43 times faster'],
     },
     {
       label: '15 Agentic AI', question: 'What is Agentic AI?',
@@ -325,6 +370,10 @@ async function main() {
     {
       label: '16 agent components', question: 'What are the three core components of an AI agent?',
       expectMentions: ['agent'],
+      // Grounding: the thesis explicitly enumerates "perception, planning,
+      // and action execution" as the three components. A general-knowledge
+      // answer would name different components.
+      expectGrounding: ['perception, planning, and action', 'perception, planning, action', 'perception planning and action'],
     },
     {
       label: '17 AutoGen', question: 'What is AutoGen used for in this thesis?',
@@ -357,6 +406,10 @@ async function main() {
     {
       label: '24 Mercury X1 DOF', question: 'How many degrees of freedom does Mercury X1 have?',
       expectMentions: ['19', 'degrees of freedom', 'Mercury X1'],
+      // Grounding: a hallucinated "Mercury X1 has 12 DOF" would still match
+      // the substring check because "Mercury X1" + "degrees of freedom" both
+      // appear in the answer. Require the EXACT figure.
+      expectGrounding: ['19 degrees of freedom', '19 DOF', 'nineteen degrees of freedom', '19-DoF', '19 dof'],
     },
     {
       label: '25 Mercury X1 sensors', question: 'What sensors does Mercury X1 use?',
@@ -381,6 +434,8 @@ async function main() {
     {
       label: '30 camera setup', question: 'What camera setup was used for data collection?',
       expectMentions: ['Orbbec Deeyea', 'Logitech'],
+      // Grounding: the "two Logitech C920 HD webcams" wording is fixture-specific.
+      expectGrounding: ['two Logitech C920', 'C920', 'Logitech C920'],
     },
     {
       label: '31 methodology', question: 'Explain the research methodology.',
@@ -444,14 +499,20 @@ async function main() {
     {
       label: '45 semantic benchmark', question: 'What happened in the semantic relationship understanding benchmark?',
       expectMentions: ['44', '0'],
+      // Grounding: 44% AgenticVLA / 0% standard VLA is fixture-specific.
+      expectGrounding: ['44', '44%', '44 percent', '0%', '0 percent'],
     },
     {
       label: '46 prompt complexity', question: 'What happened in the prompt complexity analysis?',
       expectMentions: ['84', '42'],
+      // Grounding: 84% / 42% is the fixture's specific numbers.
+      expectGrounding: ['84%', '84 percent', '84 percent Success Rate', '42%', '42 percent'],
     },
     {
       label: '47 self-awareness', question: 'What happened in the self-awareness benchmark?',
       expectMentions: ['85', '43'],
+      // Grounding: 85% / 43% is the fixture's specific numbers.
+      expectGrounding: ['85%', '85 percent', '43%', '43 percent'],
     },
     {
       label: '48 main findings', question: 'What were the main findings from the experiments?',
@@ -477,15 +538,34 @@ async function main() {
 
   let pass = 0, fail = 0;
   const failures = [];
+  // Load real production fixture when SMOKE_USE_REAL_FIXTURE=1 so the harness
+  // exercises the 6-file corpus shape that production users actually upload
+  // (multiple small files competing for retrieval slots), not the single dense
+  // inline blob. Default is the inline blob for offline / CI determinism.
+  const fixtureFiles = USE_REAL_FIXTURE ? loadRealFixtureFiles() : null;
+  if (USE_REAL_FIXTURE) {
+    console.log(`[smoke] using real fixture: ${fixtureFiles.length} files from ${REAL_FIXTURE_DIR}`);
+  }
   for (let i = 0; i < checks.length; i++) {
     const c = checks[i];
     const expected = c.expectMentions.join(', ');
-    const { text } = await liveCheck(c.label, c.question, c.retrieved, expected, model, geminiModel);
+    const { text } = await liveCheck(c.label, c.question, c.retrieved, expected, model, geminiModel, fixtureFiles);
     const lower = text.toLowerCase();
     const missMentions = c.expectMentions.filter((m) => {
       if (m instanceof RegExp) return !m.test(text);
       return !lower.includes(m.toLowerCase());
     });
+    // Fixture-statement grounding: require at least ONE of the
+    // fixture-specific phrases. These phrases are chosen so that a
+    // hallucinated general-knowledge answer cannot pass — substring
+    // matches on common terms (e.g. "OpenVLA", "Mercury X1") are not
+    // enough on their own.
+    let groundingMiss = null;
+    if (Array.isArray(c.expectGrounding) && c.expectGrounding.length > 0) {
+      const lowerText = text.toLowerCase();
+      const hit = c.expectGrounding.some((g) => lowerText.includes(g.toLowerCase()));
+      if (!hit) groundingMiss = c.expectGrounding;
+    }
     const explicitAbsent = c.expectAbsent || [];
     const leakExplicit = explicitAbsent.filter((m) => lower.includes(m.toLowerCase()));
     const leakGlobal = GLOBAL_FORBIDDEN.filter((m) => lower.includes(m.toLowerCase()));
@@ -496,6 +576,7 @@ async function main() {
     const problems = [];
     if (blank) problems.push('BLANK answer');
     if (missMentions.length) problems.push(`missing: ${missMentions.join(', ')}`);
+    if (groundingMiss) problems.push(`grounding: none of ${JSON.stringify(groundingMiss)}`);
     if (leakExplicit.length) problems.push(`leaked (question-specific): ${leakExplicit.join(', ')}`);
     if (leakGlobal.length) problems.push(`leaked (global drift): ${leakGlobal.join(', ')}`);
     if (internalWording.length) problems.push(`internal wording: ${internalWording.join(', ')}`);

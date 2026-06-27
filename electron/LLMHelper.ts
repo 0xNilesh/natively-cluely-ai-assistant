@@ -1531,15 +1531,35 @@ CRITICAL RULES:
     // Load active mode system prompt and context block (reference files + custom context)
     let activeModePrompt = '';
     let modeContextBlock = '';
+    let documentGroundedCustomModeActive = false;
     try {
       const { ModesManager } = require('./services/ModesManager');
       const modesMgr = ModesManager.getInstance();
       activeModePrompt = modesMgr.getActiveModeSystemPromptSuffix() ?? '';
-      // Gate the mode's customContext with a non-negotiation answer type so
-      // sensitive (salary/pricing) chunks are dropped on this generic suggestion
-      // path too — mirrors the _streamChatInner mode-injection site. This path
-      // has no negotiation-answer concept, so sensitive context never belongs here.
-      modeContextBlock = modesMgr.buildRetrievedActiveModeContextBlock(lastQuestion, context, 1800, 'general_meeting_answer') || '';
+      // Read the active-mode grounding flag and thread `forceDocumentGrounding`
+      // into the retrieval call so the suggestion channel cannot silently
+      // bypass the document-grounded custom-mode guard. Without this gate
+      // (audit 2026-06-27) a document-grounded session's in-meeting
+      // suggestion panel could emit general-knowledge answers over the
+      // uploaded material.
+      const groundingInfo = modesMgr.getActiveModeDocumentGroundingInfo?.();
+      documentGroundedCustomModeActive = groundingInfo?.documentGroundedCustomModeActive === true;
+      const retrieveAnswerType = documentGroundedCustomModeActive
+        ? 'document_grounded_suggestion'
+        : 'general_meeting_answer';
+      // buildRetrievedActiveModeContextBlock signature:
+      //   (query, transcript?, tokenBudget?, answerType?, excludeCustomContext?, pinnedModeId?, retrievalOptions?)
+      // Pass forceDocumentGrounding via the retrievalOptions position so the
+      // suggestion channel respects the document-grounded custom-mode gate.
+      modeContextBlock = modesMgr.buildRetrievedActiveModeContextBlock(
+        lastQuestion,
+        context,
+        1800,
+        retrieveAnswerType,
+        false, // excludeCustomContext: false — let the manager handle scoping per answer type
+        undefined, // pinnedModeId
+        { forceDocumentGrounding: documentGroundedCustomModeActive },
+      ) || '';
     } catch (_modeErr: any) {
       console.warn('[LLMHelper] ModesManager load failed in generateSuggestion (non-fatal):', _modeErr?.message);
     }
@@ -1549,7 +1569,11 @@ CRITICAL RULES:
       ? `${modeContextBlock}\n\n${context}`
       : context;
 
-    const customNotesBlock = this.customNotes?.trim()
+    // Document-grounded custom modes: drop user-supplied customNotes from the
+    // suggestion prompt. The user's notes are independent of the active mode's
+    // customContext and may contain profile / resume / personal bio text that
+    // must not surface as fact alongside uploaded-thesis material.
+    const customNotesBlock = !documentGroundedCustomModeActive && this.customNotes?.trim()
       ? `<user_context>\n${this.customNotes.trim()}\n</user_context>\nUse this context naturally if relevant. Never quote it verbatim.`
       : '';
 

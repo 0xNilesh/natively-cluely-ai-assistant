@@ -233,6 +233,11 @@ function rowToFile(row: any): ModeReferenceFile {
         fileName: row.file_name,
         content: row.content ?? '',
         createdAt: row.created_at,
+        // Round-trip PDF page counts (DB stores snake_case columns; the
+        // 2026-06-27 v18→v19 migration adds these columns and the
+        // IPC handler fills them in for .pdf uploads only).
+        pageCount: typeof row.page_count === 'number' ? row.page_count : undefined,
+        extractedPageCount: typeof row.extracted_page_count === 'number' ? row.extracted_page_count : undefined,
     };
 }
 
