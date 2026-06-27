@@ -342,12 +342,16 @@ export class ModeHybridRetriever {
 
         this.updateIndexState(file.id, contentHash, chunks.length, 'indexing', activeSpace);
         try {
-            const embeddings = await this.embeddingPipeline.getEmbeddings(chunks);
+            const result = typeof (this.embeddingPipeline as any).getEmbeddingsWithFallback === 'function'
+                ? await (this.embeddingPipeline as any).getEmbeddingsWithFallback(chunks)
+                : { embeddings: await this.embeddingPipeline.getEmbeddings(chunks), space: activeSpace };
+            const embeddings = result.embeddings;
+            const embeddingSpace = result.space;
             if (!Array.isArray(embeddings) || embeddings.length !== chunks.length) {
                 throw new Error(`batch embed returned ${embeddings?.length ?? 'none'} vectors for ${chunks.length} chunks`);
             }
-            this.persistChunks(file.id, chunks, embeddings, activeSpace);
-            this.updateIndexState(file.id, contentHash, chunks.length, 'ready', activeSpace);
+            this.persistChunks(file.id, chunks, embeddings, embeddingSpace);
+            this.updateIndexState(file.id, contentHash, chunks.length, 'ready', embeddingSpace);
         } catch (e) {
             console.warn(`[ModeHybridRetriever] indexFile failed for ${file.fileName}:`, e instanceof Error ? e.message : e);
             // Keep the chunk text for lexical retrieval; mark failed for retry.

@@ -504,6 +504,43 @@ export class EmbeddingPipeline {
         });
     }
 
+    async getEmbeddingsWithFallback(texts: string[]): Promise<{ embeddings: number[][]; space: string }> {
+        try {
+            const embeddings = await this.getEmbeddings(texts);
+            const space = this.getActiveSpaceKey();
+            if (!space) throw new Error('Embedding provider has no active space');
+            return { embeddings, space };
+        } catch (primaryError) {
+            const fallback = this.fallbackProvider;
+            if (!fallback) throw primaryError;
+            console.warn(
+                `[EmbeddingPipeline] Primary batch embedding failed via ${this.provider?.name ?? 'unknown'}; ` +
+                `falling back to ${fallback.name}:`,
+                primaryError instanceof Error ? primaryError.message : primaryError
+            );
+            const embeddings = await new Promise<number[][]>((resolve, reject) => {
+                const timer = setTimeout(() => {
+                    reject(new Error(
+                        `[EmbeddingPipeline] fallback embedBatch() timed out after ${EMBED_TIMEOUT_MS}ms for ${texts.length} chunks via ${fallback.name}`
+                    ));
+                }, EMBED_TIMEOUT_MS);
+                fallback.embedBatch(texts).then(
+                    (results) => { clearTimeout(timer); resolve(results); },
+                    (err)     => { clearTimeout(timer); reject(err); }
+                );
+            });
+            // Promote fallback for subsequent mode query embeddings. Persisted mode
+            // vectors are only comparable within one active space; keeping the
+            // exhausted cloud provider active would make freshly-local vectors look
+            // perpetually pending and unusable.
+            this.provider = fallback;
+            try {
+                this.db.prepare("INSERT OR REPLACE INTO app_state (key, value) VALUES ('last_embedding_space', ?)").run(fallback.space);
+            } catch (_) { /* non-fatal */ }
+            return { embeddings, space: fallback.space };
+        }
+    }
+
     /**
      * Get embedding for a search query (may use different prefix for asymmetric models).
      * Routes through embedWithTimeout() so a frozen API cannot stall the query path.
