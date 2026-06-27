@@ -103,6 +103,38 @@ async function pinPdfjsWorkerSrcOnce(): Promise<void> {
   }
 }
 
+/**
+ * Strip prior ASSISTANT turns from a SessionTracker formatted-context snapshot
+ * (audit 2026-06-27, document-grounded real-path fix). The snapshot format is
+ * line-prefixed blocks: `[ME]: ...`, `[INTERVIEWER]: ...`,
+ * `[ASSISTANT (PREVIOUS SUGGESTION)]: ...` joined by '\n' (see
+ * SessionTracker.formatContextItems). An assistant block's text may itself span
+ * multiple lines, so once we see the ASSISTANT label we drop every following
+ * line until the next `[ME]:` / `[INTERVIEWER]:` label (or end of input).
+ *
+ * Keeping `[ME]:` / `[INTERVIEWER]:` turns preserves follow-up pronoun
+ * resolution; dropping the assistant turns prevents a previously-emitted answer
+ * from anchoring the next document-grounded answer (the observed topic collapse).
+ */
+function stripPriorAssistantTurns(snapshot: string): string {
+  const lines = snapshot.split('\n');
+  const kept: string[] = [];
+  let skipping = false;
+  for (const line of lines) {
+    if (/^\[ASSISTANT \(PREVIOUS SUGGESTION\)\]:/.test(line)) {
+      skipping = true;
+      continue;
+    }
+    if (/^\[(ME|INTERVIEWER)\]:/.test(line)) {
+      skipping = false;
+      kept.push(line);
+      continue;
+    }
+    if (!skipping) kept.push(line);
+  }
+  return kept.join('\n').trim();
+}
+
 export function initializeIpcHandlers(appState: AppState): void {
   const safeHandle = (
     channel: string,
@@ -1140,7 +1172,17 @@ export function initializeIpcHandlers(appState: AppState): void {
           && answerPlan.answerType !== 'ethical_usage_answer'
           && answerPlan.answerType !== 'project_link_answer'
           && answerPlan.answerType !== 'source_code_evidence_answer'
-          && answerPlan.answerType !== 'project_about_answer';
+          && answerPlan.answerType !== 'project_about_answer'
+          // Document-grounded custom mode (audit 2026-06-27, real-path fix):
+          // when the planner rewrote the type to lecture_answer (because the
+          // active mode is document-grounded and the ask is NOT an explicit
+          // profile request — see AnswerPlanner explicitDocumentModeProfileAsk),
+          // the deterministic profile fast-path MUST be skipped so it cannot
+          // emit a resume/project answer (TalentScope etc.) over the uploaded
+          // material. We gate on the ANSWER TYPE, not the mode flag, so a
+          // legitimate "how does my thesis relate to my work experience"
+          // (which the planner leaves as a profile type) still gets the fast path.
+          && answerPlan.answerType !== 'lecture_answer';
         if (fastPathEligible) {
           try {
             const orchestrator = llmHelper.getKnowledgeOrchestrator?.();
@@ -1266,10 +1308,26 @@ export function initializeIpcHandlers(appState: AppState): void {
             answerType: answerPlan.answerType,
           });
         } else if (!context && autoContextSnapshot) {
-          context = autoContextSnapshot;
-          console.log(
-            `[IPC] Auto-injected 100s context for gemini-chat-stream (${context.length} chars)`,
-          );
+          // Document-grounded custom mode (audit 2026-06-27, real-path fix):
+          // strip prior ASSISTANT turns from the rolling snapshot before it
+          // becomes the prompt context. A previously-emitted answer (e.g.
+          // "AgenticVLA improves because the agentic framework acts as an
+          // intelligent wrapper…") was being fed into EVERY subsequent
+          // question, anchoring the weak model to one answer regardless of the
+          // actual question (the observed "topic collapse"). We strip only the
+          // `[ASSISTANT (PREVIOUS SUGGESTION)]:` blocks — `[ME]:` / `[INTERVIEWER]:`
+          // turns are kept so follow-up pronoun resolution ("tell me more about
+          // that") still works. Non-document-grounded chat keeps the full snapshot.
+          let snapshotForContext = autoContextSnapshot;
+          if (answerPlan.answerType === 'lecture_answer' && manualActiveMode?.documentGroundedCustomModeActive) {
+            snapshotForContext = stripPriorAssistantTurns(autoContextSnapshot);
+          }
+          if (snapshotForContext.trim().length > 0) {
+            context = snapshotForContext;
+            console.log(
+              `[IPC] Auto-injected 100s context for gemini-chat-stream (${context.length} chars${snapshotForContext !== autoContextSnapshot ? ', prior-assistant turns stripped for document-grounded mode' : ''})`,
+            );
+          }
         }
         // MANUAL REGRESSION FIX (release 2026-06-08): for ANY profile-required
         // candidate answer type (jd_fit / skill / behavioral / project / experience /
@@ -1392,9 +1450,22 @@ export function initializeIpcHandlers(appState: AppState): void {
         // framing in HARD_SYSTEM_PROMPT/ASSIST_MODE_PROMPT that was causing coding
         // questions to be answered with "At Aetherbot AI, I was responsible for..."
         // (resume hijack via CONTEXT_INTELLIGENCE_LAYER's "you ARE the user").
-        const systemPromptOverride: string | undefined = options?.skipSystemPrompt
+        let systemPromptOverride: string | undefined = options?.skipSystemPrompt
           ? ''
           : CHAT_MODE_PROMPT;
+        // Document-grounded custom mode (audit 2026-06-27, real-path fix):
+        // CHAT_MODE_PROMPT instructs the model to reply only "Hey! What would
+        // you like help with?" for a bare greeting. A weak model (production
+        // serverModel = gemini-3.1-flash-lite) misfires that greeting for real
+        // document questions ("How was OpenVLA-OFT finetuned?"). Override the
+        // greeting instruction at the SOURCE for document-grounded answers so
+        // the model never falls back to it — far more robust on a weak model
+        // than a post-hoc regex. The post-stream validator (below) is a backstop.
+        if (systemPromptOverride
+          && answerPlan.answerType === 'lecture_answer'
+          && manualActiveMode?.documentGroundedCustomModeActive) {
+          systemPromptOverride += '\n\n## DOCUMENT-GROUNDED OVERRIDE\nNever reply with a greeting such as "Hey! What would you like help with?". Every question is about the uploaded material. Answer it directly from the uploaded material. If the uploaded material does not contain the answer, say so plainly in one sentence — do not greet, and do not ask what the user wants.';
+        }
 
         try {
           // USE streamChat which handles routing. Pass the abort signal as
@@ -3006,6 +3077,11 @@ export function initializeIpcHandlers(appState: AppState): void {
       // Re-init IntelligenceManager
       appState.getIntelligenceManager().initializeLLMs();
 
+      // Hindsight: see set-gemini-api-key for rationale. LiteLLM URL/key changes also
+      // require the app-managed server to be restarted to pick up the new env — without
+      // this nudge the new config silently doesn't apply until manual relaunch.
+      try { require('./services/HindsightManager').HindsightManager.getInstance().notifyHindsightOfKeyChange('LiteLLM'); } catch { /* optional */ }
+
       return { success: true };
     } catch (error: any) {
       console.error('Error saving LiteLLM config:', error);
@@ -3338,6 +3414,170 @@ export function initializeIpcHandlers(appState: AppState): void {
       return { ok: true };
     } catch {
       return { ok: true };
+    }
+  });
+
+  // End trial via BYOK path: wipe Pro-ingested data, clear trial token + natively key.
+  safeHandle('review:get-prompt-state', async () => {
+    try {
+      const { ReviewService, getReviewApiKey, getReviewHardwareId } = require('./services/ReviewService');
+      const svc = ReviewService.getInstance();
+      const apiKey = getReviewApiKey();
+      const hwid = await getReviewHardwareId();
+      const remote = await svc.getPromptState(apiKey, hwid);
+      const local = svc.getLocalState();
+      // Local is the optimistic truth for snappy UX; backend wins on
+      // has_reviewed / dont_show_again because those are global across installs.
+      return {
+        ok: true,
+        local,
+        backend: remote.ok ? remote : null,
+        eligible: svc.shouldShowPrompt(),
+      };
+    } catch (error: any) {
+      console.error('[IPC] review:get-prompt-state failed:', error);
+      return { ok: false, error: error?.message || 'unknown' };
+    }
+  });
+
+  safeHandle('review:record-session', async () => {
+    try {
+      const { ReviewService, getReviewApiKey, getReviewHardwareId } = require('./services/ReviewService');
+      const svc = ReviewService.getInstance();
+      svc.recordSessionStart();
+      return { ok: true };
+    } catch (error: any) {
+      console.error('[IPC] review:record-session failed:', error);
+      return { ok: false, error: error?.message || 'unknown' };
+    }
+  });
+
+  safeHandle('review:flush-session', async () => {
+    try {
+      const { ReviewService, getReviewApiKey, getReviewHardwareId } = require('./services/ReviewService');
+      const svc = ReviewService.getInstance();
+      const totals = svc.recordSessionEnd();
+      const apiKey = getReviewApiKey();
+      const hwid = await getReviewHardwareId();
+      // Fire-and-forget: don't block the caller on the network round trip.
+      svc.reportUsage(apiKey, hwid, totals.session_count, totals.total_usage_ms).catch(() => {});
+      return { ok: true, totals };
+    } catch (error: any) {
+      console.error('[IPC] review:flush-session failed:', error);
+      return { ok: false, error: error?.message || 'unknown' };
+    }
+  });
+
+  safeHandle('review:mark-shown', async () => {
+    try {
+      const { ReviewService } = require('./services/ReviewService');
+      const svc = ReviewService.getInstance();
+      svc.markShown();
+      return { ok: true };
+    } catch (error: any) {
+      return { ok: false, error: error?.message || 'unknown' };
+    }
+  });
+
+  safeHandle('review:dismiss-later', async () => {
+    try {
+      const { ReviewService, getReviewApiKey, getReviewHardwareId } = require('./services/ReviewService');
+      const svc = ReviewService.getInstance();
+      svc.markDismissLater();
+      const apiKey = getReviewApiKey();
+      const hwid = await getReviewHardwareId();
+      svc.reportEvent(apiKey, hwid, { type: 'dismiss_later' }).catch(() => {});
+      return { ok: true };
+    } catch (error: any) {
+      return { ok: false, error: error?.message || 'unknown' };
+    }
+  });
+
+  safeHandle('review:dismiss-forever', async () => {
+    try {
+      const { ReviewService, getReviewApiKey, getReviewHardwareId } = require('./services/ReviewService');
+      const svc = ReviewService.getInstance();
+      svc.markDontShowAgain();
+      const apiKey = getReviewApiKey();
+      const hwid = await getReviewHardwareId();
+      svc.reportEvent(apiKey, hwid, { type: 'dont_show_again' }).catch(() => {});
+      return { ok: true };
+    } catch (error: any) {
+      return { ok: false, error: error?.message || 'unknown' };
+    }
+  });
+
+  safeHandle('review:submit', async (_event, payload: {
+    rating: number
+    review_text: string | null
+  }) => {
+    try {
+      const { ReviewService, getReviewApiKey, getReviewHardwareId, getReviewAppVersion, getReviewPlatform } = require('./services/ReviewService');
+      const svc = ReviewService.getInstance();
+      const apiKey = getReviewApiKey();
+      const hwid = await getReviewHardwareId();
+      // Server-side enforcement: rating 1-5, text <= 300 chars. Local re-check
+      // happens in the modal, but we still defend here against renderer bugs.
+      if (!Number.isInteger(payload?.rating) || payload.rating < 1 || payload.rating > 5) {
+        return { ok: false, error: 'rating_required_1_to_5' };
+      }
+      let reviewText: string | null = payload?.review_text ?? null
+      if (typeof reviewText === 'string') {
+        // eslint-disable-next-line no-control-regex
+        reviewText = reviewText.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '').replace(/[<>]/g, '').trim().slice(0, 300)
+        if (reviewText.length === 0) reviewText = null
+      }
+      const result = await svc.submitReview(apiKey, hwid, {
+        rating: payload.rating,
+        review_text: reviewText,
+        app_version: getReviewAppVersion(),
+        platform: getReviewPlatform(),
+        build_channel: '',
+        email: null,
+      });
+      if (result.ok && result.id) {
+        svc.markReviewed(result.id);
+        // Backend already records this server-side; the local call is redundant
+        // but keeps the file in sync if the network blip happens after submit.
+      }
+      return result;
+    } catch (error: any) {
+      console.error('[IPC] review:submit failed:', error);
+      return { ok: false, error: error?.message || 'unknown' };
+    }
+  });
+
+  safeHandle('review:update-testimonial', async (_event, payload: {
+    review_id: string
+    name: string | null
+    role: string | null
+    company: string | null
+    can_use_publicly: boolean
+    display_name_publicly: boolean
+  }) => {
+    try {
+      const { ReviewService, getReviewApiKey, getReviewHardwareId } = require('./services/ReviewService');
+      const svc = ReviewService.getInstance();
+      const apiKey = getReviewApiKey();
+      const hwid = await getReviewHardwareId();
+      const id = String(payload?.review_id || '').slice(0, 64)
+      if (!id) return { ok: false, error: 'invalid_review_id' }
+      const name = (typeof payload?.name === 'string') ? payload.name.replace(/[<>]/g, '').trim().slice(0, 80) : null
+      const role = (typeof payload?.role === 'string') ? payload.role.replace(/[<>]/g, '').trim().slice(0, 80) : null
+      const company = (typeof payload?.company === 'string') ? payload.company.replace(/[<>]/g, '').trim().slice(0, 80) : null
+      const can_use_publicly = !!payload?.can_use_publicly
+      const display_name_publicly = !!payload?.display_name_publicly
+      const result = await svc.updateTestimonial(apiKey, hwid, id, {
+        name: name || null,
+        role: role || null,
+        company: company || null,
+        can_use_publicly,
+        display_name_publicly,
+      });
+      return result;
+    } catch (error: any) {
+      console.error('[IPC] review:update-testimonial failed:', error);
+      return { ok: false, error: error?.message || 'unknown' };
     }
   });
 

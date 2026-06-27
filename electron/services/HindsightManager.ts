@@ -214,11 +214,24 @@ export class HindsightManager {
         return false;
       }
       // A successful or 5xx response clears any prior auth-failure cache.
-      if (this.lastAuthFailedAt) this.lastAuthFailedAt = 0;
+      if (this.lastAuthFailedAt) {
+        this.lastAuthFailedAt = 0;
+        // CRITICAL — if we WERE in the auth-failed state and the user just fixed their
+        // key, the top-of-overlay banner won't clear on its own (banner only clears
+        // on explicit 'ready' events). Broadcast 'ready' so the user gets immediate
+        // visual confirmation their fix worked. Only fires on the transition from
+        // failed → healthy, not on every healthy probe (avoids banner churn).
+        this.broadcastStatus('ready');
+      }
       return res.ok;
     } catch {
       this.lastHealthy = false;
       this.lastCheckedAt = Date.now();
+      // CRITICAL — a network error is categorically different from an auth rejection.
+      // Clear the auth-failure cache too, otherwise `isAuthFailed()` keeps returning
+      // true for the full 5-min TTL and the user sees "Cloud key rejected" even
+      // when the real problem is "server unreachable".
+      if (this.lastAuthFailedAt) this.lastAuthFailedAt = 0;
       return false;
     }
   }
@@ -279,6 +292,32 @@ export class HindsightManager {
       return (s?.get('hindsightAutoStart') as boolean | undefined) ?? true;
     } catch {
       return true; // default-on, same as autoStartCommand
+    }
+  }
+
+  /**
+   * True when the user (or env override) has explicitly disabled `hindsightMemory` — value
+   * differs from the registry default. Read via the sibling setting key
+   * `hindsightMemoryEnabledExplicit`, which `setIntelligenceFlag` writes whenever the
+   * persisted value !== registry default. Without this guard the auto-flip would silently
+   * re-enable a flag the user explicitly turned off — and the Customize disclosure hides
+   * the Hindsight flags, so there's no UI to re-disable from. Never throws.
+   */
+  private hindsightMemoryExplicitlyOff(): boolean {
+    try {
+      const s = this.settings();
+      // The sibling is set to `true` only when the value DIFFERS from default. If the
+      // user explicitly set it OFF (default is OFF), the sibling is true.
+      if (s?.get('hindsightMemoryEnabledExplicit') === true) {
+        // Cross-check with the actual flag value — covers the edge case where a user
+        // wrote `hindsightMemoryEnabledExplicit=true` but the value matches default
+        // (defensive: shouldn't happen given setIntelligenceFlag's invariant, but cheap).
+        const { isIntelligenceFlagEnabled } = require('../intelligence/intelligenceFlags');
+        return !isIntelligenceFlagEnabled('hindsightMemory');
+      }
+      return false;
+    } catch {
+      return false;
     }
   }
 
@@ -420,6 +459,18 @@ export class HindsightManager {
   async start(): Promise<void> {
     try {
       this.hasAttemptedStart = true;
+      // IDEMPOTENT RE-ENTRY GUARD — start() is called from BOTH boot (main.ts:996) AND
+      // on every debounced setHindsightConfig IPC (every field edit). If we already own
+      // a spawn (serverProcess set), no-op the entire body. Otherwise:
+      //   (a) a user who edits a field after the server is healthy would re-enter the
+      //       `if (healthy)` branch below, clobber `isAppManaged = false`, and orphan
+      //       the spawned tree on quit;
+      //   (b) a fast user editing during the boot-time grace window could fire two
+      //       concurrent spawnServer() calls, both binding port 8888 → one fails →
+      //       false 'spawn-failed' banner even though the server IS running.
+      // Both regressions were latent for the whole Hindsight lifetime and only surfaced
+      // now because the round-3 debounced auto-save made them trivially reachable.
+      if (this.serverProcess) return;
       const cfg = this.getHindsightConfig();
       if (!cfg) return;                 // no baseUrl → feature off, stay Noop
       // SELF-HEALING AUTO-FLIP — `hindsightMemory` is default-OFF in the flag registry
@@ -429,10 +480,18 @@ export class HindsightManager {
       // INDEPENDENT of the flag — it only gates `autoStartCommand()` resolution, not
       // the spawn gate. When the user has opted into auto-start, treat the request as
       // "enable memory for this session": idempotently flip the flag ON here so the
-      // gate passes. The flag's setting key (`hindsightMemoryEnabled`) is whitelisted
-      // in SettingsManager.AppSettings. Idempotent: a re-call with the flag already
-      // ON is a cheap `isIntelligenceFlagEnabled` check + a no-op write.
-      if (!this.memoryFlagOn() && this.isAutoStartEnabled()) {
+      // gate passes.
+      //
+      // RESPECT USER-OFF INTENT — the auto-flip only fires when `hindsightMemory` is
+      // at its registry default OR was last touched at the default. The sibling
+      // `hindsightMemoryEnabledExplicit` is set by `setIntelligenceFlag` whenever the
+      // value DIFFERS from default. A user (or env override like
+      // `NATIVELY_HINDSIGHT_MEMORY=0`) who explicitly disabled the flag leaves the
+      // sibling `true`, and the auto-flip below SKIPS. Without this guard, every
+      // debounced Settings save (every keystroke after the field was touched) would
+      // silently flip the flag back ON — and the Customize disclosure intentionally
+      // HIDES Hindsight flags, so the user has no UI to re-disable.
+      if (!this.memoryFlagOn() && this.isAutoStartEnabled() && !this.hindsightMemoryExplicitlyOff()) {
         try {
           const { setIntelligenceFlag } = require('../intelligence/intelligenceFlags');
           // `setIntelligenceFlag` returns boolean (false = key rejected by registry guard,
@@ -459,9 +518,15 @@ export class HindsightManager {
 
       const healthy = await this.healthCheck();
       if (healthy) {
-        console.log('[HindsightManager] server already running — connecting (not app-managed).', { baseUrl: cfg.baseUrl });
-        this.isAppManaged = false;
-        this.broadcastStatus('ready');
+        // CRITICAL: only declare "not app-managed" if we weren't the ones who spawned it.
+        // A second start() (from a debounced auto-save) hitting the healthy branch used
+        // to clobber isAppManaged = false unconditionally → stopSync() short-circuited →
+        // the spawned Python+Postgres tree was orphaned on quit AND held port 8888
+        // forever, blocking auto-spawn on next launch.
+        if (!this.isAppManaged) {
+          console.log('[HindsightManager] server already running — connecting (not app-managed).', { baseUrl: cfg.baseUrl });
+          this.broadcastStatus('ready');
+        }
         return;
       }
 
@@ -525,8 +590,14 @@ export class HindsightManager {
         // Prefer the explicit LiteLLM key; fall back to the OpenAI key already set above.
         const litellmKey = cm.getLitellmApiKey();
         if (litellmKey) extra.OPENAI_API_KEY = litellmKey;
-        // Guard: if neither key is present, litellm still needs a non-empty string.
-        if (!extra.OPENAI_API_KEY) extra.OPENAI_API_KEY = 'natively-gateway';
+        // Guard: if neither key is present, litellm still needs a non-empty string. The
+        // placeholder 'natively-gateway' satisfies litellm's non-empty check but WILL
+        // 401 against any auth-required LiteLLM proxy (the common case). Log so the
+        // operator has a trail when retains/reflects silently fail.
+        if (!extra.OPENAI_API_KEY) {
+          extra.OPENAI_API_KEY = 'natively-gateway';
+          console.warn('[HindsightManager] LiteLLM URL configured without an API key — using placeholder. Retains/reflects will likely fail on auth-required proxies. Save an OpenAI or LiteLLM key in AI Providers.');
+        }
       }
 
       // Ollama — no API key; signal availability via the enable flag and pass the base URL.

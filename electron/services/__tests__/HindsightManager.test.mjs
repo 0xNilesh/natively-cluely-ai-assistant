@@ -397,3 +397,101 @@ describe('HindsightManager.notifyHindsightOfKeyChange', () => {
     }
   });
 });
+
+// REGRESSION SUITE — round-5 senior review found 4 CRITICAL bugs that escaped rounds 1-4.
+// Each test pins one of them. If any test breaks, the corresponding regression has
+// returned and needs investigation. These tests use synthetic state (not real spawns)
+// because the bugs are all about state-machine correctness, not about the actual
+// child process behavior.
+describe('HindsightManager — round-5 regression suite', () => {
+  // Test 1: start() called twice with a healthy server must NOT clobber isAppManaged.
+  // Before the fix, the second start() entered `if (healthy)` and unconditionally set
+  // isAppManaged = false → stopSync() short-circuited → spawned tree orphaned on quit.
+  test('start() twice with healthy server preserves isAppManaged', async () => {
+    const hm = HindsightManager.getInstance();
+    // Simulate: we own a healthy spawn already.
+    hm.isAppManaged = true;
+    hm.serverProcess = { pid: 99999 }; // fake process — idempotent re-entry guard returns BEFORE we try anything
+    const origHealthy = hm.healthCheck.bind(hm);
+    // Stub healthCheck to return true (the bug-triggering condition).
+    hm.healthCheck = async () => true;
+    try {
+      await hm.start();
+      // The fix: we must NOT have flipped isAppManaged off.
+      assert.equal(hm.isAppManaged, true, 'second start() must not clobber isAppManaged');
+    } finally {
+      hm.healthCheck = origHealthy;
+      hm.isAppManaged = false;
+      hm.serverProcess = null;
+    }
+  });
+
+  // Test 2: start() called while serverProcess is already set is a no-op (idempotent
+  // re-entry). Before the fix, the second call entered the body and spawned again.
+  test('start() while serverProcess is set is idempotent', async () => {
+    const hm = HindsightManager.getInstance();
+    hm.isAppManaged = true;
+    let healthCalled = 0;
+    const origHealthy = hm.healthCheck.bind(hm);
+    hm.healthCheck = async () => { healthCalled++; return true; };
+    try {
+      // Pretend we already have a server — set serverProcess before start().
+      hm.serverProcess = { pid: 99999 };
+      await hm.start();
+      assert.equal(healthCalled, 0, 'healthCheck must not fire when serverProcess is set');
+    } finally {
+      hm.healthCheck = origHealthy;
+      hm.isAppManaged = false;
+      hm.serverProcess = null;
+    }
+  });
+
+  // Test 3: healthCheck that clears lastAuthFailedAt must broadcast 'ready' so the
+  // banner clears. Before the fix, the cache was cleared silently and the banner
+  // stayed red until the 5-min TTL expired.
+  test('healthCheck recovery from auth-failure broadcasts ready', async () => {
+    const hm = HindsightManager.getInstance();
+    // Seed: we were in auth-failed state.
+    hm.lastAuthFailedAt = Date.now() - 1000;
+    const broadcasts = [];
+    const origBroadcast = hm.broadcastStatus.bind(hm);
+    hm.broadcastStatus = (state, reason) => { broadcasts.push({ state, reason }); };
+    // Stub fetch globally to return a healthy response.
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({ ok: true, status: 200 });
+    try {
+      const ok = await hm.healthCheck();
+      assert.equal(ok, true);
+      assert.equal(hm.lastAuthFailedAt, 0, 'lastAuthFailedAt should be cleared');
+      const ready = broadcasts.find((b) => b.state === 'ready');
+      assert.ok(ready, 'should broadcast ready on auth-failure recovery');
+    } finally {
+      globalThis.fetch = origFetch;
+      hm.broadcastStatus = origBroadcast;
+      hm.lastAuthFailedAt = 0;
+      hm.lastCheckedAt = 0;
+      hm.lastHealthy = false;
+    }
+  });
+
+  // Test 4: healthCheck that throws (network error) must clear lastAuthFailedAt.
+  // Before the fix, a network blip after auth-failure kept the auth-failed banner
+  // for the full 5-min TTL even though the real problem was "server down".
+  test('healthCheck network error clears lastAuthFailedAt', async () => {
+    const hm = HindsightManager.getInstance();
+    // Seed: we were in auth-failed state.
+    hm.lastAuthFailedAt = Date.now() - 1000;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async () => { throw new Error('ECONNREFUSED'); };
+    try {
+      const ok = await hm.healthCheck();
+      assert.equal(ok, false);
+      assert.equal(hm.lastAuthFailedAt, 0, 'network error must clear lastAuthFailedAt');
+    } finally {
+      globalThis.fetch = origFetch;
+      hm.lastAuthFailedAt = 0;
+      hm.lastCheckedAt = 0;
+      hm.lastHealthy = false;
+    }
+  });
+});
