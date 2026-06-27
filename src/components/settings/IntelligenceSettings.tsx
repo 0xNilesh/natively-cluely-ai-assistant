@@ -310,11 +310,16 @@ export const IntelligenceSettings: React.FC = () => {
   const [showCustomize, setShowCustomize] = useState(false);
   const [masterBusy, setMasterBusy] = useState(false);
   // While the panel first opens, the auto-started local server may still be loading its
-  // embedding models (~15-20s). Treat a not-yet-healthy server as "starting up" (→ Checking…)
-  // during this grace window instead of alarming the user with "Can't connect". After it
-  // elapses, a still-down server correctly reads as unreachable. `tick` forces a re-render
-  // when the window expires so the chip updates even if no poll lands exactly then.
-  const [graceUntil] = useState(() => Date.now() + 25000);
+  // embedding models (~15-20s on a warm cache, 2-3min cold). Treat a not-yet-healthy
+  // server as "starting up" (→ Checking…) during this grace window instead of alarming
+  // the user with "Can't connect". After it elapses, a still-down server correctly reads
+  // as unreachable. CRITICAL: re-derive on every mount via useMemo keyed to a per-mount
+  // timestamp — otherwise a user who opens the panel 60s after restart (when the server
+  // is still booting) sees graceUntil already in the past and the chip flips to
+  // "Can't connect" immediately. `tick` forces a re-render when the window expires so
+  // the chip updates even if no poll lands exactly then.
+  const [mountAt] = useState(() => Date.now());
+  const graceUntil = useMemo(() => mountAt + 25_000, [mountAt]);
   const [, setTick] = useState(0);
   // "Try it" feature runners (lecture notes / diagram / in-meeting search). These call the
   // real IPCs against the CURRENT meeting transcript, so they need an active meeting + the

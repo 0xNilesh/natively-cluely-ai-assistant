@@ -76,6 +76,10 @@ export class HindsightManager {
   /** Cached health result + when it was taken. */
   private lastHealthy = false;
   private lastCheckedAt = 0;
+  /** Set to true the first time start() runs — gates isAvailable()'s cold-start optimism
+   *  so the very first recall doesn't fire a wasted 800ms probe before boot-time start()
+   *  has had a chance to spawn. See isAvailable(). */
+  private hasAttemptedStart = false;
   /** When the last healthCheck saw 401/403 — used to surface "Cloud key rejected" vs
    *  "server not yet ready". Cleared on a successful response. Cached longer than
    *  AVAILABILITY_TTL_MS (see AUTH_FAILURE_TTL_MS). */
@@ -233,11 +237,21 @@ export class HindsightManager {
    */
   isAvailable(): boolean {
     if (!this.getHindsightConfig()) return false;
-    // Cold start: never health-checked yet (e.g. start() hasn't run / completed). Be
-    // OPTIMISTIC — return true and kick a check. Worst case is one recall to a down server
-    // (already timeout-bounded); the alternative (return false) would wrongly skip recall
-    // for a configured+healthy server on the first question after launch.
-    if (this.lastCheckedAt === 0) { void this.healthCheck(); return true; }
+    // Cold start: never health-checked yet (e.g. start() hasn't even run). Returning true
+    // optimistically used to be safe — the server was assumed user-managed. Now that we
+    // auto-spawn on first launch, an optimistic true while start() is still mid-spawn
+    // (or has failed and broadcast spawn-failed) wastes a fetch per recall. Gate the
+    // optimistic true behind "start() has at least run once" — once it has, any recall
+    // can safely probe (the poll loop / user-manager assumption is established).
+    if (this.lastCheckedAt === 0) {
+      if (this.hasAttemptedStart) {
+        void this.healthCheck(); // re-probe in case the cache went cold (e.g. user reopened Settings)
+        return true;
+      }
+      // Boot-time, start() hasn't even been called yet. Return false — the first recall
+      // skips rather than wastes 800ms on a server that may not exist.
+      return false;
+    }
     const stale = Date.now() - this.lastCheckedAt > AVAILABILITY_TTL_MS;
     if (stale) { void this.healthCheck(); } // fire-and-forget refresh; never awaited here
     return this.lastHealthy;
@@ -405,6 +419,7 @@ export class HindsightManager {
    */
   async start(): Promise<void> {
     try {
+      this.hasAttemptedStart = true;
       const cfg = this.getHindsightConfig();
       if (!cfg) return;                 // no baseUrl → feature off, stay Noop
       // SELF-HEALING AUTO-FLIP — `hindsightMemory` is default-OFF in the flag registry
@@ -420,10 +435,24 @@ export class HindsightManager {
       if (!this.memoryFlagOn() && this.isAutoStartEnabled()) {
         try {
           const { setIntelligenceFlag } = require('../intelligence/intelligenceFlags');
-          setIntelligenceFlag('hindsightMemory', true);
+          // `setIntelligenceFlag` returns boolean (false = key rejected by registry guard,
+          // throw = SettingsManager write failed). Track both — a silent failure here means
+          // the spawn gate never opens, the user gets "Can't connect" forever, and they
+          // assume the spawn itself failed. Surface it.
+          const flipOk = setIntelligenceFlag('hindsightMemory', true);
+          if (flipOk === false) {
+            console.error('[HindsightManager] auto-flip rejected by flag registry — internal config error.');
+            this.broadcastStatus('spawn-failed', 'failed to enable long-term memory (internal config error — see log)');
+            return;
+          }
           console.log('[HindsightManager] auto-enabling hindsightMemory flag (autoStart ON, baseUrl configured).');
         } catch (e: any) {
-          console.warn('[HindsightManager] failed to auto-flip hindsightMemory flag (non-fatal):', e?.message);
+          // SettingsManager write threw (read-only disk, AV scanner, etc). This is the
+          // silent-failure case — without surfacing, the user has no signal that the
+          // reason nothing came up was the auto-flip itself, not the spawn.
+          console.error('[HindsightManager] auto-flip threw (non-fatal write failure):', e?.message);
+          this.broadcastStatus('spawn-failed', `failed to enable long-term memory: ${e?.message || 'unknown error'}`);
+          return;
         }
       }
       if (!this.memoryFlagOn()) return; // still off (autoStart explicitly disabled) → don't manage anything

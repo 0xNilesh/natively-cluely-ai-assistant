@@ -44,7 +44,11 @@ Mod._resolveFilename = function (req, ...rest) {
 };
 installElectronStub();
 
-import { HindsightManager } from '../../../dist-electron/electron/services/HindsightManager.js';
+// NOTE: imported as `let` (not `const`) so the opt-out sentinel test can rebind the
+// export after dropping/re-requiring the bundled module to exercise SettingsManager's
+// disk-based sentinel read.
+import * as HMModule from '../../../dist-electron/electron/services/HindsightManager.js';
+let { HindsightManager } = HMModule;
 
 const ENV_KEYS = ['HINDSIGHT_BASE_URL', 'HINDSIGHT_API_KEY', 'HINDSIGHT_TIMEOUT_MS'];
 function clearEnv() { for (const k of ENV_KEYS) delete process.env[k]; }
@@ -67,16 +71,69 @@ describe('HindsightManager.getHindsightConfig', () => {
 
   test('returns null when hindsightExplicitlyDisabled is set (user opted out)', () => {
     // The compiled HindsightManager bundle has its OWN bundled SettingsManager singleton
-    // (esbuild inline), distinct from any ESM-imported one. Writing to the external one
-    // doesn't affect the bundle's read. The opt-out path is exercised via the same disk
-    // file the bundled SettingsManager reads on next construction; under headless we
-    // exercise the GUARD itself (the boolean equality check) by reading the source: the
-    // bundled HindsightManager checks `s?.get('hindsightExplicitlyDisabled') === true`
-    // and returns null. End-to-end coverage lives in the manual smoke test in the docs.
-    process.env.HINDSIGHT_BASE_URL = 'http://localhost:8888';
-    // Sanity: when env IS set, getHindsightConfig returns non-null. The disabled path is
-    // documented and verified via SettingsManager integration tests + production behavior.
-    assert.ok(HindsightManager.getInstance().getHindsightConfig());
+    // (esbuild inline), distinct from any ESM-imported one. Writing to the external
+    // ESM-imported SettingsManager doesn't affect the bundle's read. The bundle reads
+    // from <userData>/settings.json on CONSTRUCTION (SettingsManager.loadSettings() in
+    // the ctor). So: drop the bundle from require.cache → forces a fresh construction
+    // on next import → re-reads from disk → sees our written sentinel.
+    process.env.HINDSIGHT_BASE_URL = 'http://localhost:8888'; // ensure cfg is non-null when sentinel is NOT set
+    // Find the testUserData the electron stub created for this run (see installElectronStub).
+    // The stub's getPath('userData') returns it; re-derive via os.tmpdir.
+    const path = require('node:path');
+    const fs = require('node:fs');
+    const os = require('node:os');
+    // Find the most-recently-created hindsight-mgr-test-* dir (this run's userData).
+    const tmpRoot = os.tmpdir();
+    const candidates = fs.readdirSync(tmpRoot)
+      .filter((n) => n.startsWith('hindsight-mgr-test-'))
+      .map((n) => path.join(tmpRoot, n));
+    // Pick the one matching our HindsightManager singleton's stored file path by checking
+    // which contains a settings.json that was written by THIS test run. The simplest
+    // proxy: HindsightManager.logPath (if a spawn populated it) or resolveServerLogPath()
+    // (which returns the SAME path getPath('userData') returned).
+    const hm = HindsightManager.getInstance();
+    const userDataDir = path.dirname(hm.getServerLogPath?.() ?? '');
+    if (!userDataDir) throw new Error('cannot determine test userData dir');
+    const settingsPath = path.join(userDataDir, 'settings.json');
+    // Write the opt-out sentinel directly to the file the bundled SettingsManager will read
+    // when we drop it from the cache and re-import.
+    fs.writeFileSync(settingsPath, JSON.stringify({ hindsightExplicitlyDisabled: true }, null, 2));
+    // Force the bundle to rebuild — drops both HindsightManager AND its bundled
+    // SettingsManager from the CJS cache. Re-importing the bundle re-runs its
+    // __esm initializer chain, which constructs a fresh SettingsManager that reads
+    // settings.json during construction.
+    const hmPath = require.resolve('../../../dist-electron/electron/services/HindsightManager.js');
+    delete require.cache[hmPath];
+    // Also need to drop the bundled SettingsManager module — its __esm function caches
+    // the SettingsManager export as a module-level binding. esbuild uses a private id
+    // "electron/services/SettingsManager.ts" that resolves through our _resolveFilename
+    // hook. Find the cache entry by iterating.
+    for (const k of Object.keys(require.cache)) {
+      if (k === hmPath || k.includes('HindsightManager')) delete require.cache[k];
+    }
+    // Re-import. This returns the SAME exports object as before but re-executes the
+    // module body once (the static `var init_*` fns run again, lazy __esm() returns
+    // fresh bindings). HindsightManager.getInstance() now returns a fresh singleton
+    // whose bundled SettingsManager reads settings.json on construction → sees our
+    // sentinel → getHindsightConfig() returns null.
+    try {
+      // eslint-disable-next-line no-unused-vars
+      const _fresh = require('../../../dist-electron/electron/services/HindsightManager.js');
+      assert.equal(_fresh.HindsightManager.getInstance().getHindsightConfig(), null,
+        'opt-out sentinel must produce null config');
+    } finally {
+      // Cleanup: clear the sentinel so subsequent tests aren't affected.
+      fs.writeFileSync(settingsPath, JSON.stringify({}, null, 2));
+      // Drop again so the next test re-reads the clean file.
+      delete require.cache[hmPath];
+      for (const k of Object.keys(require.cache)) {
+        if (k === hmPath || k.includes('HindsightManager')) delete require.cache[k];
+      }
+      // eslint-disable-next-line no-unused-vars
+      const _revert = require('../../../dist-electron/electron/services/HindsightManager.js');
+      // Rebind the import-binding used by other tests in this file.
+      HindsightManager = _revert.HindsightManager;
+    }
   });
 
   test('env HINDSIGHT_BASE_URL configures the server', () => {
