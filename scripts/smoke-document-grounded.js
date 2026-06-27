@@ -46,12 +46,46 @@ function pickGroqKey() { const k = GROQ_KEYS[groqCursor % GROQ_KEYS.length]; gro
 function pickGeminiKey() { const k = GEMINI_KEYS[geminiCursor % GEMINI_KEYS.length]; geminiCursor++; return k; }
 
 const SEMINAR_FIXTURE = `Title: Towards Connected Intelligence: Empowering Robotic Applications with Agentic AI Frameworks.
-Abstract: Agentic AI frameworks integrated with Vision-Language-Action models for embodied robotic systems, specifically the AgenticVLA system deployed on the Mercury X1 humanoid robot.
-The AgenticVLA pipeline uses OpenVLA-OFT finetuned with LoRA adapters and orchestrated by AutoGen.
-Mercury X1 has 19 degrees of freedom. Sensors include LiDAR, ultrasonic sensors, and 2D vision.
-ROS# bridges Unity and ROS. Unity hosts the VR teleoperation environment with Meta Quest 3 XR visualization.
-The project has four main phases: teleoperation, data collection, training the VLA, and Agentic AI integration.
-The benchmark Success Rate for AgenticVLA on semantic relationship understanding is 44 percent versus 0 percent for standard VLA; on prompt complexity 84 percent versus 42 percent for finetuned OpenVLA-OFT; on self-awareness 85 percent versus 43 percent.`;
+
+Abstract: This thesis studies Agentic AI frameworks integrated with Vision-Language-Action models for embodied robotic systems. AgenticVLA is the proposed end-to-end robot manipulation pipeline deployed on the Mercury X1 humanoid robot.
+
+Research Questions:
+1. How do agentic AI frameworks improve Vision-Language-Action robotic performance?
+2. How does embodied cognition support connected intelligence?
+
+Main Objectives: The four main phases are 1. Teleoperation, 2. Data collection, 3. Training the VLA, 4. Agentic AI integration.
+
+OpenVLA: OpenVLA is a 7B-parameter open-source Vision-Language-Action model based on Llama 2 and Prismatic, used as the baseline VLA.
+
+OpenVLA-OFT: OpenVLA-OFT is fine-tuned from OpenVLA using LoRA adapters with on-robot data. OpenVLA-OFT uses parallel decoding and action chunking and achieves 43x faster throughput than base OpenVLA.
+
+Agentic AI and AutoGen: Agentic AI is a paradigm where autonomous AI agents plan, reason, and use tools. AutoGen is a multi-agent framework that orchestrates AgenticVLA skills for planning, task reasoning, and tool coordination.
+
+AgenticVLA: AgenticVLA improves over a normal VLA by integrating AutoGen-driven agentic skills for planning and tool use on top of the OpenVLA-OFT backbone.
+
+Mercury X1 Hardware: Mercury X1 is a humanoid robot platform selected because it provides an embodied robotic system for manipulation experiments. Mercury X1 has 19 degrees of freedom. Sensors include LiDAR (3D point cloud for obstacle detection), ultrasonic sensors (proximity at short range), and 2D vision camera (RGB stream for object recognition). Technical specifications table lists Mercury X1 mobility, manipulation hardware, and sensor suite.
+
+ROS# Middleware: ROS# middleware bridges Unity and ROS. ROS# allows Unity and .NET applications to communicate with ROS nodes, topics, services, and messages.
+
+Unity Simulation: Unity game engine hosts the simulated Mercury X1 environment and provides the VR teleoperation interface. C# scripts drive Unity, and ROS# integrates Unity with ROS for real-time robot control.
+
+Teleoperation Hardware: Meta Quest 3 provides XR visualization of robot state and is used for immersive teleoperation. Teleoperation uses Unity, ROS#, Meta Quest 3, and ROS message bridging.
+
+Camera Setup: Camera setup includes Orbbec Deeyea 3D camera and two Logitech C920 HD webcams. The robotic raw data acquisition procedure records synchronized camera observations, robot states, and action commands.
+
+Dataset Structure: Dual-arm manipulation demonstrations collected from Mercury X1 teleoperation. Dataset tasks include manipulating fruits and objects such as banana and grapes. The dataset is formatted into observations, language instructions, and robot action trajectories for VLA training.
+
+Preprocessing: Preprocessing before finetuning aligns camera frames, action chunks, and language commands into a unified training format.
+
+OpenVLA-OFT Finetuning: OpenVLA-OFT finetuning uses LoRA adapters with the collected robot demonstration dataset.
+
+Hyperparameters: Hyperparameters include learning rate, batch size, training steps, and LoRA rank.
+
+Evaluation Metrics: Success Rate (SR) is the primary evaluation metric for manipulation tasks. MSE (Mean Squared Error) measures prediction error between predicted and demonstrated actions. Compared models are OpenVLA, finetuned OpenVLA-OFT, and AgenticVLA.
+
+Benchmark Results: On semantic relationship understanding, standard VLA scored 0 percent Success Rate while AgenticVLA scored 44 percent Success Rate. On prompt complexity analysis, finetuned OpenVLA-OFT scored 42 percent while AgenticVLA scored 84 percent. On the self-awareness benchmark, standard VLA scored 43 percent while AgenticVLA scored 85 percent.
+
+Limitations: Limitations include sim-to-real transfer, dataset scale, hardware constraints, and robustness in open environments.`;
 
 const SYSTEM_PROMPT = [
   'You are a Seminar Presentation Assistant.',
@@ -196,65 +230,294 @@ async function main() {
   const model = process.env.SMOKE_GROQ_MODEL || 'llama-3.3-70b-versatile';
   const geminiModel = process.env.SMOKE_GEMINI_MODEL || 'gemini-2.0-flash';
 
+  // Drift terms that MUST NOT appear in any answer. The user's prior 51-q
+  // benchmark surfaced these from profile/resume/JD context leaking into a
+  // document-grounded custom mode. They are forbidden across the board.
+  const GLOBAL_FORBIDDEN = [
+    'TalentScope',
+    'real-time technical interview platform',
+    'Next.js',
+    'Tailwind',
+    'Convex',
+    'Stream SDK',
+    'Clerk',
+    'Role-Based Access Control',
+    'RBAC',
+    'remote hiring',
+    'synchronized code execution',
+    'live coding',
+  ];
+  // Internal retrieval vocabulary that the model must NOT echo verbatim. The
+  // model-visible prompt now uses "uploaded material" / "thesis material"
+  // (2026-06-27 fix F7) — answers saying "snippet" or "retrieved" indicate
+  // the guard did not stick or the model is still echoing scaffold language.
+  // We deliberately exclude "chunk"/"chunks" from the block list because
+  // "action chunks" is a legitimate domain term in robotics / VLA literature
+  // — see https://arxiv.org/abs/2406.09246 — and the substring "chunk"
+  // matches that term. The retriever itself still does not surface the word
+  // "chunk" in any user-facing model prompt (2026-06-27 verified), so the
+  // answer-side check needs to allow the domain term.
+  const INTERNAL_WORDING = ['snippet', 'snippets', 'retrieved', 'excerpt'];
+
   const checks = [
+    // Core facts that MUST come from the uploaded material.
     {
-      label: 'main topic — should answer from seminar',
-      question: 'What is the main topic of my thesis?',
-      retrieved: null,
-      expectMentions: ['Agentic AI', 'Vision-Language-Action', 'embodied robotic systems'],
-      expectAbsent: ['TalentScope', 'real-time technical interview platform'],
+      label: '01 main topic', question: 'What is the main topic of my thesis?',
+      expectMentions: ['Agentic AI', 'Vision-Language-Action'],
     },
     {
-      label: 'Mercury X1 specs — 19 DOF',
-      question: 'How many degrees of freedom does Mercury X1 have?',
-      retrieved: null,
-      expectMentions: ['19', 'degrees of freedom', 'Mercury X1'],
-      expectAbsent: ['TalentScope'],
+      label: '02 explain thesis simply', question: 'Explain my thesis in simple words.',
+      expectMentions: ['Agentic AI', 'robotic'],
     },
     {
-      label: 'ROS# role',
-      question: 'What is the role of ROS# in the project?',
-      retrieved: null,
-      expectMentions: ['ROS#', 'Unity', 'ROS'],
-      expectAbsent: [],
-    },
-    {
-      label: 'no coding scaffold leak',
-      question: 'What problem is this thesis trying to solve?',
-      retrieved: null,
-      expectMentions: ['embodied', 'robot', 'Agentic AI', 'framework'],
+      label: '03 problem thesis solves', question: 'What problem is this thesis trying to solve?',
+      expectMentions: ['embodied', 'robot'],
       expectAbsent: ['## Approach', '## Code', '## Dry Run', '## Complexity'],
     },
     {
-      label: 'profile contamination guard',
-      question: 'What are the four main phases of the project?',
-      retrieved: null,
-      expectMentions: ['teleoperation', 'data collection', 'training', 'Agentic AI'],
-      expectAbsent: ['TalentScope', 'real-time technical interview platform', 'Next.js', 'Tailwind'],
+      label: '04 research questions', question: 'What are the two research questions?',
+      expectMentions: ['agentic', /\bvla\b|vision-language-action/i],
     },
     {
-      label: 'fail-closed on GPU',
-      question: 'What exact GPU was used for training?',
-      retrieved: null,
+      label: '05 objectives', question: 'What are the main objectives of the thesis?',
+      expectMentions: ['teleoperation', 'Agentic AI', 'training'],
+    },
+    {
+      label: '06 embodied AI', question: 'How is this thesis connected to embodied AI?',
+      expectMentions: ['embodied', 'robotic'],
+    },
+    {
+      label: '07 embodied cognition', question: 'What does embodied cognition mean in this thesis?',
+      expectMentions: ['embodied'],
+    },
+    {
+      label: '08 AGI', question: 'How is this thesis related to AGI?',
+      expectMentions: ['agentic', 'intelligence'],
+    },
+    {
+      label: '09 VLA importance', question: 'Why are VLA models important for robotics?',
+      expectMentions: ['VLA', 'robot'],
+    },
+    {
+      label: '10 VLA limitations', question: 'What are the limitations of current VLA models?',
+      expectMentions: ['VLA'],
+    },
+    {
+      label: '11 VLA model definition', question: 'What is a Vision-Language-Action model?',
+      expectMentions: ['Vision-Language-Action'],
+    },
+    {
+      label: '12 OpenVLA', question: 'What is OpenVLA?',
+      expectMentions: ['OpenVLA', '7B'],
+    },
+    {
+      label: '13 OpenVLA-OFT', question: 'What is OpenVLA-OFT?',
+      expectMentions: ['OpenVLA-OFT', 'LoRA'],
+    },
+    {
+      label: '14 OpenVLA-OFT vs OpenVLA', question: 'How is OpenVLA-OFT different from OpenVLA?',
+      expectMentions: ['OpenVLA-OFT', 'parallel decoding', 'action chunking', '43x'],
+    },
+    {
+      label: '15 Agentic AI', question: 'What is Agentic AI?',
+      expectMentions: ['agentic', 'AI'],
+    },
+    {
+      label: '16 agent components', question: 'What are the three core components of an AI agent?',
+      expectMentions: ['agent'],
+    },
+    {
+      label: '17 AutoGen', question: 'What is AutoGen used for in this thesis?',
+      expectMentions: ['AutoGen'],
+    },
+    {
+      label: '18 AutoGen selection', question: 'Why was AutoGen selected over other frameworks?',
+      expectMentions: ['AutoGen'],
+    },
+    {
+      label: '19 AgenticVLA', question: 'What is AgenticVLA?',
+      expectMentions: ['AgenticVLA'],
+    },
+    {
+      label: '20 AgenticVLA improvement', question: 'Why does AgenticVLA improve over a normal VLA?',
+      expectMentions: ['AgenticVLA'],
+    },
+    {
+      label: '21 Mercury X1', question: 'What is the Mercury X1 robot?',
+      expectMentions: ['Mercury X1', 'humanoid'],
+    },
+    {
+      label: '22 Mercury X1 selection', question: 'Why was Mercury X1 selected for this work?',
+      expectMentions: ['Mercury X1'],
+    },
+    {
+      label: '23 Mercury X1 specs', question: 'What are the key specifications of Mercury X1?',
+      expectMentions: ['Mercury X1', 'degrees of freedom'],
+    },
+    {
+      label: '24 Mercury X1 DOF', question: 'How many degrees of freedom does Mercury X1 have?',
+      expectMentions: ['19', 'degrees of freedom', 'Mercury X1'],
+    },
+    {
+      label: '25 Mercury X1 sensors', question: 'What sensors does Mercury X1 use?',
+      expectMentions: ['LiDAR', 'ultrasonic', 'vision'],
+    },
+    {
+      label: '26 ROS# role', question: 'What is the role of ROS# in the project?',
+      expectMentions: ['ROS#', 'Unity'],
+    },
+    {
+      label: '27 Unity role', question: 'What is the role of Unity in the project?',
+      expectMentions: ['Unity'],
+    },
+    {
+      label: '28 VR teleoperation', question: 'Why was VR teleoperation used?',
+      expectMentions: ['teleoperation'],
+    },
+    {
+      label: '29 teleop hardware', question: 'What hardware was used for teleoperation?',
+      expectMentions: ['Meta Quest 3'],
+    },
+    {
+      label: '30 camera setup', question: 'What camera setup was used for data collection?',
+      expectMentions: ['Orbbec Deeyea', 'Logitech'],
+    },
+    {
+      label: '31 methodology', question: 'Explain the research methodology.',
+      expectMentions: ['teleoperation', 'training'],
+    },
+    {
+      label: '32 four phases — profile guard', question: 'What are the four main phases of the project?',
+      expectMentions: ['teleoperation', 'data collection', 'training', 'Agentic AI'],
+    },
+    {
+      label: '33 data acquisition', question: 'What was the robotic raw data acquisition procedure?',
+      // The fixture says "robotic raw data acquisition procedure records
+      // synchronized camera observations, robot states, and action commands"
+      // — the live answer must reference at least one of those terms.
+      expectMentions: [/(?:camera|robot state|action command|teleop)/i],
+    },
+    {
+      label: '34 dataset kind', question: 'What kind of dataset was collected?',
+      expectMentions: ['manipulation', 'demonstration'],
+    },
+    {
+      label: '35 objects used', question: 'What objects were used in the robotic tasks?',
+      expectMentions: ['object'],
+    },
+    {
+      label: '36 dataset format', question: 'How was the dataset formatted for training?',
+      expectMentions: ['action', 'observation'],
+    },
+    {
+      label: '37 preprocessing', question: 'What preprocessing was done before finetuning?',
+      expectMentions: ['preprocessing', /\bfine[- ]?tun\w*/],
+    },
+    {
+      label: '38 OpenVLA-OFT finetuning', question: 'How was OpenVLA-OFT finetuned?',
+      expectMentions: ['OpenVLA-OFT', 'LoRA'],
+    },
+    {
+      label: '39 hyperparameters', question: 'What hyperparameters were used for finetuning?',
+      expectMentions: ['learning rate', 'batch'],
+    },
+    {
+      label: '40 LoRA', question: 'What was LoRA used for?',
+      expectMentions: ['LoRA', /\bfine[- ]?tun\w*/],
+    },
+    {
+      label: '41 evaluation metrics', question: 'What evaluation metrics were used?',
+      expectMentions: ['Success Rate', 'MSE'],
+    },
+    {
+      label: '42 Success Rate', question: 'What does Success Rate measure?',
+      expectMentions: ['Success Rate'],
+    },
+    {
+      label: '43 MSE', question: 'What does MSE measure?',
+      expectMentions: ['MSE'],
+    },
+    {
+      label: '44 compared models', question: 'What models were compared in the experiments?',
+      expectMentions: ['OpenVLA', 'AgenticVLA'],
+    },
+    {
+      label: '45 semantic benchmark', question: 'What happened in the semantic relationship understanding benchmark?',
+      expectMentions: ['44', '0'],
+    },
+    {
+      label: '46 prompt complexity', question: 'What happened in the prompt complexity analysis?',
+      expectMentions: ['84', '42'],
+    },
+    {
+      label: '47 self-awareness', question: 'What happened in the self-awareness benchmark?',
+      expectMentions: ['85', '43'],
+    },
+    {
+      label: '48 main findings', question: 'What were the main findings from the experiments?',
+      expectMentions: ['AgenticVLA'],
+    },
+    {
+      label: '49 limitations', question: 'What limitations or open challenges are discussed?',
+      expectMentions: ['limitation'],
+    },
+    {
+      label: '50 seminar conclusion (recovery line)', question: 'Give me a 30-second seminar-style conclusion for this thesis.',
+      expectMentions: ['AgenticVLA', 'thesis'],
+    },
+    // GPU fail-closed: the canonical case where the uploaded material does
+    // NOT contain the answer. The model must say "not directly mentioned"
+    // and must NOT invent an NVIDIA/A100/H100/T4/V100.
+    {
+      label: '51 GPU fail-closed', question: 'What exact GPU was used for training?',
       expectMentions: ['not directly mentioned', 'seminar material'],
-      expectAbsent: ['NVIDIA', 'A100', 'H100', 'T4'],
+      expectAbsent: ['NVIDIA', 'A100', 'H100', 'T4', 'V100'],
     },
   ];
 
   let pass = 0, fail = 0;
-  for (const c of checks) {
-    const { text } = await liveCheck(c.label, c.question, c.retrieved, c.expectMentions.join(', '), model, geminiModel);
+  const failures = [];
+  for (let i = 0; i < checks.length; i++) {
+    const c = checks[i];
+    const expected = c.expectMentions.join(', ');
+    const { text } = await liveCheck(c.label, c.question, c.retrieved, expected, model, geminiModel);
     const lower = text.toLowerCase();
-    const missMentions = c.expectMentions.filter((m) => !lower.includes(m.toLowerCase()));
-    const leakAbsents = c.expectAbsent.filter((m) => lower.includes(m.toLowerCase()));
-    const ok = missMentions.length === 0 && leakAbsents.length === 0;
-    if (ok) { pass++; console.log(`  PASS`); }
-    else {
+    const missMentions = c.expectMentions.filter((m) => {
+      if (m instanceof RegExp) return !m.test(text);
+      return !lower.includes(m.toLowerCase());
+    });
+    const explicitAbsent = c.expectAbsent || [];
+    const leakExplicit = explicitAbsent.filter((m) => lower.includes(m.toLowerCase()));
+    const leakGlobal = GLOBAL_FORBIDDEN.filter((m) => lower.includes(m.toLowerCase()));
+    const internalWording = INTERNAL_WORDING.filter((w) =>
+      new RegExp(`\\b${w}\\b`, 'i').test(text),
+    );
+    const blank = text.trim().length === 0;
+    const problems = [];
+    if (blank) problems.push('BLANK answer');
+    if (missMentions.length) problems.push(`missing: ${missMentions.join(', ')}`);
+    if (leakExplicit.length) problems.push(`leaked (question-specific): ${leakExplicit.join(', ')}`);
+    if (leakGlobal.length) problems.push(`leaked (global drift): ${leakGlobal.join(', ')}`);
+    if (internalWording.length) problems.push(`internal wording: ${internalWording.join(', ')}`);
+    if (problems.length === 0) {
+      pass++;
+      console.log(`  PASS`);
+    } else {
       fail++;
-      console.log(`  FAIL — missing: ${missMentions.join(', ') || '∅'} ; leaked: ${leakAbsents.join(', ') || '∅'}`);
+      failures.push({ idx: i + 1, label: c.label, problems, text });
+      console.log(`  FAIL — ${problems.join(' ; ')}`);
     }
   }
   console.log(`\n[smoke] ${pass}/${pass + fail} live checks passed (groq=${model}, gemini=${geminiModel})`);
+  if (failures.length) {
+    console.log(`\n[smoke] FAILURES (showing text excerpts):`);
+    for (const f of failures) {
+      const excerpt = (f.text || '').slice(0, 220).replace(/\n/g, ' / ');
+      console.log(`  #${f.idx} ${f.label}`);
+      console.log(`     ${f.problems.join(' ; ')}`);
+      console.log(`     → ${excerpt}${f.text && f.text.length > 220 ? ' …' : ''}`);
+    }
+  }
   process.exit(fail === 0 ? 0 : 1);
 }
 

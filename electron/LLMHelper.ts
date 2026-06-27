@@ -352,7 +352,10 @@ export class LLMHelper {
         .replace(/<active_mode_retrieved_context[\s\S]*?<\/active_mode_retrieved_context>\s*/gi, '')
         .replace(/<reference_file\b[\s\S]*?<\/reference_file>\s*/gi, '')
         .replace(/<document_identity\b[\s\S]*?<\/document_identity>\s*/gi, '')
-        .replace(/<reference_grounding_guard>[\s\S]*?<\/reference_grounding_guard>\s*/gi, '');
+        // Strip both old and new guard tag names so existing log/scrub
+        // behaviour is preserved across the 2026-06-27 rename.
+        .replace(/<reference_grounding_guard>[\s\S]*?<\/reference_grounding_guard>\s*/gi, '')
+        .replace(/<evidence_use_rule>[\s\S]*?<\/evidence_use_rule>\s*/gi, '');
     }
     if (deniedScopes.includes('profile_history')) {
       scrubbed = scrubbed

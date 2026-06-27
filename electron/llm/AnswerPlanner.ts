@@ -2285,7 +2285,7 @@ export const formatAnswerPlanForPrompt = (plan: AnswerPlan, includeVerificationS
         ? 'Speak in the FIRST PERSON as the product\'s seller/representative ("our product", "we"). Never identify as an AI assistant.'
         : 'Answer in a neutral, explanatory voice. Do not roleplay as the candidate.';
   const policyLine = plan.documentGroundedCustomModeActive
-    ? 'Ground every concrete claim in the uploaded/reference files for this custom mode. Reference files outrank profile, resume, JD, persona, prior assistant answers, and generic knowledge. If the answer is not supported by the uploaded material, say: "This is not directly mentioned in my seminar material, but based on the topic, the likely explanation is..."'
+    ? 'Ground every concrete claim in the uploaded/reference files for this custom mode. If the answer is not supported by the uploaded material, say plainly that the requested information is not in the uploaded material. Do not reconstruct it from general knowledge, prior assistant answers, profile, resume, JD, or persona context.'
     : plan.profileContextPolicy === 'required'
       ? 'Ground every concrete claim in the provided profile facts. Never invent names, numbers, metrics, companies, or technologies that are not in those facts.'
       : plan.profileContextPolicy === 'forbidden'

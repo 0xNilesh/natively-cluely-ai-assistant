@@ -1,5 +1,6 @@
 import * as crypto from 'crypto';
 import { DatabaseManager } from '../db/DatabaseManager';
+import type { EmbeddingPipeline } from '../rag/EmbeddingPipeline';
 import { ModeContextRetriever, type ModeRetrievalOptions } from './ModeContextRetriever';
 import type { AnswerType } from '../llm/AnswerPlanner';
 import type { ActiveModeInfo } from '../llm/modeProfiles';
@@ -54,6 +55,12 @@ export interface ModeReferenceFile {
     fileName: string;
     content: string;
     createdAt: string;
+    /** Real page count reported by the PDF parser (pdf-parse@2.x `data.total`).
+     *  Only set for `.pdf` uploads; undefined for txt/md/docx. */
+    pageCount?: number;
+    /** Number of pages from which text was actually extracted (a subset of
+     *  `pageCount` when some pages are image-only / blank). Only set for PDFs. */
+    extractedPageCount?: number;
 }
 
 export interface ModeNoteSection {
@@ -437,7 +444,13 @@ export class ModesManager {
         return DatabaseManager.getInstance().getReferenceFiles(modeId).map(rowToFile);
     }
 
-    public addReferenceFile(params: { modeId: string; fileName: string; content: string }): ModeReferenceFile {
+    public addReferenceFile(params: {
+        modeId: string;
+        fileName: string;
+        content: string;
+        pageCount?: number;
+        extractedPageCount?: number;
+    }): ModeReferenceFile {
         const id = `ref_${crypto.randomUUID()}`;
         DatabaseManager.getInstance().addReferenceFile({
             id,
@@ -452,6 +465,8 @@ export class ModesManager {
             fileName: params.fileName,
             content: params.content,
             createdAt: new Date().toISOString(),
+            pageCount: params.pageCount,
+            extractedPageCount: params.extractedPageCount,
         };
     }
 
@@ -470,6 +485,21 @@ export class ModesManager {
     /** Index one reference file (idempotent — re-embeds only on content/space change). */
     public async indexReferenceFile(file: ModeReferenceFile): Promise<void> {
         await this.modeContextRetriever.indexReferenceFile(file);
+    }
+
+    /** Wire the RAGManager EmbeddingPipeline into the mode hybrid retriever. */
+    public setSharedEmbeddingPipeline(pipeline: EmbeddingPipeline): void {
+        this.modeContextRetriever.setSharedEmbeddingPipeline(pipeline);
+    }
+
+    /** Re-index files that fell back before the embedding provider became ready. */
+    public async retryAllLexicalOnlyFiles(): Promise<void> {
+        for (const mode of this.getModes()) {
+            const files = this.getReferenceFiles(mode.id);
+            if (files.length > 0) {
+                await this.modeContextRetriever.retryLexicalOnlyFiles(files).catch(() => { /* logged inside */ });
+            }
+        }
     }
 
     /** Kick indexing for every not-yet-ready file of a mode (mode activation prewarm). */

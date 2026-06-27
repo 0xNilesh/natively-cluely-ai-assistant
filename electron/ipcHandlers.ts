@@ -2798,6 +2798,10 @@ export function initializeIpcHandlers(appState: AppState): void {
       // Re-init IntelligenceManager
       appState.getIntelligenceManager().initializeLLMs();
 
+      // Hindsight: an app-managed companion server inherited the OLD key in its env at
+      // spawn — it won't pick up the new one until restart. Surface the hint (log + IPC).
+      try { require('./services/HindsightManager').HindsightManager.getInstance().notifyHindsightOfKeyChange('Gemini'); } catch { /* optional */ }
+
       return { success: true };
     } catch (error: any) {
       console.error('Error saving Gemini API key:', error);
@@ -2818,6 +2822,9 @@ export function initializeIpcHandlers(appState: AppState): void {
       appState.getIntelligenceManager().resetEngine();
       // Re-init IntelligenceManager
       appState.getIntelligenceManager().initializeLLMs();
+
+      // Hindsight: see set-gemini-api-key for rationale.
+      try { require('./services/HindsightManager').HindsightManager.getInstance().notifyHindsightOfKeyChange('Groq'); } catch { /* optional */ }
 
       return { success: true };
     } catch (error: any) {
@@ -2840,6 +2847,9 @@ export function initializeIpcHandlers(appState: AppState): void {
       // Re-init IntelligenceManager
       appState.getIntelligenceManager().initializeLLMs();
 
+      // Hindsight: see set-gemini-api-key for rationale.
+      try { require('./services/HindsightManager').HindsightManager.getInstance().notifyHindsightOfKeyChange('OpenAI'); } catch { /* optional */ }
+
       return { success: true };
     } catch (error: any) {
       console.error('Error saving OpenAI API key:', error);
@@ -2861,6 +2871,9 @@ export function initializeIpcHandlers(appState: AppState): void {
       // Re-init IntelligenceManager
       appState.getIntelligenceManager().initializeLLMs();
 
+      // Hindsight: see set-gemini-api-key for rationale.
+      try { require('./services/HindsightManager').HindsightManager.getInstance().notifyHindsightOfKeyChange('Claude'); } catch { /* optional */ }
+
       return { success: true };
     } catch (error: any) {
       console.error('Error saving Claude API key:', error);
@@ -2881,6 +2894,9 @@ export function initializeIpcHandlers(appState: AppState): void {
       appState.getIntelligenceManager().resetEngine();
       // Re-init IntelligenceManager
       appState.getIntelligenceManager().initializeLLMs();
+
+      // Hindsight: see set-gemini-api-key for rationale.
+      try { require('./services/HindsightManager').HindsightManager.getInstance().notifyHindsightOfKeyChange('DeepSeek'); } catch { /* optional */ }
 
       return { success: true };
     } catch (error: any) {
@@ -7041,6 +7057,8 @@ export function initializeIpcHandlers(appState: AppState): void {
       }
 
       let content = '';
+      let pdfReportedPageCount: number | undefined;
+      let pdfExtractedPageCount: number | undefined;
       try {
         if (ext === '.pdf') {
           // pdf-parse@2.x is a thin wrapper over pdfjs-dist's legacy build.
@@ -7053,7 +7071,32 @@ export function initializeIpcHandlers(appState: AppState): void {
           const buffer = await fs.promises.readFile(filePath);
           const parser = new PDFParse({ data: buffer });
           const data: any = await withTimeout<any>(parser.getText(), PARSE_TIMEOUT_MS, 'PDF parse');
-          content = data.text;
+          // pdf-parse@2.x's `getText()` returns a TextResult with:
+          //   { text: string, total: number, pages: Array<{ num, text }> }
+          // Previously we stored ONLY `data.text` — concatenated, with no
+          // page boundaries — and the retriever inferred page count from a
+          // 3000-char heuristic, which on a 66-page image-heavy PDF reported
+          // ~47. Preserve the per-page structure so the retriever can boost
+          // exact section / page matches and surface real page metadata.
+          pdfReportedPageCount =
+            typeof data?.total === 'number' && data.total > 0
+              ? data.total
+              : Array.isArray(data?.pages)
+                ? data.pages.length
+                : undefined;
+          if (Array.isArray(data?.pages) && data.pages.length > 0) {
+            pdfExtractedPageCount = data.pages.filter(
+              (p: any) => p && typeof p.text === 'string' && p.text.trim().length > 0,
+            ).length;
+            content = data.pages
+              .map(
+                (p: any) =>
+                  `[Page ${p.num}]\n${typeof p.text === 'string' ? p.text : ''}`,
+              )
+              .join('\n\n');
+          } else {
+            content = data.text;
+          }
         } else if (ext === '.docx') {
           // mammoth@1.x only handles .docx (modern Office Open XML, a ZIP
           // container). Legacy .doc (binary CFB) is rejected upstream in
@@ -7131,7 +7174,13 @@ export function initializeIpcHandlers(appState: AppState): void {
       }
 
       const { ModesManager } = require('./services/ModesManager');
-      const file = ModesManager.getInstance().addReferenceFile({ modeId, fileName, content });
+      const file = ModesManager.getInstance().addReferenceFile({
+        modeId,
+        fileName,
+        content,
+        pageCount: pdfReportedPageCount,
+        extractedPageCount: pdfExtractedPageCount,
+      });
       // PI v3 (W3) — index at UPLOAD time (fire-and-forget): chunk + embed +
       // persist vectors now so live retrieval never pays the embedding cost.
       // Status events let the UI show pending → ready.
