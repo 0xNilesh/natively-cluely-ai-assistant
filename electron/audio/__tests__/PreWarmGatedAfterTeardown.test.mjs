@@ -41,13 +41,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distRoot = path.resolve(__dirname, '../../../dist-electron/electron/audio');
 
 let micConstructorCalls = 0;
+let lastMicDataCb = null;
 function makeFakeMic() {
     micConstructorCalls++;
     return {
         startCalls: 0,
         stopCalls: 0,
         torndown: false,
-        start(_cb) { this.startCalls++; },
+        start(cb) { this.startCalls++; lastMicDataCb = cb; },
         stop() { this.stopCalls++; this.torndown = true; },
         getSampleRate() { return 48000; },
     };
@@ -224,6 +225,30 @@ test('start() racing pre-warm: a fast start() before the .then() fires construct
         `BUG: pre-warm should have skipped because start() raced ahead and grabbed a fresh native handle. ` +
         `Total constructions = ${micConstructorCalls} (expected 2: start + start-race; ` +
         `3 would mean pre-warm built a third instance despite this.monitor !== null).`,
+    );
+
+    await cap.destroy();
+});
+test('runtime callback error disables pre-warm before stop()', async () => {
+    micConstructorCalls = 0;
+    lastMicDataCb = null;
+    const cap = new MicrophoneCapture('runtime-error-prewarm-gate');
+    cap.on('error', () => {}); // suppress EventEmitter unhandled-error semantics
+
+    cap.start();
+    assert.equal(micConstructorCalls, 1, 'start() constructs once');
+    assert.equal(typeof lastMicDataCb, 'function', 'fake native start() should receive a data callback');
+
+    lastMicDataCb(new Error('simulated runtime callback failure'));
+    assert.equal(cap.preWarmEnabled, false, 'runtime callback errors must disable pre-warm');
+
+    await cap.stop();
+    await drainPostTeardown();
+
+    assert.equal(
+        micConstructorCalls,
+        1,
+        `BUG: runtime callback error should disable pre-warm; got ${micConstructorCalls} constructions (expected only the start-construction).`,
     );
 
     await cap.destroy();

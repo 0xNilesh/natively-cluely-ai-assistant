@@ -107,7 +107,11 @@ export class MicrophoneCapture extends EventEmitter {
                 this.monitor = new RustMicCapture(this.deviceId);
             } catch (e) {
                 this.emit('error', e);
-                return;
+                // Preserve the pre-lazy-init contract: native construction
+                // failures are catchable by the caller (startMeeting,
+                // reconfigureAudio, audio-test fallback). Emitting alone would
+                // silently skip those existing try/catch UI/error paths.
+                throw e;
             }
         }
 
@@ -115,18 +119,13 @@ export class MicrophoneCapture extends EventEmitter {
             console.log('[MicrophoneCapture] Starting native capture...');
 
             this.isRecording = true; // Set BEFORE start() to prevent re-entrant calls
-            // Enable pre-warm for the NEXT stop() cycle. We've just successfully
-            // opened a cpal stream — there's strong evidence the user wants to
-            // keep using this wrapper, so paying the cold-start cost on the next
-            // meeting is worth the warm path. disablePreWarm()/destroy() can
-            // still flip this off if the wrapper is going away.
-            this.preWarmEnabled = true;
 
             this.monitor.start((err: Error | null, chunk: Buffer) => {
                 // napi v3 ThreadsafeFunction passes (err, arg) format
                 if (err) {
                     console.error('[MicrophoneCapture] Callback error:', err);
                     this.isRecording = false; // Allow recovery via restart
+                    this.preWarmEnabled = false;
                     this.emit('error', err);
                     return;
                 }
@@ -153,11 +152,18 @@ export class MicrophoneCapture extends EventEmitter {
                 this.emit('speech_ended');
             });
 
+            // Enable pre-warm for the NEXT stop() cycle only after the JS-side
+            // native start call returned successfully. If monitor.start() throws,
+            // the catch below keeps preWarmEnabled=false so a failed start cannot
+            // reopen the mic in stop()'s post-teardown pre-warm.
+            this.preWarmEnabled = true;
             this.emit('start');
         } catch (error) {
             console.error('[MicrophoneCapture] Failed to start:', error);
             this.isRecording = false;
+            this.preWarmEnabled = false;
             this.emit('error', error);
+            throw error;
         }
     }
 
