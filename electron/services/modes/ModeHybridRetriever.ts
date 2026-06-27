@@ -342,9 +342,7 @@ export class ModeHybridRetriever {
 
         this.updateIndexState(file.id, contentHash, chunks.length, 'indexing', activeSpace);
         try {
-            const result = typeof (this.embeddingPipeline as any).getEmbeddingsWithFallback === 'function'
-                ? await (this.embeddingPipeline as any).getEmbeddingsWithFallback(chunks)
-                : { embeddings: await this.embeddingPipeline.getEmbeddings(chunks), space: activeSpace };
+            const result = await this.embeddingPipeline.getEmbeddingsWithFallback(chunks);
             const embeddings = result.embeddings;
             const embeddingSpace = result.space;
             if (!Array.isArray(embeddings) || embeddings.length !== chunks.length) {
@@ -943,7 +941,7 @@ export class ModeHybridRetriever {
         const deduped = this.deduplicateChunks(candidates, reranked);
 
         // Enforce token budget
-        const selected = this.enforceTokenBudget(deduped, tokenBudget, reranked);
+        const selected = this.enforceTokenBudget(deduped, tokenBudget, reranked, topK);
 
         // Format output with citations
         const formattedContext = this.formatContext(selected);
@@ -1235,7 +1233,7 @@ export class ModeHybridRetriever {
      * Enforce token budget by selecting highest-scoring chunks that fit. When
      * `byRerank` is true, "highest" is the cross-encoder order.
      */
-    private enforceTokenBudget(candidates: ChunkCandidate[], budget: number, byRerank: boolean = false): ChunkCandidate[] {
+    private enforceTokenBudget(candidates: ChunkCandidate[], budget: number, byRerank: boolean = false, topK: number = DEFAULT_TOP_K): ChunkCandidate[] {
         const sorted = [...candidates].sort((a, b) => this.rankScore(b, byRerank) - this.rankScore(a, byRerank));
 
         const selected: ChunkCandidate[] = [];
@@ -1253,7 +1251,7 @@ export class ModeHybridRetriever {
             totalTokens += tokens;
 
             // Stop if we've reached topK
-            if (selected.length >= DEFAULT_TOP_K) break;
+            if (selected.length >= topK) break;
         }
 
         return selected;
