@@ -132,8 +132,14 @@ export class GeminiEmbeddingProvider implements IEmbeddingProvider {
       }
       if (!res.ok) {
         const body = await res.text().catch(() => '');
+        // 429: rate-limited on this sub-batch only. Treat it like any other batch-
+        // endpoint failure: serial-embed the rate-limited slice, continue with the
+        // rest of the batches. Throwing here would discard successfully-embedded
+        // prior sub-batches and force the caller to re-embed them via fallback.
         if (res.status === 429) {
-          throw new Error(`Gemini batchEmbedContents quota/rate limited (${res.status} ${res.statusText}) for batch ${start}-${start + batch.length - 1}: ${body}`);
+          console.warn(`[GeminiEmbeddingProvider] batchEmbedContents 429 for batch ${start}-${start + batch.length - 1}: ${body}. Falling back to serial for this sub-batch.`);
+          out.push(...await this.embedSerial(batch, opts));
+          continue;
         }
         // Resilient fallback: serial single-embed preserves order and survives a
         // partial batch-endpoint outage (re-index must be error-tolerant). Log the
