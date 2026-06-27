@@ -281,9 +281,26 @@ export const SkillsSettings: React.FC = () => {
             const outcome = await runUpload(preview.payload, true);
             if (outcome?.stage === 'installed') {
                 setSuccess(`Installed "${outcome.preview.name}" to ${outcome.installedPath}`);
-                setPreview(null);
-                await loadSkills();
+            } else if (outcome?.stage === 'failed') {
+                // runUpload already surfaced the error via setStatus; we just
+                // refresh the list in case the install partially landed.
+            } else {
+                // Defensive: log unexpected stages so a future regression
+                // (e.g. opts being dropped on the IPC boundary) is visible.
+                // Also surface a banner so the user is never silently stuck.
+                setStatus(
+                    `Install returned unexpected stage '${outcome?.stage ?? 'undefined'}'. ` +
+                    `Check the console for details.`,
+                );
+                // eslint-disable-next-line no-console
+                console.warn('[SkillsSettings] unexpected upload outcome:', outcome);
             }
+            // ALWAYS refresh the skills list after an install attempt — even
+            // on failure or unexpected stages — so a partial install on disk
+            // shows up in the UI, and so the user can see the new state
+            // immediately after clicking Install.
+            setPreview(null);
+            await loadSkills();
         } finally {
             setInstalling(false);
         }
