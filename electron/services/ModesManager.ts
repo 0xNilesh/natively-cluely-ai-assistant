@@ -794,12 +794,42 @@ export class ModesManager {
         if (!mode) return '';
         const files = this.getReferenceFiles(mode.id);
 
-        // Forced document grounding relies on the lexical retriever's compact
-        // document-identity block. The hybrid retriever does not build that block,
-        // so route explicitly to the sync path instead of accepting an option the
-        // hybrid implementation would silently ignore.
+        // Forced document grounding (audit 2026-06-27): run HYBRID retrieval
+        // first (semantic + lexical with cross-encoder rerank), and if the
+        // hybrid path returns nothing usable (no embedder, no chunks, used
+        // fallback), merge the lexical document-identity block on top. This
+        // gives document-grounded custom modes the precision of semantic
+        // retrieval while preserving the compact identity block for broad
+        // questions like "what is this about?" — the previous code
+        // unconditionally routed to the sync path here, missing the entire
+        // semantic ranking benefit.
         if (retrievalOptions?.forceDocumentGrounding) {
-            return this.buildRetrievedActiveModeContextBlock(query, transcript, tokenBudget, answerType, excludeCustomContext, pinnedModeId, retrievalOptions);
+            try {
+                const hybridResult = await this.modeContextRetriever.retrieveHybrid(
+                    mode, files, {
+                        query,
+                        transcript,
+                        tokenBudget,
+                        answerType,
+                        excludeCustomContext,
+                        allowRerank,
+                        forceDocumentGrounding: true,
+                    },
+                );
+                if (hybridResult && !hybridResult.usedFallback && hybridResult.formattedContext) {
+                    return hybridResult.formattedContext;
+                }
+                // Hybrid unavailable — fall back to lexical + identity block.
+                return this.buildRetrievedActiveModeContextBlock(
+                    query, transcript, tokenBudget, answerType, excludeCustomContext, pinnedModeId, retrievalOptions,
+                );
+            } catch (err) {
+                // Don't let a hybrid outage block a document-grounded answer.
+                console.warn('[ModesManager] hybrid forceDocumentGrounding failed, falling back to lexical:', err?.message);
+                return this.buildRetrievedActiveModeContextBlock(
+                    query, transcript, tokenBudget, answerType, excludeCustomContext, pinnedModeId, retrievalOptions,
+                );
+            }
         }
 
         // Telemetry: rag_query / rag_hit / rag_miss / rag_lexical_fallback.
