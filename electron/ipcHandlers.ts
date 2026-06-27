@@ -3678,11 +3678,21 @@ export function initializeIpcHandlers(appState: AppState): void {
         | 'azure'
         | 'ibmwatson'
         | 'soniox'
-        | 'natively',
+        | 'natively'
+        | 'local-whisper',
     ) => {
       try {
         const { CredentialsManager } = require('./services/CredentialsManager');
-        CredentialsManager.getInstance().setSttProvider(provider);
+        const persisted = CredentialsManager.getInstance().setSttProvider(provider);
+
+        // Branch on the real write result (mirrors the STT-key pattern at
+        // sttKeyPersistenceWarning). Without this, a disk-full/EACCES on the
+        // provider-save would silently leave the user on the previous provider
+        // after restart — same false-Saved bug class f2dc18c closed for keys.
+        if (!persisted) {
+          CredentialsManager.getInstance().emitStorageStatusDiagnostic('stt_save_failed');
+          return { success: false, error: sttPersistError };
+        }
 
         // Reconfigure the audio pipeline to use the new STT provider
         await appState.reconfigureSttProvider();
@@ -3904,6 +3914,12 @@ export function initializeIpcHandlers(appState: AppState): void {
     return msg.replace(/:\s*[a-zA-Z0-9*]+\*+[a-zA-Z0-9*]+\.?$/g, '').trim();
   };
 
+  // Sentinel the renderer sends when the input field is empty post-restart (after
+  // the #318 fix intentionally stopped pre-populating masked values). Resolving
+  // here — NOT in the renderer — means the raw key never round-trips back into
+  // renderer state, so the masked-key regression cannot recur.
+  const { USE_STORED_KEY_SENTINEL, resolveSttTestKey } = require('./services/CredentialsManager');
+
   safeHandle(
     'test-stt-connection',
     async (
@@ -3914,6 +3930,16 @@ export function initializeIpcHandlers(appState: AppState): void {
     ) => {
       console.log(`[IPC] Received test - stt - connection request for provider: ${provider} `);
       try {
+        // Resolve the sentinel to the persisted key at call time. Pure helper —
+        // unit-tested independently. If no key is on disk (or the renderer
+        // mistakenly sent the sentinel for a provider that doesn't store a
+        // key), the helper returns the clean error to forward to the renderer.
+        const resolved = resolveSttTestKey(provider, apiKey);
+        if (!resolved.ok) {
+          return { success: false, error: resolved.error };
+        }
+        apiKey = resolved.apiKey;
+
         if (provider === 'deepgram') {
           const WebSocket = require('ws');
           const token = apiKey.trim();

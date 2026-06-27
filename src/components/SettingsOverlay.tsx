@@ -1108,10 +1108,38 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
             elevenlabs: sttElevenLabsKey, azure: sttAzureKey, ibmwatson: sttIbmKey,
             soniox: sttSonioxKey,
         };
-        const keyToTest = keyMap[sttProvider] || '';
-        if (!keyToTest.trim()) {
+        const keyToTest = keyMap[sttProvider]?.trim() || '';
+
+        // If the input field is empty post-restart (the #318 fix intentionally
+        // does NOT pre-populate masked values) but a key IS on disk, ask the
+        // backend to test the persisted key directly. The sentinel is resolved
+        // in main — the raw key never round-trips back into renderer state, so
+        // the masked pre-population regression cannot recur. This closes the
+        // "Please enter an API key first" false alarm users reported as
+        // "the STT key was lost on restart."
+        const hasStoredKeyForCurrentProvider = (() => {
+            switch (sttProvider) {
+                case 'groq':       return hasStoredSttGroqKey;
+                case 'openai':     return hasStoredSttOpenaiKey;
+                case 'deepgram':   return hasStoredDeepgramKey;
+                case 'elevenlabs': return hasStoredElevenLabsKey;
+                case 'azure':      return hasStoredAzureKey;
+                case 'ibmwatson':  return hasStoredIbmWatsonKey;
+                case 'soniox':     return hasStoredSonioxKey;
+                default:           return false;
+            }
+        })();
+
+        // Pick the key to send: explicit input if present, otherwise the
+        // sentinel (the IPC will resolve to the persisted key, or fail clean
+        // with a "no key saved" error).
+        const apiKeyToSend = keyToTest
+            ? keyToTest
+            : (hasStoredKeyForCurrentProvider ? '__USE_STORED__' : '');
+
+        if (!apiKeyToSend) {
             setSttTestStatus('error');
-            setSttTestError('Please enter an API key first');
+            setSttTestError('Please add your API key in Settings to test the connection.');
             return;
         }
 
@@ -1121,7 +1149,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
             // @ts-ignore
             const result = await window.electronAPI?.testSttConnection?.(
                 sttProvider,
-                keyToTest.trim(),
+                apiKeyToSend,
                 sttProvider === 'azure' ? sttAzureRegion : undefined
             );
             if (result?.success) {
