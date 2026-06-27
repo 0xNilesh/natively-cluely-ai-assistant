@@ -17,6 +17,7 @@ import { BrowserMetadataClassifierService } from './services/browser-context/Bro
 import type { BrowserContextCategory, SafeWebsiteMetadata } from './services/browser-context/types';
 import { SettingsManager } from './services/SettingsManager';
 import { SkillsManager } from './services/SkillsManager';
+import { DEFAULT_BUILTIN_SKILL_IDS, type SkillUploadPayload } from './services/skills/SkillValidator';
 
 import { TRIAL_SENTINEL_KEY, DOM_CONTEXT_MAX_CHARS } from './config/constants';
 import { AI_RESPONSE_LANGUAGES, RECOGNITION_LANGUAGES } from './config/languages';
@@ -2469,19 +2470,31 @@ export function initializeIpcHandlers(appState: AppState): void {
       // Fresh probe (not the cached isAvailable): the settings panel polls this while open, and
       // the local server takes ~15-20s to load embedding models before /health answers. A cached
       // value would leave the chip stuck on "Can't connect" even after the server comes up.
+      // Use the RESOLVED config (synthetic default OR persisted OR null) so health probing
+      // works for the no-save flow.
       const hm = HindsightManager.getInstance();
-      const available = (sm.get('hindsightBaseUrl') ? await hm.healthCheck() : false) || hm.isAvailable();
+      const cfg = hm.getHindsightConfig();
+      const available = cfg ? ((await hm.healthCheck()) || hm.isAvailable()) : false;
+      const authFailed = Boolean(hm.isAuthFailed?.());
+      // `synthetic` is true when getHindsightConfig synthesized the default — the renderer
+      // uses it to label the URL as "(using local default)". We mirror it from the resolved
+      // config so the renderer never has to re-derive isLocalTarget itself.
+      const storedUrl = String(sm.get('hindsightBaseUrl') || '');
       return {
-        baseUrl: String(sm.get('hindsightBaseUrl') || ''),
+        baseUrl: cfg?.baseUrl || 'http://localhost:8888',
         hasApiKey: Boolean(sm.get('hindsightApiKey')),
         autoStart: sm.get('hindsightAutoStart') !== false, // default on
         serverCommand: String(sm.get('hindsightServerCommand') || ''),
         llmProvider: String(sm.get('hindsightLlmProvider') || ''),
+        mode: cfg?.mode || 'local',
+        synthetic: Boolean(cfg?.synthetic),
+        explicitlyDisabled: sm.get('hindsightExplicitlyDisabled') === true,
         available,
+        authFailed,
       };
     } catch (e: any) {
       console.warn('[HindsightConfig] get failed:', e?.message);
-      return { baseUrl: '', hasApiKey: false, autoStart: true, serverCommand: '', llmProvider: '', available: false };
+      return { baseUrl: 'http://localhost:8888', hasApiKey: false, autoStart: true, serverCommand: '', llmProvider: '', mode: 'local' as const, synthetic: true, explicitlyDisabled: false, available: false, authFailed: false };
     }
   });
 
@@ -2495,9 +2508,17 @@ export function initializeIpcHandlers(appState: AppState): void {
       if (typeof cfg?.autoStart === 'boolean') sm.set('hindsightAutoStart', cfg.autoStart);
       if (typeof cfg?.serverCommand === 'string') sm.set('hindsightServerCommand', cfg.serverCommand.trim());
       if (typeof cfg?.llmProvider === 'string') sm.set('hindsightLlmProvider', cfg.llmProvider.trim());
-      // Re-probe so the caller gets fresh availability.
+      // Saving ANY config reverses the explicit-opt-out sentinel. The user is engaging
+      // with Hindsight again — the override should not silently re-apply.
+      if (sm.get('hindsightExplicitlyDisabled') === true) sm.set('hindsightExplicitlyDisabled', false);
+      // Re-run start() so the auto-spawn fires IN-SESSION — previously the user had to restart
+      // the app for the boot-time start() to see the new config. start() is idempotent and a
+      // no-op when nothing changed (e.g. user just saved the same baseUrl).
       const { HindsightManager } = require('./services/HindsightManager') as typeof import('./services/HindsightManager');
-      const healthy = await HindsightManager.getInstance().healthCheck();
+      const hm = HindsightManager.getInstance();
+      void hm.start().catch((e: any) => console.warn('[HindsightConfig] post-save start() failed (non-fatal):', e?.message));
+      // Probe health so the caller gets a fresh read (the auto-spawn itself is async).
+      const healthy = await hm.healthCheck();
       return { success: true, healthy };
     } catch (e: any) {
       console.warn('[HindsightConfig] set failed:', e?.message);
@@ -2508,16 +2529,79 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle('hindsight-config:test', async () => {
     try {
       const { HindsightManager } = require('./services/HindsightManager') as typeof import('./services/HindsightManager');
-      const healthy = await HindsightManager.getInstance().healthCheck();
+      const hm = HindsightManager.getInstance();
+      const healthy = await hm.healthCheck();
+      // If the probe saw 401/403, broadcast an auth-failed status so the top-of-overlay
+      // banner can render Cloud-key-specific copy (different from the generic "Can't connect").
+      // isAuthFailed() reads the cached lastAuthFailedAt timestamp.
+      if (hm.isAuthFailed?.()) {
+        try {
+          const { BrowserWindow } = require('electron') as typeof import('electron');
+          BrowserWindow.getAllWindows().forEach((win) => {
+            if (!win.isDestroyed()) {
+              win.webContents.send('hindsight-status', { state: 'auth-failed', reason: 'Cloud key rejected (401/403) — check your Hindsight Cloud account key', at: Date.now() });
+            }
+          });
+        } catch { /* headless */ }
+        return { healthy: false, authFailed: true };
+      }
       return { healthy };
     } catch (e: any) {
       return { healthy: false, error: e?.message };
     }
   });
 
+  // Opens the Hindsight server's stdout/stderr log file in the OS default viewer. Path
+  // is resolved server-side from HindsightManager.resolveServerLogPath() so the renderer
+  // cannot pass an arbitrary file path. Uses shell.openPath (NOT open-external) which
+  // works with absolute file paths and never triggers a security dialog.
+  safeHandle('open-hindsight-log', async () => {
+    try {
+      const { HindsightManager } = require('./services/HindsightManager') as typeof import('./services/HindsightManager');
+      const logPath = HindsightManager.getInstance().getServerLogPath?.() ?? null;
+      if (!logPath) return { ok: false, error: 'no_log_path' };
+      const fs = require('fs') as typeof import('fs');
+      // Touch the file so it exists (resolveServerLogPath returns the path even if spawn
+      // never ran; openPath on a missing file fails silently on some platforms).
+      if (!fs.existsSync(logPath)) {
+        try { fs.writeFileSync(logPath, ''); } catch { /* read-only fs — openPath will surface */ }
+      }
+      const { shell } = require('electron') as typeof import('electron');
+      const errMsg = await shell.openPath(logPath);
+      return errMsg ? { ok: false, error: errMsg } : { ok: true, logPath };
+    } catch (e: any) {
+      return { ok: false, error: e?.message };
+    }
+  });
+
+  // User-initiated Hindsight opt-out. Sets the explicit-disable sentinel so the synthetic
+  // default doesn't silently re-enable Hindsight on next launch. Idempotent; broadcasts a
+  // 'hindsight-status' with state:'ready' so the failure banner (if shown) clears — the
+  // user has made an active choice to turn the feature off, not a "server crashed" state.
+  safeHandle('hindsight:disable', async () => {
+    try {
+      const sm = SettingsManager.getInstance();
+      sm.set('hindsightExplicitlyDisabled', true);
+      const { HindsightManager } = require('./services/HindsightManager') as typeof import('./services/HindsightManager');
+      // If we spawned an app-managed server, kill it. Cloud / user-managed servers stay up.
+      try { HindsightManager.getInstance().stopSync(); } catch { /* nothing to stop */ }
+      // Broadcast so any open banner clears with the "you're in control" state.
+      try {
+        const { BrowserWindow } = require('electron') as typeof import('electron');
+        BrowserWindow.getAllWindows().forEach((win) => {
+          if (!win.isDestroyed()) {
+            win.webContents.send('hindsight-status', { state: 'ready', reason: 'disabled by user', at: Date.now() });
+          }
+        });
+      } catch { /* headless */ }
+      return { success: true };
+    } catch (e: any) {
+      console.warn('[HindsightConfig] disable failed:', e?.message);
+      return { success: false, error: e?.message };
+    }
+  });
+
   // Legacy alias for renderer builds that still call the old IPC name.
-  // Maps the deprecated technicalInterviewDirectVision channel onto the new
-  // technicalInterviewVisionFirst getter/setter so old renderer builds keep working.
   safeHandle('get-technical-interview-direct-vision', async () => {
     return SettingsManager.getInstance().getTechnicalInterviewVisionFirst();
   });
@@ -7367,6 +7451,55 @@ export function initializeIpcHandlers(appState: AppState): void {
       return { success: false, path: '', error: e?.message || 'failed to open skills folder' };
     }
   });
+
+  // Step 3 of the Skill Upload feature — validate (and optionally install)
+  // an uploaded skill payload. Errors are NEVER thrown across the IPC
+  // boundary; they're surfaced as { stage: 'failed', errors: [...] } so the
+  // preload bridge doesn't need a try/catch.
+  safeHandle('skills:upload', async (_evt, payload: SkillUploadPayload, opts?: { autoInstall?: boolean }) => {
+    try {
+      const { SkillsManager: Manager } = require('./services/SkillsManager');
+      const { uploadSkill } = require('./services/skills/SkillUploader');
+      const existingIds = new Set(
+        Manager.getInstance().listSkills().map((s: { id: string }) => s.id),
+      );
+      const outcome = await uploadSkill(payload, {
+        existingIds,
+        builtinIds: DEFAULT_BUILTIN_SKILL_IDS,
+        skillsRoot: path.join(app.getPath('userData'), 'skills'),
+        stagingRoot: os.tmpdir(),
+        autoInstall: opts?.autoInstall ?? false,
+      });
+      return outcome;
+    } catch (e: any) {
+      console.warn('[IPC] skills:upload error:', e?.message || e);
+      return { stage: 'failed', errors: [{ field: 'structure', code: 'ipc_failed', message: e?.message || 'Skill upload failed' }] };
+    }
+  });
+
+  // Step 3 helper — sweep leftover staging directories from prior installs
+  // (e.g. app crashed mid-write). Safe to call any time; idempotent.
+  safeHandle('skills:reap-stages', async () => {
+    try {
+      const { reapStaleUploadStages } = require('./services/skills/SkillInstaller');
+      return reapStaleUploadStages({ stagingRoot: os.tmpdir() });
+    } catch (e: any) {
+      console.warn('[IPC] skills:reap-stages error:', e?.message || e);
+      return { removed: [], errors: [e?.message || 'reap failed'] };
+    }
+  });
+
+  // One-shot stale-stage cleanup. If the app crashed mid-install last
+  // session, remove any leftover `natively-skill-upload-*` dirs in
+  // os.tmpdir(). `app.whenReady()` has already fired by the time this
+  // initializeIpcHandlers() runs (see main.ts), so we don't need to
+  // re-wrap in .then(). Best-effort; never blocks startup.
+  try {
+    const { reapStaleUploadStages } = require('./services/skills/SkillInstaller');
+    reapStaleUploadStages({ stagingRoot: os.tmpdir() });
+  } catch (e: any) {
+    console.warn('[IPC] skills:reap-stages startup hook error:', e?.message || e);
+  }
 
   safeHandle('phone-mirror:get-info', async () => {
     return PhoneMirrorService.getInstance().snapshot();
