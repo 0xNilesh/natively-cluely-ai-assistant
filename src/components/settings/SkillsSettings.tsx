@@ -289,10 +289,10 @@ export const SkillsSettings: React.FC = () => {
                 onDragLeave={() => setIsDragging(false)}
                 onDrop={handleDrop}
                 className={[
-                    'relative rounded-xl border transition-all p-5',
+                    'relative rounded-xl border transition-all p-5 bg-bg-card',
                     isDragging
                         ? 'border-accent-primary bg-accent-primary/5'
-                        : 'border-dashed border-border-subtle bg-gradient-to-b from-bg-card/60 to-bg-card hover:border-accent-primary/40',
+                        : 'border-dashed border-border-subtle hover:border-accent-primary/40',
                 ].join(' ')}
             >
                 <div className="flex items-start gap-3 mb-3">
