@@ -295,16 +295,11 @@ export const SkillsSettings: React.FC = () => {
                         : 'border-dashed border-border-subtle hover:border-accent-primary/40',
                 ].join(' ')}
             >
-                <div className="flex items-start gap-3 mb-3">
+                <div className="flex items-start justify-between gap-3 mb-2">
                     <div className="min-w-0">
                         <h4 className="text-sm font-semibold text-text-primary tracking-tight">Upload a skill</h4>
-                        <p className="text-xs text-text-secondary leading-relaxed mt-0.5">
-                            Drop a <code className="text-[11px] font-mono px-1 py-0.5 rounded bg-bg-input border border-border-subtle text-text-primary">SKILL.md</code> file here, or use the button below to pick one. To add a folder of skill files, use the Advanced "open skills folder" option.
-                        </p>
                     </div>
-                </div>
-                <div className="flex items-center gap-2 flex-wrap">
-                    <label className="cursor-pointer">
+                    <label className="cursor-pointer shrink-0">
                         <input
                             type="file"
                             accept=".md,text/markdown"
@@ -318,18 +313,21 @@ export const SkillsSettings: React.FC = () => {
                         />
                         <span
                             className={[
-                                'inline-flex items-center px-4 py-2 rounded-lg text-xs font-semibold transition-all active:scale-[0.98]',
+                                'inline-flex items-center px-3 py-1.5 rounded-lg text-xs font-semibold transition-all active:scale-[0.98]',
                                 'bg-accent-primary hover:bg-accent-primary/90 text-white shadow-sm hover:shadow',
                                 uploading ? 'opacity-60 pointer-events-none' : '',
                             ].join(' ')}
                         >
-                            Upload SKILL.md
+                            Upload
                         </span>
                     </label>
-                    {uploading && (
-                        <span className="text-[11px] text-text-tertiary animate-pulse">Uploading…</span>
-                    )}
                 </div>
+                <p className="text-xs text-text-secondary leading-relaxed">
+                    Drop a <code className="text-[11px] font-mono px-1 py-0.5 rounded bg-bg-input border border-border-subtle text-text-primary">SKILL.md</code> file here, or click Upload to pick one. To add a folder of skill files, use the Advanced "open skills folder" option.
+                </p>
+                {uploading && (
+                    <p className="text-[11px] text-text-tertiary animate-pulse mt-2">Uploading…</p>
+                )}
             </div>
 
             {/* Preview card — shown when validate-only succeeded. */}
