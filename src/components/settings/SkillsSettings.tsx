@@ -451,7 +451,13 @@ export const SkillsSettings: React.FC = () => {
                         >
                             <div className="flex items-center justify-between gap-3">
                                 <div className="flex items-center gap-2 min-w-0">
-                                    <Zap size={13} className="text-accent-primary shrink-0" />
+                                    <Zap
+                                        size={13}
+                                        className={[
+                                            'shrink-0',
+                                            skill.source === 'builtin' ? 'text-green-500' : 'text-blue-500',
+                                        ].join(' ')}
+                                    />
                                     <span className="text-sm font-medium text-text-primary truncate">
                                         {skill.name}
                                     </span>
@@ -459,7 +465,14 @@ export const SkillsSettings: React.FC = () => {
                                         /{skill.id}
                                     </span>
                                 </div>
-                                <span className="text-[10px] uppercase tracking-wider text-text-tertiary shrink-0 px-1.5 py-0.5 rounded bg-bg-input border border-border-subtle">
+                                <span
+                                    className={[
+                                        'text-[10px] uppercase tracking-wider shrink-0 px-1.5 py-0.5 rounded border',
+                                        skill.source === 'builtin'
+                                            ? 'text-green-600 bg-green-500/10 border-green-500/20'
+                                            : 'text-blue-600 bg-blue-500/10 border-blue-500/20',
+                                    ].join(' ')}
+                                >
                                     {skill.source === 'builtin' ? 'Built-in' : 'Local'}
                                 </span>
                             </div>
