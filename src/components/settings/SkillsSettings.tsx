@@ -302,10 +302,10 @@ export const SkillsSettings: React.FC = () => {
                     <div className="min-w-0">
                         <div className="flex items-center gap-2 mb-1">
                             <FileUp size={15} className="text-text-secondary" />
-                            <h4 className="text-sm font-semibold text-text-primary">Upload a skill</h4>
+                            <h4 className="text-sm font-semibold text-text-primary">Upload skill</h4>
                         </div>
                         <p className="text-xs text-text-secondary">
-                            Drop a <code className="font-mono text-[11px] px-1 py-0.5 rounded bg-bg-input border border-border-subtle text-text-primary">SKILL.md</code> file here, or click Upload to pick one. For folders, use the Advanced option below.
+                            Drop a SKILL.md file here, or click Upload to pick one. For folders, use the Advanced option below.
                         </p>
                         {uploading && (
                             <p className="text-[11px] text-text-tertiary animate-pulse mt-2">Uploading…</p>
@@ -513,7 +513,7 @@ export const SkillsSettings: React.FC = () => {
                             </div>
                             <button
                                 onClick={openFolder}
-                                className="px-4 py-2 rounded-lg bg-bg-input hover:bg-bg-elevated border border-border-subtle text-xs font-medium text-text-primary transition-colors shrink-0"
+                                className="px-4 py-2 rounded-lg bg-accent-primary hover:bg-accent-primary/90 text-white text-xs font-semibold transition-colors shrink-0"
                             >
                                 Open Folder
                             </button>
