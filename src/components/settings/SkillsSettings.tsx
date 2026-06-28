@@ -5,7 +5,6 @@ import {
     FileCode,
     FileUp,
     FolderOpen,
-    Package,
     RefreshCw,
     Upload,
     X,
@@ -451,13 +450,6 @@ export const SkillsSettings: React.FC = () => {
                         >
                             <div className="flex items-center justify-between gap-3">
                                 <div className="flex items-center gap-2 min-w-0">
-                                    <Package
-                                        size={13}
-                                        className={[
-                                            'shrink-0',
-                                            skill.source === 'builtin' ? 'text-green-500' : 'text-blue-500',
-                                        ].join(' ')}
-                                    />
                                     <span className="text-sm font-medium text-text-primary truncate">
                                         {skill.name}
                                     </span>
@@ -467,12 +459,18 @@ export const SkillsSettings: React.FC = () => {
                                 </div>
                                 <span
                                     className={[
-                                        'text-[10px] font-semibold uppercase tracking-wider shrink-0 px-2.5 py-0.5 rounded-full border',
+                                        'inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-medium',
                                         skill.source === 'builtin'
-                                            ? 'text-green-600 bg-green-500/10 border-green-500/30'
-                                            : 'text-blue-600 bg-blue-500/10 border-blue-500/30',
+                                            ? 'border-green-500/30 bg-green-500/15 text-green-400'
+                                            : 'border-blue-500/30 bg-blue-500/15 text-blue-400',
                                     ].join(' ')}
                                 >
+                                    <span
+                                        className={[
+                                            'w-1.5 h-1.5 rounded-full shrink-0',
+                                            skill.source === 'builtin' ? 'bg-green-400' : 'bg-blue-400',
+                                        ].join(' ')}
+                                    />
                                     {skill.source === 'builtin' ? 'Built-in' : 'Local'}
                                 </span>
                             </div>
