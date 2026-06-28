@@ -5,10 +5,10 @@ import {
     FileCode,
     FileUp,
     FolderOpen,
+    Package,
     RefreshCw,
     Upload,
     X,
-    Zap,
 } from 'lucide-react';
 import type {
     SkillSummary,
@@ -451,7 +451,7 @@ export const SkillsSettings: React.FC = () => {
                         >
                             <div className="flex items-center justify-between gap-3">
                                 <div className="flex items-center gap-2 min-w-0">
-                                    <Zap
+                                    <Package
                                         size={13}
                                         className={[
                                             'shrink-0',
@@ -467,10 +467,10 @@ export const SkillsSettings: React.FC = () => {
                                 </div>
                                 <span
                                     className={[
-                                        'text-[10px] uppercase tracking-wider shrink-0 px-1.5 py-0.5 rounded border',
+                                        'text-[10px] font-semibold uppercase tracking-wider shrink-0 px-2.5 py-0.5 rounded-full border',
                                         skill.source === 'builtin'
-                                            ? 'text-green-600 bg-green-500/10 border-green-500/20'
-                                            : 'text-blue-600 bg-blue-500/10 border-blue-500/20',
+                                            ? 'text-green-600 bg-green-500/10 border-green-500/30'
+                                            : 'text-blue-600 bg-blue-500/10 border-blue-500/30',
                                     ].join(' ')}
                                 >
                                     {skill.source === 'builtin' ? 'Built-in' : 'Local'}
