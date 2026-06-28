@@ -492,7 +492,7 @@ export const SkillsSettings: React.FC = () => {
             <div className="pt-1">
                 <button
                     onClick={() => setShowAdvanced((s) => !s)}
-                    className="text-[11px] text-text-tertiary hover:text-text-secondary transition-colors"
+                    className="text-xs font-semibold uppercase tracking-wider text-text-tertiary hover:text-text-secondary transition-colors"
                 >
                     {showAdvanced ? '▾' : '▸'} Advanced: open skills folder
                 </button>
