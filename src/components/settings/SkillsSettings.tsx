@@ -289,15 +289,28 @@ export const SkillsSettings: React.FC = () => {
                 onDragLeave={() => setIsDragging(false)}
                 onDrop={handleDrop}
                 className={[
-                    'relative rounded-xl border transition-all p-5 bg-bg-card',
+                    'group relative overflow-hidden rounded-xl border transition-all p-5 pl-6 bg-bg-card',
+                    'shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]',
                     isDragging
-                        ? 'border-accent-primary bg-accent-primary/5'
-                        : 'border-dashed border-border-subtle hover:border-accent-primary/40',
+                        ? 'border-accent-primary bg-accent-primary/5 shadow-[0_0_0_4px_rgba(var(--accent-primary-rgb,99,102,241),0.10)]'
+                        : 'border-dashed border-border-subtle hover:border-accent-primary/50',
                 ].join(' ')}
             >
-                <div className="flex items-start justify-between gap-3 mb-2">
+                {/* Accent stripe on the left edge — a quiet accent that
+                    gives the card a defined identity without screaming. */}
+                <div
+                    aria-hidden="true"
+                    className="absolute left-0 top-0 bottom-0 w-[3px] bg-gradient-to-b from-accent-primary/70 via-accent-primary/30 to-transparent"
+                />
+
+                <div className="flex items-start justify-between gap-3 mb-2.5">
                     <div className="min-w-0">
-                        <h4 className="text-sm font-semibold text-text-primary tracking-tight">Upload a skill</h4>
+                        <h4 className="text-sm font-semibold text-text-primary tracking-tight">
+                            Upload a skill
+                        </h4>
+                        <p className="text-[11px] text-text-tertiary mt-0.5 uppercase tracking-wider font-medium">
+                            Drag &amp; drop or click to browse
+                        </p>
                     </div>
                     <label className="cursor-pointer shrink-0">
                         <input
@@ -313,8 +326,10 @@ export const SkillsSettings: React.FC = () => {
                         />
                         <span
                             className={[
-                                'inline-flex items-center px-3 py-1.5 rounded-lg text-xs font-semibold transition-all active:scale-[0.98]',
-                                'bg-accent-primary hover:bg-accent-primary/90 text-white shadow-sm hover:shadow',
+                                'inline-flex items-center px-4 py-1.5 rounded-full text-xs font-semibold transition-all active:scale-[0.97]',
+                                'bg-gradient-to-b from-accent-primary to-accent-secondary text-white',
+                                'shadow-[0_1px_2px_rgba(0,0,0,0.2),inset_0_1px_0_rgba(255,255,255,0.15)]',
+                                'hover:shadow-[0_2px_8px_rgba(var(--accent-primary-rgb,99,102,241),0.35),inset_0_1px_0_rgba(255,255,255,0.2)]',
                                 uploading ? 'opacity-60 pointer-events-none' : '',
                             ].join(' ')}
                         >
@@ -322,11 +337,22 @@ export const SkillsSettings: React.FC = () => {
                         </span>
                     </label>
                 </div>
+
                 <p className="text-xs text-text-secondary leading-relaxed">
-                    Drop a <code className="text-[11px] font-mono px-1 py-0.5 rounded bg-bg-input border border-border-subtle text-text-primary">SKILL.md</code> file here, or click Upload to pick one. To add a folder of skill files, use the Advanced "open skills folder" option.
+                    Drop a{' '}
+                    <kbd className="font-mono text-[10.5px] px-1.5 py-0.5 rounded border border-border-muted bg-bg-elevated text-text-primary shadow-[inset_0_-1px_0_rgba(0,0,0,0.08)]">
+                        SKILL.md
+                    </kbd>{' '}
+                    file here, or click Upload to pick one. To add a folder of skill files, use the Advanced{' '}
+                    <span className="text-text-primary font-medium">&ldquo;open skills folder&rdquo;</span>{' '}
+                    option.
                 </p>
+
                 {uploading && (
-                    <p className="text-[11px] text-text-tertiary animate-pulse mt-2">Uploading…</p>
+                    <p className="text-[11px] text-text-tertiary animate-pulse mt-2.5 flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-accent-primary animate-pulse" />
+                        Uploading…
+                    </p>
                 )}
             </div>
 
