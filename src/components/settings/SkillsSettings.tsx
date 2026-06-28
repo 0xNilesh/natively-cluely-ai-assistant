@@ -325,8 +325,8 @@ export const SkillsSettings: React.FC = () => {
                         />
                         <span
                             className={[
-                                'inline-flex items-center px-4 py-2 rounded-lg text-xs font-medium transition-colors shrink-0',
-                                'bg-bg-input hover:bg-bg-elevated border border-border-subtle text-text-primary',
+                                'inline-flex items-center px-4 py-2 rounded-lg text-xs font-semibold transition-colors shrink-0',
+                                'bg-accent-primary hover:bg-accent-primary/90 text-white',
                                 uploading ? 'opacity-60 pointer-events-none' : '',
                             ].join(' ')}
                         >
