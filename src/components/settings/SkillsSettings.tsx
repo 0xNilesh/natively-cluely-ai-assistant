@@ -459,10 +459,10 @@ export const SkillsSettings: React.FC = () => {
                                 </div>
                                 <span
                                     className={[
-                                        'inline-flex shrink-0 items-center rounded-full border px-2.5 py-0.5 text-[11px] font-medium',
+                                        'shrink-0 text-[11px] font-medium',
                                         skill.source === 'builtin'
-                                            ? 'border-green-500/30 bg-green-500/15 text-green-400'
-                                            : 'border-blue-500/30 bg-blue-500/15 text-blue-400',
+                                            ? 'text-green-500'
+                                            : 'text-blue-500',
                                     ].join(' ')}
                                 >
                                     {skill.source === 'builtin' ? 'Built-in' : 'Local'}
