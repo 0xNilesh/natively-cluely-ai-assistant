@@ -3,10 +3,8 @@ import {
     Check,
     CheckCircle,
     FileCode,
-    FileUp,
     FolderOpen,
     RefreshCw,
-    Upload,
     X,
 } from 'lucide-react';
 import type {
@@ -291,25 +289,17 @@ export const SkillsSettings: React.FC = () => {
                 onDragLeave={() => setIsDragging(false)}
                 onDrop={handleDrop}
                 className={[
-                    'rounded-xl border-2 border-dashed transition-all duration-200 p-5',
+                    'relative rounded-xl border transition-all p-6 text-center',
                     isDragging
-                        ? 'border-accent-primary bg-accent-primary/5 scale-[1.005]'
-                        : 'border-border-subtle bg-bg-card hover:border-border-muted',
+                        ? 'border-accent-primary bg-accent-primary/5 shadow-[0_0_0_4px_var(--accent-primary,currentColor)]/5'
+                        : 'border-dashed border-border-subtle bg-gradient-to-b from-bg-card/60 to-bg-card hover:border-accent-primary/40',
                 ].join(' ')}
             >
-                <div className="flex items-start gap-3 mb-4">
-                    <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 bg-gradient-to-br from-accent-primary/20 to-violet-500/15 border border-accent-primary/25 text-accent-primary shadow-sm">
-                        <Upload size={17} strokeWidth={2} />
-                    </div>
-                    <div className="min-w-0 pt-0.5">
-                        <h4 className="text-sm font-semibold text-text-primary">Upload a skill</h4>
-                        <p className="text-xs text-text-secondary leading-relaxed mt-1">
-                            Drop a <code className="text-[11px] font-mono px-1 py-0.5 rounded bg-bg-input border border-border-subtle text-text-primary">SKILL.md</code>{' '}
-                            here, or click below to pick one. Folders? Use the Advanced option.
-                        </p>
-                    </div>
-                </div>
-                <div className="flex items-center gap-2 flex-wrap">
+                <h4 className="text-sm font-semibold text-text-primary tracking-tight">Upload a skill</h4>
+                <p className="text-xs text-text-secondary leading-relaxed mt-1.5 max-w-sm mx-auto">
+                    Drop a <code className="text-[11px] font-mono px-1 py-0.5 rounded bg-bg-input border border-border-subtle text-text-primary">SKILL.md</code> file here, or pick one below. For folders of skill files, use the Advanced option.
+                </p>
+                <div className="mt-4 flex items-center justify-center gap-2 flex-wrap">
                     <label className="cursor-pointer">
                         <input
                             type="file"
@@ -324,19 +314,16 @@ export const SkillsSettings: React.FC = () => {
                         />
                         <span
                             className={[
-                                'group inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition-all duration-150',
-                                'bg-gradient-to-b from-accent-primary to-accent-primary/85 text-white shadow-sm shadow-accent-primary/20',
-                                'hover:shadow-md hover:shadow-accent-primary/30 hover:brightness-105',
-                                'active:scale-[0.97]',
+                                'inline-flex items-center px-4 py-2 rounded-lg text-xs font-semibold transition-all active:scale-[0.98]',
+                                'bg-accent-primary hover:bg-accent-primary/90 text-white shadow-sm hover:shadow',
                                 uploading ? 'opacity-60 pointer-events-none' : '',
                             ].join(' ')}
                         >
-                            <FileUp size={13} strokeWidth={2.5} className="group-hover:-translate-y-0.5 transition-transform duration-150" />
                             Upload SKILL.md
                         </span>
                     </label>
                     {uploading && (
-                        <span className="text-[11px] text-text-tertiary">Uploading…</span>
+                        <span className="text-[11px] text-text-tertiary animate-pulse">Uploading…</span>
                     )}
                 </div>
             </div>
