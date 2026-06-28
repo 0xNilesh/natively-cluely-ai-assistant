@@ -502,13 +502,20 @@ export const IntelligenceSettings: React.FC = () => {
       void onSaveHindsight();
     }, 400);
   }, [onSaveHindsight]);
-  // Flush any pending auto-save on unmount so a quick blur-then-close doesn't drop the edit.
+  // Flush any pending auto-save on unmount — a user who types a Cloud URL and closes
+  // the panel inside the 400ms window must NOT lose the edit. The IPC is
+  // fire-and-forget (we don't await); the renderer is unmounting anyway so any
+  // post-await setState calls would warn but not break anything.
   useEffect(() => () => {
     if (debounceRef.current) {
       clearTimeout(debounceRef.current);
       debounceRef.current = null;
-      // Note: can't fire setHindsightConfig after unmount safely; the IPC may have already
-      // arrived in main. The debounce-on-blur pattern is the user's safety net.
+      // Fire synchronously — best effort. Uses window.electronAPI directly because
+      // onSaveHindsight closes over state setters (and may run after unmount).
+      try {
+        void window.electronAPI.setHindsightConfig?.({ baseUrl, apiKey, autoStart });
+        // Don't reset apiKey to '' here — that's a UI-only concern handled in onSaveHindsight.
+      } catch { /* swallow — renderer is unmounting */ }
     }
   }, []);
 

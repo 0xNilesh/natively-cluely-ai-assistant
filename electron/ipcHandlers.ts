@@ -2706,10 +2706,21 @@ export function initializeIpcHandlers(appState: AppState): void {
       // Re-run start() so the auto-spawn fires IN-SESSION — previously the user had to restart
       // the app for the boot-time start() to see the new config. start() is idempotent and a
       // no-op when nothing changed (e.g. user just saved the same baseUrl).
+      //
+      // CHIP-FLICKER FIX (round 7): await start() instead of firing it void. start()
+      // performs its own healthCheck internally before resolving, so a separate
+      // `await hm.healthCheck()` here would race with start's probe — two concurrent
+      // /health probes on the same endpoint, one returning false (server still booting)
+      // and the chip briefly flashing "Can't connect" right after the user clicked
+      // Apply. Awaiting start() ensures start's probe completes first; we re-probe once
+      // more for a fresh read so the renderer's chip reflects current state.
       const { HindsightManager } = require('./services/HindsightManager') as typeof import('./services/HindsightManager');
       const hm = HindsightManager.getInstance();
-      void hm.start().catch((e: any) => console.warn('[HindsightConfig] post-save start() failed (non-fatal):', e?.message));
-      // Probe health so the caller gets a fresh read (the auto-spawn itself is async).
+      try {
+        await hm.start();
+      } catch (e: any) {
+        console.warn('[HindsightConfig] post-save start() failed (non-fatal):', e?.message);
+      }
       const healthy = await hm.healthCheck();
       return { success: true, healthy };
     } catch (e: any) {
@@ -3209,23 +3220,34 @@ export function initializeIpcHandlers(appState: AppState): void {
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
       const cm = CredentialsManager.getInstance();
-      cm.setLitellmConfig(config?.apiKey || '', config?.baseURL || '', config?.maxTokens);
+      // Detect a genuine change so the Hindsight restart-nudge only fires when the URL
+      // or key actually differs — mirrors the keyChanged guard on the 5 provider-key
+      // setters (round 6 fix). Without this, re-saving the same LiteLLM config (common
+      // when the user touches an unrelated field) spams a spurious "restart your server"
+      // nudge and erodes trust in the prompt.
+      const prevKey = cm.getLitellmApiKey() || '';
+      const prevUrl = cm.getLitellmBaseURL() || '';
+      const newKey = config?.apiKey || '';
+      const newUrl = config?.baseURL || '';
+      const changed = prevKey !== newKey || prevUrl !== newUrl;
+      cm.setLitellmConfig(newKey, newUrl, config?.maxTokens);
 
       // Update the LLMHelper with the EFFECTIVE stored key — a blank apiKey on
       // re-save means "keep the stored one" (the field is masked in Settings),
       // so read back what CredentialsManager actually persisted.
       const llmHelper = appState.processingHelper.getLLMHelper();
-      llmHelper.setLitellmConfig(cm.getLitellmApiKey() || '', config?.baseURL || '', config?.maxTokens);
+      llmHelper.setLitellmConfig(cm.getLitellmApiKey() || '', newUrl, config?.maxTokens);
 
       // Cancel in-flight stream before re-init (engine only, not session)
       appState.getIntelligenceManager().resetEngine();
       // Re-init IntelligenceManager
       appState.getIntelligenceManager().initializeLLMs();
 
-      // Hindsight: see set-gemini-api-key for rationale. LiteLLM URL/key changes also
-      // require the app-managed server to be restarted to pick up the new env — without
-      // this nudge the new config silently doesn't apply until manual relaunch.
-      try { require('./services/HindsightManager').HindsightManager.getInstance().notifyHindsightOfKeyChange('LiteLLM'); } catch { /* optional */ }
+      // Hindsight: see set-gemini-api-key for rationale. Only fire when the URL or key
+      // genuinely changed.
+      if (changed) {
+        try { require('./services/HindsightManager').HindsightManager.getInstance().notifyHindsightOfKeyChange('LiteLLM'); } catch { /* optional */ }
+      }
 
       return { success: true };
     } catch (error: any) {
