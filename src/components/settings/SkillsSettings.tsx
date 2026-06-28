@@ -291,20 +291,21 @@ export const SkillsSettings: React.FC = () => {
                 onDragLeave={() => setIsDragging(false)}
                 onDrop={handleDrop}
                 className={[
-                    'bg-bg-card rounded-xl border-2 border-dashed transition-colors p-5',
+                    'rounded-xl border-2 border-dashed transition-all duration-200 p-5',
                     isDragging
-                        ? 'border-accent-primary bg-bg-subtle/40'
-                        : 'border-border-subtle',
+                        ? 'border-accent-primary bg-accent-primary/5 scale-[1.005]'
+                        : 'border-border-subtle bg-bg-card hover:border-border-muted',
                 ].join(' ')}
             >
-                <div className="flex items-start gap-3 mb-3">
-                    <div className="w-9 h-9 rounded-lg bg-bg-input border border-border-subtle flex items-center justify-center shrink-0">
-                        <Upload size={16} className="text-accent-primary" />
+                <div className="flex items-start gap-3 mb-4">
+                    <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 bg-gradient-to-br from-accent-primary/20 to-violet-500/15 border border-accent-primary/25 text-accent-primary shadow-sm">
+                        <Upload size={17} strokeWidth={2} />
                     </div>
-                    <div className="min-w-0">
+                    <div className="min-w-0 pt-0.5">
                         <h4 className="text-sm font-semibold text-text-primary">Upload a skill</h4>
-                        <p className="text-xs text-text-secondary leading-relaxed mt-0.5">
-                            Drop a <code className="text-[11px] font-mono">SKILL.md</code> file here, or use the button below to pick one. To add a folder of skill files, use the Advanced "open skills folder" option.
+                        <p className="text-xs text-text-secondary leading-relaxed mt-1">
+                            Drop a <code className="text-[11px] font-mono px-1 py-0.5 rounded bg-bg-input border border-border-subtle text-text-primary">SKILL.md</code>{' '}
+                            here, or click below to pick one. Folders? Use the Advanced option.
                         </p>
                     </div>
                 </div>
@@ -323,11 +324,14 @@ export const SkillsSettings: React.FC = () => {
                         />
                         <span
                             className={[
-                                'inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-border-subtle bg-bg-input hover:bg-bg-elevated text-xs font-medium text-text-primary transition-colors',
+                                'group inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition-all duration-150',
+                                'bg-gradient-to-b from-accent-primary to-accent-primary/85 text-white shadow-sm shadow-accent-primary/20',
+                                'hover:shadow-md hover:shadow-accent-primary/30 hover:brightness-105',
+                                'active:scale-[0.97]',
                                 uploading ? 'opacity-60 pointer-events-none' : '',
                             ].join(' ')}
                         >
-                            <FileUp size={13} strokeWidth={2.5} />
+                            <FileUp size={13} strokeWidth={2.5} className="group-hover:-translate-y-0.5 transition-transform duration-150" />
                             Upload SKILL.md
                         </span>
                     </label>
