@@ -289,17 +289,21 @@ export const SkillsSettings: React.FC = () => {
                 onDragLeave={() => setIsDragging(false)}
                 onDrop={handleDrop}
                 className={[
-                    'relative rounded-xl border transition-all p-6 text-center',
+                    'relative rounded-xl border transition-all p-5',
                     isDragging
-                        ? 'border-accent-primary bg-accent-primary/5 shadow-[0_0_0_4px_var(--accent-primary,currentColor)]/5'
+                        ? 'border-accent-primary bg-accent-primary/5'
                         : 'border-dashed border-border-subtle bg-gradient-to-b from-bg-card/60 to-bg-card hover:border-accent-primary/40',
                 ].join(' ')}
             >
-                <h4 className="text-sm font-semibold text-text-primary tracking-tight">Upload a skill</h4>
-                <p className="text-xs text-text-secondary leading-relaxed mt-1.5 max-w-sm mx-auto">
-                    Drop a <code className="text-[11px] font-mono px-1 py-0.5 rounded bg-bg-input border border-border-subtle text-text-primary">SKILL.md</code> file here, or pick one below. For folders of skill files, use the Advanced option.
-                </p>
-                <div className="mt-4 flex items-center justify-center gap-2 flex-wrap">
+                <div className="flex items-start gap-3 mb-3">
+                    <div className="min-w-0">
+                        <h4 className="text-sm font-semibold text-text-primary tracking-tight">Upload a skill</h4>
+                        <p className="text-xs text-text-secondary leading-relaxed mt-0.5">
+                            Drop a <code className="text-[11px] font-mono px-1 py-0.5 rounded bg-bg-input border border-border-subtle text-text-primary">SKILL.md</code> file here, or use the button below to pick one. To add a folder of skill files, use the Advanced "open skills folder" option.
+                        </p>
+                    </div>
+                </div>
+                <div className="flex items-center gap-2 flex-wrap">
                     <label className="cursor-pointer">
                         <input
                             type="file"
