@@ -1450,22 +1450,16 @@ export function initializeIpcHandlers(appState: AppState): void {
         // framing in HARD_SYSTEM_PROMPT/ASSIST_MODE_PROMPT that was causing coding
         // questions to be answered with "At Aetherbot AI, I was responsible for..."
         // (resume hijack via CONTEXT_INTELLIGENCE_LAYER's "you ARE the user").
-        let systemPromptOverride: string | undefined = options?.skipSystemPrompt
+        const systemPromptOverride: string | undefined = options?.skipSystemPrompt
           ? ''
           : CHAT_MODE_PROMPT;
-        // Document-grounded custom mode (audit 2026-06-27, real-path fix):
-        // CHAT_MODE_PROMPT instructs the model to reply only "Hey! What would
-        // you like help with?" for a bare greeting. A weak model (production
-        // serverModel = gemini-3.1-flash-lite) misfires that greeting for real
-        // document questions ("How was OpenVLA-OFT finetuned?"). Override the
-        // greeting instruction at the SOURCE for document-grounded answers so
-        // the model never falls back to it — far more robust on a weak model
-        // than a post-hoc regex. The post-stream validator (below) is a backstop.
-        if (systemPromptOverride
-          && answerPlan.answerType === 'lecture_answer'
-          && manualActiveMode?.documentGroundedCustomModeActive) {
-          systemPromptOverride += '\n\n## DOCUMENT-GROUNDED OVERRIDE\nNever reply with a greeting such as "Hey! What would you like help with?". Every question is about the uploaded material. Answer it directly from the uploaded material. If the uploaded material does not contain the answer, say so plainly in one sentence — do not greet, and do not ask what the user wants.';
-        }
+        // NOTE (audit 2026-06-28): the document-grounded greeting-suppression +
+        // question-first restructuring now lives INSIDE LLMHelper._streamChatInner
+        // (shapeDocumentGroundedSystemPrompt + buildDocumentGroundedUserContent),
+        // gated on forceDocumentGrounding. That single source-of-truth applies on
+        // EVERY entry point (this handler, phone chat, the E2E harness), so the
+        // handler no longer appends its own override here. The post-stream
+        // validator below remains as a backstop.
 
         try {
           // USE streamChat which handles routing. Pass the abort signal as

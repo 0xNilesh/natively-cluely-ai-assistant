@@ -69,12 +69,13 @@ test('section-aware chunker: keeps heading + body together when section fits in 
 
 test('section-aware chunker: anchors each window chunk in a long section with the heading', () => {
   const src = read('electron/services/ModeContextRetriever.ts');
-  // Long-section branch: each window chunk is built as `${headingLine}\n${window}`.
-  // Without this anchor, the second/third window of a long section would lose
-  // its heading and rank lower on a heading-keyword query.
-  assert.match(
-    src,
-    /const chunkText = headingLine\s*\n\s*\?\s*`\$\{headingLine\}\\n\$\{window\.join\(' '\)\}`\s*\n\s*:\s*window\.join\(' '\)/,
+  // Long-section branch (non-fineChunk / default path): each window chunk is
+  // built as `${headingLine}\n${window}`. Without this anchor, the second/third
+  // window of a long section would lose its heading and rank lower on a
+  // heading-keyword query. (Variable renamed to `ct` in the 2026-06-28 refactor
+  // that split the default vs document-grounded fine-chunk paths.)
+  assert.ok(
+    src.includes("const ct = headingLine ? `${headingLine}\\n${window.join(' ')}` : window.join(' ')"),
     'chunkText must anchor every window chunk in a long section with the heading',
   );
 });
