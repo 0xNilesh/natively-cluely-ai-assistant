@@ -1,79 +1,49 @@
-import { Beaker, BookOpen, Braces, Briefcase, Check, Copy, HelpCircle, Lock, RefreshCw, ShieldAlert, Smartphone, Sparkles, Wifi, Zap } from 'lucide-react';
+import { BookOpen, Bot, Braces, Briefcase, Check, Copy, HelpCircle, Lock, Paperclip, RefreshCw, ShieldAlert, ShieldCheck, Sparkles, Wifi, Zap } from 'lucide-react';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { BrowserContextSettings, PhoneMirrorInfo } from '../../types/electron';
 import { isMac } from '../../utils/platformUtils';
 import { BrowserExtensionIcon } from '../onboarding/BrowserExtensionIcon';
 
-// ---------------------------------------------------------------------------
-// Pairing countdown ring
-//
-// Drawn as a 40px inline SVG. Two arcs:
-//   - background track: full circle, blue-500/20
-//   - progress arc: animated `stroke-dashoffset`, blue-400 → indigo-400 gradient
-// The progress arc represents the share of the original arm window that
-// remains. As `seconds` ticks down, the dashoffset grows (more of the stroke
-// is hidden). The ring slowly spins on its own so it reads as a "live"
-// indicator without the vibe-coded `animate-pulse` on the container.
-//
-// We deliberately cap the visual arc at the original arm window (the prop
-// `total`) so re-pairing after a previous countdown doesn't visually snap.
-// ---------------------------------------------------------------------------
-const PairingCountdownRing: React.FC<{ seconds: number; total: number }> = ({
+const MiniPairingCountdownRing: React.FC<{ seconds: number; total: number }> = ({
   seconds,
   total,
 }) => {
-  const size = 40;
-  const stroke = 3.5;
+  const size = 24;
+  const stroke = 2.25;
   const radius = (size - stroke) / 2;
   const circumference = 2 * Math.PI * radius;
   const safeTotal = total > 0 ? total : 60;
   const remaining = Math.max(0, Math.min(safeTotal, seconds));
   const dashOffset = circumference * (1 - remaining / safeTotal);
+
   return (
-    <div
-      className="relative flex-shrink-0"
-      style={{ width: size, height: size }}
-      role="img"
-      aria-label={`Pairing window: ${remaining} seconds remaining`}
-    >
-      {/* slow, continuous spin — reads as "active channel", not vibe-coded pulse */}
-      <div className="absolute inset-0 animate-spin" style={{ animationDuration: '8s' }}>
-        <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} aria-hidden="true">
-          <defs>
-            <linearGradient id="pairRingGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="rgb(96, 165, 250)" />
-              <stop offset="100%" stopColor="rgb(129, 140, 248)" />
-            </linearGradient>
-          </defs>
-          <circle
-            cx={size / 2}
-            cy={size / 2}
-            r={radius}
-            fill="none"
-            stroke="rgba(59, 130, 246, 0.18)"
-            strokeWidth={stroke}
-          />
-          <circle
-            cx={size / 2}
-            cy={size / 2}
-            r={radius}
-            fill="none"
-            stroke="url(#pairRingGradient)"
-            strokeWidth={stroke}
-            strokeLinecap="round"
-            strokeDasharray={circumference}
-            strokeDashoffset={dashOffset}
-            // Rotate -90deg so the countdown starts at 12 o'clock.
-            transform={`rotate(-90 ${size / 2} ${size / 2})`}
-            style={{ transition: 'stroke-dashoffset 950ms cubic-bezier(0.4, 0, 0.2, 1)' }}
-          />
-        </svg>
-      </div>
-      <div className="absolute inset-0 grid place-items-center">
-        <span className="font-mono text-[11px] font-semibold tabular-nums text-blue-300">
-          {remaining}
-        </span>
-      </div>
+    <div className="relative h-6 w-6 flex-shrink-0" aria-hidden="true">
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="block">
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={radius}
+          fill="none"
+          stroke="rgba(59, 130, 246, 0.18)"
+          strokeWidth={stroke}
+        />
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={radius}
+          fill="none"
+          stroke="rgb(96, 165, 250)"
+          strokeWidth={stroke}
+          strokeLinecap="round"
+          strokeDasharray={circumference}
+          strokeDashoffset={dashOffset}
+          transform={`rotate(-90 ${size / 2} ${size / 2})`}
+          style={{ transition: 'stroke-dashoffset 950ms cubic-bezier(0.4, 0, 0.2, 1)' }}
+        />
+      </svg>
+      <span className="absolute inset-0 grid place-items-center font-mono text-[8px] font-semibold tabular-nums text-blue-300">
+        {remaining}
+      </span>
     </div>
   );
 };
@@ -111,9 +81,6 @@ export const PhoneMirrorSettings: React.FC = () => {
   // Companion browser-extension pairing: countdown (seconds left) while the 60s
   // one-click /pair window is open after "Connect browser extension".
   const [armCountdown, setArmCountdown] = useState(0);
-  // Total seconds the current arm window started with — captured once per
-  // arm so the progress ring renders against the original duration, not a
-  // shrinking denominator.
   const [armTotal, setArmTotal] = useState(60);
   const [armError, setArmError] = useState<string | null>(null);
   const [pairCopied, setPairCopied] = useState(false);
@@ -312,46 +279,16 @@ export const PhoneMirrorSettings: React.FC = () => {
   const showQr = info.running && info.qrDataUrl;
   const lanRequestedButMissing = info.running && info.exposeOnLan && info.lanUrls.length === 0;
 
-  // Combined "Watch for coding pages" row — flips BOTH backend IPC keys together
-  // (autoDetect + autoAttach are tightly coupled UX-wise: detect-without-attach
-  // and attach-without-detect aren't meaningful user-facing states). Optimistic
-  // on both fields; reconcile from the resolved settings response, revert on
-  // failure.
-  const codingModeOn = ctx.autoDetectCoding && ctx.autoAttachCoding;
-  const onToggleCodingMode = useCallback(async () => {
-    const next = !codingModeOn;
-    setCtx((prev) => ({ ...prev, autoDetectCoding: next, autoAttachCoding: next }));
-    try {
-      const res = await window.electronAPI.browserContextSetSettings?.({
-        browserAutoDetectCoding: next,
-        browserAutoAttachCoding: next,
-      });
-      if (res && typeof res === 'object' && !('error' in res)) {
-        setCtx(res as BrowserContextSettings);
-      }
-    } catch (e: any) {
-      setError(e?.message || 'Failed to save coding page setting');
-      setCtx((prev) => ({ ...prev, autoDetectCoding: !next, autoAttachCoding: !next }));
-    }
-  }, [codingModeOn]);
+  // Count of Optional classifiers that are hidden under the disclosure.
+  const hiddenOptionalCount = 4;
 
   return (
     <div className="space-y-6 animated fadeIn">
-      <header className="flex items-start gap-3">
-        <div className="rounded-xl bg-bg-item-surface p-2.5 border border-border-subtle">
-          <Smartphone size={20} className="text-text-primary" />
-        </div>
-        <div className="flex-1">
-          <div className="flex items-center gap-2">
-            <h3 className="text-text-primary text-lg font-semibold tracking-tight">Sync</h3>
-            <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-[0.08em] bg-amber-500/15 text-amber-400 border border-amber-500/30">
-              Beta
-            </span>
-          </div>
-          <p className="text-text-secondary text-sm mt-1 leading-relaxed">
-            Mirror answers to your phone. Capture browser tabs to your answers.
-          </p>
-        </div>
+      <header>
+        <h3 className="text-lg font-bold text-text-primary mb-1">Sync</h3>
+        <p className="text-xs text-text-secondary mb-5">
+          Mirror answers to your phone. Capture browser tabs to your answers.
+        </p>
       </header>
 
       {/* =====================================================================
@@ -499,8 +436,8 @@ export const PhoneMirrorSettings: React.FC = () => {
               </div>
               <div className="text-text-secondary text-xs mt-1">
                 {info.exposeOnLan
-                  ? 'Same Wi-Fi can connect.'
-                  : 'Loopback only. SSH tunnel for remote.'}
+                  ? 'Open the mirror on any device on this network.'
+                  : 'Keep the mirror on this computer only.'}
               </div>
             </div>
             <button
@@ -520,8 +457,8 @@ export const PhoneMirrorSettings: React.FC = () => {
             <div className="mt-2.5 flex items-start gap-2 text-amber-400/90 text-xs leading-relaxed">
               <ShieldAlert size={13} className="mt-0.5 flex-shrink-0" />
               <span>
-                Anyone on this Wi-Fi with the URL can read your answers. Rotate the token below
-                to invalidate it.
+                Anyone with the pairing link can view the phone mirror on this Wi-Fi. Rotate the
+                token if the link was shared.
               </span>
             </div>
           )}
@@ -566,7 +503,7 @@ export const PhoneMirrorSettings: React.FC = () => {
           {info.running ? (
             <div className="mt-3 space-y-2.5">
               {/* Primary action area — three states:
-                  1) Counting down (arm in flight) → ring + copy.
+                  1) Counting down (arm in flight) → compact waiting status.
                   2) Already connected & not arming → quiet emerald status row +
                      small ghost "Re-pair" link on the right.
                   3) Idle, not connected → big blue primary CTA. */}
@@ -574,22 +511,17 @@ export const PhoneMirrorSettings: React.FC = () => {
                 <div
                   role="status"
                   aria-live="polite"
-                  className="relative overflow-hidden rounded-lg border border-blue-500/30 bg-gradient-to-r from-blue-500/10 via-indigo-500/10 to-blue-500/10 pl-3 pr-3.5 py-2.5 animate-fade-in-up"
+                  aria-atomic="true"
+                  aria-label={`Waiting for extension. Pairing window: ${armCountdown} seconds remaining.`}
+                  className="flex items-center gap-2.5 rounded-lg border border-blue-500/20 bg-blue-500/[0.05] px-3 py-2"
                 >
-                  <span
-                    aria-hidden="true"
-                    className="absolute left-0 top-0 bottom-0 w-[2px] bg-gradient-to-b from-blue-400 to-indigo-400"
-                  />
-                  <div className="flex items-center gap-3">
-                    <PairingCountdownRing seconds={armCountdown} total={armTotal} />
-                    <div className="min-w-0 flex-1">
-                      <div className="text-text-primary text-xs font-medium leading-tight">
-                        Open the extension and click{' '}
-                        <span className="text-blue-300">“Connect to Natively”</span>
-                      </div>
-                      <div className="text-text-secondary text-[11px] mt-0.5 leading-snug">
-                        Pairing window · the extension will complete the connection
-                      </div>
+                  <MiniPairingCountdownRing seconds={armCountdown} total={armTotal} />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-text-primary text-xs font-medium leading-tight">
+                      Waiting for extension
+                    </div>
+                    <div className="text-text-secondary text-[11px] mt-0.5 leading-snug">
+                      Click <span className="text-blue-300">Connect to Natively</span> in the browser popup.
                     </div>
                   </div>
                 </div>
@@ -675,76 +607,91 @@ export const PhoneMirrorSettings: React.FC = () => {
       </div>
 
       {/* =====================================================================
-          Group B — Coding page context (single card)
-          The two coupled coding toggles are presented as one mode row. Optional
-          page types are tucked into a quiet disclosure so this doesn't read like
-          a generated list of settings.
+          Group B — Smart Browser Context (single card)
+          Primary 3 toggles always visible; Optional classifiers nested under a
+          <details>. Experimental toggle lives inside that disclosure with
+          amber treatment, NOT as a peer card.
           ===================================================================== */}
-      <div className="bg-bg-item-surface rounded-xl border border-border-subtle p-5 space-y-3.5">
-        <div>
-          <div
-            role="heading"
-            aria-level={3}
-            className="text-text-primary font-medium text-sm"
-          >
-            Coding page context
+      <div className="bg-bg-item-surface rounded-xl border border-border-subtle p-5 space-y-4">
+        <div className="flex items-start gap-3">
+          <div className="rounded-lg bg-bg-main p-2 border border-border-subtle flex-shrink-0">
+            <ShieldCheck size={16} className="text-emerald-400" />
           </div>
-          <div className="text-text-secondary text-xs mt-1 leading-relaxed">
-            Attach the page when you ask on a coding or interview site. Manual capture still
-            works.
+          <div className="min-w-0 flex-1">
+            <div
+              role="heading"
+              aria-level={3}
+              className="text-text-primary font-medium text-sm"
+            >
+              Smart Browser Context
+            </div>
+            <div className="text-text-secondary text-xs mt-1 leading-relaxed">
+              Detect coding/interview pages and attach the problem when you ask. Manual capture
+              always works.
+            </div>
           </div>
         </div>
 
-        <div role="group" aria-label="Coding page context" className="space-y-2">
+        <div role="group" aria-label="Automatic coding capture" className="space-y-2.5">
           <CtxToggle
-            icon={<Braces size={12} className="text-text-secondary" aria-hidden="true" />}
-            label="Watch for coding pages"
-            desc="Natively watches your active tab and attaches the problem when you ask. Off — you can still capture manually."
-            checked={codingModeOn}
-            onChange={onToggleCodingMode}
+            icon={<Braces size={13} className="text-text-secondary" aria-hidden="true" />}
+            label="Auto-detect coding problems"
+            desc="Recognize high-confidence coding/interview pages locally."
+            checked={ctx.autoDetectCoding}
+            onChange={() => onToggleCtx('autoDetectCoding', 'browserAutoDetectCoding')}
           />
           <CtxToggle
-            icon={<HelpCircle size={12} className="text-text-secondary" aria-hidden="true" />}
-            label="Ask first on unfamiliar pages"
-            desc="If we're not sure it's a coding page, we'll ask before attaching."
+            icon={<Paperclip size={13} className="text-text-secondary" aria-hidden="true" />}
+            label="Auto-attach coding context"
+            desc="Capture and attach it just-in-time when you ask for an answer."
+            checked={ctx.autoAttachCoding}
+            onChange={() => onToggleCtx('autoAttachCoding', 'browserAutoAttachCoding')}
+          />
+          <CtxToggle
+            icon={<HelpCircle size={13} className="text-text-secondary" aria-hidden="true" />}
+            label="Ask before attaching unknown pages"
+            desc="When we can't classify a page confidently, ask first instead of attaching automatically."
             checked={ctx.askBeforeUnknown}
             onChange={() => onToggleCtx('askBeforeUnknown', 'browserAskBeforeUnknown')}
           />
-          <CtxToggle
-            icon={<Sparkles size={12} className="text-text-secondary" aria-hidden="true" />}
-            label="Ask the AI when unsure"
-            desc="Send only the page title and URL to classify — never the content."
-            checked={ctx.aiClassifierEnabled}
-            onChange={() => onToggleCtx('aiClassifierEnabled', 'browserAiClassifierEnabled')}
-          />
         </div>
 
-        {/* Optional page-type classifiers — collapsed by default. The Experimental
-            row sits in here as a plain sibling (no amber inner card): same
-            rhythm as the job/dev docs rows, distinguished only by its chip. */}
+        {/* Optional classifiers — collapsed by default. Experimental toggle
+            lives inside, with amber treatment, no standalone peer card. */}
         <details className="text-xs rounded-lg border border-border-subtle bg-bg-main">
-          <summary className="px-3 py-2 text-text-secondary cursor-pointer hover:text-text-primary select-none">
-            More page types
+          <summary className="px-3 py-2 text-text-secondary cursor-pointer hover:text-text-primary select-none flex items-center gap-2">
+            <span>Optional classifiers</span>
+            <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-bg-item-active text-text-secondary border border-border-subtle">
+              {hiddenOptionalCount} hidden
+            </span>
           </summary>
-          <div className="px-3 pb-3 pt-1 space-y-1.5">
+          <div className="px-3 pb-3 pt-1 space-y-2.5">
             <CtxToggle
-              icon={<Briefcase size={12} className="text-text-secondary" aria-hidden="true" />}
-              label="Watch for job posts"
-              desc="Attach listings when you ask about a role."
+              icon={<Sparkles size={13} className="text-text-secondary" aria-hidden="true" />}
+              label="AI page classifier"
+              desc="Classify unknown pages with sanitized metadata."
+              checked={ctx.aiClassifierEnabled}
+              onChange={() => onToggleCtx('aiClassifierEnabled', 'browserAiClassifierEnabled')}
+            />
+            <CtxToggle
+              icon={<Briefcase size={13} className="text-text-secondary" aria-hidden="true" />}
+              label="Auto-detect job descriptions"
+              desc="Recognize job posts."
               checked={ctx.autoDetectJobDescriptions}
               onChange={() => onToggleCtx('autoDetectJobDescriptions', 'browserAutoDetectJobDescriptions')}
             />
             <CtxToggle
-              icon={<BookOpen size={12} className="text-text-secondary" aria-hidden="true" />}
-              label="Watch for dev docs"
-              desc="Attach the page when you ask on MDN, library docs, etc."
+              icon={<BookOpen size={13} className="text-text-secondary" aria-hidden="true" />}
+              label="Auto-detect developer docs"
+              desc="Recognize dev docs."
               checked={ctx.autoDetectDeveloperDocs}
               onChange={() => onToggleCtx('autoDetectDeveloperDocs', 'browserAutoDetectDeveloperDocs')}
             />
+
             <CtxToggle
-              icon={<Beaker size={12} className="text-text-secondary" aria-hidden="true" />}
-              label="Send the full page"
-              desc="Usually we send an excerpt. This sends everything. Slower, more tokens."
+              icon={<Paperclip size={13} className="text-text-secondary" aria-hidden="true" />}
+              label="Full page context"
+              desc="Use the complete page when excerpts miss details. More tokens; sensitive pages stay blocked."
               checked={ctx.experimentalFullPageCapture}
               onChange={() => onToggleCtx('experimentalFullPageCapture', 'browserExperimentalFullPageCapture')}
               experimental
@@ -780,7 +727,7 @@ export const PhoneMirrorSettings: React.FC = () => {
   );
 };
 
-/** A single labelled on/off row for the Coding page context settings group. */
+/** A single labelled on/off row for the Smart Browser Context settings group. */
 const CtxToggle: React.FC<{
   label: string;
   desc: string;
@@ -803,7 +750,7 @@ const CtxToggle: React.FC<{
     <div className="flex items-start gap-2.5 min-w-0">
       {icon && (
         <div
-          className="flex-shrink-0 mt-0.5 w-5 h-5 rounded-md bg-bg-main border border-border-subtle grid place-items-center"
+          className="flex-shrink-0 mt-0.5 w-6 h-6 rounded-md bg-bg-main border border-border-subtle grid place-items-center"
           aria-hidden="true"
         >
           {icon}
@@ -813,7 +760,7 @@ const CtxToggle: React.FC<{
         <div className="text-text-primary text-sm flex items-center gap-2">
           {label}
           {experimental && (
-            <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-[0.08em] bg-amber-500/15 text-amber-400 border border-amber-500/30">
+            <span className="inline-flex items-center rounded-full bg-amber-500/10 px-1 py-px text-[8px] font-semibold uppercase tracking-[0.05em] text-amber-400/90">
               Experimental
             </span>
           )}
@@ -823,7 +770,7 @@ const CtxToggle: React.FC<{
             </span>
           )}
         </div>
-        <div className="text-text-secondary text-[11px] mt-0.5 leading-snug">{desc}</div>
+        <div className="text-text-secondary text-xs mt-0.5 leading-snug">{desc}</div>
       </div>
     </div>
     <button
