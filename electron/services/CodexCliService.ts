@@ -603,7 +603,6 @@ export class CodexCliService {
     const reader = response.body.getReader();
     const decoder = new TextDecoder('utf-8');
     let buffer = '';
-    let sawTerminalDone = false;
     // Tracks whether we've seen a real terminal event for THIS response
     // (response.completed / response.incomplete / response.failed). Once
     // set, an AbortError on the next reader.read() is a benign cleanup
@@ -631,10 +630,17 @@ export class CodexCliService {
           buffer = buffer.slice(idx + (buffer[idx] === '\r' ? 4 : 2));
           const parsed = parseSseEvent(raw);
           if (!parsed) continue;
-          if (parsed.data === '[DONE]') {
-            sawTerminalDone = true;
-            continue;
-          }
+          // The `[DONE]` sentinel was historically used by the old
+          // chat-completions SSE protocol to signal end-of-stream. The
+          // new Responses API uses `response.completed` / .incomplete /
+          // .failed events instead — those drive sawTerminalEvent
+          // (the flag that gates the post-completion AbortError
+          // swallow). We intentionally IGNORE `[DONE]` here: ignoring
+          // it lets the parser keep reading the body until the real
+          // terminal event arrives or the body closes, which matches
+          // the natively path at LLMHelper.ts:4897-4900 (also ignores
+          // `[DONE]` and relies on the terminal event).
+          if (parsed.data === '[DONE]') continue;
           let json: any;
           try {
             json = JSON.parse(parsed.data);
@@ -728,13 +734,20 @@ export class CodexCliService {
       // presses Cmd+R, etc.) during that window, the still-open body
       // throws AbortError on the next reader.read() — the very error
       // the catch above swallows when sawTerminalEvent is true.
-      try { reader.cancel(); } catch { /* already cancelled / released */ }
+      //
+      // reader.cancel() returns a Promise. We attach .catch() because
+      // the synchronous try/catch around a Promise-returning call does
+      // NOT catch Promise rejections — those surface as
+      // unhandledRejection events which Electron's main process treats
+      // as fatal under --unhandled-rejections=strict. The reject is
+      // benign (the body is already torn down by the abort path or by
+      // a prior cancel) — we just need to absorb it.
+      reader.cancel().catch(() => { /* already torn down */ });
     }
     if (terminalError) throw terminalError;
     // We intentionally don't require [DONE] — some servers omit it; an
     // open stream that just ends is treated as successful (the deltas
     // already produced the response).
-    void sawTerminalDone;
   }
 
   // ---------------------------------------------------------------------------

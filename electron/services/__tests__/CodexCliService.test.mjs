@@ -574,6 +574,42 @@ test('parseSseStream: source uses reader.cancel() (NOT releaseLock) in finally �
     'parseSseStream\'s finally must NOT call reader.releaseLock() — releases the lock but leaves the body open on the server');
 });
 
+test('parseSseStream: reader.read() AbortError mid-stream (no terminal event yet) surfaces "Codex request aborted."', async () => {
+  // Regression guard for the OTHER half of the catch's predicate: the
+  // pre-completion surface. Test #2 covers the `if (signal.aborted)`
+  // guard at line 620 (signal-driven abort). THIS test covers the
+  // `await reader.read()` rejection path — what fires when the user's
+  // outer controller.abort() reaches the still-parked SSE reader
+  // BEFORE any response.completed is seen.
+  //
+  // The original "Codex is answering fast, but after 30s it says
+  // request aborted" bug was the inverse (abort AFTER response.completed
+  // was swallowed). This test pins the symmetrical guard: an abort
+  // that arrives BEFORE the terminal event must STILL surface as
+  // "Codex request aborted." so the IPC handler's supersession path
+  // continues to work.
+  const ctrl = makeControllableSseResponse([
+    'data: {"type":"response.output_text.delta","delta":"Hello"}\n\n',
+  ]);
+  const parseSseStream = mod.CodexCliService.parseSseStream;
+  const collected = [];
+  const gen = parseSseStream.call(mod.CodexCliService, ctrl.response, new AbortController().signal);
+  const drain = (async () => {
+    for await (const delta of gen) collected.push(delta);
+    return collected;
+  })().catch((e) => ({ ok: false, error: e }));
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(collected.join(''), 'Hello',
+    'first delta should deliver before the abort fires');
+  // Abort the body BEFORE any terminal event has been pushed.
+  ctrl.abortBody();
+  const result = await drain;
+  assert.equal(result.ok, false,
+    'mid-stream AbortError (no terminal event yet) MUST surface as an error');
+  assert.match(result.error.message, /Codex request aborted/,
+    'mid-stream abort must produce exactly "Codex request aborted." — preserves the supersession/cancel surface');
+});
+
 test('parseSseStream: stream emits :keepalive comment after response.completed (high-fidelity chatgpt.com simulation)', async () => {
   // The real ChatGPT OAuth backend sends `:keepalive` SSE comments
   // every few seconds for ~30s after response.completed. The parser
