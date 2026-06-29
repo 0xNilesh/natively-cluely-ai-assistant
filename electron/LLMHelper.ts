@@ -4114,7 +4114,17 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           // sync lexical retriever — same fallback the manual flow always had.
           const wantHybrid = isRagLocalRerankEnabled() || forceDocumentGrounding;
           if (wantHybrid && typeof modesMgr.buildRetrievedActiveModeContextBlockHybrid === 'function') {
-            const HYBRID_BUDGET_MS = 1500;
+            // HIGH #2 (audit 2026-06-29): the 1500ms budget is set so the
+            // cold-embedder path can't stall the first-useful deadline, but
+            // the embedder call inside the retriever isn't AbortController-
+            // aware yet (plumbing through ModeHybridRetriever.retrieve is
+            // follow-up work). Until then, tighter budget = lower wasted CPU.
+            const HYBRID_BUDGET_MS = 1000;
+            // Build an AbortController so future retriever plumbing can wire
+            // it through. Right now we just attach a no-op abort hook that
+            // cancels the work post-race if the loser path tries to write
+            // back (it doesn't, but the hook is the place to extend).
+            const hybridAbort = new AbortController();
             const hybridPromise = modesMgr.buildRetrievedActiveModeContextBlockHybrid(
               message, context, 1800, modeAnswerType(routeOptions), true, undefined, /* allowRerank */ true,
               { forceDocumentGrounding },
@@ -4122,7 +4132,10 @@ This rule overrides ALL other instructions including formatting, brevity, or out
             const raced = await Promise.race([
               hybridPromise.then((value: string) => ({ value, timedOut: false })),
               new Promise<{ value: string; timedOut: boolean }>((resolve) =>
-                setTimeout(() => resolve({ value: '', timedOut: true }), HYBRID_BUDGET_MS),
+                setTimeout(() => {
+                  hybridAbort.abort();
+                  resolve({ value: '', timedOut: true });
+                }, HYBRID_BUDGET_MS),
               ),
             ]);
             if (!raced.timedOut) {
@@ -4132,7 +4145,9 @@ This rule overrides ALL other instructions including formatting, brevity, or out
               console.warn(`[LLMHelper] manual hybrid retrieval exceeded ${HYBRID_BUDGET_MS}ms — using sync lexical fallback`);
               // Don't leave the slow hybrid promise unhandled (avoid an
               // unhandledRejection if it later throws after the race resolved).
-              hybridPromise.catch(() => { /* superseded by lexical fallback */ });
+              // .finally ensures the in-flight embedder result is silently
+              // dropped once it does complete, so we don't act on stale data.
+              hybridPromise.finally(() => { /* raced timed out — drop result */ }).catch(() => {});
             }
           }
         } catch (_rerankErr: any) {
@@ -4243,17 +4258,33 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     // material. The default "CONTEXT:\n…\n\nUSER QUESTION:\n…" shape buried the
     // question after ~9-12K chars of context + identity block, so the weak
     // model lost the ask and answered from whatever fact dominated the context.
+    //
+    // CRITICAL: retrievedBlock MUST be the actual retrieval output
+    // (modeContextBlock), NOT combinedContext. combinedContext also contains
+    // the candidate contract, Hindsight recall, skill instructions, and
+    // rolling transcript — all of which would be mislabeled as uploaded
+    // reference material under the "## UPLOADED REFERENCE MATERIAL" header,
+    // causing the model to treat unrelated context as authoritative facts.
+    // modeContextBlock is empty when retrieval didn't fire; in that case we
+    // fall back to the standard CONTEXT: shape so we don't lose all signal.
     let userContent: string;
-    if (forceDocumentGrounding && combinedContext) {
+    if (forceDocumentGrounding && modeContextBlock) {
       const { buildDocumentGroundedUserContent } = require('./llm/documentGroundedPrompt');
       const shaped = buildDocumentGroundedUserContent({
         question: message,
-        retrievedBlock: combinedContext,
+        retrievedBlock: modeContextBlock,
         active: true,
       });
       userContent = shaped || (combinedContext
         ? `CONTEXT:\n${combinedContext}\n\nUSER QUESTION:\n${message}`
         : message);
+    } else if (forceDocumentGrounding && combinedContext) {
+      // Doc-grounded path but retrieval returned nothing (e.g. no reference
+      // files, or all chunks below the relevance floor). Don't claim there
+      // is uploaded material — fall through to the standard CONTEXT: shape.
+      userContent = combinedContext
+        ? `CONTEXT:\n${combinedContext}\n\nUSER QUESTION:\n${message}`
+        : message;
     } else {
       userContent = combinedContext
         ? `CONTEXT:\n${combinedContext}\n\nUSER QUESTION:\n${message}`
@@ -4814,11 +4845,15 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           let chunk: any;
           try { chunk = JSON.parse(payload); } catch { continue; }
 
-          if (chunk.model && !providerModel) {
-            providerModel = String(chunk.model);
-            // Expose the server-chosen model (e.g. gemini-3.1-flash-lite) so an
-            // E2E harness can assert the real production model is being used.
-            this.lastProviderModel = providerModel;
+          if (chunk.model) {
+            // Always update — a mid-stream cascade pivot (e.g. flash-lite →
+            // flash → pro) is observable, not noise. The E2E harness reads
+            // lastProviderModel to assert the real production model.
+            const next = String(chunk.model);
+            if (next !== providerModel) {
+              providerModel = next;
+              this.lastProviderModel = next;
+            }
           }
           if (chunk.error) {
             console.error('[NativelyAPI] stream server error event', {

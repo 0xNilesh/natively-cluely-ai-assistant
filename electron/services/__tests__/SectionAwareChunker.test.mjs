@@ -131,3 +131,50 @@ test('section-aware chunker: same change is mirrored in ModeHybridRetriever.ts',
     'ModeHybridRetriever chunker must not use the old pure word-window loop',
   );
 });
+
+// MEDIUM #1 (audit 2026-06-29): the document-grounded fine-chunk path is
+// the path the entire real-path fix depends on for OpenVLA-OFT-style
+// flat-prose fixtures. Source-assertion coverage of the SUBCHUNK_WORDS=45
+// sentence-split branch.
+test('section-aware chunker: fineChunk path uses SUBCHUNK_WORDS=45 sentence-split', () => {
+  const src = read('electron/services/ModeContextRetriever.ts');
+  // The fine-chunk sub-budget is the documented 45 words.
+  assert.match(
+    src,
+    /const\s+SUBCHUNK_WORDS\s*=\s*45\b/,
+    'fineChunk path must define SUBCHUNK_WORDS = 45',
+  );
+  // The split-into-units helper must run before the emit loop (sentence /
+  // line boundary split, not a global word window).
+  assert.match(
+    src,
+    /const\s+units\s*=\s*splitIntoUnits\(rawBody\)/,
+    'fineChunk path must call splitIntoUnits(rawBody) to break on sentence/line boundaries',
+  );
+  // The emit-on-overflow check at SUBCHUNK_WORDS boundary.
+  assert.match(
+    src,
+    /pendingWords\s*>\s*0\s*&&\s*pendingWords\s*\+\s*uw\s*>\s*SUBCHUNK_WORDS/,
+    'fineChunk emit-on-overflow must use SUBCHUNK_WORDS as the bound',
+  );
+});
+
+test('section-aware chunker: fineChunk path is gated on forceDocumentGrounding', () => {
+  const src = read('electron/services/ModeContextRetriever.ts');
+  // The fineChunk path is reachable only when forceDocumentGrounding=true —
+  // the default path (fineChunk=false) must remain byte-for-byte unchanged
+  // from the prior audit so non-doc-grounded custom modes are unaffected.
+  assert.match(
+    src,
+    /function\s+chunkText\s*\(\s*content:\s*string,\s*fineChunk:\s*boolean\s*=\s*false\s*\)/,
+    'chunkText signature must include a fineChunk=false default',
+  );
+  // The legacy path branches on `if (!fineChunk)` and the doc-grounded
+  // sub-chunk path lives in the else (so legacy non-doc-grounded custom
+  // modes are byte-for-byte unchanged).
+  assert.match(
+    src,
+    /if\s*\(\s*!fineChunk\s*\)\s*\{/,
+    'chunkText must branch the legacy path on `if (!fineChunk)` so doc-grounded runs use the else (sentence-split SUBCHUNK_WORDS path)',
+  );
+});

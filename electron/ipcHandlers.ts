@@ -1661,6 +1661,13 @@ export function initializeIpcHandlers(appState: AppState): void {
                   isUsefulYet: () => regen.length >= 10,
                   shouldAbort: () => regen.length > 4000,
                   onToken: (tok: string) => { regen += tok; },
+                  // HIGH #3 (audit 2026-06-29): iterator.return() alone can't
+                  // cancel a parked fetch; without onCleanup the upstream
+                  // gemini-3.1-flash-lite request keeps consuming rate-limit
+                  // / billing for the rest of its natural response. Abort the
+                  // stream's underlying fetch so the provider is released
+                  // immediately when we stop reading.
+                  onCleanup: () => { try { llmHelper.abortActiveStream?.(); } catch { /* best effort */ } },
                 });
                 const regenTrim = regen.trim();
                 // Accept the regen only if it is itself complete (don't replace a truncated
@@ -2127,12 +2134,18 @@ export function initializeIpcHandlers(appState: AppState): void {
                     '',
                     'ANSWER:',
                   ].join('\n');
+                  // HIGH #3 (audit 2026-06-29): onCleanup aborts the underlying
+                  // provider fetch on timeout/shouldAbort, preventing
+                  // gemini-3.1-flash-lite from continuing to bill through a
+                  // parked response after we stop reading.
+                  const regenAbort = new AbortController();
                   await raceStreamWithDeadline({
                     stream: llmHelper.streamChat(strictPrompt, undefined, undefined, undefined, true, true) as AsyncGenerator<string>,
                     firstUsefulDeadlineMs: usingLocalLlm ? LIVE_LOCAL_FIRST_USEFUL_TIMEOUT_MS : 7000,
                     isUsefulYet: () => regen.length >= 8,
                     shouldAbort: () => regen.length > 2000,
                     onToken: (tok: string) => { regen += tok; },
+                    onCleanup: () => { try { regenAbort.abort(); } catch { /* best effort */ } },
                   });
                 } catch (regenErr: any) {
                   console.warn('[DocGrounded] regeneration failed (non-fatal):', regenErr?.message || regenErr);

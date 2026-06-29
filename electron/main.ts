@@ -5914,6 +5914,15 @@ async function initializeApp() {
   // Initialize IPC handlers before window creation
   initializeIpcHandlers(appState)
 
+  // Start the in-app review session ledger. This is intentionally main-process
+  // owned so renderer reloads don't double-count app sessions.
+  try {
+    const { ReviewService } = require('./services/ReviewService');
+    ReviewService.getInstance().recordSessionStart();
+  } catch (err) {
+    console.warn('[Init] ReviewService recordSessionStart failed (non-fatal):', err);
+  }
+
   // Generic, provider-agnostic local-model download service. Owns the
   // in-flight state for Whisper (today) and any future local model family
   // (vision, embeddings, …). Instantiated BEFORE createWindow so the
@@ -6296,6 +6305,16 @@ if (process.env.THINKING_MATRIX === '1') {
       HindsightManager.getInstance().stopSync();
     } catch { /* optional */ }
 
+    // Review-prompt service: close any in-flight session so total_usage_ms
+    // captures this run, then flush the debounced state write (250ms window)
+    // synchronously so a user dismissing the prompt 100ms before quit isn't
+    // re-prompted on next launch. Idempotent with the renderer's
+    // beforeunload path (which also calls review:flush-session).
+    try {
+      const { ReviewService } = require('./services/ReviewService');
+      ReviewService.getInstance().beforeQuit();
+    } catch { /* optional */ }
+
     // Stop the default-output watcher so the setInterval doesn't keep calling
     // into the native module while V8 is tearing down. Without this, quitting
     // mid-meeting extends shutdown by 1–2s on slow CoreAudio teardown because
@@ -6374,6 +6393,21 @@ if (process.env.THINKING_MATRIX === '1') {
     PhoneMirrorService.getInstance().dispose().catch((err) =>
       console.error('[Main] PhoneMirror dispose failed:', err)
     );
+
+    // Flush review prompt session usage before credentials are scrubbed. The
+    // network sync is best-effort; the local state file is flushed synchronously.
+    try {
+      const { ReviewService, getReviewApiKey, getReviewHardwareId } = require('./services/ReviewService');
+      const reviewService = ReviewService.getInstance();
+      const totals = reviewService.recordSessionEnd();
+      reviewService.flush();
+      const apiKey = getReviewApiKey();
+      getReviewHardwareId()
+        .then((hwid: string | null) => reviewService.reportUsage(apiKey, hwid, totals.session_count, totals.total_usage_ms))
+        .catch(() => {});
+    } catch (e) {
+      console.error('[Main] Failed to flush review session on quit:', e);
+    }
 
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');

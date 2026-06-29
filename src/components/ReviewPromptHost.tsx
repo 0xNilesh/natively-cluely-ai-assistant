@@ -77,16 +77,36 @@ const ReviewPromptHost: React.FC<ReviewPromptHostProps> = ({ paused }) => {
             // crosses the threshold without us having to react to other events.
             check()
         }, SUBSEQUENT_CHECK_DELAY_MS)
+        // Close the current usage session on unmount + page-hide. The main
+        // process also flushes on before-quit, but the renderer may be torn
+        // down first (Cmd+Q on macOS, devtools reload, route change). This
+        // makes the session accounting race-free in either path.
+        const flush = () => {
+            try { window.electronAPI?.reviewFlushSession?.() } catch { /* noop */ }
+        }
+        window.addEventListener("pagehide", flush)
+        window.addEventListener("beforeunload", flush)
         return () => {
             mounted = false
             clearTimeout(first)
             clearInterval(interval)
+            window.removeEventListener("pagehide", flush)
+            window.removeEventListener("beforeunload", flush)
+            flush()
         }
     }, [paused, check])
 
     const onClose = useCallback(() => {
         isOpenRef.current = false
         setIsOpen(false)
+    }, [])
+
+    const handleDismissLater = useCallback(() => {
+        void window.electronAPI?.reviewDismissLater?.()
+    }, [])
+
+    const handleDismissForever = useCallback(() => {
+        void window.electronAPI?.reviewDismissForever?.()
     }, [])
 
     const handleSubmit = useCallback(async (payload: { rating: number; review_text: string | null }) => {
@@ -103,6 +123,8 @@ const ReviewPromptHost: React.FC<ReviewPromptHostProps> = ({ paused }) => {
         <ReviewModal
             isOpen={isOpen}
             onClose={onClose}
+            onDismissLater={handleDismissLater}
+            onDismissForever={handleDismissForever}
             platform={PLATFORM}
             appVersion={APP_VERSION}
             hardwareId={undefined}

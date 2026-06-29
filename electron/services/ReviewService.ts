@@ -15,7 +15,7 @@
 //   * API keys are NOT stored here — review submissions use x-natively-key
 //     transparently via the request handler.
 
-import { app, safeStorage } from "electron"
+import { app } from "electron"
 import fs from "fs"
 import path from "path"
 import { loadNativeModule } from "../audio/nativeModuleLoader"
@@ -94,14 +94,20 @@ export class ReviewService {
         if (this.writeTimer) return
         this.writeTimer = setTimeout(() => {
             this.writeTimer = null
-            try {
-                const tmp = this.statePath + ".tmp"
-                fs.writeFileSync(tmp, JSON.stringify(this.state, null, 2), "utf8")
-                fs.renameSync(tmp, this.statePath)
-            } catch (err) {
-                console.warn("[ReviewService] Could not persist review-state.json:", (err as Error)?.message)
-            }
+            this.commitNow()
         }, 250)
+    }
+
+    /** Single-sourced atomic write. Used by both the debounced scheduleWrite
+     *  tail AND by flush() / beforeQuit() to defeat the 250ms debounce window. */
+    private commitNow() {
+        try {
+            const tmp = this.statePath + ".tmp"
+            fs.writeFileSync(tmp, JSON.stringify(this.state, null, 2), "utf8")
+            fs.renameSync(tmp, this.statePath)
+        } catch (err) {
+            console.warn("[ReviewService] Could not persist review-state.json:", (err as Error)?.message)
+        }
     }
 
     // ── session + usage tracking ──────────────────────────────────────────
@@ -113,13 +119,20 @@ export class ReviewService {
 
     /** Call when the session ends. Adds elapsed ms to total_usage_ms and
      *  bumps session_count by 1. Returns the new totals so callers can sync
-     *  to the backend if they wish. */
+     *  to the backend if they wish. No-op (returns current totals) when
+     *  recordSessionStart was never called or elapsed is 0 — prevents the
+     *  double-call / no-call-starts case from bumping session_count and
+     *  flooding the backend with zero-usage reports. */
     recordSessionEnd(): { session_count: number; total_usage_ms: number } {
         const now = Date.now()
-        if (this.sessionStartTime != null) {
-            const elapsed = Math.max(0, Math.min(now - this.sessionStartTime, 6 * 60 * 60 * 1000))
-            this.state.total_usage_ms += elapsed
+        if (this.sessionStartTime == null) {
+            return {
+                session_count: this.state.session_count,
+                total_usage_ms: this.state.total_usage_ms,
+            }
         }
+        const elapsed = Math.max(0, Math.min(now - this.sessionStartTime, 6 * 60 * 60 * 1000))
+        this.state.total_usage_ms += elapsed
         this.state.session_count += 1
         this.sessionStartTime = null
         this.scheduleWrite()
@@ -135,13 +148,15 @@ export class ReviewService {
             clearTimeout(this.writeTimer)
             this.writeTimer = null
         }
-        try {
-            const tmp = this.statePath + ".tmp"
-            fs.writeFileSync(tmp, JSON.stringify(this.state, null, 2), "utf8")
-            fs.renameSync(tmp, this.statePath)
-        } catch (err) {
-            console.warn("[ReviewService] Could not flush review-state.json:", (err as Error)?.message)
-        }
+        this.commitNow()
+    }
+
+    /** App-quit convenience: closes the current session and flushes state.
+     *  Idempotent — safe to call alongside flush() or in addition to the
+     *  beforeunload-renderer path. */
+    beforeQuit() {
+        this.recordSessionEnd()
+        this.flush()
     }
 
     // ── prompt gating (local decision, used as a UX pre-check before the
