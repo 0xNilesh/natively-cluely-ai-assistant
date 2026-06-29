@@ -81,6 +81,36 @@ interface ElectronAPI {
   setLitellmConfig: (config: { apiKey: string; baseURL: string; maxTokens?: number }) => Promise<{ success: boolean; error?: string }>;
   getAvailableLiteLLMModels: () => Promise<string[]>;
   setNativelyApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>;
+  // ── In-app review / testimonial prompt ─────────────────────────────────
+  reviewGetPromptState: () => Promise<{
+    ok: boolean;
+    local?: {
+      has_reviewed: boolean;
+      dismissed_count: number;
+      dont_show_again: boolean;
+      last_prompted_at: string | null;
+      next_eligible_at: string | null;
+      session_count: number;
+      total_usage_ms: number;
+    };
+    backend?: { ok: boolean; state?: any; eligible?: boolean; reason?: string } | null;
+    eligible?: { eligible: boolean; reason: string };
+    error?: string;
+  }>;
+  reviewRecordSession: () => Promise<{ ok: boolean; error?: string }>;
+  reviewFlushSession: () => Promise<{ ok: boolean; totals?: { session_count: number; total_usage_ms: number }; error?: string }>;
+  reviewMarkShown: () => Promise<{ ok: boolean; error?: string }>;
+  reviewDismissLater: () => Promise<{ ok: boolean; error?: string }>;
+  reviewDismissForever: () => Promise<{ ok: boolean; error?: string }>;
+  reviewSubmit: (payload: { rating: number; review_text: string | null }) => Promise<{ ok: boolean; id?: string; error?: string; status?: number }>;
+  reviewUpdateTestimonial: (payload: {
+    review_id: string;
+    name: string | null;
+    role: string | null;
+    company: string | null;
+    can_use_publicly: boolean;
+    display_name_publicly: boolean;
+  }) => Promise<{ ok: boolean; error?: string; status?: number }>;
   getNativelyPricing: () => Promise<{
     ok: boolean;
     currency?: string;
@@ -363,7 +393,7 @@ interface ElectronAPI {
   generateDiagram: (text?: string) => Promise<{ enabled: boolean; diagram: any }>;
   getIntelligenceFlags: () => Promise<Array<{ key: string; enabled: boolean; setting: string; env: string; default: boolean }>>;
   setIntelligenceFlag: (key: string, value: boolean | null) => Promise<{ success: boolean; enabled?: boolean; error?: string }>;
-  getHindsightConfig: () => Promise<{ baseUrl: string; hasApiKey: boolean; autoStart: boolean; serverCommand: string; llmProvider: string; available: boolean }>;
+  getHindsightConfig: () => Promise<{ baseUrl: string; hasApiKey: boolean; autoStart: boolean; serverCommand: string; llmProvider: string; available: boolean; mode: 'local' | 'cloud'; synthetic: boolean; explicitlyDisabled: boolean; authFailed: boolean }>;
   setHindsightConfig: (cfg: { baseUrl?: string; apiKey?: string; autoStart?: boolean; serverCommand?: string; llmProvider?: string }) => Promise<{ success: boolean; healthy?: boolean; error?: string }>;
   testHindsightConnection: () => Promise<{ healthy: boolean; error?: string }>;
   updateMeetingTitle: (id: string, title: string) => Promise<boolean>;
@@ -1202,6 +1232,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setLitellmConfig: (config: { apiKey: string; baseURL: string; maxTokens?: number }) => ipcRenderer.invoke('set-litellm-config', config),
   getAvailableLiteLLMModels: () => ipcRenderer.invoke('get-available-litellm-models'),
   setNativelyApiKey: (apiKey: string) => ipcRenderer.invoke('set-natively-api-key', apiKey),
+
+  // ── In-app review / testimonial prompt ─────────────────────────────────
+  reviewGetPromptState: () => ipcRenderer.invoke('review:get-prompt-state'),
+  reviewRecordSession: () => ipcRenderer.invoke('review:record-session'),
+  reviewFlushSession: () => ipcRenderer.invoke('review:flush-session'),
+  reviewMarkShown: () => ipcRenderer.invoke('review:mark-shown'),
+  reviewDismissLater: () => ipcRenderer.invoke('review:dismiss-later'),
+  reviewDismissForever: () => ipcRenderer.invoke('review:dismiss-forever'),
+  reviewSubmit: (payload: { rating: number; review_text: string | null }) => ipcRenderer.invoke('review:submit', payload),
+  reviewUpdateTestimonial: (payload: {
+    review_id: string;
+    name: string | null;
+    role: string | null;
+    company: string | null;
+    can_use_publicly: boolean;
+    display_name_publicly: boolean;
+  }) => ipcRenderer.invoke('review:update-testimonial', payload),
   getNativelyPricing: () => ipcRenderer.invoke('get-natively-pricing'),
   getNativelyUsage: () => ipcRenderer.invoke('get-natively-usage'),
   getStoredCredentials: () => ipcRenderer.invoke('get-stored-credentials'),
