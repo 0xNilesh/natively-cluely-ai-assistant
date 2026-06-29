@@ -68,10 +68,12 @@ const TOC_ENTRY_RE = /^\d+(?:\.\d+){0,3}\s+[A-Z].{0,70}?\s+\d{1,3}$/;
 // A real section heading: chapter-numbered, Title-cased, no trailing punctuation.
 const HEADING_RE = /^(\d+(?:\.\d+){0,3})\s+([A-Z][A-Za-z].{1,68})$/;
 // Bibliography / author-year line guard: "12 Smith et al 2021 Robotics", "5 J.
-// Doe, A. Roe. 2019". Reject lines whose title looks like authors + a 19xx/20xx
-// year, which a numbered bibliography emits and which would otherwise parse as a
-// chapter heading.
-const BIBLIO_RE = /\b(19|20)\d{2}\b|\bet al\b|\b[A-Z]\.\s?[A-Z]?\.?\s+[A-Z][a-z]+/;
+// Doe, A. Roe. 2019". Reject lines whose title looks like an AUTHOR LIST (with
+// "et al" or initials-style names) — optionally followed by a year. A bare year
+// alone is NOT a signal: real headings like "3.1 The 2020 Dataset" or
+// "2.4 ImageNet-2012 Pretraining" contain a year and must survive. We require an
+// author-shaped token, and treat a year as corroborating only.
+const BIBLIO_RE = /\bet al\b|\b[A-Z]\.\s?[A-Z]?\.?\s+[A-Z][a-z]+|\b[A-Z][a-z]+\s+(?:and|&|,)\s+[A-Z][a-z]+\s+(?:19|20)\d{2}\b/;
 
 function hasDottedLeader(line: string): boolean {
     return DOTTED_LEADER_RE.test(line);
@@ -92,7 +94,13 @@ function parseHeading(line: string): { num: string; title: string } | null {
     if (/[.:;,]$/.test(t)) return null;            // headings don't end in punctuation
     const firstNum = parseInt(m[1].split('.')[0], 10);
     if (firstNum < 1 || firstNum > 40) return null; // chapters 1-40; excludes data rows like "<bignum> pose"
-    if (/[[\]]|\bmm\b|\brx\b|pose/i.test(t)) return null; // table/data rows
+    // Table/data-row guard. `pose` was an UNBOUNDED substring that wrongly
+    // dropped real headings like "3.2 Pose Estimation" / "4.1 6-DOF Pose
+    // Tracking" — common in robotics/vision theses. Use a word-boundary form
+    // AND only reject when the row also carries data-row shapes (brackets, units)
+    // so a genuine "Pose Estimation" heading survives.
+    if (/[[\]]|\bmm\b|\brx\b/i.test(t)) return null; // bracketed / unit-bearing data rows
+    if (/\bpose\b/i.test(t) && /\[|\b\d+\s*,|\bx\s*,\s*y\b/i.test(t)) return null; // pose DATA rows only
     if (BIBLIO_RE.test(t)) return null;            // numbered bibliography entries
     return { num: m[1], title: m[2].trim() };
 }
@@ -188,6 +196,52 @@ export function buildDocumentMap(content: string): DocumentMap {
 }
 
 /**
+ * Section-aware chunking shared by BOTH retrievers (the sync lexical
+ * ModeContextRetriever AND the hybrid ModeHybridRetriever). Each chunk is the
+ * section body (sub-split when long), prefixed with a `[Section N.N | pX-Y]
+ * heading` tag so the chunk carries its own section + page provenance into
+ * scoring, telemetry, and the prompt. Returns null when the document has no
+ * detectable ToC/section structure — the caller then keeps its existing
+ * word-window chunker (flat-prose fixtures, slide decks).
+ *
+ * This is the single source of truth for ToC-excluding chunking; keeping it here
+ * (not duplicated in each retriever) prevents the two paths from diverging — the
+ * exact bug that let production keep serving ToC fragments while the lexical
+ * path was fixed.
+ */
+export function sectionAwareChunksFromMap(
+    map: DocumentMap,
+    chunkWords: number,
+    chunkOverlap: number,
+): string[] | null {
+    if (!map.hasToc) return null;
+    const chunks: string[] = [];
+    for (const section of map.sections) {
+        const body = section.body.trim();
+        if (!body) continue;
+        const tag = section.num
+            ? `[Section ${section.num} | p${section.pageStart}${section.pageEnd !== section.pageStart ? '-' + section.pageEnd : ''}]`
+            : `[p${section.pageStart}]`;
+        const headingLine = section.heading && section.heading !== 'Preamble'
+            ? `${tag} ${section.heading}`
+            : tag;
+        const words = body.split(/\s+/).filter(Boolean);
+        if (words.length <= chunkWords) {
+            chunks.push(`${headingLine}\n${body}`);
+            continue;
+        }
+        const step = Math.max(1, chunkWords - chunkOverlap);
+        for (let i = 0; i < words.length; i += step) {
+            const window = words.slice(i, i + chunkWords);
+            if (window.length === 0) break;
+            chunks.push(`${headingLine}\n${window.join(' ')}`);
+            if (i + chunkWords >= words.length) break;
+        }
+    }
+    return chunks.length > 0 ? chunks : null;
+}
+
+/**
  * Resolve a query to the section numbers it most likely targets, using the
  * section TITLES from the document map (not a hardcoded synonym table). Returns
  * section numbers ordered best-first. ADVISORY ONLY — the caller must treat
@@ -254,11 +308,13 @@ export function resolveTargetSections(query: string, map: DocumentMap): string[]
     if (contentWords.length === 0) return [];
     const sectionsWithBody = map.sections.filter(s => s.num && s.body);
     if (sectionsWithBody.length === 0) return [];
+    // Lowercase each body ONCE (was re-lowercased O(words × sections × 2) times).
+    const lowerBodies = sectionsWithBody.map(s => s.body.toLowerCase());
     // Section frequency per content word.
     const sf = new Map<string, number>();
     for (const w of contentWords) {
         let n = 0;
-        for (const s of sectionsWithBody) if (s.body.toLowerCase().includes(w)) n++;
+        for (const lb of lowerBodies) if (lb.includes(w)) n++;
         sf.set(w, n);
     }
     const total = sectionsWithBody.length;
@@ -268,8 +324,8 @@ export function resolveTargetSections(query: string, map: DocumentMap): string[]
     // content word is "lora", so the target must literally contain "lora".
     const rarest = [...contentWords].sort((a, b) => (sf.get(a) || total) - (sf.get(b) || total))[0];
     const bodyScored: Array<{ num: string; score: number }> = [];
-    for (const s of sectionsWithBody) {
-        const bodyLower = s.body.toLowerCase();
+    for (let i = 0; i < sectionsWithBody.length; i++) {
+        const bodyLower = lowerBodies[i];
         if (!bodyLower.includes(rarest)) continue; // must contain the signal word
         let score = 0;
         for (const w of contentWords) {
@@ -278,7 +334,7 @@ export function resolveTargetSections(query: string, map: DocumentMap): string[]
             // Inverse section frequency: rare words (low freq) → high weight.
             score += Math.log((total + 1) / (freq + 1));
         }
-        if (score > 0) bodyScored.push({ num: s.num, score });
+        if (score > 0) bodyScored.push({ num: sectionsWithBody[i].num, score });
     }
     bodyScored.sort((a, b) => b.score - a.score);
     if (bodyScored.length === 0) return [];

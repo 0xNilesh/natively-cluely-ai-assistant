@@ -100,6 +100,35 @@ test('bibliography lines are NOT mistaken for headings', async () => {
   assert.equal(nums.length, 0, `bibliography lines must not become headings, got [${nums.join(',')}]`);
 });
 
+test('real headings with "pose" or a year survive (review HIGH fixes)', async () => {
+  const { buildDocumentMap } = await loadMap();
+  // "Pose Estimation" was dropped by an unbounded `pose` substring guard.
+  const poseMap = buildDocumentMap('[Page 1]\n3.2 Pose Estimation\nWe estimate the 6-DOF pose of the gripper.');
+  assert.ok(poseMap.sections.some(s => s.num === '3.2'), '"3.2 Pose Estimation" must be a section');
+  // A pose DATA row (brackets/coords) must still be rejected.
+  const poseRow = buildDocumentMap('[Page 1]\n24 Right arm pose [x, y, z, rx]\ndata');
+  assert.ok(!poseRow.sections.some(s => s.num === '24'), 'pose data rows must not become sections');
+  // Headings containing a year were dropped by a bare-year bibliography guard.
+  const yearMap = buildDocumentMap('[Page 1]\n3.1 The 2020 Dataset\nWe used it.\n2.4 ImageNet-2012 Pretraining\nWe pretrain.');
+  assert.ok(yearMap.sections.some(s => s.num === '3.1'), '"3.1 The 2020 Dataset" must survive');
+  assert.ok(yearMap.sections.some(s => s.num === '2.4'), '"2.4 ImageNet-2012 Pretraining" must survive');
+});
+
+test('sectionAwareChunksFromMap excludes ToC and tags sections (shared chunker)', async () => {
+  const { buildDocumentMap, sectionAwareChunksFromMap } = await loadMap();
+  const map = buildDocumentMap(THESIS);
+  const chunks = sectionAwareChunksFromMap(map, 140, 30);
+  assert.ok(Array.isArray(chunks) && chunks.length > 0, 'structured doc must yield section chunks');
+  assert.equal(
+    chunks.filter(c => /\.\s?\.\s?\.\s?\./.test(c)).length, 0,
+    'no chunk may contain ToC dotted leaders (this is what the hybrid path regressed on)',
+  );
+  assert.ok(chunks.every(c => /^\[(Section [\d.]+|p\d)/.test(c)), 'every chunk carries a [Section|p] provenance tag');
+  // A flat-prose doc (no ToC) returns null so the caller keeps its word chunker.
+  const flat = buildDocumentMap('Mercury X1 has 19 DOF. Sensors include LiDAR.');
+  assert.equal(sectionAwareChunksFromMap(flat, 140, 30), null, 'flat prose → null (no section chunking)');
+});
+
 test('prose ending in a number is NOT dropped as a ToC line', async () => {
   const { buildDocumentMap } = await loadMap();
   // No ToC region here → the "N.N Title <page>" rule must not fire.

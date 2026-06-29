@@ -7,6 +7,7 @@ import { ModeReferenceFile } from '../ModesManager';
 import { VectorStore, ScoredChunk } from '../../rag/VectorStore';
 import { EmbeddingPipeline } from '../../rag/EmbeddingPipeline';
 import Database from 'better-sqlite3';
+import { buildDocumentMap, sectionAwareChunksFromMap } from './DocumentMap';
 
 export interface ModeRetrievedChunk {
     sourceId: string;
@@ -464,6 +465,17 @@ export class ModeHybridRetriever {
      * ingest are SOFT boundaries — they don't close a section.
      */
     private chunkText(content: string): string[] {
+        // STRUCTURED documents (real ToC + numbered sections, e.g. a thesis PDF)
+        // are chunked by the shared Document Map, which EXCLUDES the Table of
+        // Contents and tags each chunk `[Section N.N | pX-Y]`. This is the same
+        // chunker the lexical retriever uses — keeping them identical prevents
+        // the hybrid path from silently serving ToC fragments (the round-6 bug
+        // where the fix reached only the lexical path). Flat-prose files (no
+        // ToC) fall through to the legacy heading/word-window chunker below.
+        const docMap = buildDocumentMap(content);
+        const sectionChunks = sectionAwareChunksFromMap(docMap, CHUNK_WORDS, CHUNK_OVERLAP);
+        if (sectionChunks) return sectionChunks;
+
         const lines = content.split('\n');
         const sections: Array<{ heading: string | null; body: string[] }> = [];
         let current: { heading: string | null; body: string[] } = { heading: null, body: [] };

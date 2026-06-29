@@ -6,7 +6,7 @@ import { DatabaseManager } from '../db/DatabaseManager';
 // Imported from the leaf module (not the ../llm barrel) to avoid a require cycle.
 import { classifyCustomContext, selectCustomContextForAnswer } from '../llm/customContextClassifier';
 import type { AnswerType } from '../llm/AnswerPlanner';
-import { buildDocumentMap, resolveTargetSections, type DocumentMap } from './modes/DocumentMap';
+import { buildDocumentMap, resolveTargetSections, sectionAwareChunksFromMap, type DocumentMap } from './modes/DocumentMap';
 
 /**
  * Gate the mode's raw customContext blob by answer type (Phase 3). Returns only
@@ -255,7 +255,23 @@ function splitIntoUnits(text: string): string[] {
     return out;
 }
 
-function scoreChunk(queryWords: Set<string>, chunk: string, rawQuery?: string, useEntityFusion: boolean = false): number {
+// Precompute the query's high-signal entity terms ONCE per retrieve() call.
+// scoreChunk() runs once per chunk (hundreds of times on a 66-page doc, across
+// three loops), and extractHighSignalEntityTerms re-parses the query with two
+// global regexes — identical every call. Compute it once and thread it in.
+function precomputeEntityTerms(rawQuery: string | undefined, useEntityFusion: boolean): string[] | null {
+    if (!useEntityFusion || !rawQuery) return null;
+    const terms = extractHighSignalEntityTerms(rawQuery);
+    return terms.length > 0 ? terms : null;
+}
+
+function scoreChunk(
+    queryWords: Set<string>,
+    chunk: string,
+    rawQuery?: string,
+    useEntityFusion: boolean = false,
+    entityTerms?: string[] | null,
+): number {
     if (queryWords.size === 0) return 0;
     const chunkWords = wordsOf(chunk);
     if (chunkWords.length === 0) return 0;
@@ -284,12 +300,16 @@ function scoreChunk(queryWords: Set<string>, chunk: string, rawQuery?: string, u
     // is only needed to separate sections in a large structured document. Also
     // skip when the query has no high-signal entity terms.
     if (!useEntityFusion || !rawQuery) return lexical;
-    const entityTerms = extractHighSignalEntityTerms(rawQuery);
-    if (entityTerms.length === 0) return lexical;
+    // Use the precomputed terms when provided (hot path); otherwise compute
+    // lazily (keeps the function correct if called without precomputation).
+    const resolvedEntityTerms = entityTerms !== undefined
+        ? entityTerms
+        : (extractHighSignalEntityTerms(rawQuery) || null);
+    if (!resolvedEntityTerms || resolvedEntityTerms.length === 0) return lexical;
 
     const chunkLower = chunk.toLowerCase();
     let entityHits = 0;
-    for (const term of entityTerms) {
+    for (const term of resolvedEntityTerms) {
         const t = term.toLowerCase();
         // WORD-BOUNDARY match (round-6 fix): substring matching wrongly counted
         // "lora" inside "exploration"/"collaborative", inflating the entity
@@ -307,7 +327,7 @@ function scoreChunk(queryWords: Set<string>, chunk: string, rawQuery?: string, u
     }
     // Fraction of the query's entity terms present verbatim in the chunk — a
     // strong "this chunk is about the asked entity" signal, bounded to [0,1].
-    const entityFrac = entityHits / entityTerms.length;
+    const entityFrac = entityHits / resolvedEntityTerms.length;
 
     // 55% lexical overlap + 45% entity coverage. Entity coverage is weighted
     // heavily (a chunk that names the queried entity verbatim should win) but
@@ -419,14 +439,21 @@ function reportReferenceFilePageCounts(files: ModeReferenceFile[]): {
             const markers = file.content.match(/\[Page\s+\d+\]/g);
             if (markers && markers.length > 0) {
                 let maxP = 0;
+                const distinctPages = new Set<number>();
                 for (const mk of markers) {
                     const n = parseInt(mk.replace(/\D+/g, ''), 10);
-                    if (n > maxP) maxP = n;
+                    if (n > 0) {
+                        distinctPages.add(n);
+                        if (n > maxP) maxP = n;
+                    }
                 }
                 if (maxP > 0) {
                     hasRealPdf = true;
                     pageCount += maxP;
-                    ingestedPages += markers.length; // distinct page markers extracted
+                    // DISTINCT pages, not raw marker count — a repeated [Page N]
+                    // (page split across extraction blocks) must not inflate
+                    // ingestedPages above pageCount.
+                    ingestedPages += distinctPages.size;
                 }
             }
         }
@@ -489,23 +516,29 @@ const documentIdentityCache = new Map<string, { terms: string[]; excerpt: string
 // reference file (up to 128 KB); the lexical retrieve() loop has NO chunk cache
 // (unlike ModeHybridRetriever), so without this it would re-parse on every
 // query, up to 3× per call. Keyed by `${file.id}:${contentHash}` so a re-upload
-// (new content → new hash → miss) is handled automatically. Mirrors the
-// documentIdentityCache LRU eviction.
+// (new content → new hash → miss) is handled automatically. True LRU: on a hit
+// we delete+reinsert so the entry moves to the most-recently-used end (Map
+// preserves insertion order), and eviction removes the least-recently-used
+// front entry — a hot file uploaded early is NOT evicted before cold ones.
 const DOCUMENT_MAP_CACHE_MAX = 100;
 const documentMapCache = new Map<string, DocumentMap>();
 
 function getCachedDocumentMap(fileId: string, content: string): DocumentMap {
     const key = `${fileId}:${identityContentHash(content)}`;
-    let cached = documentMapCache.get(key);
-    if (!cached) {
-        cached = buildDocumentMap(content);
-        if (documentMapCache.size >= DOCUMENT_MAP_CACHE_MAX) {
-            const oldestKey = documentMapCache.keys().next().value;
-            if (oldestKey) documentMapCache.delete(oldestKey);
-        }
+    const cached = documentMapCache.get(key);
+    if (cached) {
+        // Refresh recency (LRU): move this key to the most-recent end.
+        documentMapCache.delete(key);
         documentMapCache.set(key, cached);
+        return cached;
     }
-    return cached;
+    const built = buildDocumentMap(content);
+    if (documentMapCache.size >= DOCUMENT_MAP_CACHE_MAX) {
+        const oldestKey = documentMapCache.keys().next().value;
+        if (oldestKey) documentMapCache.delete(oldestKey);
+    }
+    documentMapCache.set(key, built);
+    return built;
 }
 
 /**
@@ -518,32 +551,10 @@ function getCachedDocumentMap(fileId: string, content: string): DocumentMap {
  */
 function sectionAwareChunks(fileId: string, content: string): string[] | null {
     const map = getCachedDocumentMap(fileId, content);
-    if (!map.hasToc) return null;
-    const chunks: string[] = [];
-    for (const section of map.sections) {
-        const body = section.body.trim();
-        if (!body) continue;
-        const tag = section.num
-            ? `[Section ${section.num} | p${section.pageStart}${section.pageEnd !== section.pageStart ? '-' + section.pageEnd : ''}]`
-            : `[p${section.pageStart}]`;
-        const headingLine = section.heading && section.heading !== 'Preamble'
-            ? `${tag} ${section.heading}`
-            : tag;
-        const words = body.split(/\s+/).filter(Boolean);
-        if (words.length <= CHUNK_WORDS) {
-            chunks.push(`${headingLine}\n${body}`);
-            continue;
-        }
-        // Long section: window the body, anchoring every window with the
-        // section tag + heading so each chunk keeps its provenance.
-        for (let i = 0; i < words.length; i += CHUNK_WORDS - CHUNK_OVERLAP) {
-            const window = words.slice(i, i + CHUNK_WORDS);
-            if (window.length === 0) break;
-            chunks.push(`${headingLine}\n${window.join(' ')}`);
-            if (i + CHUNK_WORDS >= words.length) break;
-        }
-    }
-    return chunks.length > 0 ? chunks : null;
+    // Delegates to the shared chunker in DocumentMap so the lexical and hybrid
+    // retrievers produce identical section-tagged chunks (single source of
+    // truth — prevents the two paths from diverging).
+    return sectionAwareChunksFromMap(map, CHUNK_WORDS, CHUNK_OVERLAP);
 }
 
 function extractHighSignalTerms(file: ModeReferenceFile): string[] {
@@ -738,27 +749,48 @@ export class ModeContextRetriever {
             const m = text.match(/^\[Section\s+([\d.]+)\s*\|/);
             return m ? m[1] : null;
         };
-        // Boost a chunk for being IN a target section or a DIRECT CHILD of one
+        // Boost a chunk for being IN a target section or a DESCENDANT of one
         // (a target "2.3" pulls "2.3.2 Technical Specifications"). We do NOT
         // boost ANCESTORS — boosting the broad "2" chapter for a "2.4.2" target
         // is what let the parent chapter outrank the specific section. The lift
-        // decays by target rank so the top-predicted section wins ties.
+        // decays by target RANK (top-predicted section wins) AND by DEPTH
+        // DISTANCE from the target, so when the planner returns a broad parent
+        // like "2.4" a deep descendant doesn't get the full lift sprayed across
+        // every subsection — the exact-match section still wins.
+        const depthOf = (n: string): number => n.split('.').length;
         const sectionBoost = (secNum: string | null): number => {
             if (!secNum || targetList.length === 0) return 0;
             for (let i = 0; i < targetList.length; i++) {
                 const t = targetList[i];
-                if (secNum === t || secNum.startsWith(t + '.')) {
-                    // 0.35 for the #1 target, decaying for lower-ranked targets.
-                    return 0.35 * Math.pow(0.6, i);
-                }
+                const isExact = secNum === t;
+                const isDescendant = secNum.startsWith(t + '.');
+                if (!isExact && !isDescendant) continue;
+                // Rank decay (0.6^i) × depth weighting. A DIRECT child
+                // (levelsBelow=1) is boosted SLIGHTLY ABOVE its exact-match
+                // parent: the planner frequently returns a broad parent like
+                // "2.3 Mercury X1 Robot" while the actual fact (sensors, specs)
+                // lives in the "2.3.1"/"2.3.2" child, and the generic parent
+                // chunk otherwise outranks and DILUTES the specific child. Deep
+                // descendants (≥2 levels) are damped to avoid spraying the lift
+                // across a whole chapter subtree.
+                const levelsBelow = isExact ? 0 : depthOf(secNum) - depthOf(t);
+                let depthWeight: number;
+                if (levelsBelow === 0) depthWeight = 1.0;        // exact match
+                else if (levelsBelow === 1) depthWeight = 1.1;   // direct child wins over generic parent
+                else depthWeight = Math.pow(0.7, levelsBelow);   // deep descendant damped
+                return Math.min(0.4, 0.35 * Math.pow(0.6, i) * depthWeight);
             }
             return 0;
         };
 
+        // Precompute the query's entity terms ONCE (was recomputed per chunk
+        // inside scoreChunk across all three scoring loops).
+        const queryEntityTerms = precomputeEntityTerms(options.query, forceDocumentGrounding);
+
         const candidates: ModeRetrievedSnippet[] = [];
         for (const source of sources) {
             for (const chunk of chunksForSource(source)) {
-                let score = scoreChunk(queryWords, chunk, options.query, forceDocumentGrounding);
+                let score = scoreChunk(queryWords, chunk, options.query, forceDocumentGrounding, queryEntityTerms);
                 const boost = sectionBoost(chunkSectionNum(chunk));
                 if (boost > 0) score = Math.min(1, score + boost);
                 if (score < adaptiveThreshold) continue;
@@ -823,7 +855,12 @@ export class ModeContextRetriever {
                         const hitCount = sectionHints.filter(h => chunkLower.includes(h)).length;
                         if (hitCount === 0) continue;
                         const key = `${source.id}::${chunk}`;
-                        const base = scoreChunk(queryWords, chunk, options.query, forceDocumentGrounding);
+                        let base = scoreChunk(queryWords, chunk, options.query, forceDocumentGrounding, queryEntityTerms);
+                        // Carry forward the section-target boost so a rescued
+                        // chunk in a TARGET section isn't demoted below its
+                        // first-pass rank (consistency across the two passes).
+                        const rb = sectionBoost(chunkSectionNum(chunk));
+                        if (rb > 0) base = Math.min(1, base + rb);
                         // BOUNDED rescue (round-6): convex-combine the base score
                         // with a section-hint coverage signal so the result stays
                         // in [0,1] (was `base + 0.4*hitCount`, unbounded). A chunk
@@ -878,10 +915,13 @@ export class ModeContextRetriever {
                     const retryQueryWords = new Set(
                         retryTerms.flatMap((t) => wordsOf(t)),
                     );
+                    // retryTerms ARE the entity terms — reuse them directly so
+                    // scoreChunk doesn't re-extract per chunk.
+                    const retryEntityTerms = forceDocumentGrounding && retryTerms.length > 0 ? retryTerms : null;
                     const retryCandidates: ModeRetrievedSnippet[] = [];
                     for (const source of sources) {
                         for (const chunk of chunksForSource(source)) {
-                            const score = scoreChunk(retryQueryWords, chunk, retryTerms.join(" "), forceDocumentGrounding);
+                            const score = scoreChunk(retryQueryWords, chunk, retryTerms.join(" "), forceDocumentGrounding, retryEntityTerms);
                             if (score < MIN_RELEVANCE_SCORE) continue;
                             retryCandidates.push({
                                 sourceId: source.id,
