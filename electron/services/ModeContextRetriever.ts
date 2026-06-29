@@ -6,6 +6,7 @@ import { DatabaseManager } from '../db/DatabaseManager';
 // Imported from the leaf module (not the ../llm barrel) to avoid a require cycle.
 import { classifyCustomContext, selectCustomContextForAnswer } from '../llm/customContextClassifier';
 import type { AnswerType } from '../llm/AnswerPlanner';
+import { buildDocumentMap, resolveTargetSections, type DocumentMap } from './modes/DocumentMap';
 
 /**
  * Gate the mode's raw customContext blob by answer type (Phase 3). Returns only
@@ -254,7 +255,7 @@ function splitIntoUnits(text: string): string[] {
     return out;
 }
 
-function scoreChunk(queryWords: Set<string>, chunk: string, rawQuery?: string): number {
+function scoreChunk(queryWords: Set<string>, chunk: string, rawQuery?: string, useEntityFusion: boolean = false): number {
     if (queryWords.size === 0) return 0;
     const chunkWords = wordsOf(chunk);
     if (chunkWords.length === 0) return 0;
@@ -267,33 +268,53 @@ function scoreChunk(queryWords: Set<string>, chunk: string, rawQuery?: string): 
             seen.add(word);
         }
     }
-    let score = matches / Math.sqrt(queryWords.size * Math.max(1, new Set(chunkWords).size));
+    const lexical = matches / Math.sqrt(queryWords.size * Math.max(1, new Set(chunkWords).size));
 
-    // Entity / exact-phrase boost (audit 2026-06-28, weak-model real-path fix).
-    // The base lexical score gives "OpenVLA-OFT" and "Mercury X1" near-identical
-    // scores on a flat doc, so the weak model can't tell which chunk answers the
-    // question. Strongly boost chunks that contain the query's HIGH-SIGNAL
-    // entity terms verbatim (capitalised / hyphenated / digit-bearing terms like
-    // "OpenVLA-OFT", "ROS#", "19", "MSE", "LiDAR") and the query's exact
-    // multi-word phrases. This makes the relevant chunk rank clearly first so
-    // topK selection is meaningful.
-    if (rawQuery) {
-        const chunkLower = chunk.toLowerCase();
-        const entityTerms = extractHighSignalEntityTerms(rawQuery);
-        let entityHits = 0;
-        for (const term of entityTerms) {
-            // Match the entity as a token (allow trailing punctuation like ROS#).
-            const t = term.toLowerCase();
-            if (chunkLower.includes(t)) entityHits++;
+    // BOUNDED fusion (round-6 rebuild, 2026-06-29). The previous code did
+    // `score += 0.5 * entityHits` UNBOUNDED — a chunk that tripped several entity
+    // terms reached scores >2 (the live logs showed 2.207), so a generic chunk
+    // that happens to name many query tokens dominated the chunk that actually
+    // answered the question, and the two retrievers (lexical here vs the bounded
+    // hybrid) produced incomparable orderings. Now entity presence is a SECOND
+    // bounded signal in [0,1] and the final score is a weighted convex
+    // combination, so every score stays in [0,1] and is comparable.
+    // Entity-coverage fusion is DOCUMENT-GROUNDED ONLY (round-6). The 7 default
+    // modes and non-doc-grounded custom modes keep PURE lexical scoring — their
+    // flat fixtures/tests depend on the original ranking, and the entity signal
+    // is only needed to separate sections in a large structured document. Also
+    // skip when the query has no high-signal entity terms.
+    if (!useEntityFusion || !rawQuery) return lexical;
+    const entityTerms = extractHighSignalEntityTerms(rawQuery);
+    if (entityTerms.length === 0) return lexical;
+
+    const chunkLower = chunk.toLowerCase();
+    let entityHits = 0;
+    for (const term of entityTerms) {
+        const t = term.toLowerCase();
+        // WORD-BOUNDARY match (round-6 fix): substring matching wrongly counted
+        // "lora" inside "exploration"/"collaborative", inflating the entity
+        // score of windows that don't actually name the entity and burying the
+        // window that does (e.g. the "Low-Rank Adaptation (LoRA)" sentence). Use
+        // a boundary check so only genuine entity mentions count. Falls back to
+        // substring for terms with regex-special chars (e.g. "ROS#", "C++").
+        let matched: boolean;
+        if (/^[a-z0-9-]+$/.test(t)) {
+            matched = new RegExp(`(^|[^a-z0-9])${t.replace(/[-]/g, '\\-')}([^a-z0-9]|$)`).test(chunkLower);
+        } else {
+            matched = chunkLower.includes(t);
         }
-        if (entityHits > 0) {
-            // Each verbatim entity hit adds a strong multiplicative-ish boost so
-            // a chunk that actually names the queried entity dominates one that
-            // merely shares common words.
-            score += 0.5 * entityHits;
-        }
+        if (matched) entityHits++;
     }
-    return score;
+    // Fraction of the query's entity terms present verbatim in the chunk — a
+    // strong "this chunk is about the asked entity" signal, bounded to [0,1].
+    const entityFrac = entityHits / entityTerms.length;
+
+    // 55% lexical overlap + 45% entity coverage. Entity coverage is weighted
+    // heavily (a chunk that names the queried entity verbatim should win) but
+    // can never push the score above 1 (the old `+0.5*hits` reached 2.2) or
+    // swamp a chunk with strong lexical overlap.
+    const ENTITY_WEIGHT = 0.45;
+    return (1 - ENTITY_WEIGHT) * lexical + ENTITY_WEIGHT * entityFrac;
 }
 
 const DOCUMENT_IDENTITY_MAX_FILES = 5;
@@ -390,6 +411,24 @@ function reportReferenceFilePageCounts(files: ModeReferenceFile[]): {
                     : file.pageCount;
         } else if (/\.pdf$/i.test(file.fileName)) {
             anyPdf = true;
+            // BACKFILL (round-6 Stage 4): the stored page_count is null for
+            // pre-v19 uploads, but the content carries [Page N] markers — count
+            // them as the real page count instead of falling to the 3000-char
+            // heuristic (which reported "43" for the 66-page thesis). No
+            // re-upload needed; this reads the markers already in the content.
+            const markers = file.content.match(/\[Page\s+\d+\]/g);
+            if (markers && markers.length > 0) {
+                let maxP = 0;
+                for (const mk of markers) {
+                    const n = parseInt(mk.replace(/\D+/g, ''), 10);
+                    if (n > maxP) maxP = n;
+                }
+                if (maxP > 0) {
+                    hasRealPdf = true;
+                    pageCount += maxP;
+                    ingestedPages += markers.length; // distinct page markers extracted
+                }
+            }
         }
     }
     if (hasRealPdf) {
@@ -445,6 +484,67 @@ function identityContentHash(content: string): string {
 
 const DOCUMENT_IDENTITY_CACHE_MAX = 100;
 const documentIdentityCache = new Map<string, { terms: string[]; excerpt: string }>();
+
+// Document-map cache (round-6 rebuild). buildDocumentMap parses the whole
+// reference file (up to 128 KB); the lexical retrieve() loop has NO chunk cache
+// (unlike ModeHybridRetriever), so without this it would re-parse on every
+// query, up to 3× per call. Keyed by `${file.id}:${contentHash}` so a re-upload
+// (new content → new hash → miss) is handled automatically. Mirrors the
+// documentIdentityCache LRU eviction.
+const DOCUMENT_MAP_CACHE_MAX = 100;
+const documentMapCache = new Map<string, DocumentMap>();
+
+function getCachedDocumentMap(fileId: string, content: string): DocumentMap {
+    const key = `${fileId}:${identityContentHash(content)}`;
+    let cached = documentMapCache.get(key);
+    if (!cached) {
+        cached = buildDocumentMap(content);
+        if (documentMapCache.size >= DOCUMENT_MAP_CACHE_MAX) {
+            const oldestKey = documentMapCache.keys().next().value;
+            if (oldestKey) documentMapCache.delete(oldestKey);
+        }
+        documentMapCache.set(key, cached);
+    }
+    return cached;
+}
+
+/**
+ * Build section-aware chunks from a structured document (one with a real ToC +
+ * numbered sections). Each chunk is the section heading + body (sub-split when a
+ * section is long), prefixed with a `[Section N.N | pX-Y]` tag so the chunk
+ * carries its own section + page provenance into scoring and telemetry. Returns
+ * null when the document has no detectable ToC/section structure — the caller
+ * then keeps the existing chunkText() path (flat-prose fixtures, slide decks).
+ */
+function sectionAwareChunks(fileId: string, content: string): string[] | null {
+    const map = getCachedDocumentMap(fileId, content);
+    if (!map.hasToc) return null;
+    const chunks: string[] = [];
+    for (const section of map.sections) {
+        const body = section.body.trim();
+        if (!body) continue;
+        const tag = section.num
+            ? `[Section ${section.num} | p${section.pageStart}${section.pageEnd !== section.pageStart ? '-' + section.pageEnd : ''}]`
+            : `[p${section.pageStart}]`;
+        const headingLine = section.heading && section.heading !== 'Preamble'
+            ? `${tag} ${section.heading}`
+            : tag;
+        const words = body.split(/\s+/).filter(Boolean);
+        if (words.length <= CHUNK_WORDS) {
+            chunks.push(`${headingLine}\n${body}`);
+            continue;
+        }
+        // Long section: window the body, anchoring every window with the
+        // section tag + heading so each chunk keeps its provenance.
+        for (let i = 0; i < words.length; i += CHUNK_WORDS - CHUNK_OVERLAP) {
+            const window = words.slice(i, i + CHUNK_WORDS);
+            if (window.length === 0) break;
+            chunks.push(`${headingLine}\n${window.join(' ')}`);
+            if (i + CHUNK_WORDS >= words.length) break;
+        }
+    }
+    return chunks.length > 0 ? chunks : null;
+}
 
 function extractHighSignalTerms(file: ModeReferenceFile): string[] {
     const terms = new Map<string, number>();
@@ -599,10 +699,68 @@ export class ModeContextRetriever {
             ? MIN_RELEVANCE_SCORE
             : MIN_RELEVANCE_SCORE * Math.min(1, queryWords.size / 5);
 
+        // Chunk a source the right way: a STRUCTURED reference file (real ToC +
+        // numbered sections, e.g. a thesis PDF) is chunked by SECTION via the
+        // document map, which excludes the Table of Contents — the round-6 fix
+        // for the model only ever seeing the "3.4.1 Conversational Agent" ToC
+        // fragment. A flat-prose reference file (the seminar fixtures, a slide
+        // deck) or custom_context falls back to the existing chunkText path.
+        const chunksForSource = (source: ModeKnowledgeSource): string[] => {
+            if (forceDocumentGrounding && source.type === 'reference_file') {
+                const sectionChunks = sectionAwareChunks(source.id, source.content);
+                if (sectionChunks) return sectionChunks;
+            }
+            return chunkText(source.content, forceDocumentGrounding);
+        };
+
+        // QUERY PLANNER (round-6 Stage 3): resolve the question to the document
+        // SECTIONS it most likely targets, using the section titles from the
+        // document map. A chunk whose `[Section N.N | …]` tag matches a target
+        // section gets a bounded relevance lift, so e.g. "What is the role of
+        // ROS#?" surfaces §2.4.2 ROS# above the §2 parent chapter that merely
+        // mentions ROS# once. ADVISORY only — the lift is added to the score,
+        // never a hard filter, so a fact that lives outside the predicted
+        // section is still reachable via lexical/entity scoring.
+        // Keep the targets ORDERED (best-first) and only take the top few, so a
+        // low-confidence 3rd/4th match doesn't spray boosts across the document.
+        let targetList: string[] = [];
+        if (forceDocumentGrounding && options.query) {
+            for (const source of sources) {
+                if (source.type !== 'reference_file') continue;
+                const map = getCachedDocumentMap(source.id, source.content);
+                if (!map.hasToc) continue;
+                const t = resolveTargetSections(options.query, map);
+                if (t.length > targetList.length) targetList = t;
+            }
+        }
+        // Pull the section number out of a chunk's `[Section N.N | …]` tag.
+        const chunkSectionNum = (text: string): string | null => {
+            const m = text.match(/^\[Section\s+([\d.]+)\s*\|/);
+            return m ? m[1] : null;
+        };
+        // Boost a chunk for being IN a target section or a DIRECT CHILD of one
+        // (a target "2.3" pulls "2.3.2 Technical Specifications"). We do NOT
+        // boost ANCESTORS — boosting the broad "2" chapter for a "2.4.2" target
+        // is what let the parent chapter outrank the specific section. The lift
+        // decays by target rank so the top-predicted section wins ties.
+        const sectionBoost = (secNum: string | null): number => {
+            if (!secNum || targetList.length === 0) return 0;
+            for (let i = 0; i < targetList.length; i++) {
+                const t = targetList[i];
+                if (secNum === t || secNum.startsWith(t + '.')) {
+                    // 0.35 for the #1 target, decaying for lower-ranked targets.
+                    return 0.35 * Math.pow(0.6, i);
+                }
+            }
+            return 0;
+        };
+
         const candidates: ModeRetrievedSnippet[] = [];
         for (const source of sources) {
-            for (const chunk of chunkText(source.content, forceDocumentGrounding)) {
-                const score = scoreChunk(queryWords, chunk, options.query);
+            for (const chunk of chunksForSource(source)) {
+                let score = scoreChunk(queryWords, chunk, options.query, forceDocumentGrounding);
+                const boost = sectionBoost(chunkSectionNum(chunk));
+                if (boost > 0) score = Math.min(1, score + boost);
                 if (score < adaptiveThreshold) continue;
                 candidates.push({
                     sourceId: source.id,
@@ -660,13 +818,19 @@ export class ModeContextRetriever {
                 const rescued = new Map<string, ModeRetrievedSnippet>();
                 for (const c of candidates) rescued.set(`${c.sourceId}::${c.text}`, c);
                 for (const source of sources) {
-                    for (const chunk of chunkText(source.content, forceDocumentGrounding)) {
+                    for (const chunk of chunksForSource(source)) {
                         const chunkLower = chunk.toLowerCase();
                         const hitCount = sectionHints.filter(h => chunkLower.includes(h)).length;
                         if (hitCount === 0) continue;
                         const key = `${source.id}::${chunk}`;
-                        const base = scoreChunk(queryWords, chunk, options.query);
-                        const boosted = base + 0.4 * hitCount;
+                        const base = scoreChunk(queryWords, chunk, options.query, forceDocumentGrounding);
+                        // BOUNDED rescue (round-6): convex-combine the base score
+                        // with a section-hint coverage signal so the result stays
+                        // in [0,1] (was `base + 0.4*hitCount`, unbounded). A chunk
+                        // in the asked-about section gets a meaningful lift but
+                        // can't exceed a perfectly-matching chunk elsewhere.
+                        const hintFrac = Math.min(1, hitCount / Math.max(1, sectionHints.length));
+                        const boosted = 0.6 * base + 0.4 * hintFrac;
                         const existing = rescued.get(key);
                         if (!existing || boosted > existing.score) {
                             rescued.set(key, {
@@ -716,8 +880,8 @@ export class ModeContextRetriever {
                     );
                     const retryCandidates: ModeRetrievedSnippet[] = [];
                     for (const source of sources) {
-                        for (const chunk of chunkText(source.content, forceDocumentGrounding)) {
-                            const score = scoreChunk(retryQueryWords, chunk, retryTerms.join(' '));
+                        for (const chunk of chunksForSource(source)) {
+                            const score = scoreChunk(retryQueryWords, chunk, retryTerms.join(" "), forceDocumentGrounding);
                             if (score < MIN_RELEVANCE_SCORE) continue;
                             retryCandidates.push({
                                 sourceId: source.id,
@@ -789,8 +953,36 @@ export class ModeContextRetriever {
         }
 
         if (forceDocumentGrounding) {
-            const matchedSections = DOCUMENT_GROUNDED_QUERY_EXPANSION.filter(section =>
-                selected.some(snippet => snippet.text.toLowerCase().includes(section.toLowerCase())));
+            // REAL section + page telemetry (round-6 Stage 4). The selected
+            // chunks now carry `[Section N.N | pX-Y] heading` tags from the
+            // document map, so we report the ACTUAL sections and pages the
+            // answer was grounded in — not the old fixed 14-word expansion list
+            // (which could only ever say "introduction/results/…") and not the
+            // hard-coded `queryMatchedPages: []`. Falls back to the old
+            // expansion-word scan for flat-prose files that have no section tags.
+            const sectionTagRe = /\[Section\s+([\d.]+)\s*\|\s*p(\d+)(?:-(\d+))?\]/g;
+            const matchedSectionSet = new Set<string>();
+            const matchedPageSet = new Set<number>();
+            for (const snippet of selected) {
+                let m: RegExpExecArray | null;
+                sectionTagRe.lastIndex = 0;
+                let taggedHere = false;
+                while ((m = sectionTagRe.exec(snippet.text)) !== null) {
+                    taggedHere = true;
+                    matchedSectionSet.add(m[1]);
+                    const start = parseInt(m[2], 10);
+                    const end = m[3] ? parseInt(m[3], 10) : start;
+                    for (let p = start; p <= end && p - start < 30; p++) matchedPageSet.add(p);
+                }
+                if (!taggedHere) {
+                    const pm = extractPageMarker(snippet.text);
+                    if (pm !== null) matchedPageSet.add(pm);
+                }
+            }
+            const matchedSections = matchedSectionSet.size > 0
+                ? Array.from(matchedSectionSet).sort()
+                : DOCUMENT_GROUNDED_QUERY_EXPANSION.filter(section =>
+                    selected.some(snippet => snippet.text.toLowerCase().includes(section.toLowerCase())));
             console.log('[ModeContextRetriever] document-grounded retrieval', {
                 retrievalRequired: true,
                 retrievalSource: 'reference_files',
@@ -801,15 +993,7 @@ export class ModeContextRetriever {
                 ...reportReferenceFilePageCounts(files),
                 referenceFileChunkCount: candidates.length,
                 referenceFileLastIndexedAt: new Date().toISOString(),
-                // Compute matched pages from the [Page N] markers in the selected
-                // chunks (audit 2026-06-27) — was hard-coded [] even when the
-                // chunks carried page markers. Empty for pre-v19 PDFs (no markers)
-                // and for txt/md files; that absence is itself a useful signal.
-                queryMatchedPages: Array.from(new Set(
-                    selected
-                        .map(s => extractPageMarker(s.text))
-                        .filter((p): p is number => p !== null),
-                )).sort((a, b) => a - b),
+                queryMatchedPages: Array.from(matchedPageSet).sort((a, b) => a - b),
                 queryMatchedSections: matchedSections,
             });
         }

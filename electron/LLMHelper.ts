@@ -4063,6 +4063,11 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     } catch { /* non-fatal: preserve legacy skip behavior if modes cannot load */ }
     const isActiveCustomMode = activeModeGroundingInfo?.isCustom === true;
     const forceDocumentGrounding = activeModeGroundingInfo?.documentGroundedCustomModeActive === true;
+    // Hoisted to function scope (round-6) so the document-grounded userContent
+    // shaping below can read the actual retrieval output as `retrievedBlock`.
+    // It is assigned inside the mode-injection block; '' when retrieval didn't
+    // fire, in which case the shaping falls back to the standard CONTEXT: shape.
+    let modeContextBlock = '';
     // MODE-SCOPED answer types (manual regression 2026-06-12): a manual sales/
     // lecture turn NEEDS the active mode's voice + retrieved product material —
     // CHAT_MODE_PROMPT's blanket "universal override" skip left sales-mode
@@ -4095,7 +4100,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         // escalation (allowRerank=true). Default (flag off) → the existing sync
         // lexical retriever, byte-for-byte unchanged. The hybrid call is guarded
         // so any failure falls back to the sync path the manual flow always used.
-        let modeContextBlock = '';
+        // modeContextBlock hoisted to function scope above (round-6).
         let usedRerankPath = false;
         try {
           // eslint-disable-next-line @typescript-eslint/no-var-requires
