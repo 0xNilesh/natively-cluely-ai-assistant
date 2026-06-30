@@ -721,7 +721,7 @@ test('parseSseStream: source-pin — done: true sets sawTerminalEvent=true (comm
   const methodBody = source.slice(parseSseIdx);
   // Locate the 'if (done)' branch that handles clean body close.
   // Find the first `if (done)` AFTER the parser's `signal.aborted` check.
-  const signalAbortIdx = methodBody.indexOf("if (signal.aborted) throw new Error('Codex request aborted.')");
+  const signalAbortIdx = methodBody.indexOf("if (signal.aborted)");
   assert.ok(signalAbortIdx > 0, 'signal.aborted guard must still exist');
   const afterSignalAbort = methodBody.slice(signalAbortIdx);
   const doneBranchIdx = afterSignalAbort.search(/if\s*\(\s*done\s*\)/);
@@ -731,5 +731,42 @@ test('parseSseStream: source-pin — done: true sets sawTerminalEvent=true (comm
   const doneBranchSnippet = afterSignalAbort.slice(doneBranchIdx, doneBranchIdx + 800);
   assert.match(doneBranchSnippet, /sawTerminalEvent\s*=\s*true/,
     '`if (done)` branch must set sawTerminalEvent = true so the catch swallows post-clean-close aborts — commit 05db8ca fix');
+});
+
+// =============================================================================
+// Idle-timeout: the deadlineTimer RESETS on every delta (wall-clock fix)
+// =============================================================================
+//
+// Root cause of the production "Codex request aborted." bug (2026-07-01):
+// The user had codexCliTimeoutMs=30000 persisted. The first call completed
+// in <30s; the second call (larger sysPrompt, reasoning model) took >30s
+// total. The old code started a setTimeout(30s) at stream() entry and
+// NEVER reset it — so even a healthy streaming response was guillotined
+// at the 30s wall-clock mark. The fix converts the timer to an IDLE timer
+// that resets on every yielded delta. This source-pin verifies the fix.
+
+test('stream(): source uses resetDeadline() on each yielded delta — idle-timer fix pin', () => {
+  const source = fs.readFileSync(
+    path.resolve(__dirname, '../../../electron/services/CodexCliService.ts'),
+    'utf8',
+  );
+  // stream() starts with `public static async *stream(`
+  const streamMethodIdx = source.indexOf('public static async *stream(');
+  assert.ok(streamMethodIdx > 0, 'stream() method must still exist in CodexCliService.ts');
+  // 3000 chars: enough to span the full method body including the for-await loop.
+  const streamBody = source.slice(streamMethodIdx, streamMethodIdx + 3000);
+
+  // The fix: resetDeadline must be defined and called inside the for-await loop.
+  assert.match(streamBody, /resetDeadline\s*=\s*\(\)\s*=>/,
+    'stream() must define resetDeadline as an idle-timer reset function');
+  assert.match(streamBody, /resetDeadline\(\)/,
+    'stream() must call resetDeadline() — idle-timer must reset on each delta (wall-clock abort fix)');
+
+  // resetDeadline must be called inside the `for await` loop, before/alongside yield delta.
+  const forAwaitIdx = streamBody.indexOf('for await (const delta of deltas)');
+  assert.ok(forAwaitIdx > 0, 'stream() must still have a `for await` loop over deltas');
+  const loopBody = streamBody.slice(forAwaitIdx, forAwaitIdx + 200);
+  assert.match(loopBody, /resetDeadline\(\)/,
+    'resetDeadline() must be called inside the for-await loop body — not outside it');
 });
 

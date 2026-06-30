@@ -308,11 +308,23 @@ export class CodexCliService {
     const body = this.buildRequestBody(options);
     const headers = this.buildHeaders();
 
-    // Manual deadline (in addition to AbortSignal) so an open connection
-    // that stops emitting data still gets killed.
+    // Idle-timeout guard: aborts the HTTP connection if no bytes arrive for
+    // `timeoutMs` ms. The timer RESETS on every yielded delta, so a long
+    // answer that is actively streaming (even slowly) is never cut off.
+    // This is intentionally NOT a wall-clock cap from request start — that
+    // would abort long but healthy responses (e.g. gpt-5.5 with a large
+    // system prompt routinely takes >30s total). The outer
+    // raceStreamWithDeadline() already handles the first-useful-token
+    // deadline and the inter-token stall guard independently; this guard
+    // serves as a belt-and-suspenders kill for a truly stuck HTTP connection
+    // (server accepted the request but sends nothing at all for timeoutMs).
     const deadlineController = new AbortController();
-    const deadlineTimer = setTimeout(() => deadlineController.abort(), options.timeoutMs);
-    // Combine user-supplied signal with our deadline.
+    let deadlineTimer: ReturnType<typeof setTimeout> = setTimeout(() => deadlineController.abort(), options.timeoutMs);
+    const resetDeadline = () => {
+      clearTimeout(deadlineTimer);
+      deadlineTimer = setTimeout(() => deadlineController.abort(), options.timeoutMs);
+    };
+    // Combine user-supplied signal with our idle-timeout signal.
     const combinedSignal = combineSignals(options.signal, deadlineController.signal);
     const cleanup = () => {
       clearTimeout(deadlineTimer);
@@ -322,6 +334,7 @@ export class CodexCliService {
     try {
       const deltas = this.fetchDeltas(body, headers, combinedSignal.signal, options);
       for await (const delta of deltas) {
+        resetDeadline();
         yield delta;
       }
     } finally {
@@ -489,7 +502,9 @@ export class CodexCliService {
     let refreshedOnce = false;
 
     while (true) {
-      if (signal.aborted) throw new Error('Codex request aborted.');
+      if (signal.aborted) {
+        throw new Error('Codex request aborted.');
+      }
 
       // Re-mint headers on each attempt so a 401-retry uses the FRESH
       // access token (after the refresh succeeded, not before).
@@ -510,7 +525,9 @@ export class CodexCliService {
         });
       } catch (e: any) {
         // AbortError: re-throw so the generator halts cleanly.
-        if (e?.name === 'AbortError') throw new Error('Codex request aborted.');
+        if (e?.name === 'AbortError') {
+          throw new Error('Codex request aborted.');
+        }
         // Network error: retry with backoff.
         if (attempt >= TRANSIENT_RETRY_MAX) {
           throw new Error(`Codex request failed after ${TRANSIENT_RETRY_MAX} retries: ${e?.message || e}`);
@@ -626,7 +643,9 @@ export class CodexCliService {
     let terminalError: Error | null = null;
     try {
       while (true) {
-        if (signal.aborted) throw new Error('Codex request aborted.');
+        if (signal.aborted) {
+          throw new Error('Codex request aborted.');
+        }
         const { value, done } = await reader.read();
         if (done) {
           // Body closed cleanly (server sent EOF, or our own prior
