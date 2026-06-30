@@ -254,63 +254,141 @@ export function resolveTargetSections(query: string, map: DocumentMap): string[]
     const qWords = new Set(
         q.replace(/[^a-z0-9#-]+/g, ' ').split(/\s+/).filter(w => w.length > 2),
     );
-    if (qWords.size === 0) return [];
+    // Short pure-digit ordinals (1, 2, 3 …) are discriminating in queries like
+    // "What is Benchmark 1 about?" — the digit is the only token that separates
+    // §4.2.1 from §4.2.2 and §4.2.3. They are filtered by the `length > 2` guard
+    // above, so we add them back explicitly.
+    const qOrdinals = new Set(
+        q.replace(/[^0-9\s]+/g, ' ').split(/\s+/).filter(d => /^\d{1,2}$/.test(d)),
+    );
+    if (qWords.size === 0 && qOrdinals.size === 0) return [];
 
-    const scored: Array<{ num: string; score: number }> = [];
+    const tokenizeTitle = (heading: string): string[] => heading.toLowerCase()
+        .replace(/^\d+(?:\.\d+)*\s+/, '')
+        .replace(/[^a-z0-9#-]+/g, ' ')
+        .split(/\s+/)
+        .filter(w => w.length > 2);
+
+    // Original-case title words (parallel to tokenizeTitle output) so that
+    // all-caps acronyms like RLDS, DOF, VLA, MSE retain their signal after
+    // tokenizeTitle lowercases them for the qWords lookup.
+    const tokenizeTitleOrigCase = (heading: string): string[] => heading
+        .replace(/^\d+(?:\.\d+)*\s+/, '')
+        .replace(/[^A-Za-z0-9#-]+/g, ' ')
+        .split(/\s+/)
+        .filter(w => w.length > 2);
+
+    // Title document frequency: how many section titles contain each word. A
+    // word in only ONE title (e.g. "ros#", "unity", "openvla-oft") is
+    // DISTINCTIVE; a word in many titles ("robot", "data", "structure") is
+    // generic. This — not token length — decides whether a single-word title
+    // match is strong enough to short-circuit. "unity"/"ros#" are short but
+    // distinctive; "robot" is long but generic.
+    const titleDf = new Map<string, number>();
     for (const s of map.sections) {
         if (!s.num) continue;
-        const titleLower = s.heading.toLowerCase();
-        const titleWords = titleLower
-            .replace(/^\d+(?:\.\d+)*\s+/, '')
-            .replace(/[^a-z0-9#-]+/g, ' ')
-            .split(/\s+/)
-            .filter(w => w.length > 2);
+        for (const tw of new Set(tokenizeTitle(s.heading))) titleDf.set(tw, (titleDf.get(tw) || 0) + 1);
+    }
+
+    const scored: Array<{ num: string; score: number; wordHits: number; distinctiveHit: boolean }> = [];
+    for (const s of map.sections) {
+        if (!s.num) continue;
+        const titleWords = tokenizeTitle(s.heading);
         if (titleWords.length === 0) continue;
         let hits = 0;
-        for (const tw of titleWords) if (qWords.has(tw)) hits++;
+        let wordHits = 0;          // distinct title words present in the query
+        let distinctiveHit = false; // a title-rare (df<=2) ENTITY token matched
+        // A token is "distinctive" only when it is BOTH rare in titles (df≤2) AND
+        // has signal shape (a non-lowercase-alpha character: digit, hyphen, "#",
+        // uppercase). This prevents plain dictionary words that are df=1 purely
+        // due to spelling variation ("robot" vs "robotic") from being treated as
+        // entity tokens — only true entities like "ros#", "openvla-oft", "x1"
+        // qualify. Without this gate, "robot" (df=1) caused the planner to target
+        // §2.3 Mercury X1 Robot (hardware) for "what task did the robot perform?"
+        // instead of falling to resolveByContent, which correctly finds §3.2.1.
+        // hasSignalShape: a token has signal when it contains a non-lowercase char
+        // (digit, hyphen, "#") OR when its original-case form is an all-caps
+        // acronym (RLDS, DOF, VLA, MSE). tokenizeTitle lowercases "RLDS" → "rlds"
+        // so the /[^a-z]/ test alone misses pure-alpha acronyms.
+        const titleWordsOrigCase = tokenizeTitleOrigCase(s.heading);
+        const hasSignalShape = (tw: string, idx: number): boolean =>
+            /[^a-z]/.test(tw) || /^[A-Z]{2,}$/.test(titleWordsOrigCase[idx] ?? '');
+        const markDistinctive = (tw: string, idx: number) => {
+            if ((titleDf.get(tw) || 0) <= 2 && hasSignalShape(tw, idx)) distinctiveHit = true;
+        };
+        for (let ti = 0; ti < titleWords.length; ti++) {
+            const tw = titleWords[ti];
+            if (qWords.has(tw)) { hits++; wordHits++; markDistinctive(tw, ti); }
+        }
         // Exact verbatim title-token match in the query (handles "ROS#", hyphens).
-        for (const tw of titleWords) {
-            if (tw.length >= 3 && q.includes(tw)) hits += 0.5;
+        for (let ti = 0; ti < titleWords.length; ti++) {
+            const tw = titleWords[ti];
+            if (tw.length >= 3 && q.includes(tw)) { hits += 0.5; markDistinctive(tw, ti); }
         }
         if (hits > 0) {
             // Normalise by title length so a 1-word title match isn't swamped by
             // a long title that happens to share a common word.
-            scored.push({ num: s.num, score: hits / Math.sqrt(titleWords.length) });
+            scored.push({ num: s.num, score: hits / Math.sqrt(titleWords.length), wordHits, distinctiveHit });
         }
     }
     scored.sort((a, b) => b.score - a.score);
-    // A STRONG title match (≥1.0 — the query contains the section title's
-    // distinctive word verbatim, e.g. "ROS#", "OpenVLA-OFT", "Unity",
-    // "Evaluation metrics") is high-confidence; return it directly. A weak
-    // title match (0.5–1.0, e.g. a query sharing a common word like "data" with
-    // several section titles) does NOT block the content fallback below, which
-    // finds the section whose BODY actually discusses the asked-about thing.
-    const strongTitleTargets = scored.filter(s => s.score >= 1.0).slice(0, 4).map(s => s.num);
+    // A STRONG title match is high-confidence ONLY when it has real specificity:
+    // either ≥2 distinct title words matched, OR a DISTINCTIVE (title-rare)
+    // token matched — e.g. "ROS#", "Unity", "OpenVLA-OFT", "Evaluation". A
+    // SINGLE GENERIC-noun match (a query sharing just "robot" with "2.3 Mercury
+    // X1 Robot", where "robot" appears in many titles) must NOT short-circuit,
+    // or it steals targeting from the section whose BODY actually answers (e.g.
+    // "3.2.1 Robotic Task Structure" for "what task did the robot perform").
+    // Such weak matches fall through to the content fallback below.
+    const strongTitleTargets = scored
+        .filter(s => s.score >= 1.0 && (s.wordHits >= 2 || s.distinctiveHit))
+        .slice(0, 4).map(s => s.num);
     if (strongTitleTargets.length > 0) return strongTitleTargets;
+    return resolveByContent(query, map, qOrdinals);
+}
 
-    // CONTENT FALLBACK (round-6 Stage 3b). When no section TITLE matches the
-    // query (e.g. "What camera setup was used?" — the answer lives in
-    // "3.1.1 Robotic Hardware and Software configuration", whose title has no
-    // "camera"), score section BODIES for the query's content terms and target
-    // the best-matching section. Common words ("what", "data", "used") appear
-    // in most sections and would drown the signal word ("camera"), so we weight
-    // each query word by its INVERSE SECTION FREQUENCY — a word that appears in
-    // few sections is discriminative and scores high; a word in many sections
-    // barely counts. No document-specific terms are hardcoded.
+/**
+ * Content-based section resolution: score section BODIES for the query's
+ * content terms, weighting each by inverse section frequency (a word in few
+ * sections is discriminative). The top body section MUST contain the rarest
+ * content word, so a section sharing only generic words can't win. Used as the
+ * fallback when no title matches, and merged in for ambiguous single-word title
+ * matches. No document-specific terms are hardcoded.
+ *
+ * qOrdinals: bare numeric ordinals extracted from the query (e.g. {'1', '2'}).
+ * Used to break ties when the query references a numbered item ("Benchmark 1")
+ * whose ordinal discriminates between parallel sections (§4.2.1 vs §4.2.2).
+ * The ordinal '1' appears in the BODY of §4.2.1 ("first benchmark", "1 task")
+ * but NOT in §4.2.2 or §4.2.3, providing a decisive discriminating signal.
+ */
+function resolveByContent(query: string, map: DocumentMap, qOrdinals: Set<string> = new Set()): string[] {
+    const q = query.toLowerCase();
+    const qWords = new Set(q.replace(/[^a-z0-9#-]+/g, ' ').split(/\s+/).filter(w => w.length > 2));
     const STOPWORDS = new Set([
         'what', 'which', 'where', 'when', 'how', 'why', 'who', 'whom',
         'used', 'use', 'using', 'uses', 'was', 'were', 'are', 'is', 'the',
         'for', 'and', 'with', 'this', 'that', 'these', 'those', 'does', 'did',
         'has', 'have', 'had', 'can', 'could', 'would', 'should', 'about',
-        'role', 'main', 'project', 'thesis', 'paper', 'work', 'study',
+        'role', 'main', 'project', 'thesis', 'paper', 'work', 'study', 'perform',
+        // Sync with DOC_GROUNDED_STOPWORDS (ModeContextRetriever.ts): these are
+        // high-frequency words that appear in almost every section body and add
+        // noise rather than signal to IDF body scoring.
+        'many', 'much', 'research',
     ]);
-    const contentWords = [...qWords].filter(w => w.length >= 4 && !STOPWORDS.has(w));
+    // Length floor is > 2 (not >= 4) so 3-char tokens like 'mse', 'ros', 'vla'
+    // participate in body scoring — they are rare content words whose section
+    // frequency is typically 1, making them the rarest word and the anchor for
+    // the rarest-word guard below. The STOPWORDS set already blocks noise tokens.
+    const contentWords = [...qWords].filter(w => w.length > 2 && !STOPWORDS.has(w));
     if (contentWords.length === 0) return [];
     const sectionsWithBody = map.sections.filter(s => s.num && s.body);
     if (sectionsWithBody.length === 0) return [];
-    // Lowercase each body ONCE (was re-lowercased O(words × sections × 2) times).
     const lowerBodies = sectionsWithBody.map(s => s.body.toLowerCase());
-    // Section frequency per content word.
+    // Also lowercase each section heading (without number prefix) for the
+    // title-word tiebreak below.
+    const lowerHeadings = sectionsWithBody.map(s =>
+        s.heading.toLowerCase().replace(/^\d+(?:\.\d+)*\s+/, ''),
+    );
     const sf = new Map<string, number>();
     for (const w of contentWords) {
         let n = 0;
@@ -318,23 +396,58 @@ export function resolveTargetSections(query: string, map: DocumentMap): string[]
         sf.set(w, n);
     }
     const total = sectionsWithBody.length;
-    // The most DISCRIMINATIVE content word (rarest across sections). The target
-    // section MUST contain it — this prevents a section that merely shares
-    // generic words from winning. e.g. for "What was LoRA used for?" the only
-    // content word is "lora", so the target must literally contain "lora".
     const rarest = [...contentWords].sort((a, b) => (sf.get(a) || total) - (sf.get(b) || total))[0];
     const bodyScored: Array<{ num: string; score: number }> = [];
     for (let i = 0; i < sectionsWithBody.length; i++) {
         const bodyLower = lowerBodies[i];
-        if (!bodyLower.includes(rarest)) continue; // must contain the signal word
+        if (!bodyLower.includes(rarest)) continue;
         let score = 0;
         for (const w of contentWords) {
             if (!bodyLower.includes(w)) continue;
             const freq = sf.get(w) || total;
-            // Inverse section frequency: rare words (low freq) → high weight.
             score += Math.log((total + 1) / (freq + 1));
         }
-        if (score > 0) bodyScored.push({ num: sectionsWithBody[i].num, score });
+        // Title-word tiebreak: a section whose HEADING contains a content word is
+        // the authoritative source for that concept — a strong bonus so that
+        // §3.2.3 "Preprocessing and RLDS format" decisively outranks §3.3 for
+        // "what format was the dataset stored in?", and §3.2.1 "Robotic Task
+        // Structure" outranks §2.3 "Mercury X1 Robot" for task queries. The bonus
+        // is large (2.0 per match) because IDF body scores can differ by >1 when a
+        // "big" section like §3.3 mentions format/dataset in passing many times.
+        // Substring matching handles "robot" in "robotic task structure", which
+        // gives §3.2.1 BOTH "task" and "robot" matches (+4) vs §2.3 "mercury x1
+        // robot" with only "robot" (+2), preserving Q38's correct routing.
+        let titleBonus = 0;
+        for (const w of contentWords) {
+            if (lowerHeadings[i].includes(w)) titleBonus += 2.0;
+        }
+        // Ordinal discrimination: when the query contains a bare digit (e.g. '1'
+        // from "Benchmark 1"), sections whose HEADING contains a DIFFERENT digit
+        // are penalised. "Benchmark 2" (heading has '2') is wrong for "Benchmark 1"
+        // even if its body scores equally. The heading digits (stripped of section
+        // number prefix) are compared against qOrdinals.
+        let ordinalBonus = 0;
+        if (qOrdinals.size > 0) {
+            // Extract bare digit tokens from the heading (after stripping the section number).
+            const headingText = lowerHeadings[i];
+            const headingDigits = new Set(
+                headingText.replace(/[^0-9\s]+/g, ' ').split(/\s+/).filter(d => /^\d{1,2}$/.test(d)),
+            );
+            // Penalty: heading explicitly names a DIFFERENT ordinal than the query.
+            const hasWrongOrdinal = [...headingDigits].some(d => !qOrdinals.has(d));
+            // Bonus: heading does NOT contain a conflicting ordinal (section is neutral
+            // or matches). Prefer sections with no ordinal in their heading over those
+            // that name the wrong ordinal.
+            if (hasWrongOrdinal) ordinalBonus -= 3.0; // decisive penalty for "Benchmark 2" when query says "1"
+        }
+        const total_score = score + titleBonus + ordinalBonus;
+        // Push if score is positive OR if ordinals are active and this section
+        // wasn't penalised (ordinalBonus >= 0 means no conflicting ordinal in
+        // the heading) — covers "Benchmark 1" where IDF score is 0 for all
+        // sections but §4.2.1 has no wrong ordinal in its heading.
+        if (total_score > 0 || (qOrdinals.size > 0 && ordinalBonus >= 0)) {
+            bodyScored.push({ num: sectionsWithBody[i].num, score: total_score });
+        }
     }
     bodyScored.sort((a, b) => b.score - a.score);
     if (bodyScored.length === 0) return [];

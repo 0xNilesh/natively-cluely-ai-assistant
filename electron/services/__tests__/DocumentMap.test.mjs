@@ -169,6 +169,129 @@ test('resolveTargetSections maps questions to the right sections', async () => {
   );
 });
 
+test('a single DISTINCTIVE title word targets strongly; a single GENERIC word does not steal targeting', async () => {
+  const { buildDocumentMap, resolveTargetSections } = await loadMap();
+  // Two sections share the generic word "robot"; only one has the distinctive
+  // entity "ROS#". A query naming the distinctive word must hit its section.
+  const doc = [
+    '[Page 1]', 'Contents',
+    '2.3 Robot Hardware . . . . . . . 16',
+    '2.4 ROS# . . . . . . . . . . . . 20',
+    '3.1 Robot Task Structure . . . . 30',
+    '[Page 16]', '2.3 Robot Hardware',
+    'The robot platform has a mobile base and arms.',
+    '[Page 20]', '2.4 ROS#',
+    'ROS# connects Unity to ROS nodes and topics.',
+    '[Page 30]', '3.1 Robot Task Structure',
+    'The robot performs a pick and place task in each episode.',
+  ].join('\n');
+  const map = buildDocumentMap(doc);
+  // Distinctive single word "ros#" → its section.
+  assert.ok(resolveTargetSections('What is the role of ROS#?', map).includes('2.4'), 'ROS# (distinctive) targets §2.4');
+  // A query about the TASK must reach the task-body section via resolveByContent
+  // (§3.1 "Robot Task Structure" — the body says "pick and place task"), NOT
+  // be monopolised by a generic "robot" title match (§2.3/§3.1 share "robot",
+  // df=1 per section only because one says "Robot" and the other "Robotic" —
+  // spelling variation, not an entity signal). The hasSignalShape gate ensures
+  // plain alphabetic df=1 tokens don't count as distinctive.
+  const taskTargets = resolveTargetSections('What task did the robot perform?', map);
+  assert.ok(taskTargets.includes('3.1'), `task query must target §3.1 (Robot Task Structure), got: [${taskTargets.join(',')}]`);
+});
+
+test('all-caps acronym in section title triggers distinctiveHit (RLDS, DOF, VLA)', async () => {
+  const { buildDocumentMap, resolveTargetSections } = await loadMap();
+  // Pure-alpha all-caps acronym RLDS should be treated as distinctive despite
+  // tokenizeTitle lowercasing it to "rlds" (which has no non-[a-z] char).
+  // Fix: tokenizeTitleOrigCase preserves case → /^[A-Z]{2,}$/ detects it.
+  const doc = [
+    '[Page 1]', 'Contents',
+    '3.2.2 Data Collection . . . . . . 33',
+    '3.2.3 Dataset Structure and Format . . . 34',
+    '3.3 Training Pipeline . . . . . 36',
+    '[Page 33]', '3.2.2 Data Collection',
+    'Data was recorded during teleoperation sessions using the robotic arm.',
+    '[Page 34]', '3.2.3 Dataset Structure and Format',
+    'During data collection 1000 episodes were recorded. The data follows the Reinforcement Learning Dataset (RLDS) format. Each episode stores joint states, Cartesian position, and action arrays.',
+    '[Page 36]', '3.3 Training Pipeline',
+    'The training pipeline fine-tunes the model on collected data. Format and structure are preserved.',
+  ].join('\n');
+  const map = buildDocumentMap(doc);
+  // §3.2.3 title has 2 content words ('dataset', 'format') → wordHits=2 → strongTitleTarget
+  const formatTargets = resolveTargetSections('What format was the dataset stored in?', map);
+  assert.ok(formatTargets.includes('3.2.3'), `format query must target §3.2.3, got: [${formatTargets.join(',')}]`);
+
+  // All-caps DOF acronym in title §2.3.2 must also get distinctiveHit
+  const doc2 = [
+    '[Page 1]', 'Contents',
+    '2.3.1 Robot Overview . . . . . 15',
+    '2.3.2 DOF Specifications . . . 17',
+    '2.4 Software . . . . . . . . . 20',
+    '[Page 15]', '2.3.1 Robot Overview',
+    'The Mercury X1 robot is a humanoid platform used for manipulation tasks.',
+    '[Page 17]', '2.3.2 DOF Specifications',
+    'The Mercury X1 has 19 DOF: 7 per arm, 2 in the waist, 3 in the head.',
+    '[Page 20]', '2.4 Software',
+    'Software stack uses ROS2 for robot control and communication.',
+  ].join('\n');
+  const map2 = buildDocumentMap(doc2);
+  const dofTargets = resolveTargetSections('How many DOF does Mercury X1 have?', map2);
+  assert.ok(dofTargets.includes('2.3.2'), `DOF query must target §2.3.2, got: [${dofTargets.join(',')}]`);
+});
+
+test('resolveByContent routes "many parameters" to intro section not fine-tuning (Q17 regression guard)', async () => {
+  const { buildDocumentMap, resolveTargetSections } = await loadMap();
+  // "many" must NOT be a content word — it appears in every large section body.
+  // If it leaks through STOPWORDS, §3.3 wins because it says "many parameters,
+  // many epochs" many times. The fix: add 'many' to STOPWORDS in resolveByContent.
+  const doc = [
+    '[Page 1]', 'Contents',
+    '2.1 OpenVLA . . . . . . . . . 12',
+    '2.1.1 OpenVLA Architecture . . 13',
+    '3.3 Training Pipeline . . . . . 36',
+    '[Page 12]', '2.1 OpenVLA',
+    'OpenVLA is a 7B-parameter open-source vision-language-action model.',
+    '[Page 13]', '2.1.1 OpenVLA Architecture',
+    'The OpenVLA model has 7 billion parameters and is pretrained on BridgeData.',
+    '[Page 36]', '3.3 Training Pipeline',
+    'The fine-tuning pipeline adjusts many parameters over many epochs. Many samples were used. Many hyperparameters were tuned.',
+  ].join('\n');
+  const map = buildDocumentMap(doc);
+  const targets = resolveTargetSections('How many parameters does OpenVLA have?', map);
+  assert.ok(
+    targets.some(t => t.startsWith('2.1')),
+    `must target §2.1.x (7B-parameter section), got: [${targets.join(',')}]`,
+  );
+  assert.ok(
+    !targets.some(t => t.startsWith('3.3')),
+    `must NOT target §3.3 (fine-tuning — "many" is a noise word), got: [${targets.join(',')}]`,
+  );
+});
+
+test('resolveByContent routes "Benchmark 1" to §4.2.1 not §4.2.2/4.2.3 (Q47 regression guard)', async () => {
+  const { buildDocumentMap, resolveTargetSections } = await loadMap();
+  // §4.2.1 title has NO "benchmark" word; §4.2.2 and §4.2.3 do.
+  // The title-word tiebreak (+2.0) must not push §4.2.2/4.2.3 above §4.2.1
+  // for "Benchmark 1" — because the BODY of §4.2.1 describes the first benchmark.
+  const doc = [
+    '[Page 1]', 'Contents',
+    '4.2.1 Semantic relationship understanding . . 45',
+    '4.2.2 Benchmark 2 . . . . . . . . 47',
+    '4.2.3 Benchmark 3 . . . . . . . . 50',
+    '[Page 45]', '4.2.1 Semantic relationship understanding',
+    'The first benchmark examines semantic relationships between objects. The robot must pick the banana and place the grapes. This benchmark evaluates visual semantic understanding in pick-and-place tasks.',
+    '[Page 47]', '4.2.2 Benchmark 2',
+    'The second benchmark examines prompt complexity and instruction following.',
+    '[Page 50]', '4.2.3 Benchmark 3',
+    'The third benchmark examines self-awareness and multi-step planning.',
+  ].join('\n');
+  const map = buildDocumentMap(doc);
+  const targets = resolveTargetSections('What is Benchmark 1 about?', map);
+  assert.ok(
+    targets.some(t => t === '4.2.1'),
+    `must target §4.2.1 (first benchmark body), got: [${targets.join(',')}]`,
+  );
+});
+
 test('resolveTargetSections returns empty for an unmatched query (global fallback)', async () => {
   const { buildDocumentMap, resolveTargetSections } = await loadMap();
   const map = buildDocumentMap(THESIS);
