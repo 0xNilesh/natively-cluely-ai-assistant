@@ -574,6 +574,61 @@ test('parseSseStream: source uses reader.cancel() (NOT releaseLock) in finally �
     'parseSseStream\'s finally must NOT call reader.releaseLock() — releases the lock but leaves the body open on the server');
 });
 
+test('parseSseStream: clean close (done: true without response.completed) — drain completes cleanly', async () => {
+  // Pins the new `done: true → sawTerminalEvent = true` behavior
+  // introduced in commit 05db8ca. Unlike the earlier post-terminal-event
+  // test, AbortError CANNOT be injected after closeCleanly() — the
+  // parser loop has already exited, there is no pending reader.read()
+  // for an abort to reject. So this test asserts what is actually
+  // falsifiable: the clean-close path delivers all queued deltas and
+  // returns without throwing.
+  //
+  // HONEST CAVEAT (per senior code-review of 05db8ca): the original
+  // commit message described a causal chain ("done:true then AbortError
+  // from controller.abort") that JS event-loop semantics don't permit —
+  // once reader.read() resolves with done:true, there is no further
+  // pending read() to be rejected. This test therefore cannot prove
+  // the user's specific live-log scenario is fixed; the companion
+  // source-pin test at the bottom of this file pins the structural
+  // change that commit 05db8ca made.
+  //
+  // Regression guard for the second flavor of the user's bug. The
+  // first fix (commit 250ac39) only swallowed AbortError AFTER the
+  // parser saw response.completed / .incomplete / .failed. But
+  // chatgpt.com sometimes CLOSES the body cleanly (`done: true`) AFTER
+  // the final delta WITHOUT emitting a response.completed event — the
+  // user observed this exact pattern in live logs (21107ms first
+  // call succeeded cleanly, then a follow-up supersession triggered
+  // AbortError on the completed stream).
+  //
+  // Without THIS fix, `done: true` exits the parser loop without
+  // setting sawTerminalEvent, and any AbortError that fires AFTER the
+  // clean close (e.g., from a subsequent controller.abort()) hits
+  // the catch with sawTerminalEvent=false and propagates as
+  // "Codex request aborted." even though the response was delivered
+  // in full.
+  const ctrl = makeControllableSseResponse([
+    'data: {"type":"response.output_text.delta","delta":"Hello"}\n\n',
+    'data: {"type":"response.output_text.delta","delta":" world"}\n\n',
+  ]);
+  const parseSseStream = mod.CodexCliService.parseSseStream;
+  const collected = [];
+  const gen = parseSseStream.call(mod.CodexCliService, ctrl.response, new AbortController().signal);
+  const drain = (async () => {
+    for await (const delta of gen) collected.push(delta);
+    return collected;
+  })().catch((e) => ({ thrown: true, error: e }));
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(collected.join(''), 'Hello world',
+    'both deltas should deliver before the body closes');
+  ctrl.closeCleanly();
+  const result = await drain;
+  assert.ok(!result?.thrown,
+    `clean close (done: true, no response.completed) must NOT throw — got ${JSON.stringify(result)}`);
+  assert.deepEqual(result, ['Hello', ' world'],
+    'all deltas must survive a clean close path');
+});
+
 test('parseSseStream: reader.read() AbortError mid-stream (no terminal event yet) surfaces "Codex request aborted."', async () => {
   // Regression guard for the OTHER half of the catch's predicate: the
   // pre-completion surface. Test #2 covers the `if (signal.aborted)`
@@ -643,3 +698,38 @@ test('parseSseStream: stream emits :keepalive comment after response.completed (
   assert.deepEqual(result, ['partial ', 'answer'],
     'drain completed cleanly with :keepalive lines in the stream — no "Codex request aborted." thrown');
 });
+
+test('parseSseStream: source-pin — done: true sets sawTerminalEvent=true (commit 05db8ca)', () => {
+  // Falsifiable source-pin for the `done: true → sawTerminalEvent = true`
+  // change introduced in commit 05db8ca. This is the ONLY test that
+  // catches a revert of the source change — the behavioral test above
+  // (clean close path) would pass even with the revert because the
+  // clean close path was already not throwing; the structural change
+  // is what enables any future AbortError fired via a different code
+  // path (e.g., async reader cancellation during unwinding) to be
+  // correctly classified as post-completion cleanup.
+  //
+  // See senior code-review of 05db8ca for the analysis that prompted
+  // this pin.
+  const source = fs.readFileSync(
+    path.resolve(__dirname, '../../../electron/services/CodexCliService.ts'),
+    'utf8',
+  );
+  const parseSseIdx = source.indexOf('parseSseStream(response: Response, signal: AbortSignal)');
+  assert.ok(parseSseIdx > 0,
+    'parseSseStream method signature must still exist in CodexCliService.ts');
+  const methodBody = source.slice(parseSseIdx);
+  // Locate the 'if (done)' branch that handles clean body close.
+  // Find the first `if (done)` AFTER the parser's `signal.aborted` check.
+  const signalAbortIdx = methodBody.indexOf("if (signal.aborted) throw new Error('Codex request aborted.')");
+  assert.ok(signalAbortIdx > 0, 'signal.aborted guard must still exist');
+  const afterSignalAbort = methodBody.slice(signalAbortIdx);
+  const doneBranchIdx = afterSignalAbort.search(/if\s*\(\s*done\s*\)/);
+  assert.ok(doneBranchIdx > 0, '`if (done)` branch must still exist in parseSseStream');
+  // 800 chars is enough to span the entire `if (done) { ... break; }` block
+  // including the sawTerminalEvent assignment, multi-line comment, and break.
+  const doneBranchSnippet = afterSignalAbort.slice(doneBranchIdx, doneBranchIdx + 800);
+  assert.match(doneBranchSnippet, /sawTerminalEvent\s*=\s*true/,
+    '`if (done)` branch must set sawTerminalEvent = true so the catch swallows post-clean-close aborts — commit 05db8ca fix');
+});
+

@@ -603,22 +603,42 @@ export class CodexCliService {
     const reader = response.body.getReader();
     const decoder = new TextDecoder('utf-8');
     let buffer = '';
-    // Tracks whether we've seen a real terminal event for THIS response
-    // (response.completed / response.incomplete / response.failed). Once
-    // set, an AbortError on the next reader.read() is a benign cleanup
-    // event (the ChatGPT OAuth endpoint keeps the SSE body open for
-    // ~30s of keepalive after the model finishes; if an outer
+    // Tracks whether the stream for THIS response has finished normally.
+    // Set to `true` when ANY of the following happens:
+    //   - a terminal event arrives: response.completed / .incomplete / .failed
+    //   - the SSE body closes cleanly (reader.read() returns done: true)
+    //
+    // Once set, an AbortError on a subsequent reader.read() is a benign
+    // cleanup event (the ChatGPT OAuth endpoint keeps the SSE body open
+    // with :keepalive for ~30s after the model finishes; if our outer
     // controller.abort() fires during that window, the still-bound
-    // fetch rejects the reader.read() with AbortError — even though
-    // the response was already fully delivered). Surfacing it as a
-    // stream error here is the bug we just fixed.
+    // fetch rejects reader.read() with AbortError — even though the
+    // response was already fully delivered). Surfacing such an abort
+    // as "Codex request aborted." is the bug this flag was added to
+    // address.
+    //
+    // CRITICAL: this flag MUST also cover the clean-close path (`done:
+    // true`) below. The 30s-late AbortError can ALSO fire on a stream
+    // that finished via `done: true` without a terminal event name we
+    // recognize (in practice chatgpt.com sometimes sends the final
+    // delta + closes the body without emitting response.completed).
     let sawTerminalEvent = false;
     let terminalError: Error | null = null;
     try {
       while (true) {
         if (signal.aborted) throw new Error('Codex request aborted.');
         const { value, done } = await reader.read();
-        if (done) break;
+        if (done) {
+          // Body closed cleanly (server sent EOF, or our own prior
+          // reader.cancel() in the finally of an earlier code path
+          // unwound the body). This IS a successful completion — deltas
+          // were already flushed. Set sawTerminalEvent so any future
+          // AbortError on the catch's swallow predicate treats this
+          // stream as post-completion cleanup, in case the abort
+          // signal fires after the loop exits.
+          sawTerminalEvent = true;
+          break;
+        }
         buffer += decoder.decode(value, { stream: true });
 
         // SSE messages are separated by a blank line ("\n\n" in
