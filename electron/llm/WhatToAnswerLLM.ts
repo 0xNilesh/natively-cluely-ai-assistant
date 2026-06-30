@@ -298,9 +298,12 @@ ANSWER SHAPE: ${intentResult.answerShape}
                                 const { isRagSpeculativeRerankEnabled } = require('../intelligence/intelligenceFlags');
                                 allowRerank = isRagSpeculativeRerankEnabled();
                             } catch { /* flag module unavailable → no rerank */ }
+                            // Pass undefined tokenBudget when doc-grounded so the
+                            // retriever auto-upgrades to DOC_GROUNDED_TOKEN_BUDGET
+                            // (3600). Explicit 1800 would bypass the != null guard.
                             const { value, timedOut } = await raceWithBudget(
                                 modesManager.buildRetrievedActiveModeContextBlockHybrid(
-                                    cleanedTranscript, cleanedTranscript, 1800, answerPlan?.answerType, true, requestSnapshot?.modeUniqueId, allowRerank, retrievalOptions,
+                                    cleanedTranscript, cleanedTranscript, forceDocumentGrounding ? undefined : 1800, answerPlan?.answerType, true, requestSnapshot?.modeUniqueId, allowRerank, retrievalOptions,
                                 ),
                                 HYBRID_RETRIEVAL_BUDGET_MS,
                                 '',
@@ -314,11 +317,11 @@ ANSWER SHAPE: ${intentResult.answerShape}
                             // excludeCustomContext (PI v3 W2): the mode's
                             // customContext is PINNED below — keep retrieval to
                             // reference files only so the text never ships twice.
-                            modeContextBlock = modesManager.buildRetrievedActiveModeContextBlock(cleanedTranscript, cleanedTranscript, 1800, answerPlan?.answerType, true, requestSnapshot?.modeUniqueId, retrievalOptions);
+                            modeContextBlock = modesManager.buildRetrievedActiveModeContextBlock(cleanedTranscript, cleanedTranscript, forceDocumentGrounding ? undefined : 1800, answerPlan?.answerType, true, requestSnapshot?.modeUniqueId, retrievalOptions);
                         }
                     } else if (await this.llmHelper.canUseLocalFallback(false)) {
                         console.warn('[ScopeFallback] reference_files denied; local fallback available, routing via streamChat');
-                        modeContextBlock = modesManager.buildRetrievedActiveModeContextBlock(cleanedTranscript, cleanedTranscript, 1800, answerPlan?.answerType, true, requestSnapshot?.modeUniqueId, retrievalOptions);
+                        modeContextBlock = modesManager.buildRetrievedActiveModeContextBlock(cleanedTranscript, cleanedTranscript, forceDocumentGrounding ? undefined : 1800, answerPlan?.answerType, true, requestSnapshot?.modeUniqueId, retrievalOptions);
                     } else {
                         console.warn('[ScopeFallback] reference_files denied; Ollama unavailable, omitting from context');
                         if (forceDocumentGrounding) {

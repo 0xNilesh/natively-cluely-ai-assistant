@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
-import { ArrowLeft, Search, Mail, Link, ChevronDown, Play, ArrowUp, Copy, Check, MoreHorizontal, Settings, ArrowRight, RefreshCw, Info, AlertTriangle, Eye, EyeOff, Sparkles, History, Pencil, X } from 'lucide-react';
+import { ArrowLeft, Search, Mail, Link, ChevronDown, Play, ArrowUp, Copy, Check, MoreHorizontal, Settings, ArrowRight, RefreshCw, Info, Eye, EyeOff, History, Pencil, X, ChevronRight } from 'lucide-react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import { genMessageId } from '../utils/messageId';
 import MeetingChatOverlay from './MeetingChatOverlay';
@@ -115,6 +115,329 @@ const cleanMarkdown = (content: string) => {
     if (!content) return '';
     // Ensure code blocks are on new lines to fix rendering issues
     return content.replace(/([^\n])```/g, '$1\n\n```');
+};
+
+// ── Coding template renderer ──────────────────────────────────────────────────
+
+interface CodingSection {
+    title: string;
+    body: string;
+}
+
+type DetailKind = 'dry-run' | 'complexity' | 'followup';
+
+const DETAIL_PILLS: { kind: DetailKind; label: string }[] = [
+    { kind: 'dry-run',    label: 'Dry run'        },
+    { kind: 'complexity', label: 'Complexity'     },
+    { kind: 'followup',   label: 'Follow-up tips' },
+];
+
+const PANEL_VARIANTS = {
+    hidden: {
+        opacity: 0,
+        height: 0,
+        transition: {
+            height:  { duration: 0.15, ease: [0.23, 1, 0.32, 1] as [number,number,number,number] },
+            opacity: { duration: 0.08 },
+        },
+    },
+    visible: {
+        opacity: 1,
+        height: 'auto' as const,
+        transition: {
+            height:  { duration: 0.22, ease: [0.23, 1, 0.32, 1] as [number,number,number,number] },
+            opacity: { duration: 0.18 },
+        },
+    },
+};
+
+function classifySection(title: string): 'approach' | 'technique' | 'code' | DetailKind | 'other' {
+    const t = title.toLowerCase().trim();
+    if (/approach/.test(t))                            return 'approach';
+    if (/technique|data.?structure|algorithm/.test(t)) return 'technique';
+    if (/^code$/.test(t))                              return 'code';
+    if (/dry.?run|trace/.test(t))                      return 'dry-run';
+    if (/complex/.test(t))                             return 'complexity';
+    if (/follow.?up|interviewer/.test(t))              return 'followup';
+    return 'other';
+}
+
+/**
+ * Split a coding answer into named sections. Returns null when the answer does
+ * not contain recognisable coding template headings.
+ */
+function parseCodingTemplate(answer: string): CodingSection[] | null {
+    const lines = answer.split('\n');
+    const sections: CodingSection[] = [];
+    let current: CodingSection | null = null;
+
+    const H2_RE = /^##\s+(.+)$/;
+    for (const line of lines) {
+        const m = H2_RE.exec(line);
+        if (m) {
+            if (current) sections.push(current);
+            current = { title: m[1].trim(), body: '' };
+        } else if (current) {
+            current.body += (current.body ? '\n' : '') + line;
+        }
+    }
+    if (current) sections.push(current);
+
+    const KNOWN = new Set(['approach','technique','code','dry-run','complexity','followup']);
+    const knownCount = sections.filter(s => KNOWN.has(classifySection(s.title))).length;
+    if (knownCount < 2) return null;
+    return sections;
+}
+
+// Compact markdown renderer for the "via …" technique annotation line.
+// Must be module-level so react-markdown gets stable component references.
+const mdComponentsTechnique = {
+    p: ({ node, ...props }: any) => <p className="text-[12px] text-text-tertiary font-normal leading-snug m-0" {...props} />,
+    strong: ({ node, ...props }: any) => <strong className="font-medium text-text-secondary" {...props} />,
+    ul: ({ node, ...props }: any) => <ul className="list-disc ml-4 space-y-0.5" {...props} />,
+    li: ({ node, ...props }: any) => <li className="text-[12px] text-text-tertiary font-normal" {...props} />,
+    code: ({ node, className, children, ...props }: any) => (
+        <code className="text-[11px] font-mono text-blue-300/60 bg-white/[0.05] px-1 py-px rounded" {...props}>{children}</code>
+    ),
+    pre: ({ children }: any) => <div>{children}</div>,
+};
+
+// Shared markdown renderer config — used by both CodingAnswerBlock and plain answers.
+const mdComponents = {
+    h1: ({ node, ...props }: any) => <p className="text-[15px] text-text-secondary font-semibold leading-relaxed mb-2" {...props} />,
+    h2: ({ node, ...props }: any) => <p className="text-[15px] text-text-secondary font-semibold leading-relaxed mb-2" {...props} />,
+    h3: ({ node, ...props }: any) => <p className="text-[14px] text-text-secondary font-semibold leading-relaxed mb-1.5" {...props} />,
+    p: ({ node, ...props }: any) => <p className="text-[15px] text-text-secondary font-normal leading-relaxed mb-2 last:mb-0" {...props} />,
+    ul: ({ node, ...props }: any) => <ul className="list-disc ml-4 mb-2 space-y-1.5" {...props} />,
+    ol: ({ node, ...props }: any) => <ol className="list-decimal ml-4 mb-2 space-y-1.5" {...props} />,
+    li: ({ node, ...props }: any) => <li className="text-[15px] text-text-secondary font-normal leading-relaxed" {...props} />,
+    strong: ({ node, ...props }: any) => <strong className="font-semibold text-text-primary" {...props} />,
+    a: ({ node, ...props }: any) => <a className="text-blue-400 hover:text-blue-300 underline underline-offset-2 transition-colors duration-150" {...props} />,
+    pre: ({ children }: any) => <div className="mb-3 last:mb-0">{children}</div>,
+    code: ({ node, className, children, ...props }: any) => {
+        const match = /language-(\w+)/.exec(className || '');
+        const lang = match ? match[1] : '';
+        const codeStr = String(children);
+        const isBlock = Boolean(match) || codeStr.endsWith('\n');
+        return isBlock ? (
+            <div className="rounded-xl overflow-hidden border border-white/[0.08] shadow-xl shadow-black/20 bg-zinc-900/80">
+                <div className="flex items-center justify-between px-3.5 py-2 border-b border-white/[0.06] bg-white/[0.025]">
+                    <span className="text-[10px] uppercase tracking-[0.13em] font-semibold text-white/30 font-mono select-none">
+                        {lang || 'code'}
+                    </span>
+                </div>
+                <SyntaxHighlighter
+                    language={mapLanguageForPrism(lang, codeStr)}
+                    style={vscDarkPlus}
+                    customStyle={{ margin: 0, borderRadius: 0, fontSize: '13px', lineHeight: '1.65', background: 'transparent', padding: '14px 16px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' }}
+                    wrapLongLines={true}
+                    showLineNumbers={true}
+                    lineNumberStyle={{ minWidth: '2.2em', paddingRight: '1.2em', color: 'rgba(255,255,255,0.15)', textAlign: 'right', fontSize: '11px', userSelect: 'none' }}
+                    {...props}
+                >
+                    {codeStr.replace(/\n$/, '')}
+                </SyntaxHighlighter>
+            </div>
+        ) : (
+            <code className="bg-white/[0.07] px-1.5 py-0.5 rounded-md text-[13px] font-mono text-blue-300/80 border border-white/[0.06]" {...props}>
+                {children}
+            </code>
+        );
+    },
+};
+
+/**
+ * Apple-quality coding answer renderer.
+ * - Approach and Code render immediately, without labels (self-evident).
+ * - Technique appears as a quiet "via …" annotation between approach and code.
+ * - Dry run / Complexity / Follow-up are tucked into a pill strip below the code.
+ *   One pill expands at a time with asymmetric spring animation (enter 220ms, exit 150ms).
+ */
+const CodingAnswerBlock: React.FC<{ sections: CodingSection[] }> = ({ sections }) => {
+    const [activeDetail, setActiveDetail] = useState<DetailKind | null>(null);
+
+    const tagged = sections.map(s => ({ ...s, kind: classifySection(s.title) }));
+
+    const approach  = tagged.find(s => s.kind === 'approach');
+    const technique = tagged.find(s => s.kind === 'technique');
+    const code      = tagged.find(s => s.kind === 'code');
+    const others    = tagged.filter(s => s.kind === 'other');
+
+    const detailMap = new Map(
+        tagged
+            .filter(s => (['dry-run','complexity','followup'] as string[]).includes(s.kind))
+            .map(s => [s.kind as DetailKind, s])
+    );
+
+    const availablePills = DETAIL_PILLS.filter(p => detailMap.has(p.kind));
+    const activeSection  = activeDetail != null ? detailMap.get(activeDetail) : undefined;
+
+    return (
+        <div className="flex flex-col gap-4">
+            {/* Approach — plain prose, no label */}
+            {approach && (
+                <div>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                        {cleanMarkdown(approach.body.trim())}
+                    </ReactMarkdown>
+                </div>
+            )}
+
+            {/* Technique — quiet "via" whisper between approach and code */}
+            {technique && (
+                <div className="flex items-start gap-2 -mt-1">
+                    <span className="shrink-0 mt-[3px] text-[9px] font-semibold uppercase tracking-[0.14em] text-white/20 leading-none select-none">
+                        via
+                    </span>
+                    <div className="flex-1">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponentsTechnique}>
+                            {cleanMarkdown(technique.body.trim())}
+                        </ReactMarkdown>
+                    </div>
+                </div>
+            )}
+
+            {/* Code — hero block */}
+            {code && (
+                <div className="rounded-xl overflow-hidden border border-white/[0.07] ring-1 ring-inset ring-white/[0.03] shadow-xl shadow-black/25">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                        {cleanMarkdown(code.body.trim())}
+                    </ReactMarkdown>
+                </div>
+            )}
+
+            {/* Unrecognised sections — graceful fallthrough */}
+            {others.map(s => (
+                <div key={s.title} className="flex flex-col gap-1.5">
+                    <p className="text-[10px] font-semibold uppercase tracking-widest text-white/20 select-none">{s.title}</p>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                        {cleanMarkdown(s.body.trim())}
+                    </ReactMarkdown>
+                </div>
+            ))}
+
+            {/* Detail pill strip + animated panel */}
+            {availablePills.length > 0 && (
+                <div className="flex flex-col gap-2">
+                    {/* Separator with centred pill row */}
+                    <div className="flex items-center gap-2">
+                        <div className="h-px flex-1 bg-white/[0.06]" />
+                        <div className="flex items-center">
+                            {availablePills.map((pill, i) => {
+                                const isActive = activeDetail === pill.kind;
+                                return (
+                                    <span key={pill.kind} className="flex items-center">
+                                        {i > 0 && (
+                                            <span className="mx-1.5 text-[10px] text-white/[0.12] select-none leading-none">·</span>
+                                        )}
+                                        <button
+                                            onClick={() => setActiveDetail(prev => prev === pill.kind ? null : pill.kind)}
+                                            className={[
+                                                'px-2 py-1 rounded-lg text-[11px] font-medium select-none',
+                                                'active:scale-[0.97] transition-[color,background-color,box-shadow,transform] duration-150 ease-out',
+                                                'focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20',
+                                                isActive
+                                                    ? 'text-text-primary bg-white/[0.08] shadow-[inset_0_1px_0_rgba(255,255,255,0.07)]'
+                                                    : 'text-white/30 hover:text-text-tertiary hover:bg-white/[0.04]',
+                                            ].join(' ')}
+                                        >
+                                            {pill.label}
+                                        </button>
+                                    </span>
+                                );
+                            })}
+                        </div>
+                        <div className="h-px flex-1 bg-white/[0.06]" />
+                    </div>
+
+                    {/* Animated detail panel — one section at a time */}
+                    <AnimatePresence mode="wait">
+                        {activeSection && (
+                            <motion.div
+                                key={activeSection.kind}
+                                variants={PANEL_VARIANTS}
+                                initial="hidden"
+                                animate="visible"
+                                exit="hidden"
+                                className="overflow-hidden"
+                            >
+                                <div className="pt-0.5">
+                                    <div className="rounded-xl px-4 py-3.5 bg-white/[0.025] border border-white/[0.05] ring-1 ring-inset ring-white/[0.02]">
+                                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                                            {cleanMarkdown(activeSection.body.trim())}
+                                        </ReactMarkdown>
+                                    </div>
+                                </div>
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
+                </div>
+            )}
+        </div>
+    );
+};
+
+// Tone dropdown for the follow-up draft regeneration toolbar.
+// Must be a named component (not an IIFE) so React can track its hooks stably.
+const ToneDropdown: React.FC<{
+    followUpTone: 'professional' | 'warm' | 'concise' | 'friendly';
+    isRegeneratingFollowUp: boolean;
+    onSelect: (tone: 'professional' | 'warm' | 'concise' | 'friendly') => void;
+}> = ({ followUpTone, isRegeneratingFollowUp, onSelect }) => {
+    const toneOptions: { value: 'professional' | 'warm' | 'concise' | 'friendly'; label: string }[] = [
+        { value: 'professional', label: 'Professional' },
+        { value: 'warm',         label: 'Warm'         },
+        { value: 'concise',      label: 'Concise'      },
+        { value: 'friendly',     label: 'Friendly'     },
+    ];
+    const [toneOpen, setToneOpen] = useState(false);
+    const toneRef = useRef<HTMLDivElement>(null);
+    useEffect(() => {
+        if (!toneOpen) return;
+        const handler = (e: MouseEvent) => {
+            if (toneRef.current && !toneRef.current.contains(e.target as Node)) setToneOpen(false);
+        };
+        document.addEventListener('mousedown', handler);
+        return () => document.removeEventListener('mousedown', handler);
+    }, [toneOpen]);
+    return (
+        <div ref={toneRef} className="relative w-fit">
+            <button
+                type="button"
+                disabled={isRegeneratingFollowUp}
+                onClick={() => setToneOpen(v => !v)}
+                className="h-7 inline-flex items-center gap-1.5 text-[11px] font-medium pl-2.5 pr-2 rounded-md text-text-secondary hover:text-text-primary hover:bg-white/[0.06] disabled:opacity-50 transition-colors"
+            >
+                <span>{toneOptions.find(o => o.value === followUpTone)?.label ?? 'Tone'}</span>
+                <ChevronDown className={`w-3 h-3 text-text-tertiary transition-transform duration-150 ${toneOpen ? 'rotate-180' : ''}`} strokeWidth={2.5} />
+            </button>
+            <AnimatePresence>
+                {toneOpen && (
+                    <motion.div
+                        initial={{ opacity: 0, scale: 0.96, y: -2 }}
+                        animate={{ opacity: 1, scale: 1, y: 0 }}
+                        exit={{ opacity: 0, scale: 0.96, y: -2 }}
+                        transition={{ duration: 0.1, ease: [0.23, 1, 0.32, 1] }}
+                        className="absolute left-0 top-full mt-1 z-50 w-full rounded-lg border border-border-subtle bg-[#121214] overflow-hidden py-0.5 shadow-[0_4px_16px_rgba(0,0,0,0.5)]"
+                    >
+                        {toneOptions.map((opt) => (
+                            <button
+                                key={opt.value}
+                                type="button"
+                                onClick={() => { onSelect(opt.value); setToneOpen(false); }}
+                                className={`w-full text-left flex items-center justify-between px-2.5 py-1.5 text-[11px] font-medium transition-colors ${followUpTone === opt.value ? 'text-text-primary bg-white/[0.06]' : 'text-text-secondary hover:text-text-primary hover:bg-white/[0.04]'}`}
+                            >
+                                <span>{opt.label}</span>
+                                {followUpTone === opt.value && (
+                                    <Check className="w-3 h-3 text-text-tertiary shrink-0" strokeWidth={2.5} />
+                                )}
+                            </button>
+                        ))}
+                    </motion.div>
+                )}
+            </AnimatePresence>
+        </div>
+    );
 };
 
 // The mode's note-section template is the source of truth for the notes layout
@@ -588,63 +911,26 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
 
                                 {/* 1. Source quality — severity-aware. Benign cleanup notes (segments removed/cleaned)
                                     read as quiet info; genuine concerns (speaker labels, coverage, "verify") stay amber. */}
-                                {isV3Summary && meeting.detailedSummary?.sourceQuality?.warnings && meeting.detailedSummary.sourceQuality.warnings.length > 0 && (() => {
-                                    const warnings = meeting.detailedSummary.sourceQuality.warnings;
-                                    const realIssues = warnings.filter(w => !isBenignQualityNote(w));
-                                    const allBenign = realIssues.length === 0;
+                                {/* 1. Source quality warning */}
+                                {isV3Summary && (() => {
+                                    const sqWarnings = meeting.detailedSummary?.sourceQuality?.warnings ?? [];
+                                    const realIssues = sqWarnings.filter(w => !isBenignQualityNote(w));
+                                    if (realIssues.length === 0) return null;
                                     return (
-                                        <motion.section
-                                            initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 12 }}
+                                        <motion.div
+                                            initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 6 }}
                                             animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
-                                            transition={{ duration: 0.22, ease: [0.23, 1, 0.32, 1], delay: prefersReducedMotion ? 0 : 0 }}
-                                            className={
-                                                allBenign
-                                                    ? 'mb-6 px-3 py-2 rounded-[10px] border border-border-subtle bg-white/[0.02] flex items-start gap-2.5'
-                                                    : 'mb-6 p-3 rounded-[10px] border border-amber-400/30 bg-amber-500/5'
-                                            }
+                                            transition={{ duration: 0.24, ease: [0.25, 0.46, 0.45, 0.94] }}
+                                            className="mb-4 px-4 py-3.5 rounded-2xl border border-[rgba(255,159,10,0.18)] bg-[rgba(255,159,10,0.06)] backdrop-blur-sm shadow-[inset_0_1px_0_rgba(255,159,10,0.12),0_1px_4px_rgba(0,0,0,0.2)]"
                                         >
-                                            {allBenign ? (
-                                                // All-benign: a single quiet line, no header, no alarm.
-                                                <>
-                                                    <Info className="w-3.5 h-3.5 text-text-tertiary mt-0.5 shrink-0" strokeWidth={2} />
-                                                    <ul className="space-y-0.5">
-                                                        {warnings.map((warning, i) => (
-                                                            <li key={i} className="text-[12px] text-text-tertiary leading-relaxed">{warning}</li>
-                                                        ))}
-                                                    </ul>
-                                                </>
-                                            ) : (
-                                                <>
-                                                    <div className="flex items-center gap-2 mb-1.5">
-                                                        <span className="inline-flex items-center justify-center w-5 h-5 rounded-md bg-amber-500/15 text-amber-400 shrink-0">
-                                                            <AlertTriangle className="w-3.5 h-3.5" strokeWidth={2} />
-                                                        </span>
-                                                        <p className="text-sm font-semibold text-text-primary">Quality warning</p>
-                                                    </div>
-                                                    <ul className="space-y-1 pl-7">
-                                                        {warnings.map((warning, i) => {
-                                                            const benign = isBenignQualityNote(warning);
-                                                            return (
-                                                                <li
-                                                                    key={i}
-                                                                    className={`flex items-start gap-2 leading-relaxed ${benign ? 'text-[12px] text-text-tertiary' : 'text-[12.5px] text-text-secondary'}`}
-                                                                >
-                                                                    {benign
-                                                                        ? <Info className="w-3 h-3 text-text-tertiary mt-[3px] shrink-0" strokeWidth={2} />
-                                                                        : <AlertTriangle className="w-3 h-3 text-amber-400/80 mt-[3px] shrink-0" strokeWidth={2} />}
-                                                                    <span>{warning}</span>
-                                                                </li>
-                                                            );
-                                                        })}
-                                                    </ul>
-                                                </>
-                                            )}
-                                        </motion.section>
+                                            {realIssues.map((w, i) => (
+                                                <p key={i} className="text-[13px] text-white/60 leading-snug">{w}</p>
+                                            ))}
+                                        </motion.div>
                                     );
                                 })()}
 
-                                {/* 2. Toolbar — segmented control matching the Follow-up draft group: cohesive pill,
-                                    icon+label buttons, whileTap, RefreshCw spin, real Eye/EyeOff evidence toggle. */}
+                                {/* 2. Toolbar */}
                                 {isV3Summary && (
                                     <motion.div
                                         initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 12 }}
@@ -653,8 +939,6 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                                         className="mb-6 flex flex-wrap items-center gap-2"
                                     >
                                         <div className="flex items-center gap-1 p-1 rounded-lg bg-white/[0.03] border border-border-subtle">
-                                            {/* Regenerate — icon spins while working; on hover it rotates a half-turn as a
-                                                preview of the action. */}
                                             <motion.button
                                                 type="button"
                                                 onClick={() => handleRegenerate()}
@@ -680,8 +964,6 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
 
                                             <div className="w-px h-4 bg-border-subtle shrink-0" aria-hidden="true" />
 
-                                            {/* Evidence toggle — animated icon crossfade + a width-animated label so the
-                                                pressed (active) state reads clearly. */}
                                             <motion.button
                                                 type="button"
                                                 onClick={() => setShowEvidence(v => !v)}
@@ -718,43 +1000,29 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                                     </motion.div>
                                 )}
 
-                                {/* 3. Mode auto-detect suggestion — the smart, high-value card. Refined blue accent,
-                                    sparkle glyph, clear primary action. Appears after processing detects a better mode. */}
+                                {/* 3. Mode auto-detect suggestion */}
                                 {isV3Summary && v3Mode?.detectedModeName && v3Mode?.detectedConfidence != null && v3Mode.detectedConfidence >= 0.5 &&
                                   v3Mode.detectedModeName !== v3Mode.selectedModeName && (
-                                    <motion.section
-                                        initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 12 }}
+                                    <motion.button
+                                        type="button"
+                                        onClick={() => handleRegenerate(v3Mode.detectedModeId ? undefined : (v3Mode.detectedModeName || '').toLowerCase())}
+                                        disabled={isRegenerating}
+                                        initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 6 }}
                                         animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
-                                        transition={{ duration: 0.24, ease: [0.23, 1, 0.32, 1], delay: prefersReducedMotion ? 0 : 0.1 }}
-                                        className="mb-6 p-3.5 rounded-[10px] border border-blue-400/30 bg-gradient-to-br from-blue-500/[0.09] to-blue-500/[0.02] flex items-center justify-between gap-3"
+                                        whileTap={prefersReducedMotion || isRegenerating ? undefined : { scale: 0.982, transition: { duration: 0.1 } }}
+                                        transition={{ duration: 0.24, ease: [0.25, 0.46, 0.45, 0.94], delay: prefersReducedMotion ? 0 : 0.06 }}
+                                        className="mb-5 w-full text-left flex items-center justify-between gap-3 px-4 py-4 rounded-2xl border border-[rgba(10,132,255,0.20)] bg-[rgba(10,132,255,0.07)] backdrop-blur-sm shadow-[inset_0_1px_0_rgba(10,132,255,0.15),0_1px_4px_rgba(0,0,0,0.2)] hover:bg-[rgba(10,132,255,0.10)] hover:border-[rgba(10,132,255,0.28)] active:bg-[rgba(10,132,255,0.05)] disabled:opacity-40 transition-[background-color,border-color] duration-150 group"
                                     >
-                                        <div className="flex items-start gap-2.5 min-w-0">
-                                            <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-blue-500/15 text-blue-300 shrink-0">
-                                                <Sparkles className="w-3.5 h-3.5" strokeWidth={2} />
-                                            </span>
-                                            <div className="min-w-0">
-                                                <p className="text-[10px] font-semibold uppercase tracking-wide text-blue-300/80 mb-0.5">Suggestion</p>
-                                                <p className="text-[12.5px] text-text-secondary leading-relaxed">
-                                                    This looks like a <span className="font-semibold text-text-primary">{v3Mode.detectedModeName}</span> meeting
-                                                    {v3Mode.selectedModeName ? <> (notes used {v3Mode.selectedModeName})</> : null}.
-                                                </p>
-                                            </div>
+                                        <div className="min-w-0">
+                                            <p className="text-[11.5px] text-white/40 mb-1 tracking-[0.01em]">
+                                                {v3Mode.selectedModeName ? `notes used ${v3Mode.selectedModeName}` : 'suggested template'}
+                                            </p>
+                                            <p className="text-[15px] font-semibold text-white/90 tracking-[-0.02em] truncate leading-tight">
+                                                {isRegenerating ? 'Regenerating…' : v3Mode.detectedModeName}
+                                            </p>
                                         </div>
-                                        <motion.button
-                                            type="button"
-                                            onClick={() => handleRegenerate(v3Mode.detectedModeId ? undefined : (v3Mode.detectedModeName || '').toLowerCase())}
-                                            disabled={isRegenerating}
-                                            whileTap={prefersReducedMotion || isRegenerating ? undefined : { scale: 0.96 }}
-                                            transition={{ duration: 0.16, ease: [0.23, 1, 0.32, 1] }}
-                                            className="shrink-0 h-7 inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 rounded-md bg-blue-500/20 hover:bg-blue-500/30 disabled:opacity-50 text-blue-200 border border-blue-400/30 transition-colors"
-                                        >
-                                            <RefreshCw
-                                                className={`w-3.5 h-3.5 shrink-0 ${isRegenerating && !prefersReducedMotion ? 'animate-spin' : ''}`}
-                                                strokeWidth={2}
-                                            />
-                                            <span>Regenerate as {v3Mode.detectedModeName}</span>
-                                        </motion.button>
-                                    </motion.section>
+                                        <ChevronRight className="w-4 h-4 text-white/25 shrink-0 group-hover:text-white/50 transition-colors duration-150" strokeWidth={2} />
+                                    </motion.button>
                                 )}
 
                                 {/* 4. Cross-meeting recall — still-open carryover from prior meetings (Phase 13). */}
@@ -789,7 +1057,7 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                                         <ul className="space-y-3">
                                             {v3Tldr.map((item, i) => (
                                                 <li key={i} className="flex items-start gap-3 group">
-                                                    <div className="mt-2 w-1.5 h-1.5 rounded-full bg-purple-500/80 shrink-0" />
+                                                    <div className="mt-2 w-1.5 h-1.5 rounded-full bg-blue-400/70 shrink-0" />
                                                     <p className="text-sm text-text-secondary leading-relaxed">{item}</p>
                                                 </li>
                                             ))}
@@ -993,23 +1261,12 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
 
                                                 <div className="w-px h-4 bg-border-subtle shrink-0" aria-hidden="true" />
 
-                                                {/* Tone — styled native select for full keyboard accessibility. */}
-                                                <div className="relative inline-flex items-center h-7">
-                                                    <select
-                                                        value={followUpTone}
-                                                        onChange={(e) => { const t = e.target.value as 'professional' | 'warm' | 'concise' | 'friendly'; setFollowUpTone(t); handleRegenerateFollowUp(t); }}
-                                                        disabled={isRegeneratingFollowUp}
-                                                        className="h-7 leading-none appearance-none text-[11px] font-medium pl-2.5 pr-7 rounded-md bg-transparent hover:bg-white/[0.06] text-text-secondary hover:text-text-primary disabled:opacity-50 transition-colors cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-primary"
-                                                        title="Regenerate with tone"
-                                                        aria-label="Follow-up tone"
-                                                    >
-                                                        <option value="professional" className="bg-bg-secondary text-text-primary">Professional</option>
-                                                        <option value="warm" className="bg-bg-secondary text-text-primary">Warm</option>
-                                                        <option value="concise" className="bg-bg-secondary text-text-primary">Concise</option>
-                                                        <option value="friendly" className="bg-bg-secondary text-text-primary">Friendly</option>
-                                                    </select>
-                                                    <ChevronDown className="w-3 h-3 text-text-tertiary absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" strokeWidth={2.5} />
-                                                </div>
+                                                {/* Tone — custom dropdown */}
+                                                <ToneDropdown
+                                                    followUpTone={followUpTone}
+                                                    isRegeneratingFollowUp={isRegeneratingFollowUp}
+                                                    onSelect={(tone) => { setFollowUpTone(tone); handleRegenerateFollowUp(tone); }}
+                                                />
                                             </div>
                                         </div>
                                         {followUpSubject && <p className="text-[12.5px] text-text-tertiary mb-1">Subject: {followUpSubject}</p>}
@@ -1349,63 +1606,20 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                                                 <div>
                                                     <div className="text-[11px] text-text-tertiary mb-1.5 font-medium">{formatTime(interaction.timestamp)}</div>
                                                     <div className="text-text-secondary text-[15px] leading-relaxed max-w-none">
-                                                        <ReactMarkdown
-                                                            remarkPlugins={[remarkGfm]}
-                                                            components={{
-                                                                h1: ({ node, ...props }) => <p className="text-[15px] text-text-secondary font-normal leading-relaxed mb-2 whitespace-pre-wrap" {...props} />,
-                                                                h2: ({ node, ...props }) => <p className="text-[15px] text-text-secondary font-normal leading-relaxed mb-2 whitespace-pre-wrap" {...props} />,
-                                                                h3: ({ node, ...props }) => <p className="text-[15px] text-text-secondary font-normal leading-relaxed mb-2 whitespace-pre-wrap" {...props} />,
-                                                                p: ({ node, ...props }) => <p className="text-[15px] text-text-secondary font-normal leading-relaxed mb-2 whitespace-pre-wrap" {...props} />,
-                                                                ul: ({ node, ...props }) => <ul className="list-disc ml-4 mb-2 space-y-1" {...props} />,
-                                                                ol: ({ node, ...props }) => <ol className="list-decimal ml-4 mb-2 space-y-1" {...props} />,
-                                                                li: ({ node, ...props }) => <li className="text-[15px] text-text-secondary font-normal" {...props} />,
-                                                                strong: ({ node, ...props }) => <span className="font-normal text-text-secondary" {...props} />,
-                                                                a: ({ node, ...props }: any) => <a className="text-blue-500 hover:underline" {...props} />,
-                                                                pre: ({ children }: any) => <div className="not-prose mb-4">{children}</div>,
-                                                                code: ({ node, inline, className, children, ...props }: any) => {
-                                                                    const match = /language-(\w+)/.exec(className || '');
-                                                                    const isInline = inline ?? false;
-                                                                    const lang = match ? match[1] : '';
-
-                                                                    return !isInline ? (
-                                                                        <div className="my-3 rounded-xl overflow-hidden border border-white/[0.08] shadow-lg bg-zinc-800/60 backdrop-blur-md">
-                                                                            <div className="bg-white/[0.04] px-3 py-1.5 border-b border-white/[0.08]">
-                                                                                <span className="text-[10px] uppercase tracking-widest font-semibold text-white/40 font-mono">
-                                                                                    {lang || 'CODE'}
-                                                                                </span>
-                                                                            </div>
-                                                                            <div className="bg-transparent">
-                                                                                <SyntaxHighlighter
-                                                                                    language={mapLanguageForPrism(lang, String(children))}
-                                                                                    style={vscDarkPlus}
-                                                                                    customStyle={{
-                                                                                        margin: 0,
-                                                                                        borderRadius: 0,
-                                                                                        fontSize: '13px',
-                                                                                        lineHeight: '1.6',
-                                                                                        background: 'transparent',
-                                                                                        padding: '16px',
-                                                                                        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
-                                                                                    }}
-                                                                                    wrapLongLines={true}
-                                                                                    showLineNumbers={true}
-                                                                                    lineNumberStyle={{ minWidth: '2.5em', paddingRight: '1.2em', color: 'rgba(255,255,255,0.2)', textAlign: 'right', fontSize: '11px' }}
-                                                                                    {...props}
-                                                                                >
-                                                                                    {String(children).replace(/\n$/, '')}
-                                                                                </SyntaxHighlighter>
-                                                                            </div>
-                                                                        </div>
-                                                                    ) : (
-                                                                        <code className="bg-bg-tertiary px-1.5 py-0.5 rounded text-[13px] font-mono text-text-primary border border-border-subtle whitespace-pre-wrap" {...props}>
-                                                                            {children}
-                                                                        </code>
-                                                                    );
-                                                                }
-                                                            }}
-                                                        >
-                                                            {cleanMarkdown(interaction.answer || '')}
-                                                        </ReactMarkdown>
+                                                        {(() => {
+                                                            const codingSections = parseCodingTemplate(interaction.answer || '');
+                                                            if (codingSections) {
+                                                                return <CodingAnswerBlock sections={codingSections} />;
+                                                            }
+                                                            return (
+                                                                <ReactMarkdown
+                                                                    remarkPlugins={[remarkGfm]}
+                                                                    components={mdComponents}
+                                                                >
+                                                                    {cleanMarkdown(interaction.answer || '')}
+                                                                </ReactMarkdown>
+                                                            );
+                                                        })()}
                                                     </div>
                                                 </div>
                                             </div>

@@ -34,9 +34,13 @@ export const DOCUMENT_GROUNDED_SYSTEM_OVERRIDE = [
   // it map "phases"→"objectives" also makes it INVENT plausible-but-wrong
   // content when the answer isn't obvious. The user explicitly forbade
   // hallucination, so we prefer failing closed over inventing.
-  'CRITICAL: Use ONLY facts that are actually present in the uploaded material. NEVER invent, guess, or add numbers, names, phases, steps, methods, or results that are not literally written in the material — not even plausible-sounding ones.',
-  'The material may use slightly different words than the question (e.g. it may say "objectives" where the question says "phases", or give data as table rows). You MAY answer from clearly-matching content, but ONLY when the specific items are literally present in the material.',
-  'If the specific answer is not present in the material (even allowing for different wording), do NOT make one up. Instead say: "This is not directly mentioned in my seminar material, but based on the topic, the likely explanation is..." and then give a brief, clearly-labelled best guess.',
+  //
+  // IMPORTANT: the retrieved snippets are EXCERPTS from the document, not the
+  // full document. If the answer is not in the current excerpts the model should
+  // say so clearly — NOT pretend the document lacks the information entirely.
+  'CRITICAL: Use ONLY facts that are actually present in the retrieved excerpts below. NEVER invent, guess, or add numbers, names, phases, steps, methods, or results that are not literally written in the excerpts — not even plausible-sounding ones.',
+  'The excerpts may use slightly different words than the question (e.g. it may say "objectives" where the question says "phases", or give data as table rows). You MAY answer from clearly-matching content, but ONLY when the specific items are literally present in the excerpts.',
+  'If the specific answer does not appear in these retrieved excerpts, say: "I could not find that in the retrieved sections of the document." Do NOT say it is not in the document — only the retrieved sections were checked, not the full document.',
   'Keep the answer natural and speakable. For a normal question, 2-4 sentences. Do not restate the question back to the user.',
 ].join('\n');
 
@@ -75,10 +79,10 @@ export function buildDocumentGroundedUserContent(params: {
   const parts: string[] = [];
   parts.push(`QUESTION: ${q}`);
   parts.push('');
-  parts.push('Answer the QUESTION above using ONLY facts literally present in the uploaded reference material below. The material may use slightly different words than the question (e.g. "objectives" for "phases", table rows for data) — you may answer from clearly-matching content, but never invent numbers, names, or items that are not actually written there. If the specific answer is not present, say it is not directly mentioned in the material rather than guessing.');
+  parts.push('Answer the QUESTION above using ONLY facts literally present in the retrieved document excerpts below. These are excerpts from the uploaded file — not the complete document. The excerpts may use slightly different words than the question (e.g. "objectives" for "phases", table rows for data) — you may answer from clearly-matching content, but never invent numbers, names, or items that are not actually written there. If the specific answer is not found in these excerpts, say so clearly ("I could not find that in the retrieved sections") — do not claim it is absent from the whole document.');
   parts.push('');
   if (material) {
-    parts.push('## UPLOADED REFERENCE MATERIAL');
+    parts.push('## RETRIEVED EXCERPTS FROM UPLOADED DOCUMENT');
     parts.push(material);
     parts.push('');
   }

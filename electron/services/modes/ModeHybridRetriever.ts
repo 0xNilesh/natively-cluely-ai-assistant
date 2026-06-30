@@ -825,12 +825,24 @@ export class ModeHybridRetriever {
         const {
             query,
             files,
-            tokenBudget = DEFAULT_TOKEN_BUDGET,
-            topK = DEFAULT_TOP_K,
+            tokenBudget: _rawTokenBudget,
+            topK: _rawTopK,
             hasTranscript = false,
             allowRerank = false,
             forceDocumentGrounding = false,
         } = params;
+        // Auto-upgrade limits for doc-grounded large PDFs (mirrors the guard in
+        // ModeContextRetriever.retrieve()). Must be applied AFTER extracting
+        // forceDocumentGrounding from params — JS destructuring can't reference
+        // sibling parameters.
+        const DOC_GROUNDED_TOKEN_BUDGET_LOCAL = 3600;
+        const DOC_GROUNDED_TOP_K_LOCAL = 12;
+        const tokenBudget = _rawTokenBudget != null
+            ? _rawTokenBudget
+            : (forceDocumentGrounding ? DOC_GROUNDED_TOKEN_BUDGET_LOCAL : DEFAULT_TOKEN_BUDGET);
+        const topK = _rawTopK != null
+            ? _rawTopK
+            : (forceDocumentGrounding ? DOC_GROUNDED_TOP_K_LOCAL : DEFAULT_TOP_K);
 
         // If no files, return empty
         if (files.length === 0) {

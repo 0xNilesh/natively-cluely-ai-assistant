@@ -35,6 +35,7 @@ import { SearchOrchestrator, type SearchCandidate } from './intelligence/SearchO
 import { CHAT_MODE_PROMPT } from './llm/prompts';
 import { isAssistantIdentityQuestion, profileFactsReady } from './llm/manualProfileIntelligence';
 import { buildManualProfileBackendAnswer } from './llm/profileAnswerBackend';
+import { DOC_GROUNDED_TOKEN_BUDGET } from './services/ModeContextRetriever';
 
 // Module-scope: pdfjs-dist's legacy build defaults GlobalWorkerOptions.workerSrc
 // to `new URL("./pdf.worker.mjs", import.meta.url)`. Inside esbuild's bundle
@@ -738,7 +739,6 @@ export function initializeIpcHandlers(appState: AppState): void {
       let iTrace = beginTrace('');
       const { ForegroundGate } = require('./services/ForegroundGate') as typeof import('./services/ForegroundGate');
       try {
-        console.log('[IPC] gemini-chat-stream started using LLMHelper.streamChat');
         const llmHelper = appState.processingHelper.getLLMHelper();
 
         const senderId = event.sender.id;
@@ -1553,7 +1553,9 @@ export function initializeIpcHandlers(appState: AppState): void {
             onStallTimeout: () => { chatTrace.mark('provider_timeout', { reason: 'inter_token_stall' }); },
             // Abort the underlying provider request on timeout/supersession so a
             // stalled HTTP stream doesn't leak (the signal was passed to streamChat).
-            onCleanup: () => { try { myController?.abort(); } catch { /* noop */ } },
+            onCleanup: () => {
+              try { myController?.abort(); } catch { /* noop */ }
+            },
             onToken: (token: string) => {
               manualFirstUseful = true;
               // First token back from the provider — the gap from
@@ -2088,59 +2090,105 @@ export function initializeIpcHandlers(appState: AppState): void {
               let docContextBlock = '';
               try {
                 const { ModesManager } = require('./services/ModesManager');
+                // Use the expanded doc-grounded budget so the validator sees as
+                // many chunks as the main answer path did. The 1800-token default
+                // was calibrated for seminar notes; a 66-page thesis may have the
+                // answer in a chunk that 1800 tokens can't reach.
                 docContextBlock = ModesManager.getInstance().buildRetrievedActiveModeContextBlock(
-                  message, undefined, 1800, 'lecture_answer', true, undefined, { forceDocumentGrounding: true },
+                  message, undefined, DOC_GROUNDED_TOKEN_BUDGET, 'lecture_answer', true, undefined, { forceDocumentGrounding: true },
                 ) || '';
               } catch (reErr: any) {
                 console.warn('[DocGrounded] re-retrieval for validator failed (non-fatal):', reErr?.message);
               }
-              // LOG-ONLY groundedness signal: does the answer claim "not mentioned"
-              // while a retrieved chunk contains a high-signal term from the question?
+              // False-refusal detector: does the answer claim "not mentioned / not
+              // found" while at least two meaningful question terms ARE present in
+              // the retrieved excerpts? This is an actionable signal — it means the
+              // model read the context and still refused to synthesize from it, which
+              // is fixable by re-prompting with a stronger synthesis instruction.
+              // We gate on ≥2 unique terms to avoid triggering on coincidental
+              // single-word matches (e.g. the chunk says "the" and so does the Q).
+              let isFalseRefusal = false;
               try {
-                const saysNotMentioned = /not (?:directly )?(?:mentioned|in (?:the|my) (?:uploaded|seminar|thesis) material|found|present)/i.test(trimmed);
+                // "not mentioned / found in" is specific enough on its own.
+                // "could not find" is only caught when sentence-initial or after
+                // a first-person subject ("I could not find") to avoid matching
+                // factual research sentences like "Researchers could not find a
+                // viable solution, leading to the proposed framework."
+                const saysNotMentioned = /not (?:directly )?(?:mentioned|in (?:the|my) (?:uploaded|seminar|thesis|retrieved) (?:material|sections?|document)|found in|present in)|(?:^|(?<=[.!?]\s+))I could not find\b/i.test(trimmed);
                 if (saysNotMentioned && docContextBlock) {
-                  const qTerms: string[] = (message.match(/\b[A-Za-z0-9-]*[A-Z][A-Za-z0-9-]*\b|\b\w*\d\w*\b/g) || [])
-                    .filter((t: string) => t.length >= 2 && t.length <= 40);
+                  const qTerms: string[] = (message.match(/\b[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9]\b/g) || [])
+                    .filter((t: string) => t.length >= 3 && t.length <= 40)
+                    // strip common English stop-words and question words
+                    .filter((t: string) => !/^(?:the|this|that|what|when|where|who|how|why|which|does|did|was|were|are|is|in|of|at|to|for|with|about|and|or|not|has|have|had|its|can|could|would|should|will|from|than|more|any|all|some|tell|explain|describe|me|my|your|their|it|be|do|an|on|by|as|up|if|so|but|out|no|we|they|he|she|you|his|her|our|us|them)$/i.test(t));
                   const chunkLower = docContextBlock.toLowerCase();
                   const present = qTerms.filter((t: string) => chunkLower.includes(t.toLowerCase()));
-                  if (present.length > 0) {
-                    console.warn('[DocGrounded] possible false "not mentioned" — retrieved context contains question terms (log-only, not regenerated)', {
-                      questionTerms: present.slice(0, 6),
+                  if (present.length >= 2) {
+                    isFalseRefusal = true;
+                    console.warn('[DocGrounded] false-refusal detected — retrieved context contains question terms, triggering regen', {
+                      questionTerms: present.slice(0, 8),
+                      totalTermsFound: present.length,
+                    });
+                  } else if (present.length === 1) {
+                    // Only 1 term matched — log but don't regen (could be coincidental)
+                    console.warn('[DocGrounded] possible false "not mentioned" (1 term, below regen threshold)', {
+                      questionTerms: present,
                     });
                   }
                 }
-              } catch { /* log-only, never throws into the answer path */ }
+              } catch { /* never throws into the answer path */ }
 
               const reason = isGreeting ? 'greeting'
                 : isEmpty ? 'empty'
                 : isExactRepeat ? 'exact_repeat_of_prior_answer'
+                : isFalseRefusal ? 'false_refusal'
                 : null;
 
               if (reason) {
                 console.warn('[DocGrounded] answer validation failed', { reason, answerType: answerPlan.answerType });
                 piTelemetry.emit('pi_doc_grounded_validation_failed', { reason });
-                // Regenerate ONCE, deadline-guarded, with a stricter prompt that
-                // pins the retrieved material and forbids greetings.
+                // Regenerate ONCE, deadline-guarded. For false_refusal we need
+                // a stronger synthesis directive; for greeting/empty/repeat a
+                // simple grounding prompt is sufficient.
                 let regen = '';
                 try {
-                  const strictPrompt = [
-                    'You are answering a question strictly from the uploaded reference material below.',
-                    'Do NOT greet. Do NOT ask what the user wants. Answer the question directly from the material.',
-                    'If the material does not contain the answer, say so in one sentence and stop.',
-                    '',
-                    docContextBlock || '(no retrieved material)',
-                    '',
-                    `QUESTION: ${message}`,
-                    '',
-                    'ANSWER:',
-                  ].join('\n');
+                  const strictPrompt = reason === 'false_refusal'
+                    ? [
+                        'You are synthesizing an answer from the document excerpts below.',
+                        'IMPORTANT: The excerpts DO contain relevant information for this question.',
+                        'The content may be phrased differently from the question — read carefully.',
+                        'Synthesize the answer directly from the excerpts. Do NOT say "not mentioned" — the information IS there.',
+                        'If multiple excerpts cover different parts of the answer, combine them.',
+                        'Answer in 2-4 natural sentences. Do not restate the question.',
+                        '',
+                        '## DOCUMENT EXCERPTS',
+                        docContextBlock || '(no retrieved material)',
+                        '',
+                        `QUESTION: ${message}`,
+                        '',
+                        'ANSWER (synthesize from the excerpts above):',
+                      ].join('\n')
+                    : [
+                        'You are answering a question strictly from the uploaded reference material below.',
+                        'Do NOT greet. Do NOT ask what the user wants. Answer the question directly from the material.',
+                        'If the material does not contain the answer, say so in one sentence and stop.',
+                        '',
+                        docContextBlock || '(no retrieved material)',
+                        '',
+                        `QUESTION: ${message}`,
+                        '',
+                        'ANSWER:',
+                      ].join('\n');
                   // HIGH #3 (audit 2026-06-29): onCleanup aborts the underlying
                   // provider fetch on timeout/shouldAbort, preventing
                   // gemini-3.1-flash-lite from continuing to bill through a
                   // parked response after we stop reading.
                   const regenAbort = new AbortController();
                   await raceStreamWithDeadline({
-                    stream: llmHelper.streamChat(strictPrompt, undefined, undefined, undefined, true, true) as AsyncGenerator<string>,
+                    // Pass regenAbort.signal so streamChat/_streamChatInner can
+                    // abort the underlying provider fetch when onCleanup fires.
+                    // streamChat() finds AbortSignal instances by instanceof scan
+                    // (LLMHelper.ts:3897), so position doesn't matter.
+                    stream: llmHelper.streamChat(strictPrompt, undefined, undefined, undefined, true, true, regenAbort.signal) as AsyncGenerator<string>,
                     firstUsefulDeadlineMs: usingLocalLlm ? LIVE_LOCAL_FIRST_USEFUL_TIMEOUT_MS : 7000,
                     isUsefulYet: () => regen.length >= 8,
                     shouldAbort: () => regen.length > 2000,
@@ -2151,10 +2199,16 @@ export function initializeIpcHandlers(appState: AppState): void {
                   console.warn('[DocGrounded] regeneration failed (non-fatal):', regenErr?.message || regenErr);
                 }
                 const regenTrim = regen.trim();
+                // For false_refusal regen, also reject if the model still refuses
+                // after the synthesis-focused prompt — treat it as a true not-found
+                // and fall through to the safe failure line so telemetry is honest.
+                const regenIsStillRefusing = reason === 'false_refusal'
+                  && /not (?:directly )?(?:mentioned|in (?:the|my) (?:uploaded|seminar|thesis|retrieved) (?:material|sections?|document)|found in|present in)|(?:^|(?<=[.!?]\s+))I could not find\b/i.test(regenTrim);
                 const regenValid = regenTrim.length >= 8
                   && !GREETING_RE.test(regenTrim)
                   && !/what would you like help with/i.test(regenTrim)
-                  && regenTrim !== priorAnswer;
+                  && regenTrim !== priorAnswer
+                  && !regenIsStillRefusing;
                 if (regenValid) {
                   fullResponse = regenTrim;
                   finalText = regenTrim;
@@ -3631,10 +3685,12 @@ export function initializeIpcHandlers(appState: AppState): void {
       const { ReviewService, getReviewApiKey, getReviewHardwareId } = require('./services/ReviewService');
       const svc = ReviewService.getInstance();
       const totals = svc.recordSessionEnd();
-      const apiKey = getReviewApiKey();
-      const hwid = await getReviewHardwareId();
-      // Fire-and-forget: don't block the caller on the network round trip.
-      svc.reportUsage(apiKey, hwid, totals.session_count, totals.total_usage_ms).catch(() => {});
+      if (totals.counted) {
+        const apiKey = getReviewApiKey();
+        const hwid = await getReviewHardwareId();
+        // Fire-and-forget: don't block the caller on the network round trip.
+        svc.reportUsage(apiKey, hwid, totals.usage_ms).catch(() => {});
+      }
       return { ok: true, totals };
     } catch (error: any) {
       console.error('[IPC] review:flush-session failed:', error);

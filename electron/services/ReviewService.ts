@@ -43,6 +43,13 @@ export interface ReviewPromptLocalState {
     total_usage_ms: number
 }
 
+export interface ReviewSessionEndResult {
+    session_count: number
+    total_usage_ms: number
+    usage_ms: number
+    counted: boolean
+}
+
 const DEFAULT_STATE: ReviewPromptLocalState = {
     has_reviewed: false,
     dismissed_count: 0,
@@ -114,7 +121,9 @@ export class ReviewService {
 
     /** Call when a meaningful user session starts (app open / overlay start). */
     recordSessionStart() {
-        this.sessionStartTime = Date.now()
+        // Idempotent: a renderer reload or accidental duplicate IPC should not
+        // shorten the active session by resetting the start timestamp.
+        if (this.sessionStartTime == null) this.sessionStartTime = Date.now()
     }
 
     /** Call when the session ends. Adds elapsed ms to total_usage_ms and
@@ -123,12 +132,14 @@ export class ReviewService {
      *  recordSessionStart was never called or elapsed is 0 — prevents the
      *  double-call / no-call-starts case from bumping session_count and
      *  flooding the backend with zero-usage reports. */
-    recordSessionEnd(): { session_count: number; total_usage_ms: number } {
+    recordSessionEnd(): ReviewSessionEndResult {
         const now = Date.now()
         if (this.sessionStartTime == null) {
             return {
                 session_count: this.state.session_count,
                 total_usage_ms: this.state.total_usage_ms,
+                usage_ms: 0,
+                counted: false,
             }
         }
         const elapsed = Math.max(0, Math.min(now - this.sessionStartTime, 6 * 60 * 60 * 1000))
@@ -139,6 +150,8 @@ export class ReviewService {
         return {
             session_count: this.state.session_count,
             total_usage_ms: this.state.total_usage_ms,
+            usage_ms: elapsed,
+            counted: true,
         }
     }
 
@@ -154,9 +167,10 @@ export class ReviewService {
     /** App-quit convenience: closes the current session and flushes state.
      *  Idempotent — safe to call alongside flush() or in addition to the
      *  beforeunload-renderer path. */
-    beforeQuit() {
-        this.recordSessionEnd()
+    beforeQuit(): ReviewSessionEndResult {
+        const result = this.recordSessionEnd()
         this.flush()
+        return result
     }
 
     // ── prompt gating (local decision, used as a UX pre-check before the
@@ -224,18 +238,18 @@ export class ReviewService {
             // not just the boolean flags. Without this, a user who dismissed
             // on another install (via a shared HWID) would be re-prompted
             // here because local `last_dismissed_at` was null.
-            if (remote.has_reviewed || remote.dont_show_again || (remote.dismissed_count || 0) > (this.state.dismissed_count || 0)) {
+            const remoteDismissedAtMs = remote.last_dismissed_at ? new Date(remote.last_dismissed_at).getTime() : 0
+            const localDismissedAtMs = this.state.last_dismissed_at ? new Date(this.state.last_dismissed_at).getTime() : 0
+            const remoteHasNewerDismissal = !!remoteDismissedAtMs && remoteDismissedAtMs > localDismissedAtMs
+            if (remote.has_reviewed || remote.dont_show_again || (remote.dismissed_count || 0) > (this.state.dismissed_count || 0) || remoteHasNewerDismissal) {
                 this.state.has_reviewed = !!remote.has_reviewed
                 this.state.dont_show_again = !!remote.dont_show_again
                 this.state.dismissed_count = Math.max(this.state.dismissed_count, remote.dismissed_count || 0)
                 this.state.next_eligible_at = remote.next_eligible_at
-                // Mirror the latest dismissal timestamp too so the redisplay
-                // 7-day window is consistent across installs.
-                if (remote.last_dismissed_at) {
-                    this.state.last_dismissed_at = !this.state.last_dismissed_at
-                        || new Date(remote.last_dismissed_at) < new Date(this.state.last_dismissed_at)
-                            ? remote.last_dismissed_at
-                            : this.state.last_dismissed_at
+                // Mirror the MOST RECENT dismissal timestamp so the redisplay
+                // 7-day window is anchored to the latest user interaction.
+                if (remoteHasNewerDismissal) {
+                    this.state.last_dismissed_at = remote.last_dismissed_at
                 }
                 this.scheduleWrite()
             }
@@ -245,7 +259,7 @@ export class ReviewService {
     }
 
     /** Fire-and-forget usage sync after a session ends. */
-    async reportUsage(apiKey: string | null, hardwareId: string | null, sessionCount: number, totalUsageMs: number): Promise<void> {
+    async reportUsage(apiKey: string | null, hardwareId: string | null, usageMs: number): Promise<void> {
         try {
             const headers: Record<string, string> = { "Content-Type": "application/json" }
             if (apiKey) headers["x-natively-key"] = apiKey
@@ -254,7 +268,9 @@ export class ReviewService {
                 headers,
                 body: JSON.stringify({
                     hardware_id: hardwareId,
-                    event: { type: "session", usage_ms: Math.max(0, totalUsageMs), session_count: sessionCount },
+                    // Backend treats usage_ms as an INCREMENT. Send only this
+                    // session's elapsed delta, never the cumulative local total.
+                    event: { type: "session", usage_ms: Math.max(0, usageMs) },
                 }),
                 signal: AbortSignal.timeout(8000),
             })

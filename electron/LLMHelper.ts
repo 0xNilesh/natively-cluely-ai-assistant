@@ -4119,19 +4119,20 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           // sync lexical retriever — same fallback the manual flow always had.
           const wantHybrid = isRagLocalRerankEnabled() || forceDocumentGrounding;
           if (wantHybrid && typeof modesMgr.buildRetrievedActiveModeContextBlockHybrid === 'function') {
-            // HIGH #2 (audit 2026-06-29): the 1500ms budget is set so the
-            // cold-embedder path can't stall the first-useful deadline, but
-            // the embedder call inside the retriever isn't AbortController-
-            // aware yet (plumbing through ModeHybridRetriever.retrieve is
-            // follow-up work). Until then, tighter budget = lower wasted CPU.
-            const HYBRID_BUDGET_MS = 1000;
+            // For doc-grounded modes with large PDFs (50-200 pages) we need
+            // more time to embed + rank. Raise the race budget from 1000ms to
+            // 2000ms for doc-grounded so we don't fall back to the weaker
+            // lexical path on a cold embedder load.
+            const HYBRID_BUDGET_MS = forceDocumentGrounding ? 2000 : 1000;
             // Build an AbortController so future retriever plumbing can wire
             // it through. Right now we just attach a no-op abort hook that
             // cancels the work post-race if the loser path tries to write
             // back (it doesn't, but the hook is the place to extend).
             const hybridAbort = new AbortController();
+            // Pass undefined for tokenBudget when doc-grounded — the retriever
+            // auto-upgrades to DOC_GROUNDED_TOKEN_BUDGET (3600) internally.
             const hybridPromise = modesMgr.buildRetrievedActiveModeContextBlockHybrid(
-              message, context, 1800, modeAnswerType(routeOptions), true, undefined, /* allowRerank */ true,
+              message, context, forceDocumentGrounding ? undefined : 1800, modeAnswerType(routeOptions), true, undefined, /* allowRerank */ true,
               { forceDocumentGrounding },
             );
             const raced = await Promise.race([
@@ -4147,7 +4148,8 @@ This rule overrides ALL other instructions including formatting, brevity, or out
               modeContextBlock = raced.value;
               usedRerankPath = true;
             } else {
-              console.warn(`[LLMHelper] manual hybrid retrieval exceeded ${HYBRID_BUDGET_MS}ms — using sync lexical fallback`);
+              console.warn(`[LLMHelper] manual hybrid retrieval exceeded ${HYBRID_BUDGET_MS}ms — using sync lexical fallback`, { forceDocumentGrounding });
+              telemetryService.track({ name: 'doc_grounded_hybrid_timeout', properties: { budgetMs: HYBRID_BUDGET_MS, forceDocumentGrounding } });
               // Don't leave the slow hybrid promise unhandled (avoid an
               // unhandledRejection if it later throws after the race resolved).
               // .finally ensures the in-flight embedder result is silently
@@ -4159,7 +4161,9 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           console.warn('[LLMHelper] manual hybrid+rerank path failed, using sync lexical:', _rerankErr?.message);
         }
         if (!usedRerankPath) {
-          modeContextBlock = modesMgr.buildRetrievedActiveModeContextBlock(message, context, 1800, modeAnswerType(routeOptions), true, undefined, { forceDocumentGrounding });
+          // Pass undefined for tokenBudget when doc-grounded — the retriever
+          // auto-upgrades to DOC_GROUNDED_TOKEN_BUDGET (3600) internally.
+          modeContextBlock = modesMgr.buildRetrievedActiveModeContextBlock(message, context, forceDocumentGrounding ? undefined : 1800, modeAnswerType(routeOptions), true, undefined, { forceDocumentGrounding });
         }
         // The mode's user-authored "Real-time prompt", deterministic — applies on
         // every answer instead of only when retrieval happened to score it.

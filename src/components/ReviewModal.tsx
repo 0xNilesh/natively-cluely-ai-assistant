@@ -2,22 +2,36 @@
 // In-app review + testimonial collection modal.
 //
 // Two-step morph:
-//   Step 1: rating + 300-char review text
-//   Step 2: optional name/role/company + public-testimonial permission
+//   Step 1 ("review")    — rating + optional 300-char text
+//   Step 2 ("testimonial") — optional name/role/company + public-testimonial permission
+//   Step 3 ("thanks")    — confirmation
 //
-// Polished, accessible, keyboard-navigable. Re-uses the FollowUpEmailModal
-// visual idiom (dark glass + framer-motion morph) so it feels native.
+// Polished, accessible, keyboard-navigable. Re-uses the FollowUpEmailModal visual
+// idiom (dark glass + framer-motion morph) so it feels native. All motion is
+// gated on `useReducedMotion()`.
 
-import React, { useEffect, useMemo, useRef, useState } from "react"
-import { motion, AnimatePresence } from "framer-motion"
-import { Star, X, Lock, ShieldCheck } from "lucide-react"
-import { isMac } from "../utils/platformUtils"
+import React, { useEffect, useMemo, useRef, useState, useCallback } from "react"
+import { motion, AnimatePresence, useReducedMotion } from "framer-motion"
+import { Star, X, Lock, CheckCircle2 } from "lucide-react"
 
 const MAX_CHARS = 300
+
+// ─── Spring presets ────────────────────────────────────────────────────────
+// Defined once at module level so they are never recreated on render.
+
+const SPRING_SNAPPY    = { type: "spring" as const, stiffness: 380, damping: 32 }
+const SPRING_BOUNCY    = { type: "spring" as const, stiffness: 550, damping: 22 }
+const SPRING_CELEBRATE = { type: "spring" as const, stiffness: 550, damping: 18 }
+
+// Reduced-motion fallback helper. Use anywhere we pass a `transition` object.
+const rt = (reduced: boolean, normal: object): object =>
+    reduced ? { duration: 0 } : normal
 
 export interface ReviewModalProps {
     isOpen: boolean
     onClose: () => void
+    onDismissLater?: () => void | Promise<void>
+    onDismissForever?: () => void | Promise<void>
     onSubmitted?: (reviewId: string) => void
     prefillName?: string
     prefillRole?: string
@@ -50,6 +64,8 @@ type Step = "review" | "testimonial" | "thanks"
 const ReviewModal: React.FC<ReviewModalProps> = ({
     isOpen,
     onClose,
+    onDismissLater,
+    onDismissForever,
     onSubmitted,
     prefillName = "",
     prefillRole = "",
@@ -61,6 +77,7 @@ const ReviewModal: React.FC<ReviewModalProps> = ({
     submitReview,
     updateTestimonial,
 }) => {
+    const reduced = useReducedMotion() ?? false
     const [step, setStep] = useState<Step>("review")
     const [rating, setRating] = useState<number>(0)
     const [hoverRating, setHoverRating] = useState<number>(0)
@@ -70,16 +87,12 @@ const ReviewModal: React.FC<ReviewModalProps> = ({
 
     // Testimonial state
     const [reviewId, setReviewId] = useState<string | null>(null)
-    // CRITICAL FIX (audit HIGH #3): SOFT PREFILL only — prefilled values are
-    // held in *separate* state, NOT copied into the live form fields. The user
-    // must explicitly opt in to use each prefill via the chip button. This
-    // prevents the previous behavior where a prefill was silently saved as
-    // the testimonial identity.
+    // SOFT PREFILL only — prefilled values are held in *separate* state, NOT
+    // copied into the live form fields. The user must explicitly opt in to
+    // use each prefill via the chip button.
     const [name, setName] = useState("")
     const [role, setRole] = useState("")
     const [company, setCompany] = useState("")
-    // User hasn't acted on the prefill — true if the field is still empty AND
-    // a prefill is available. Drives the (suggested) affordance.
     const [namePrefillUsed, setNamePrefillUsed] = useState(false)
     const [rolePrefillUsed, setRolePrefillUsed] = useState(false)
     const [companyPrefillUsed, setCompanyPrefillUsed] = useState(false)
@@ -90,8 +103,8 @@ const ReviewModal: React.FC<ReviewModalProps> = ({
 
     const textareaRef = useRef<HTMLTextAreaElement | null>(null)
 
-    const namePrefillSuggested = !namePrefillUsed && !name && !!prefillName?.trim()
-    const rolePrefillSuggested = !rolePrefillUsed && !role && !!prefillRole?.trim()
+    const namePrefillSuggested    = !namePrefillUsed    && !name    && !!prefillName?.trim()
+    const rolePrefillSuggested    = !rolePrefillUsed    && !role    && !!prefillRole?.trim()
     const companyPrefillSuggested = !companyPrefillUsed && !company && !!prefillCompany?.trim()
 
     // Reset state when modal opens fresh.
@@ -117,22 +130,41 @@ const ReviewModal: React.FC<ReviewModalProps> = ({
         }
     }, [isOpen])
 
-    // ESC closes; only when not mid-submit.
+    // Move focus to the first star button when the modal opens (after the
+    // spring settles) so keyboard users land in the right place.
+    useEffect(() => {
+        if (!isOpen) return
+        const t = window.setTimeout(() => {
+            document.querySelector<HTMLButtonElement>('[data-review-star="1"]')?.focus()
+        }, 260)
+        return () => window.clearTimeout(t)
+    }, [isOpen])
+
+    // ESC closes; only when not mid-submit. On the first step this is a
+    // soft dismissal ("Maybe later") so the prompt doesn't immediately reopen.
     useEffect(() => {
         if (!isOpen) return
         const onKey = (e: KeyboardEvent) => {
-            if (e.key === "Escape" && !submitting && !testimonialBusy) onClose()
+            if (e.key === "Escape" && !submitting && !testimonialBusy) dismissLaterAndClose()
         }
         window.addEventListener("keydown", onKey)
         return () => window.removeEventListener("keydown", onKey)
-    }, [isOpen, submitting, testimonialBusy, onClose])
+    }, [isOpen, submitting, testimonialBusy])
 
-    const remaining = MAX_CHARS - text.length
-    const textOver = remaining < 0
-    const canSubmitReview = rating >= 1 && rating <= 5 && !textOver && !submitting
+    const closeModal = () => onClose()
+
+    const dismissLaterAndClose = () => {
+        if (step === "review") void onDismissLater?.()
+        closeModal()
+    }
+
+    const dismissForeverAndClose = () => {
+        if (step === "review") void onDismissForever?.()
+        closeModal()
+    }
 
     const handleSubmitReview = async () => {
-        if (!canSubmitReview) return
+        if (rating < 1 || rating > 5 || text.length > MAX_CHARS || submitting) return
         setSubmitting(true)
         setSubmitError(null)
         try {
@@ -146,7 +178,7 @@ const ReviewModal: React.FC<ReviewModalProps> = ({
                 email: null,
             })
             if (!res.ok) {
-                setSubmitError(res.error || "Couldn't submit. Try again.")
+                setSubmitError(res.error || "Couldn't share. Try again.")
                 setSubmitting(false)
                 return
             }
@@ -161,7 +193,11 @@ const ReviewModal: React.FC<ReviewModalProps> = ({
     }
 
     const handleSaveTestimonial = async () => {
-        if (!reviewId) return
+        if (!reviewId) {
+            // ReviewId missing — go straight to thanks rather than silently failing.
+            setStep("thanks")
+            return
+        }
         setTestimonialBusy(true)
         setTestimonialError(null)
         try {
@@ -201,6 +237,10 @@ const ReviewModal: React.FC<ReviewModalProps> = ({
 
     if (!isOpen) return null
 
+    // Accessible title id. Must be unique per step to avoid duplicate IDs while
+    // framer-motion is mid-exit on the previous step.
+    const titleId = `review-modal-title-${step === "thanks" ? "review" : step}`
+
     return (
         <AnimatePresence>
             <motion.div
@@ -208,19 +248,20 @@ const ReviewModal: React.FC<ReviewModalProps> = ({
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
-                onClick={() => !submitting && !testimonialBusy && onClose()}
-                className="fixed inset-0 bg-black/70 backdrop-blur-sm z-[60] transition-opacity"
+                transition={rt(reduced, { duration: 0.18 })}
+                onClick={() => !submitting && !testimonialBusy && dismissLaterAndClose()}
+                className="fixed inset-0 bg-black/70 backdrop-blur-sm z-[60]"
             />
             <motion.div
                 key="container"
-                initial={{ opacity: 0, scale: 0.95, y: 10 }}
+                initial={{ opacity: 0, scale: reduced ? 1 : 0.96, y: reduced ? 0 : 8 }}
                 animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.95, y: 10 }}
-                transition={{ duration: 0.3, type: "spring", damping: 25, stiffness: 300 }}
+                exit={{ opacity: 0, scale: reduced ? 1 : 0.97, y: reduced ? 0 : 5 }}
+                transition={rt(reduced, SPRING_SNAPPY)}
                 className="fixed inset-0 z-[60] flex items-center justify-center p-4 pointer-events-none"
                 role="dialog"
                 aria-modal="true"
-                aria-labelledby="review-modal-title"
+                aria-labelledby={titleId}
             >
                 <div className="w-full max-w-[520px] bg-[#121212]/95 backdrop-blur-xl rounded-2xl shadow-2xl border border-white/[0.08] flex flex-col pointer-events-auto overflow-hidden ring-1 ring-white/5">
                     <AnimatePresence mode="wait">
@@ -233,16 +274,16 @@ const ReviewModal: React.FC<ReviewModalProps> = ({
                                 setHoverRating={setHoverRating}
                                 text={text}
                                 setText={setText}
-                                remaining={remaining}
-                                textOver={textOver}
+                                maxChars={MAX_CHARS}
                                 submitting={submitting}
                                 error={submitError}
                                 ratingLabel={ratingLabel}
-                                canSubmit={canSubmitReview}
                                 onSubmit={handleSubmitReview}
-                                onClose={onClose}
+                                onClose={dismissLaterAndClose}
+                                onDismissLater={dismissLaterAndClose}
+                                onDismissForever={dismissForeverAndClose}
                                 textareaRef={textareaRef}
-                                isMac={isMac}
+                                reduced={reduced}
                             />
                         )}
                         {step === "testimonial" && (
@@ -286,7 +327,8 @@ const ReviewModal: React.FC<ReviewModalProps> = ({
                                 error={testimonialError}
                                 onSave={handleSaveTestimonial}
                                 onSkip={handleSkipTestimonial}
-                                onClose={onClose}
+                                onClose={closeModal}
+                                reduced={reduced}
                             />
                         )}
                         {step === "thanks" && (
@@ -294,7 +336,8 @@ const ReviewModal: React.FC<ReviewModalProps> = ({
                                 key="thanks"
                                 canUsePublicly={canUsePublicly}
                                 displayNamePublicly={displayNamePublicly}
-                                onClose={onClose}
+                                onClose={closeModal}
+                                reduced={reduced}
                             />
                         )}
                     </AnimatePresence>
@@ -313,135 +356,257 @@ interface StepReviewProps {
     setHoverRating: (n: number) => void
     text: string
     setText: (s: string) => void
-    remaining: number
-    textOver: boolean
+    maxChars: number
     submitting: boolean
     error: string | null
     ratingLabel: string
-    canSubmit: boolean
     onSubmit: () => void
     onClose: () => void
+    onDismissLater: () => void
+    onDismissForever: () => void
     textareaRef: React.RefObject<HTMLTextAreaElement | null>
-    isMac: boolean
+    reduced: boolean
 }
 
 const StepReview: React.FC<StepReviewProps> = ({
     rating, hoverRating, setRating, setHoverRating,
-    text, setText, remaining, textOver, submitting, error,
-    ratingLabel, canSubmit, onSubmit, onClose, textareaRef,
+    text, setText, maxChars, submitting, error,
+    ratingLabel, onSubmit, onClose, onDismissLater, onDismissForever,
+    textareaRef, reduced,
 }) => {
+    const remaining = maxChars - text.length
+    const textOver = remaining < 0
+    // Counter only appears when the user is near the limit — avoids the
+    // distraction of seeing 0 / 300 from a blank textarea.
+    const showCounter = remaining <= 60
+    const canSubmit = rating >= 1 && rating <= 5 && !textOver && !submitting
+
+    // Arrow-key navigation for the radio group (ARIA APG).
+    const handleStarKey = useCallback((e: React.KeyboardEvent<HTMLButtonElement>, n: number) => {
+        if (e.key === "ArrowRight" || e.key === "ArrowUp") {
+            e.preventDefault()
+            const next = Math.min(n + 1, 5)
+            setRating(next)
+            document.querySelector<HTMLButtonElement>(`[data-review-star="${next}"]`)?.focus()
+        } else if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
+            e.preventDefault()
+            const prev = Math.max(n - 1, 1)
+            setRating(prev)
+            document.querySelector<HTMLButtonElement>(`[data-review-star="${prev}"]`)?.focus()
+        }
+    }, [setRating])
+
     return (
         <motion.div
-            initial={{ opacity: 0, x: -8 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: -8 }}
-            transition={{ duration: 0.2 }}
+            initial={{ opacity: 0, y: reduced ? 0 : 8, scale: reduced ? 1 : 0.99 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: reduced ? 0 : -6, scale: reduced ? 1 : 0.99 }}
+            transition={rt(reduced, SPRING_SNAPPY)}
         >
             <div className="flex px-6 py-4 justify-between items-center border-b border-white/[0.06]">
                 <div className="flex items-center gap-2">
                     <Star size={14} className="text-amber-400" />
-                    <h2 id="review-modal-title" className="text-sm font-medium text-[#E9E9E9] tracking-wide">
-                        How was your experience with Natively?
+                    <h2 id="review-modal-title-review" className="text-sm font-medium text-[#E9E9E9] tracking-wide">
+                        How's Natively working for you?
                     </h2>
                 </div>
-                <button
+                <motion.button
                     onClick={onClose}
                     aria-label="Close"
-                    className="text-[#71717A] hover:text-white transition-colors bg-white/5 hover:bg-white/10 p-1.5 rounded-full"
+                    whileHover={reduced ? undefined : { scale: 1.05 }}
+                    whileTap={reduced ? undefined : { scale: 0.92 }}
+                    transition={SPRING_BOUNCY}
+                    className="text-[#71717A] hover:text-white transition-colors bg-white/5 hover:bg-white/10 p-1.5 rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
                 >
                     <X size={14} />
-                </button>
+                </motion.button>
             </div>
-            <div className="px-8 pt-6 pb-2 space-y-6">
-                <p className="text-[#A1A1AA] text-[13px]">Your feedback helps improve Natively.</p>
-
+            <div className="px-8 pt-6 pb-6 space-y-6">
                 {/* Star rating */}
-                <div className="flex flex-col items-center gap-2 py-2">
+                <div
+                    className="flex flex-col items-center gap-2 py-2"
+                    onMouseLeave={() => setHoverRating(0)}
+                >
                     <div
                         className="flex gap-1.5"
                         role="radiogroup"
                         aria-label="Star rating"
                     >
-                        {[1, 2, 3, 4, 5].map((n) => {
+                        {[1, 2, 3, 4, 5].map((n, i) => {
                             const filled = n <= (hoverRating || rating)
                             return (
-                                <button
+                                <motion.button
                                     key={n}
                                     role="radio"
                                     aria-checked={rating === n}
                                     aria-label={`${n} star${n > 1 ? "s" : ""}`}
-                                    onMouseEnter={() => setHoverRating(n)}
-                                    onMouseLeave={() => setHoverRating(0)}
+                                    data-review-star={n}
+                                    initial={{ opacity: 0, scale: reduced ? 1 : 0.4 }}
+                                    animate={{ opacity: 1, scale: 1 }}
+                                    transition={{
+                                        ...(reduced ? { duration: 0 } : SPRING_BOUNCY),
+                                        delay: reduced ? 0 : 0.04 + i * 0.05,
+                                    }}
+                                    whileHover={reduced || submitting ? undefined : { scale: 1.22 }}
+                                    whileTap={reduced || submitting ? undefined : { scale: 0.85 }}
+                                    onMouseEnter={() => !submitting && setHoverRating(n)}
                                     onClick={() => setRating(n)}
-                                    className="p-1 rounded transition-transform hover:scale-110 focus:outline-none focus:ring-2 focus:ring-amber-400/40"
+                                    onKeyDown={(e) => handleStarKey(e, n)}
                                     disabled={submitting}
+                                    className="p-1.5 rounded transition-shadow focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/80"
                                 >
-                                    <Star
-                                        size={32}
-                                        className={filled ? "text-amber-400 fill-amber-400" : "text-[#3F3F46]"}
-                                        strokeWidth={1.5}
-                                    />
-                                </button>
+                                    <motion.span
+                                        animate={{
+                                            opacity: filled ? 1 : 0.38,
+                                            scale: filled ? 1 : reduced ? 1 : 0.88,
+                                        }}
+                                        transition={reduced ? { duration: 0 } : {
+                                            opacity: { duration: 0.14 },
+                                            scale: SPRING_BOUNCY,
+                                        }}
+                                        style={{ display: "block" }}
+                                    >
+                                        <Star
+                                            size={32}
+                                            className={filled ? "text-amber-400 fill-amber-400" : "text-[#3F3F46]"}
+                                            strokeWidth={1.5}
+                                        />
+                                    </motion.span>
+                                </motion.button>
                             )
                         })}
                     </div>
-                    <span className="text-[12px] text-[#71717A] h-4" aria-live="polite">{ratingLabel}</span>
+                    <AnimatePresence mode="wait">
+                        <motion.span
+                            key={ratingLabel}
+                            initial={{ opacity: 0, y: 3 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: -3 }}
+                            transition={{ duration: 0.15 }}
+                            className="text-[12px] text-[#71717A] h-4"
+                            aria-live="polite"
+                        >
+                            {ratingLabel}
+                        </motion.span>
+                    </AnimatePresence>
                 </div>
 
                 {/* Review text */}
                 <div className="space-y-1.5">
-                    <label htmlFor="review-text" className="block text-[12px] font-medium text-[#A1A1AA]">
-                        What stood out? <span className="text-[#52525B]">(optional)</span>
+                    <label htmlFor="review-text" className="block text-[12px] font-medium text-[#71717A]">
+                        What stood out?
                     </label>
                     <textarea
                         id="review-text"
                         ref={textareaRef}
                         value={text}
-                        onChange={(e) => setText(e.target.value.slice(0, MAX_CHARS))}
+                        onChange={(e) => setText(e.target.value.slice(0, maxChars))}
                         placeholder="Tell us what worked, what didn't, what surprised you…"
-                        rows={4}
+                        rows={3}
                         disabled={submitting}
-                        className={`w-full bg-[#0A0A0A]/60 text-[#E9E9E9] placeholder-[#52525B] text-[13px] rounded-lg border px-3 py-2 resize-none focus:outline-none focus:ring-2 transition-colors ${
+                        className={`w-full bg-[#0A0A0A]/60 text-[#E9E9E9] placeholder-[#52525B] text-[13px] rounded-lg border px-3 py-2 resize-none focus:outline-none transition-colors ${
                             textOver
-                                ? "border-red-500/60 focus:ring-red-400/40"
-                                : "border-white/10 focus:border-white/20 focus:ring-white/10"
+                                ? "border-red-500/60"
+                                : "border-white/10 focus:border-white/20"
                         }`}
                         aria-invalid={textOver}
-                        aria-describedby="review-counter"
                     />
-                    <div
-                        id="review-counter"
-                        className={`flex justify-between text-[11px] ${textOver ? "text-red-400" : remaining <= 30 ? "text-amber-400" : "text-[#52525B]"}`}
-                    >
-                        <span>{textOver ? "Too long by " + Math.abs(remaining) + " characters" : " "}</span>
-                        <span>{text.length} / {MAX_CHARS}</span>
-                    </div>
+                    <AnimatePresence>
+                        {showCounter && (
+                            <motion.div
+                                key="counter"
+                                initial={{ opacity: 0, height: 0 }}
+                                animate={{ opacity: 1, height: "auto" }}
+                                exit={{ opacity: 0, height: 0 }}
+                                transition={SPRING_SNAPPY}
+                                className="overflow-hidden"
+                            >
+                                <div
+                                    className={`flex justify-end text-[11px] ${
+                                        textOver ? "text-red-400"
+                                            : remaining <= 40 ? "text-amber-400"
+                                            : "text-[#71717A]"
+                                    }`}
+                                >
+                                    <span>
+                                        {textOver
+                                            ? `${Math.abs(remaining)} over`
+                                            : `${text.length} / ${maxChars}`}
+                                    </span>
+                                </div>
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
                 </div>
 
                 {/* Error */}
-                {error && (
-                    <div role="alert" className="text-[12px] text-red-400 bg-red-500/10 border border-red-500/20 rounded-md px-3 py-2">
-                        {error}
-                    </div>
-                )}
+                <AnimatePresence>
+                    {error && (
+                        <motion.div
+                            key="error"
+                            role="alert"
+                            initial={{ opacity: 0, y: -6, height: 0 }}
+                            animate={{ opacity: 1, y: 0, height: "auto" }}
+                            exit={{ opacity: 0, y: -4, height: 0 }}
+                            transition={SPRING_SNAPPY}
+                            className="overflow-hidden"
+                        >
+                            <div className="text-[12px] text-red-400 bg-red-500/10 border border-red-500/20 rounded-md px-3 py-2">
+                                {error}
+                            </div>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
 
                 {/* Submit */}
-                <button
+                <motion.button
                     onClick={onSubmit}
                     disabled={!canSubmit}
-                    className="w-full py-2.5 rounded-lg text-[13px] font-medium transition-colors bg-amber-500 hover:bg-amber-400 disabled:bg-[#27272A] disabled:text-[#52525B] disabled:cursor-not-allowed text-black"
+                    whileHover={reduced || !canSubmit ? undefined : { y: -1, filter: "brightness(1.07)" }}
+                    whileTap={reduced || !canSubmit ? undefined : { scale: 0.97 }}
+                    transition={SPRING_SNAPPY}
+                    className="w-full py-2.5 rounded-lg text-[13px] font-medium transition-colors bg-amber-500 hover:bg-amber-400 disabled:bg-[#27272A] disabled:text-[#71717A] disabled:cursor-not-allowed text-black focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
                 >
                     {submitting ? (
                         <span className="inline-flex items-center gap-2">
-                            <span className="w-3.5 h-3.5 rounded-full border-2 border-black/40 border-t-black animate-spin" />
-                            Submitting…
+                            <motion.span
+                                animate={reduced ? {} : { rotate: 360 }}
+                                transition={{ duration: 0.8, repeat: Infinity, ease: "linear" }}
+                                className="block w-3.5 h-3.5 rounded-full border-2 border-black/30 border-t-black"
+                            />
+                            Sharing…
                         </span>
                     ) : (
-                        "Submit feedback"
+                        "Share feedback"
                     )}
-                </button>
+                </motion.button>
+
+                <div className="flex items-center justify-center gap-3 pt-1">
+                    <motion.button
+                        type="button"
+                        onClick={onDismissLater}
+                        disabled={submitting}
+                        whileHover={reduced ? undefined : { opacity: 0.82 }}
+                        whileTap={reduced ? undefined : { scale: 0.96 }}
+                        transition={{ duration: 0.10 }}
+                        className="text-[12px] text-[#A1A1AA] hover:text-white transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:underline"
+                    >
+                        Maybe later
+                    </motion.button>
+                    <span className="text-[#3F3F46] text-[11px]">•</span>
+                    <motion.button
+                        type="button"
+                        onClick={onDismissForever}
+                        disabled={submitting}
+                        whileHover={reduced ? undefined : { opacity: 0.82 }}
+                        whileTap={reduced ? undefined : { scale: 0.96 }}
+                        transition={{ duration: 0.10 }}
+                        className="text-[12px] text-[#71717A] hover:text-white transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:underline"
+                    >
+                        Never ask again
+                    </motion.button>
+                </div>
             </div>
-            <ModalFooter />
         </motion.div>
     )
 }
@@ -473,247 +638,333 @@ interface StepTestimonialProps {
     onSave: () => void
     onSkip: () => void
     onClose: () => void
+    reduced: boolean
 }
 
 const StepTestimonial: React.FC<StepTestimonialProps> = ({
     name, setName, role, setRole, company, setCompany,
-    prefillName, prefillRole, prefillCompany,
+    prefillName = "", prefillRole = "", prefillCompany = "",
     namePrefillSuggested, rolePrefillSuggested, companyPrefillSuggested,
     onAcceptNamePrefill, onAcceptRolePrefill, onAcceptCompanyPrefill,
-    canUsePublicly, setCanUsePublicly,
-    displayNamePublicly, setDisplayNamePublicly,
-    busy, error, onSave, onSkip, onClose,
+    canUsePublicly, setCanUsePublicly, displayNamePublicly, setDisplayNamePublicly,
+    busy, error,
+    onSave, onSkip, onClose, reduced,
 }) => {
     return (
         <motion.div
-            initial={{ opacity: 0, x: 12 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: -12 }}
-            transition={{ duration: 0.25 }}
+            initial={{ opacity: 0, y: reduced ? 0 : 8, scale: reduced ? 1 : 0.99 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: reduced ? 0 : -6, scale: reduced ? 1 : 0.99 }}
+            transition={rt(reduced, SPRING_SNAPPY)}
         >
             <div className="flex px-6 py-4 justify-between items-center border-b border-white/[0.06]">
                 <div className="flex items-center gap-2">
-                    <ShieldCheck size={14} className="text-emerald-400" />
-                    <h2 id="review-modal-title" className="text-sm font-medium text-[#E9E9E9] tracking-wide">
-                        Can we use this as a public testimonial?
+                    <Star size={14} className="text-amber-400" />
+                    <h2 id="review-modal-title-testimonial" className="text-sm font-medium text-[#E9E9E9] tracking-wide">
+                        Share as a testimonial?
                     </h2>
                 </div>
-                <button
+                <motion.button
                     onClick={onClose}
                     aria-label="Close"
-                    className="text-[#71717A] hover:text-white transition-colors bg-white/5 hover:bg-white/10 p-1.5 rounded-full"
+                    whileHover={reduced ? undefined : { scale: 1.05 }}
+                    whileTap={reduced ? undefined : { scale: 0.92 }}
+                    transition={SPRING_BOUNCY}
+                    className="text-[#71717A] hover:text-white transition-colors bg-white/5 hover:bg-white/10 p-1.5 rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
                 >
                     <X size={14} />
-                </button>
+                </motion.button>
             </div>
+            <p className="px-8 pt-4 text-[12px] text-[#71717A]">All optional — you can stay anonymous.</p>
+            <div className="px-8 pt-4 pb-6 space-y-4">
+                <Field
+                    label="Name"
+                    value={name}
+                    onChange={setName}
+                    suggestion={prefillName?.trim() ?? ""}
+                    onAcceptSuggestion={onAcceptNamePrefill}
+                    isSuggestionAvailable={namePrefillSuggested}
+                    disabled={busy}
+                    reduced={reduced}
+                />
+                <Field
+                    label="Role / Title"
+                    value={role}
+                    onChange={setRole}
+                    suggestion={prefillRole?.trim() ?? ""}
+                    onAcceptSuggestion={onAcceptRolePrefill}
+                    isSuggestionAvailable={rolePrefillSuggested}
+                    disabled={busy}
+                    reduced={reduced}
+                />
+                <Field
+                    label="Company"
+                    value={company}
+                    onChange={setCompany}
+                    suggestion={prefillCompany?.trim() ?? ""}
+                    onAcceptSuggestion={onAcceptCompanyPrefill}
+                    isSuggestionAvailable={companyPrefillSuggested}
+                    disabled={busy}
+                    reduced={reduced}
+                />
 
-            <div className="px-8 pt-6 pb-2 space-y-5">
-                <p className="text-[#A1A1AA] text-[13px]">
-                    Totally optional. You can stay anonymous, share just your first name, or include your full name and role.
-                </p>
-
-                <div className="space-y-3">
-                    <Field
-                        label="Name"
-                        optional
-                        placeholder="e.g. Alex Chen"
-                        value={name}
-                        onChange={setName}
-                        maxLength={80}
-                        disabled={busy}
-                        suggestion={namePrefillSuggested ? prefillName : undefined}
-                        onAcceptSuggestion={onAcceptNamePrefill}
-                    />
-                    <Field
-                        label="Role / Title"
-                        optional
-                        placeholder="e.g. Senior Engineer"
-                        value={role}
-                        onChange={setRole}
-                        maxLength={80}
-                        disabled={busy}
-                        suggestion={rolePrefillSuggested ? prefillRole : undefined}
-                        onAcceptSuggestion={onAcceptRolePrefill}
-                    />
-                    <Field
-                        label="Company"
-                        optional
-                        placeholder="e.g. Acme"
-                        value={company}
-                        onChange={setCompany}
-                        maxLength={80}
-                        disabled={busy}
-                        suggestion={companyPrefillSuggested ? prefillCompany : undefined}
-                        onAcceptSuggestion={onAcceptCompanyPrefill}
-                    />
-                </div>
-
-                <div className="space-y-3 pt-2">
+                <div className="space-y-2 pt-2">
                     <Checkbox
                         checked={canUsePublicly}
                         onChange={setCanUsePublicly}
+                        label="Allow Natively to use this review publicly"
                         disabled={busy}
-                        label="Allow Natively to use this review on the website, social posts, or marketing"
+                        reduced={reduced}
                     />
-                    <Checkbox
-                        checked={displayNamePublicly}
-                        onChange={setDisplayNamePublicly}
-                        disabled={busy || !canUsePublicly}
-                        label="Show my name publicly"
-                        hint={!canUsePublicly ? "Enable public use first" : (displayNamePublicly ? "Your name appears on the testimonial" : "Shown as Anonymous Natively user")}
-                    />
+                    <div className={canUsePublicly ? "" : "opacity-50 pointer-events-none"}>
+                        <Checkbox
+                            checked={displayNamePublicly}
+                            onChange={setDisplayNamePublicly}
+                            label="Show my name publicly"
+                            disabled={busy || !canUsePublicly}
+                            hint={canUsePublicly
+                                ? "Otherwise shown as Anonymous Natively user."
+                                : "Enable public use first."}
+                            reduced={reduced}
+                        />
+                    </div>
                 </div>
 
-                {error && (
-                    <div role="alert" className="text-[12px] text-red-400 bg-red-500/10 border border-red-500/20 rounded-md px-3 py-2">
-                        {error}
-                    </div>
-                )}
+                <AnimatePresence>
+                    {error && (
+                        <motion.div
+                            key="error"
+                            role="alert"
+                            initial={{ opacity: 0, y: -6, height: 0 }}
+                            animate={{ opacity: 1, y: 0, height: "auto" }}
+                            exit={{ opacity: 0, y: -4, height: 0 }}
+                            transition={SPRING_SNAPPY}
+                            className="overflow-hidden"
+                        >
+                            <div className="text-[12px] text-red-400 bg-red-500/10 border border-red-500/20 rounded-md px-3 py-2">
+                                {error}
+                            </div>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
 
-                <div className="flex gap-2 pt-1">
-                    <button
+                <div className="flex items-center gap-2 pt-1">
+                    <motion.button
                         onClick={onSave}
                         disabled={busy}
-                        className="flex-1 py-2.5 rounded-lg text-[13px] font-medium transition-colors bg-emerald-500 hover:bg-emerald-400 disabled:bg-[#27272A] disabled:text-[#52525B] disabled:cursor-not-allowed text-black"
+                        whileHover={reduced || busy ? undefined : { y: -1 }}
+                        whileTap={reduced || busy ? undefined : { scale: 0.97 }}
+                        transition={SPRING_SNAPPY}
+                        className="flex-1 py-2.5 rounded-lg text-[13px] font-medium transition-colors bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-black focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
                     >
-                        {busy ? "Saving…" : canUsePublicly ? "Save details" : "Save"}
-                    </button>
-                    <button
+                        {busy ? (
+                            <span className="inline-flex items-center justify-center gap-2">
+                                <motion.span
+                                    animate={reduced ? {} : { rotate: 360 }}
+                                    transition={{ duration: 0.8, repeat: Infinity, ease: "linear" }}
+                                    className="block w-3.5 h-3.5 rounded-full border-2 border-black/30 border-t-black"
+                                />
+                                Saving…
+                            </span>
+                        ) : "Save"}
+                    </motion.button>
+                    <motion.button
                         onClick={onSkip}
                         disabled={busy}
-                        className="px-4 py-2.5 rounded-lg text-[13px] font-medium transition-colors bg-white/5 hover:bg-white/10 text-[#E9E9E9]"
+                        whileHover={reduced || busy ? undefined : { y: -1 }}
+                        whileTap={reduced || busy ? undefined : { scale: 0.97 }}
+                        transition={SPRING_SNAPPY}
+                        className="flex-1 py-2.5 rounded-lg text-[13px] font-medium transition-colors bg-white/5 hover:bg-white/10 text-[#E9E9E9] disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
                     >
                         Keep anonymous
-                    </button>
+                    </motion.button>
                 </div>
 
-                <p className="text-[11px] text-[#71717A] flex items-start gap-1.5">
-                    <Lock size={11} className="mt-px shrink-0" />
-                    We never publish or share your review without your explicit permission. You can ask us to remove it at any time.
-                </p>
+                <div className="flex items-start gap-2 pt-1 text-[11px] text-[#71717A]">
+                    <Lock size={11} className="mt-[2px] shrink-0" aria-hidden />
+                    <span>We never publish without permission. Request removal anytime.</span>
+                </div>
             </div>
         </motion.div>
     )
 }
 
-// ─── Step 3: thanks ──────────────────────────────────────────────────────
+// ─── Field + Checkbox helpers ────────────────────────────────────────────
+
+interface FieldProps {
+    label: string
+    value: string
+    onChange: (s: string) => void
+    suggestion: string
+    onAcceptSuggestion: () => void
+    isSuggestionAvailable: boolean
+    disabled: boolean
+    reduced: boolean
+}
+
+const Field: React.FC<FieldProps> = ({ label, value, onChange, suggestion, onAcceptSuggestion, isSuggestionAvailable, disabled, reduced }) => {
+    return (
+        <div className="space-y-1">
+            <label className="block text-[12px] font-medium text-[#71717A]">{label}</label>
+            <input
+                value={value}
+                onChange={(e) => onChange(e.target.value)}
+                disabled={disabled}
+                className="w-full bg-[#0A0A0A]/60 text-[#E9E9E9] placeholder-[#52525B] text-[13px] rounded-lg border border-white/10 focus:border-white/20 px-3 py-2 focus:outline-none transition-colors focus:ring-2 focus:ring-white/10"
+            />
+            <AnimatePresence>
+                {isSuggestionAvailable && suggestion && (
+                    <motion.button
+                        key="prefill-chip"
+                        type="button"
+                        initial={reduced ? { opacity: 0 } : { opacity: 0, y: 4, scale: 0.92 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={reduced ? { opacity: 0 } : { opacity: 0, y: 2, scale: 0.95 }}
+                        transition={SPRING_BOUNCY}
+                        whileHover={reduced ? undefined : { scale: 1.02 }}
+                        whileTap={reduced ? undefined : { scale: 0.96 }}
+                        onClick={onAcceptSuggestion}
+                        className="inline-flex items-center gap-1.5 text-[11px] text-[#71717A] hover:text-[#A1A1AA] bg-white/5 hover:bg-white/10 border border-white/[0.06] rounded-full px-2.5 py-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
+                    >
+                        <span className="italic text-[#A1A1AA]">Use suggested:</span>
+                        <span className="truncate max-w-[180px]">{suggestion}</span>
+                    </motion.button>
+                )}
+            </AnimatePresence>
+        </div>
+    )
+}
+
+interface CheckboxProps {
+    checked: boolean
+    onChange: (b: boolean) => void
+    label: string
+    hint?: string
+    disabled: boolean
+    reduced: boolean
+}
+
+const Checkbox: React.FC<CheckboxProps> = ({ checked, onChange, label, hint, disabled, reduced }) => {
+    return (
+        <label className={`flex items-start gap-3 select-none ${disabled ? "cursor-not-allowed" : "cursor-pointer"}`}>
+            <span className="relative mt-0.5 inline-flex w-4 h-4 shrink-0">
+                <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={(e) => onChange(e.target.checked)}
+                    disabled={disabled}
+                    className="sr-only peer"
+                />
+                <span
+                    className={`absolute inset-0 rounded border transition-colors duration-150 ${
+                        checked ? "bg-amber-500 border-amber-400" : "bg-transparent border-white/20"
+                    } peer-focus-visible:ring-2 peer-focus-visible:ring-amber-400/60`}
+                    aria-hidden
+                />
+                <AnimatePresence>
+                    {checked && (
+                        <motion.svg
+                            key="check"
+                            width="10" height="10" viewBox="0 0 24 24"
+                            fill="none" stroke="currentColor"
+                            initial={reduced ? { opacity: 0 } : { scale: 0.4, opacity: 0 }}
+                            animate={{ scale: 1, opacity: 1 }}
+                            exit={reduced ? { opacity: 0 } : { scale: 0.4, opacity: 0 }}
+                            transition={reduced ? { duration: 0 } : SPRING_BOUNCY}
+                            className="absolute inset-0 m-auto text-black"
+                            aria-hidden
+                        >
+                            <motion.polyline
+                                points="20 6 9 17 4 12"
+                                initial={{ pathLength: 0 }}
+                                animate={{ pathLength: 1 }}
+                                transition={{ duration: 0.18, ease: "easeOut" }}
+                            />
+                        </motion.svg>
+                    )}
+                </AnimatePresence>
+            </span>
+            <div className="flex flex-col">
+                <span className={`text-[13px] ${disabled ? "text-[#71717A]" : "text-[#E9E9E9]"}`}>{label}</span>
+                {hint && <span className="text-[11px] text-[#71717A] mt-0.5">{hint}</span>}
+            </div>
+        </label>
+    )
+}
+
+// ─── Step 3: thanks ───────────────────────────────────────────────────────
 
 interface StepThanksProps {
     canUsePublicly: boolean
     displayNamePublicly: boolean
     onClose: () => void
+    reduced: boolean
 }
 
-const StepThanks: React.FC<StepThanksProps> = ({ canUsePublicly, displayNamePublicly, onClose }) => {
+const StepThanks: React.FC<StepThanksProps> = ({ canUsePublicly, displayNamePublicly, onClose, reduced }) => {
     return (
         <motion.div
-            initial={{ opacity: 0, scale: 0.96 }}
-            animate={{ opacity: 1, scale: 1 }}
+            initial={{ opacity: 0, scale: reduced ? 1 : 0.92, y: reduced ? 0 : 14 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0 }}
-            transition={{ duration: 0.3 }}
+            transition={rt(reduced, SPRING_SNAPPY)}
             className="flex flex-col items-center text-center px-8 py-10 space-y-4"
         >
-            <div className="w-14 h-14 rounded-full bg-emerald-500/20 flex items-center justify-center">
-                <ShieldCheck size={28} className="text-emerald-400" />
-            </div>
-            <h3 className="text-lg font-medium text-[#E9E9E9]">Thank you!</h3>
-            <p className="text-[13px] text-[#A1A1AA] max-w-[320px]">
+            <motion.div
+                className="relative w-14 h-14 rounded-full bg-amber-500/20 flex items-center justify-center"
+                initial={reduced ? { opacity: 0 } : { opacity: 0, scale: 0.6 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{
+                    ...(reduced ? { duration: 0 } : SPRING_CELEBRATE),
+                    delay: reduced ? 0 : 0.08,
+                }}
+            >
+                <CheckCircle2 size={28} className="text-amber-400" aria-hidden />
+            </motion.div>
+
+            <motion.h3
+                className="text-lg font-medium text-[#E9E9E9]"
+                initial={reduced ? { opacity: 0 } : { opacity: 0, y: 9 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{
+                    ...(reduced ? { duration: 0 } : SPRING_SNAPPY),
+                    delay: reduced ? 0 : 0.18,
+                }}
+            >
+                Thanks for your feedback
+            </motion.h3>
+
+            <motion.p
+                className="text-[13px] text-[#71717A] max-w-[320px]"
+                initial={reduced ? { opacity: 0 } : { opacity: 0, y: 7 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{
+                    ...(reduced ? { duration: 0 } : SPRING_SNAPPY),
+                    delay: reduced ? 0 : 0.26,
+                }}
+            >
                 {canUsePublicly
-                    ? "Your review was submitted. " + (displayNamePublicly ? "Your name will appear on the testimonial." : "It will appear as Anonymous Natively user.")
-                    : "Your feedback was saved privately. We won't show it anywhere public."}
-            </p>
-            <button
+                    ? (displayNamePublicly
+                        ? "Your name will appear alongside the testimonial."
+                        : "It will appear as Anonymous Natively user.")
+                    : "Your feedback was saved. We'll keep it private."}
+            </motion.p>
+
+            <motion.button
                 onClick={onClose}
-                className="mt-2 px-6 py-2 rounded-lg text-[13px] font-medium bg-white/5 hover:bg-white/10 text-[#E9E9E9] transition-colors"
+                initial={reduced ? { opacity: 0 } : { opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{
+                    ...(reduced ? { duration: 0 } : SPRING_SNAPPY),
+                    delay: reduced ? 0 : 0.36,
+                }}
+                whileHover={reduced ? undefined : { y: -1, filter: "brightness(1.1)" }}
+                whileTap={reduced ? undefined : { scale: 0.97 }}
+                className="mt-2 px-6 py-2 rounded-lg text-[13px] font-medium bg-white/5 hover:bg-white/10 text-[#E9E9E9] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
             >
-                Close
-            </button>
+                Done
+            </motion.button>
         </motion.div>
-    )
-}
-
-// ─── Reusable bits ───────────────────────────────────────────────────────
-
-const Field: React.FC<{
-    label: string
-    optional?: boolean
-    placeholder?: string
-    value: string
-    onChange: (s: string) => void
-    maxLength?: number
-    disabled?: boolean
-    suggestion?: string
-    onAcceptSuggestion?: () => void
-}> = ({ label, optional, placeholder, value, onChange, maxLength, disabled, suggestion, onAcceptSuggestion }) => (
-    <div className="space-y-1">
-        <label className="block text-[12px] font-medium text-[#A1A1AA]">
-            {label} {optional && <span className="text-[#52525B]">(optional)</span>}
-        </label>
-        <input
-            type="text"
-            value={value}
-            onChange={(e) => onChange(e.target.value)}
-            placeholder={placeholder}
-            maxLength={maxLength}
-            disabled={disabled}
-            className="w-full bg-[#0A0A0A]/60 text-[#E9E9E9] placeholder-[#52525B] text-[13px] rounded-lg border border-white/10 focus:border-white/20 focus:outline-none focus:ring-2 focus:ring-white/10 px-3 py-2 transition-colors"
-        />
-        {/* Soft-prefill (audit HIGH #3): only render the suggestion chip
-            when there's an actual prefill available AND the field is still
-            empty. Clicking copies the prefill into the field, otherwise it
-            remains unused and is NOT persisted. */}
-        {suggestion && onAcceptSuggestion && (
-            <button
-                type="button"
-                onClick={onAcceptSuggestion}
-                className="inline-flex items-center gap-1.5 text-[11px] text-[#71717A] hover:text-[#A1A1AA] bg-white/5 hover:bg-white/10 border border-white/[0.06] rounded-full px-2.5 py-1 transition-colors"
-                title="Click to use this suggestion"
-            >
-                <span className="italic text-[#A1A1AA]">Use suggested:</span>
-                <span className="truncate max-w-[180px]">{suggestion}</span>
-            </button>
-        )}
-    </div>
-)
-
-const Checkbox: React.FC<{
-    checked: boolean
-    onChange: (b: boolean) => void
-    label: string
-    hint?: string
-    disabled?: boolean
-}> = ({ checked, onChange, label, hint, disabled }) => (
-    <label className={`flex items-start gap-3 ${disabled ? "opacity-60 cursor-not-allowed" : "cursor-pointer"} select-none`}>
-        <span className={`mt-0.5 inline-flex w-4 h-4 shrink-0 rounded border ${checked ? "bg-emerald-500 border-emerald-400" : "bg-transparent border-white/20"} items-center justify-center transition-colors`}>
-            {checked && (
-                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className="text-black">
-                    <polyline points="20 6 9 17 4 12" />
-                </svg>
-            )}
-        </span>
-        <input
-            type="checkbox"
-            checked={checked}
-            onChange={(e) => onChange(e.target.checked)}
-            disabled={disabled}
-            className="sr-only"
-        />
-        <span className="flex flex-col">
-            <span className="text-[13px] text-[#E9E9E9]">{label}</span>
-            {hint && <span className="text-[11px] text-[#71717A] mt-0.5">{hint}</span>}
-        </span>
-    </label>
-)
-
-const ModalFooter: React.FC = () => {
-    // Used as the divider on the review step — privacy footer is rendered on
-    // the testimonial step instead, since that's where the permission lives.
-    return (
-        <div className="px-8 py-4 mt-2 border-t border-white/[0.04]">
-            <p className="text-[11px] text-[#52525B] text-center">
-                Your review stays private until you give explicit permission.
-            </p>
-        </div>
     )
 }
 

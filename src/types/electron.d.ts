@@ -139,6 +139,7 @@ export interface ElectronAPI {
       dismissed_count: number;
       dont_show_again: boolean;
       last_prompted_at: string | null;
+      last_dismissed_at: string | null;
       next_eligible_at: string | null;
       session_count: number;
       total_usage_ms: number;
@@ -148,7 +149,7 @@ export interface ElectronAPI {
     error?: string;
   }>
   reviewRecordSession: () => Promise<{ ok: boolean; error?: string }>
-  reviewFlushSession: () => Promise<{ ok: boolean; totals?: { session_count: number; total_usage_ms: number }; error?: string }>
+  reviewFlushSession: () => Promise<{ ok: boolean; totals?: { session_count: number; total_usage_ms: number; usage_ms: number; counted: boolean }; error?: string }>
   reviewMarkShown: () => Promise<{ ok: boolean; error?: string }>
   reviewDismissLater: () => Promise<{ ok: boolean; error?: string }>
   reviewDismissForever: () => Promise<{ ok: boolean; error?: string }>

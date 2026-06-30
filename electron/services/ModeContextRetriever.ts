@@ -83,6 +83,14 @@ interface RetrieveOptions extends ModeRetrievalOptions {
 
 const DEFAULT_TOKEN_BUDGET = 1800;
 const DEFAULT_TOP_K = 6;
+// Document-grounded custom mode retrieves from large PDFs (50-200 pages).
+// Default limits (topK=6, budget=1800) were calibrated for short seminar
+// notes; they leave most of the thesis unread. These higher limits apply
+// automatically when forceDocumentGrounding=true and the caller didn't
+// pass a larger explicit value.
+// Exported so ipcHandlers.ts and LLMHelper.ts can reference the same values.
+export const DOC_GROUNDED_TOKEN_BUDGET = 3600;
+export const DOC_GROUNDED_TOP_K = 12;
 const MIN_RELEVANCE_SCORE = 0.18;
 const CHUNK_WORDS = 140;
 const CHUNK_OVERLAP = 30;
@@ -960,8 +968,15 @@ export class ModeContextRetriever {
 
         const selected: ModeRetrievedSnippet[] = [];
         let tokenTotal = 0;
-        const tokenBudget = options.tokenBudget ?? DEFAULT_TOKEN_BUDGET;
-        const topK = options.topK ?? DEFAULT_TOP_K;
+        // When forceDocumentGrounding is active and the caller left the limits at
+        // defaults, upgrade to the larger doc-grounded limits so large PDFs get
+        // enough chunks to cover the full answer. Explicit caller overrides win.
+        const tokenBudget = options.tokenBudget != null
+            ? options.tokenBudget
+            : (forceDocumentGrounding ? DOC_GROUNDED_TOKEN_BUDGET : DEFAULT_TOKEN_BUDGET);
+        const topK = options.topK != null
+            ? options.topK
+            : (forceDocumentGrounding ? DOC_GROUNDED_TOP_K : DEFAULT_TOP_K);
 
         for (const candidate of candidates) {
             const tokens = estimateTokens(candidate.text);

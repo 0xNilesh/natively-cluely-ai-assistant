@@ -5915,10 +5915,16 @@ async function initializeApp() {
   initializeIpcHandlers(appState)
 
   // Start the in-app review session ledger. This is intentionally main-process
-  // owned so renderer reloads don't double-count app sessions.
+  // owned so renderer reloads don't double-count app sessions. Also sync the
+  // backend prompt-state once so cross-install dismissals/reviews are honored.
   try {
-    const { ReviewService } = require('./services/ReviewService');
-    ReviewService.getInstance().recordSessionStart();
+    const { ReviewService, getReviewApiKey, getReviewHardwareId } = require('./services/ReviewService');
+    const reviewService = ReviewService.getInstance();
+    reviewService.recordSessionStart();
+    const apiKey = getReviewApiKey();
+    getReviewHardwareId()
+      .then((hwid: string | null) => reviewService.syncWithBackend(apiKey, hwid))
+      .catch(() => {});
   } catch (err) {
     console.warn('[Init] ReviewService recordSessionStart failed (non-fatal):', err);
   }
@@ -6311,8 +6317,15 @@ if (process.env.THINKING_MATRIX === '1') {
     // re-prompted on next launch. Idempotent with the renderer's
     // beforeunload path (which also calls review:flush-session).
     try {
-      const { ReviewService } = require('./services/ReviewService');
-      ReviewService.getInstance().beforeQuit();
+      const { ReviewService, getReviewApiKey, getReviewHardwareId } = require('./services/ReviewService');
+      const reviewService = ReviewService.getInstance();
+      const totals = reviewService.beforeQuit();
+      if (totals.counted) {
+        const apiKey = getReviewApiKey();
+        getReviewHardwareId()
+          .then((hwid: string | null) => reviewService.reportUsage(apiKey, hwid, totals.usage_ms))
+          .catch(() => {});
+      }
     } catch { /* optional */ }
 
     // Stop the default-output watcher so the setInterval doesn't keep calling
@@ -6394,20 +6407,6 @@ if (process.env.THINKING_MATRIX === '1') {
       console.error('[Main] PhoneMirror dispose failed:', err)
     );
 
-    // Flush review prompt session usage before credentials are scrubbed. The
-    // network sync is best-effort; the local state file is flushed synchronously.
-    try {
-      const { ReviewService, getReviewApiKey, getReviewHardwareId } = require('./services/ReviewService');
-      const reviewService = ReviewService.getInstance();
-      const totals = reviewService.recordSessionEnd();
-      reviewService.flush();
-      const apiKey = getReviewApiKey();
-      getReviewHardwareId()
-        .then((hwid: string | null) => reviewService.reportUsage(apiKey, hwid, totals.session_count, totals.total_usage_ms))
-        .catch(() => {});
-    } catch (e) {
-      console.error('[Main] Failed to flush review session on quit:', e);
-    }
 
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
