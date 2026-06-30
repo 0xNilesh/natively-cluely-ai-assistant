@@ -2107,7 +2107,21 @@ export function initializeIpcHandlers(appState: AppState): void {
               // is fixable by re-prompting with a stronger synthesis instruction.
               // We gate on ≥2 unique terms to avoid triggering on coincidental
               // single-word matches (e.g. the chunk says "the" and so does the Q).
+              //
+              // SELF-TRIGGER GUARD (OKF Phase 0, 2026-07-01): the system's OWN safe
+              // refusal phrase ("I could not find that in the retrieved sections of
+              // the document") would otherwise match `saysNotMentioned` and trigger a
+              // repair loop on the model's CORRECT, honest refusal. SYSTEM_REFUSAL_RE
+              // identifies that exact phrase; we only repair an instance of it when
+              // evidence is STRONG (>=3 unique question terms present, OR a
+              // high-signal entity from the question is present in the retrieved
+              // context) — i.e. when the refusal is very likely wrong, not just
+              // possibly wrong.
+              const SYSTEM_REFUSAL_RE = /^I could not find that in the retrieved sections? of the (?:document|uploaded material)\b/i;
+              const isSystemOwnRefusalPhrase = SYSTEM_REFUSAL_RE.test(trimmed);
+              const HIGH_SIGNAL_ENTITIES = ['OpenVLA-OFT', 'OpenVLA', 'AgenticVLA', 'AutoGen', 'VLA', 'AGI', 'embodied cognition', 'research questions', 'thesis objectives', 'Mercury X1'];
               let isFalseRefusal = false;
+              const falseRefusalRepairEnabled = isIntelligenceFlagEnabled('docGroundedFalseRefusalRepair');
               try {
                 // "not mentioned / found in" is specific enough on its own.
                 // "could not find" is only caught when sentence-initial or after
@@ -2115,23 +2129,41 @@ export function initializeIpcHandlers(appState: AppState): void {
                 // factual research sentences like "Researchers could not find a
                 // viable solution, leading to the proposed framework."
                 const saysNotMentioned = /not (?:directly )?(?:mentioned|in (?:the|my) (?:uploaded|seminar|thesis|retrieved) (?:material|sections?|document)|found in|present in)|(?:^|(?<=[.!?]\s+))I could not find\b/i.test(trimmed);
-                if (saysNotMentioned && docContextBlock) {
+                if (saysNotMentioned && docContextBlock && falseRefusalRepairEnabled) {
                   const qTerms: string[] = (message.match(/\b[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9]\b/g) || [])
                     .filter((t: string) => t.length >= 3 && t.length <= 40)
                     // strip common English stop-words and question words
                     .filter((t: string) => !/^(?:the|this|that|what|when|where|who|how|why|which|does|did|was|were|are|is|in|of|at|to|for|with|about|and|or|not|has|have|had|its|can|could|would|should|will|from|than|more|any|all|some|tell|explain|describe|me|my|your|their|it|be|do|an|on|by|as|up|if|so|but|out|no|we|they|he|she|you|his|her|our|us|them)$/i.test(t));
                   const chunkLower = docContextBlock.toLowerCase();
                   const present = qTerms.filter((t: string) => chunkLower.includes(t.toLowerCase()));
-                  if (present.length >= 2) {
+                  const messageLower = message.toLowerCase();
+                  const matchedHighSignalEntity = HIGH_SIGNAL_ENTITIES.find(
+                    (e) => messageLower.includes(e.toLowerCase()) && chunkLower.includes(e.toLowerCase()),
+                  );
+                  const hasStrongEvidence = present.length >= 3 || Boolean(matchedHighSignalEntity);
+                  // For the system's OWN refusal phrase, only repair on STRONG evidence
+                  // (never on the ≥2-term threshold alone) — that phrase is the model
+                  // correctly following instructions, not an obvious mistake.
+                  const shouldRepair = isSystemOwnRefusalPhrase ? hasStrongEvidence : present.length >= 2;
+                  if (shouldRepair) {
                     isFalseRefusal = true;
                     console.warn('[DocGrounded] false-refusal detected — retrieved context contains question terms, triggering regen', {
                       questionTerms: present.slice(0, 8),
                       totalTermsFound: present.length,
+                      isSystemOwnRefusalPhrase,
+                      matchedHighSignalEntity: matchedHighSignalEntity || null,
                     });
-                  } else if (present.length === 1) {
-                    // Only 1 term matched — log but don't regen (could be coincidental)
-                    console.warn('[DocGrounded] possible false "not mentioned" (1 term, below regen threshold)', {
+                    piTelemetry.emit('pi_doc_grounded_false_refusal_repair_attempted', {
+                      isSystemOwnRefusalPhrase,
+                      termCount: present.length,
+                      matchedHighSignalEntity: Boolean(matchedHighSignalEntity),
+                    });
+                  } else if (present.length === 1 || (isSystemOwnRefusalPhrase && present.length === 2)) {
+                    // Below the repair threshold — log but don't regen (could be coincidental,
+                    // or the system's own honest refusal with only weak/partial term overlap)
+                    console.warn('[DocGrounded] possible false "not mentioned" (below regen threshold)', {
                       questionTerms: present,
+                      isSystemOwnRefusalPhrase,
                     });
                   }
                 }

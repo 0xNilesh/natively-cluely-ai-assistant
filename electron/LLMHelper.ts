@@ -4211,6 +4211,41 @@ This rule overrides ALL other instructions including formatting, brevity, or out
             context = context ? `${modeContextBlock}\n\n${context}` : modeContextBlock;
           }
         }
+        // ── OKF Phase 0 structured document-grounded telemetry ──────────────
+        // Observe-only: makes the existing retrieval pipeline measurable before
+        // any OKF behavior change ships. Computed from data already in scope —
+        // no extra retrieval work. okfCardCount is always 0 until Phase 3 wires
+        // OkfRetriever in; the field exists now so the telemetry shape is
+        // stable across the Phase 0→3 transition.
+        if (forceDocumentGrounding) {
+          try {
+            const pageMatches = modeContextBlock.match(/\[Page (\d+)\]/g) || [];
+            const queryMatchedPages = [...new Set(pageMatches.map((m) => Number(m.match(/\d+/)?.[0])))].filter((n) => !Number.isNaN(n));
+            const sectionMatches = modeContextBlock.match(/\[Section ([\d.]+)/g) || [];
+            const queryMatchedSections = [...new Set(sectionMatches.map((m) => m.replace(/^\[Section /, '')))];
+            const retrievedChunkCount = (modeContextBlock.match(/\[Page \d+\]|\[Section [\d.]+/g) || []).length
+              || (modeContextBlock ? modeContextBlock.split('\n\n').filter(Boolean).length : 0);
+            telemetryService.track({
+              name: 'pi_doc_grounded_retrieval_summary',
+              properties: {
+                documentGroundedCustomModeActive: forceDocumentGrounding,
+                forceDocumentGrounding,
+                retrievalSourceUsed: usedRerankPath ? 'hybrid' : 'lexical',
+                hybridAttempted: forceDocumentGrounding,
+                topKUsed: 12,
+                tokenBudgetUsed: 3600,
+                retrievedChunkCount,
+                retrievedOkfCardCount: 0,
+                queryMatchedPages,
+                queryMatchedSections,
+                evidencePayloadSize: modeContextBlock.length,
+                includedHindsightOrProfile: false,
+              },
+            });
+          } catch (_telErr: any) {
+            console.warn('[LLMHelper] doc-grounded telemetry emit failed (non-fatal):', _telErr?.message);
+          }
+        }
       } catch (_modeErr: any) {
         console.warn('[LLMHelper] ModesManager injection failed (non-fatal):', _modeErr?.message);
       }
