@@ -891,6 +891,16 @@ interface ElectronAPI {
     modeId: string,
   ) => Promise<{ success: boolean; statuses?: Array<{ fileId: string; fileName: string; status: string; chunkCount: number }>; error?: string }>;
   onModeFileIndexStatus: (callback: (data: { modeId: string; fileId?: string }) => void) => () => void;
+  onKnowledgeIndexProgress: (callback: (data: { fileId: string; status: string; startedAt?: number; finishedAt?: number; error?: string }) => void) => () => void;
+  knowledgeListPacks: (modeId: string) => Promise<{ success: boolean; packs: Array<{ id: string; sourceId: string; fileName: string; cardCount: number; entityCount: number; relationCount: number; packVersion: number; updatedAt: string }>; error?: string }>;
+  knowledgeGetPack: (fileId: string) => Promise<{ success: boolean; pack: any | null; error?: string }>;
+  knowledgeRegeneratePack: (params: { fileId: string; modeId: string; fileName: string }) => Promise<{ success: boolean; status?: string; pack?: any; error?: string }>;
+  knowledgeExportPack: (fileId: string) => Promise<{ success: boolean; cancelled?: boolean; exportedFileCount?: number; destRoot?: string; error?: string }>;
+  knowledgeEditCard: (params: { cardId: string; title?: string; body?: string; entities?: string[]; tags?: string[] }) => Promise<{ success: boolean; card?: any; error?: string }>;
+  knowledgeApproveCard: (cardId: string) => Promise<{ success: boolean; card?: any; error?: string }>;
+  knowledgeRejectCard: (cardId: string) => Promise<{ success: boolean; card?: any; error?: string }>;
+  knowledgeRestoreCardVersion: (params: { cardId: string; versionId: string }) => Promise<{ success: boolean; card?: any; error?: string }>;
+  knowledgeGetCardHistory: (cardId: string) => Promise<{ success: boolean; versions: any[]; error?: string }>;
   modesGetNoteSections: (modeId: string) => Promise<
     Array<{
       id: string;
@@ -2360,11 +2370,30 @@ contextBridge.exposeInMainWorld('electronAPI', {
   modesDeleteReferenceFile: (id: string) => ipcRenderer.invoke('modes:delete-reference-file', id),
   modesGetReferenceFileStatus: (modeId: string) =>
     ipcRenderer.invoke('modes:get-reference-file-status', modeId),
+  knowledgeListPacks: (modeId: string) => ipcRenderer.invoke('knowledge:list-packs', modeId),
+  knowledgeGetPack: (fileId: string) => ipcRenderer.invoke('knowledge:get-pack', fileId),
+  knowledgeRegeneratePack: (params: { fileId: string; modeId: string; fileName: string }) =>
+    ipcRenderer.invoke('knowledge:regenerate-pack', params),
+  knowledgeExportPack: (fileId: string) => ipcRenderer.invoke('knowledge:export-pack', fileId),
+  knowledgeEditCard: (params: { cardId: string; title?: string; body?: string; entities?: string[]; tags?: string[] }) =>
+    ipcRenderer.invoke('knowledge:edit-card', params),
+  knowledgeApproveCard: (cardId: string) => ipcRenderer.invoke('knowledge:approve-card', cardId),
+  knowledgeRejectCard: (cardId: string) => ipcRenderer.invoke('knowledge:reject-card', cardId),
+  knowledgeRestoreCardVersion: (params: { cardId: string; versionId: string }) =>
+    ipcRenderer.invoke('knowledge:restore-card-version', params),
+  knowledgeGetCardHistory: (cardId: string) => ipcRenderer.invoke('knowledge:get-card-history', cardId),
   onModeFileIndexStatus: (callback: (data: { modeId: string; fileId?: string }) => void) => {
     const subscription = (_: any, data: { modeId: string; fileId?: string }) => callback(data);
     ipcRenderer.on('mode-file-index-status', subscription);
     return () => {
       ipcRenderer.removeListener('mode-file-index-status', subscription);
+    };
+  },
+  onKnowledgeIndexProgress: (callback: (data: { fileId: string; status: string; startedAt?: number; finishedAt?: number; error?: string }) => void) => {
+    const subscription = (_: any, data: any) => callback(data);
+    ipcRenderer.on('knowledge-index-progress', subscription);
+    return () => {
+      ipcRenderer.removeListener('knowledge-index-progress', subscription);
     };
   },
   modesGetNoteSections: (modeId: string) => ipcRenderer.invoke('modes:get-note-sections', modeId),

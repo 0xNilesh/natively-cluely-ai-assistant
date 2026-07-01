@@ -753,6 +753,162 @@ export class DatabaseManager {
             this.db.pragma('user_version = 19');
         }
 
+        if (version < 20) {
+            // OKF Hybrid Knowledge System (Phase 2, 2026-07-01): structured,
+            // source-attributed "Knowledge Packs" (OKF-compatible Knowledge
+            // Bundles) generated from uploaded reference files, layered ON TOP
+            // of (never replacing) mode_reference_files / mode_reference_chunks.
+            // All FKs cascade on mode/source deletion so a deleted reference
+            // file's pack/cards/entities/relations are cleaned up automatically.
+            console.log('[DatabaseManager] Applying migration v19 → v20: Add OKF knowledge_* tables');
+            this.db.exec(`
+                CREATE TABLE IF NOT EXISTS knowledge_sources (
+                    id TEXT PRIMARY KEY,
+                    type TEXT NOT NULL DEFAULT 'reference_file',
+                    file_id TEXT,
+                    mode_id TEXT,
+                    file_name TEXT,
+                    source_checksum TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    indexed_at TEXT,
+                    page_count INTEGER,
+                    extracted_page_count INTEGER,
+                    index_version TEXT NOT NULL DEFAULT 'knowledge_pack_v1',
+                    embedding_space TEXT,
+                    FOREIGN KEY(file_id) REFERENCES mode_reference_files(id) ON DELETE CASCADE,
+                    FOREIGN KEY(mode_id) REFERENCES modes(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_knowledge_sources_file_id ON knowledge_sources(file_id);
+                CREATE INDEX IF NOT EXISTS idx_knowledge_sources_mode_id ON knowledge_sources(mode_id);
+
+                CREATE TABLE IF NOT EXISTS knowledge_packs (
+                    id TEXT PRIMARY KEY,
+                    source_id TEXT NOT NULL,
+                    mode_id TEXT NOT NULL,
+                    file_name TEXT NOT NULL,
+                    index_md TEXT NOT NULL DEFAULT '',
+                    stats_json TEXT NOT NULL DEFAULT '{}',
+                    pack_version INTEGER NOT NULL DEFAULT 1,
+                    generated_by TEXT NOT NULL DEFAULT 'okf_extractor_v1',
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(source_id) REFERENCES knowledge_sources(id) ON DELETE CASCADE,
+                    FOREIGN KEY(mode_id) REFERENCES modes(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_knowledge_packs_source_id ON knowledge_packs(source_id);
+                CREATE INDEX IF NOT EXISTS idx_knowledge_packs_mode_id ON knowledge_packs(mode_id);
+
+                CREATE TABLE IF NOT EXISTS knowledge_cards (
+                    id TEXT PRIMARY KEY,
+                    pack_id TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    slug TEXT NOT NULL,
+                    concept_id TEXT NOT NULL,
+                    body TEXT NOT NULL DEFAULT '',
+                    body_markdown TEXT,
+                    source_pages_json TEXT NOT NULL DEFAULT '[]',
+                    source_sections_json TEXT NOT NULL DEFAULT '[]',
+                    source_quotes_json TEXT NOT NULL DEFAULT '[]',
+                    entities_json TEXT NOT NULL DEFAULT '[]',
+                    tags_json TEXT NOT NULL DEFAULT '[]',
+                    related_card_ids_json TEXT NOT NULL DEFAULT '[]',
+                    confidence TEXT NOT NULL DEFAULT 'medium',
+                    generated_from TEXT NOT NULL DEFAULT 'pdf_extraction',
+                    source_checksum TEXT NOT NULL,
+                    user_edited INTEGER NOT NULL DEFAULT 0,
+                    approval_status TEXT NOT NULL DEFAULT 'generated',
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    card_version INTEGER NOT NULL DEFAULT 1,
+                    FOREIGN KEY(pack_id) REFERENCES knowledge_packs(id) ON DELETE CASCADE,
+                    FOREIGN KEY(source_id) REFERENCES knowledge_sources(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_knowledge_cards_pack_id ON knowledge_cards(pack_id);
+                CREATE INDEX IF NOT EXISTS idx_knowledge_cards_source_id ON knowledge_cards(source_id);
+                CREATE INDEX IF NOT EXISTS idx_knowledge_cards_concept_id ON knowledge_cards(concept_id);
+                CREATE INDEX IF NOT EXISTS idx_knowledge_cards_type ON knowledge_cards(type);
+
+                CREATE TABLE IF NOT EXISTS knowledge_entities (
+                    id TEXT PRIMARY KEY,
+                    pack_id TEXT NOT NULL,
+                    slug TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    type TEXT NOT NULL DEFAULT 'concept',
+                    aliases_json TEXT NOT NULL DEFAULT '[]',
+                    description TEXT NOT NULL DEFAULT '',
+                    source_card_ids_json TEXT NOT NULL DEFAULT '[]',
+                    source_pages_json TEXT NOT NULL DEFAULT '[]',
+                    first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(pack_id) REFERENCES knowledge_packs(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_knowledge_entities_pack_id ON knowledge_entities(pack_id);
+                CREATE INDEX IF NOT EXISTS idx_knowledge_entities_slug ON knowledge_entities(slug);
+
+                CREATE TABLE IF NOT EXISTS knowledge_relations (
+                    id TEXT PRIMARY KEY,
+                    pack_id TEXT NOT NULL,
+                    subject_id TEXT NOT NULL,
+                    subject_type TEXT NOT NULL,
+                    predicate TEXT NOT NULL,
+                    object_id TEXT NOT NULL,
+                    object_type TEXT NOT NULL,
+                    source_card_ids_json TEXT NOT NULL DEFAULT '[]',
+                    source_pages_json TEXT NOT NULL DEFAULT '[]',
+                    confidence TEXT NOT NULL DEFAULT 'medium',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(pack_id) REFERENCES knowledge_packs(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_knowledge_relations_pack_id ON knowledge_relations(pack_id);
+                CREATE INDEX IF NOT EXISTS idx_knowledge_relations_subject_id ON knowledge_relations(subject_id);
+
+                CREATE TABLE IF NOT EXISTS knowledge_index_versions (
+                    id TEXT PRIMARY KEY,
+                    source_id TEXT NOT NULL,
+                    pack_id TEXT,
+                    pack_version INTEGER NOT NULL DEFAULT 1,
+                    content_hash TEXT NOT NULL,
+                    embedding_space TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    error_message TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(source_id) REFERENCES knowledge_sources(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_knowledge_index_versions_source_id ON knowledge_index_versions(source_id);
+            `);
+            this.db.pragma('user_version = 20');
+        }
+
+        if (version < 21) {
+            // OKF Phase 6 (2026-07-01): user edits and approval workflow.
+            // knowledge_card_versions preserves EVERY prior card body (both
+            // generated and user-edited) so an edit can always be reverted to
+            // the original generated card, never destructively overwriting
+            // history. approval_status/user_edited columns already exist on
+            // knowledge_cards (added in v19→v20); this migration adds the
+            // version-history table those columns' UI depends on.
+            console.log('[DatabaseManager] Applying migration v20 → v21: Add knowledge_card_versions table');
+            this.db.exec(`
+                CREATE TABLE IF NOT EXISTS knowledge_card_versions (
+                    id TEXT PRIMARY KEY,
+                    card_id TEXT NOT NULL,
+                    card_version INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    entities_json TEXT NOT NULL DEFAULT '[]',
+                    tags_json TEXT NOT NULL DEFAULT '[]',
+                    confidence TEXT NOT NULL DEFAULT 'medium',
+                    edited_by TEXT NOT NULL DEFAULT 'system',
+                    edit_reason TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(card_id) REFERENCES knowledge_cards(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_knowledge_card_versions_card_id ON knowledge_card_versions(card_id);
+            `);
+            this.db.pragma('user_version = 21');
+        }
+
         console.log('[DatabaseManager] Migrations completed.');
     }
 
@@ -937,6 +1093,312 @@ export class DatabaseManager {
         } catch (e) {
             console.error('[DatabaseManager] deleteReferenceFile failed:', e);
         }
+    }
+
+    // ── OKF Knowledge Packs (Phase 2) ───────────────────────────────
+    // CRUD for knowledge_sources/knowledge_packs/knowledge_cards/knowledge_entities/
+    // knowledge_relations/knowledge_index_versions. All rows cascade-delete via FK
+    // when the owning mode_reference_files / modes row is deleted — see migration
+    // v19→v20. Row shapes are intentionally untyped (`any`) at this layer; typed
+    // mapping happens in electron/services/knowledge/KnowledgePackStore.ts.
+
+    public upsertKnowledgeSource(source: {
+        id: string; type: string; fileId?: string; modeId?: string; fileName?: string;
+        sourceChecksum: string; contentHash: string; indexedAt?: string;
+        pageCount?: number; extractedPageCount?: number; indexVersion?: string; embeddingSpace?: string;
+    }): void {
+        if (!this.db) throw new Error('Database not initialized');
+        this.db.prepare(`
+            INSERT INTO knowledge_sources (id, type, file_id, mode_id, file_name, source_checksum, content_hash, indexed_at, page_count, extracted_page_count, index_version, embedding_space)
+            VALUES (@id, @type, @fileId, @modeId, @fileName, @sourceChecksum, @contentHash, @indexedAt, @pageCount, @extractedPageCount, @indexVersion, @embeddingSpace)
+            ON CONFLICT(id) DO UPDATE SET
+                source_checksum = excluded.source_checksum,
+                content_hash = excluded.content_hash,
+                indexed_at = excluded.indexed_at,
+                page_count = excluded.page_count,
+                extracted_page_count = excluded.extracted_page_count,
+                index_version = excluded.index_version,
+                embedding_space = excluded.embedding_space
+        `).run({
+            id: source.id, type: source.type, fileId: source.fileId ?? null, modeId: source.modeId ?? null,
+            fileName: source.fileName ?? null, sourceChecksum: source.sourceChecksum, contentHash: source.contentHash,
+            indexedAt: source.indexedAt ?? null, pageCount: source.pageCount ?? null, extractedPageCount: source.extractedPageCount ?? null,
+            indexVersion: source.indexVersion ?? 'knowledge_pack_v1', embeddingSpace: source.embeddingSpace ?? null,
+        });
+    }
+
+    public getKnowledgeSourceByFileId(fileId: string): any | null {
+        if (!this.db) return null;
+        return this.db.prepare('SELECT * FROM knowledge_sources WHERE file_id = ? ORDER BY created_at DESC LIMIT 1').get(fileId) || null;
+    }
+
+    public getKnowledgeSourceById(id: string): any | null {
+        if (!this.db) return null;
+        return this.db.prepare('SELECT * FROM knowledge_sources WHERE id = ?').get(id) || null;
+    }
+
+    public getKnowledgeSourcesByModeId(modeId: string): any[] {
+        if (!this.db) return [];
+        return this.db.prepare('SELECT * FROM knowledge_sources WHERE mode_id = ?').all(modeId);
+    }
+
+    /**
+     * Explicit cascade delete for a knowledge_sources row and everything
+     * hanging off it (packs, cards, entities, relations, index versions).
+     * This codebase never enables `PRAGMA foreign_keys = ON` (confirmed:
+     * zero references anywhere in electron/), so the `ON DELETE CASCADE`
+     * clauses declared on these tables in the v19→v20/v20→v21 migrations are
+     * inert — SQLite silently ignores FK actions when enforcement is off. A
+     * bare `DELETE FROM knowledge_sources` would leave every dependent row
+     * permanently orphaned (unreclaimable disk growth, since a re-upload
+     * mints a fresh random file id that never matches the orphaned rows).
+     * Deletes in dependency order (children before the pack, pack before
+     * the source) inside one transaction so a mid-delete failure can't
+     * leave a partially-cleaned pack.
+     */
+    public deleteKnowledgeSource(id: string): void {
+        if (!this.db) return;
+        const txn = this.db.transaction(() => {
+            const packs = this.db!.prepare('SELECT id FROM knowledge_packs WHERE source_id = ?').all(id) as Array<{ id: string }>;
+            for (const { id: packId } of packs) {
+                this.db!.prepare('DELETE FROM knowledge_relations WHERE pack_id = ?').run(packId);
+                this.db!.prepare('DELETE FROM knowledge_entities WHERE pack_id = ?').run(packId);
+                // knowledge_card_versions cascades off knowledge_cards.id, not pack_id directly.
+                this.db!.prepare(`
+                    DELETE FROM knowledge_card_versions
+                    WHERE card_id IN (SELECT id FROM knowledge_cards WHERE pack_id = ?)
+                `).run(packId);
+                this.db!.prepare('DELETE FROM knowledge_cards WHERE pack_id = ?').run(packId);
+            }
+            this.db!.prepare('DELETE FROM knowledge_packs WHERE source_id = ?').run(id);
+            this.db!.prepare('DELETE FROM knowledge_index_versions WHERE source_id = ?').run(id);
+            this.db!.prepare('DELETE FROM knowledge_sources WHERE id = ?').run(id);
+        });
+        txn();
+    }
+
+    public upsertKnowledgePack(pack: {
+        id: string; sourceId: string; modeId: string; fileName: string;
+        indexMd: string; statsJson: string; packVersion: number; generatedBy: string;
+    }): void {
+        if (!this.db) throw new Error('Database not initialized');
+        this.db.prepare(`
+            INSERT INTO knowledge_packs (id, source_id, mode_id, file_name, index_md, stats_json, pack_version, generated_by, updated_at)
+            VALUES (@id, @sourceId, @modeId, @fileName, @indexMd, @statsJson, @packVersion, @generatedBy, CURRENT_TIMESTAMP)
+            ON CONFLICT(id) DO UPDATE SET
+                index_md = excluded.index_md,
+                stats_json = excluded.stats_json,
+                pack_version = excluded.pack_version,
+                updated_at = CURRENT_TIMESTAMP
+        `).run(pack);
+    }
+
+    public getKnowledgePackBySourceId(sourceId: string): any | null {
+        if (!this.db) return null;
+        return this.db.prepare('SELECT * FROM knowledge_packs WHERE source_id = ? ORDER BY updated_at DESC LIMIT 1').get(sourceId) || null;
+    }
+
+    public getKnowledgePacksByModeId(modeId: string): any[] {
+        if (!this.db) return [];
+        return this.db.prepare('SELECT * FROM knowledge_packs WHERE mode_id = ? ORDER BY updated_at DESC').all(modeId);
+    }
+
+    public deleteKnowledgePack(id: string): void {
+        if (!this.db) return;
+        this.db.prepare('DELETE FROM knowledge_packs WHERE id = ?').run(id);
+    }
+
+    public replaceKnowledgeCards(packId: string, sourceId: string, cards: Array<{
+        id: string; type: string; title: string; slug: string; conceptId: string;
+        body: string; bodyMarkdown?: string; sourcePagesJson: string; sourceSectionsJson: string;
+        sourceQuotesJson: string; entitiesJson: string; tagsJson: string; relatedCardIdsJson: string;
+        confidence: string; generatedFrom: string; sourceChecksum: string; cardVersion: number;
+    }>): void {
+        if (!this.db) throw new Error('Database not initialized');
+        const txn = this.db.transaction(() => {
+            // OKF Phase 6: a user-edited card whose source_checksum no longer
+            // matches the freshly-extracted content (the underlying document
+            // changed since the edit) is flagged needs_review instead of being
+            // silently kept stale or silently overwritten. The card body
+            // itself is left untouched — only the review flag changes.
+            const newChecksum = cards[0]?.sourceChecksum;
+            if (newChecksum) {
+                this.db!.prepare(`
+                    UPDATE knowledge_cards SET approval_status = 'needs_review'
+                    WHERE pack_id = ? AND user_edited = 1 AND source_checksum != ? AND approval_status != 'needs_review'
+                `).run(packId, newChecksum);
+            }
+            this.db!.prepare('DELETE FROM knowledge_cards WHERE pack_id = ? AND user_edited = 0').run(packId);
+            const ins = this.db!.prepare(`
+                INSERT INTO knowledge_cards (id, pack_id, source_id, type, title, slug, concept_id, body, body_markdown,
+                    source_pages_json, source_sections_json, source_quotes_json, entities_json, tags_json, related_card_ids_json,
+                    confidence, generated_from, source_checksum, updated_at, card_version)
+                VALUES (@id, @packId, @sourceId, @type, @title, @slug, @conceptId, @body, @bodyMarkdown,
+                    @sourcePagesJson, @sourceSectionsJson, @sourceQuotesJson, @entitiesJson, @tagsJson, @relatedCardIdsJson,
+                    @confidence, @generatedFrom, @sourceChecksum, CURRENT_TIMESTAMP, @cardVersion)
+                ON CONFLICT(id) DO UPDATE SET
+                    body = excluded.body, body_markdown = excluded.body_markdown,
+                    source_pages_json = excluded.source_pages_json, source_sections_json = excluded.source_sections_json,
+                    source_quotes_json = excluded.source_quotes_json, entities_json = excluded.entities_json,
+                    tags_json = excluded.tags_json, related_card_ids_json = excluded.related_card_ids_json,
+                    confidence = excluded.confidence, source_checksum = excluded.source_checksum,
+                    updated_at = CURRENT_TIMESTAMP, card_version = excluded.card_version
+                WHERE knowledge_cards.user_edited = 0
+            `);
+            for (const c of cards) {
+                ins.run({ ...c, packId, sourceId, bodyMarkdown: c.bodyMarkdown ?? null });
+            }
+        });
+        txn();
+    }
+
+    public getKnowledgeCardsByPackId(packId: string): any[] {
+        if (!this.db) return [];
+        return this.db.prepare('SELECT * FROM knowledge_cards WHERE pack_id = ? ORDER BY rowid ASC').all(packId);
+    }
+
+    public replaceKnowledgeEntities(packId: string, entities: Array<{
+        id: string; slug: string; name: string; type: string; aliasesJson: string;
+        description: string; sourceCardIdsJson: string; sourcePagesJson: string;
+    }>): void {
+        if (!this.db) throw new Error('Database not initialized');
+        const txn = this.db.transaction(() => {
+            this.db!.prepare('DELETE FROM knowledge_entities WHERE pack_id = ?').run(packId);
+            // Defense-in-depth: OkfExtractor.extractEntityCards is the
+            // primary dedup boundary (keys by slugify(name), matching this
+            // row's id derivation), but a bare INSERT here would abort the
+            // WHOLE transaction — including the entities inserted before
+            // the colliding row — on any future extraction-side regression
+            // that reintroduces a duplicate slug. ON CONFLICT DO UPDATE
+            // makes a same-id collision within one pack a harmless
+            // last-write-wins merge instead of a thrown exception that
+            // silently drops every entity (see the 2026-07-01 "Mercury
+            // X1"/"The Mercury X1" incident this fixed at the source).
+            const ins = this.db!.prepare(`
+                INSERT INTO knowledge_entities (id, pack_id, slug, name, type, aliases_json, description, source_card_ids_json, source_pages_json)
+                VALUES (@id, @packId, @slug, @name, @type, @aliasesJson, @description, @sourceCardIdsJson, @sourcePagesJson)
+                ON CONFLICT(id) DO UPDATE SET
+                    slug = excluded.slug, name = excluded.name, type = excluded.type,
+                    aliases_json = excluded.aliases_json, description = excluded.description,
+                    source_card_ids_json = excluded.source_card_ids_json, source_pages_json = excluded.source_pages_json
+            `);
+            for (const e of entities) ins.run({ ...e, packId });
+        });
+        txn();
+    }
+
+    public getKnowledgeEntitiesByPackId(packId: string): any[] {
+        if (!this.db) return [];
+        return this.db.prepare('SELECT * FROM knowledge_entities WHERE pack_id = ? ORDER BY rowid ASC').all(packId);
+    }
+
+    public replaceKnowledgeRelations(packId: string, relations: Array<{
+        id: string; subjectId: string; subjectType: string; predicate: string; objectId: string; objectType: string;
+        sourceCardIdsJson: string; sourcePagesJson: string; confidence: string;
+    }>): void {
+        if (!this.db) throw new Error('Database not initialized');
+        const txn = this.db.transaction(() => {
+            this.db!.prepare('DELETE FROM knowledge_relations WHERE pack_id = ?').run(packId);
+            // Defense-in-depth: same reasoning as replaceKnowledgeEntities
+            // above — GraphExtractor already dedupes relations by
+            // `${subjectId}|${predicate}|${objectId}` before emitting, but a
+            // bare INSERT here would still abort the whole transaction (and
+            // drop every relation already inserted) on any future
+            // extraction-side regression. ON CONFLICT DO UPDATE degrades a
+            // same-id collision to a harmless merge instead.
+            const ins = this.db!.prepare(`
+                INSERT INTO knowledge_relations (id, pack_id, subject_id, subject_type, predicate, object_id, object_type, source_card_ids_json, source_pages_json, confidence)
+                VALUES (@id, @packId, @subjectId, @subjectType, @predicate, @objectId, @objectType, @sourceCardIdsJson, @sourcePagesJson, @confidence)
+                ON CONFLICT(id) DO UPDATE SET
+                    subject_id = excluded.subject_id, subject_type = excluded.subject_type,
+                    predicate = excluded.predicate, object_id = excluded.object_id, object_type = excluded.object_type,
+                    source_card_ids_json = excluded.source_card_ids_json, source_pages_json = excluded.source_pages_json,
+                    confidence = excluded.confidence
+            `);
+            for (const r of relations) ins.run({ ...r, packId });
+        });
+        txn();
+    }
+
+    public getKnowledgeRelationsByPackId(packId: string): any[] {
+        if (!this.db) return [];
+        return this.db.prepare('SELECT * FROM knowledge_relations WHERE pack_id = ? ORDER BY rowid ASC').all(packId);
+    }
+
+    public upsertKnowledgeIndexVersion(v: {
+        id: string; sourceId: string; packId?: string; packVersion: number; contentHash: string;
+        embeddingSpace?: string; status: string; errorMessage?: string;
+    }): void {
+        if (!this.db) throw new Error('Database not initialized');
+        this.db.prepare(`
+            INSERT INTO knowledge_index_versions (id, source_id, pack_id, pack_version, content_hash, embedding_space, status, error_message, updated_at)
+            VALUES (@id, @sourceId, @packId, @packVersion, @contentHash, @embeddingSpace, @status, @errorMessage, CURRENT_TIMESTAMP)
+            ON CONFLICT(id) DO UPDATE SET
+                pack_id = excluded.pack_id, pack_version = excluded.pack_version, content_hash = excluded.content_hash,
+                embedding_space = excluded.embedding_space, status = excluded.status, error_message = excluded.error_message,
+                updated_at = CURRENT_TIMESTAMP
+        `).run({
+            id: v.id, sourceId: v.sourceId, packId: v.packId ?? null, packVersion: v.packVersion,
+            contentHash: v.contentHash, embeddingSpace: v.embeddingSpace ?? null, status: v.status,
+            errorMessage: v.errorMessage ?? null,
+        });
+    }
+
+    public getKnowledgeIndexVersionBySourceId(sourceId: string): any | null {
+        if (!this.db) return null;
+        return this.db.prepare('SELECT * FROM knowledge_index_versions WHERE source_id = ? ORDER BY updated_at DESC LIMIT 1').get(sourceId) || null;
+    }
+
+    // ── OKF Knowledge Card edit/approval (Phase 6) ──────────────────
+
+    public getKnowledgeCardById(id: string): any | null {
+        if (!this.db) return null;
+        return this.db.prepare('SELECT * FROM knowledge_cards WHERE id = ?').get(id) || null;
+    }
+
+    /**
+     * Snapshots the card's CURRENT row into knowledge_card_versions, then
+     * applies the edit and marks the card user_edited=1 (so it survives the
+     * next regenerate() call's `WHERE user_edited = 0` guard). Called before
+     * every edit/approve/reject so the prior state is never lost.
+     */
+    public snapshotKnowledgeCardVersion(cardId: string, editedBy: string, editReason?: string): void {
+        if (!this.db) return;
+        const card = this.getKnowledgeCardById(cardId);
+        if (!card) return;
+        this.db.prepare(`
+            INSERT INTO knowledge_card_versions (id, card_id, card_version, title, body, entities_json, tags_json, confidence, edited_by, edit_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+            `kcv_${cardId}_v${card.card_version}_${Date.now()}`,
+            cardId, card.card_version, card.title, card.body, card.entities_json, card.tags_json, card.confidence,
+            editedBy, editReason ?? null,
+        );
+    }
+
+    public getKnowledgeCardVersions(cardId: string): any[] {
+        if (!this.db) return [];
+        return this.db.prepare('SELECT * FROM knowledge_card_versions WHERE card_id = ? ORDER BY created_at DESC').all(cardId);
+    }
+
+    public updateKnowledgeCard(id: string, updates: {
+        title?: string; body?: string; entitiesJson?: string; tagsJson?: string; confidence?: string;
+        userEdited?: boolean; approvalStatus?: string;
+    }): void {
+        if (!this.db) return;
+        const sets: string[] = [];
+        const values: any[] = [];
+        if (updates.title !== undefined) { sets.push('title = ?'); values.push(updates.title); }
+        if (updates.body !== undefined) { sets.push('body = ?'); values.push(updates.body); }
+        if (updates.entitiesJson !== undefined) { sets.push('entities_json = ?'); values.push(updates.entitiesJson); }
+        if (updates.tagsJson !== undefined) { sets.push('tags_json = ?'); values.push(updates.tagsJson); }
+        if (updates.confidence !== undefined) { sets.push('confidence = ?'); values.push(updates.confidence); }
+        if (updates.userEdited !== undefined) { sets.push('user_edited = ?'); values.push(updates.userEdited ? 1 : 0); }
+        if (updates.approvalStatus !== undefined) { sets.push('approval_status = ?'); values.push(updates.approvalStatus); }
+        if (sets.length === 0) return;
+        sets.push('card_version = card_version + 1', 'updated_at = CURRENT_TIMESTAMP');
+        values.push(id);
+        this.db.prepare(`UPDATE knowledge_cards SET ${sets.join(', ')} WHERE id = ?`).run(...values);
     }
 
     // ── Note Sections ─────────────────────────────────────────────

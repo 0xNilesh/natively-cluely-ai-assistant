@@ -3928,6 +3928,15 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     // by the real answer type). Absent → legacy behavior (no change).
     routeOptions?: StreamRouteOptions
   ): AsyncGenerator<string, void, unknown> {
+    // OKF Phase 1 (F7 fix): capture the caller-supplied `context` BEFORE the
+    // mode-injection block below mutates it by prepending modeContextBlock.
+    // For document-grounded answers this is the sanitized rolling-transcript
+    // snapshot (already stripped of prior-assistant turns by ipcHandlers.ts's
+    // stripPriorAssistantTurns) — passed through to
+    // buildDocumentGroundedUserContent as `priorContext`, explicitly labeled
+    // "for pronoun resolution only" so it can never be mistaken for document
+    // evidence.
+    const callerSuppliedContextForPriorResolution = context;
 
     // Stage timer (gated): isolates pre-stream work (knowledge intercept,
     // cache create) from provider TTFT. Set MEASURE_LATENCY=true to see it.
@@ -4068,6 +4077,9 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     // It is assigned inside the mode-injection block; '' when retrieval didn't
     // fire, in which case the shaping falls back to the standard CONTEXT: shape.
     let modeContextBlock = '';
+    // Hoisted alongside modeContextBlock (OKF Phase 3) so the telemetry block
+    // after the mode-injection try/catch can report which retrieval path won.
+    let usedRerankPath = false;
     // MODE-SCOPED answer types (manual regression 2026-06-12): a manual sales/
     // lecture turn NEEDS the active mode's voice + retrieved product material —
     // CHAT_MODE_PROMPT's blanket "universal override" skip left sales-mode
@@ -4100,8 +4112,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         // escalation (allowRerank=true). Default (flag off) → the existing sync
         // lexical retriever, byte-for-byte unchanged. The hybrid call is guarded
         // so any failure falls back to the sync path the manual flow always used.
-        // modeContextBlock hoisted to function scope above (round-6).
-        let usedRerankPath = false;
+        // modeContextBlock / usedRerankPath hoisted to function scope above (round-6 / OKF Phase 3).
         try {
           // eslint-disable-next-line @typescript-eslint/no-var-requires
           const { isRagLocalRerankEnabled } = require('./intelligence/intelligenceFlags');
@@ -4211,41 +4222,6 @@ This rule overrides ALL other instructions including formatting, brevity, or out
             context = context ? `${modeContextBlock}\n\n${context}` : modeContextBlock;
           }
         }
-        // ── OKF Phase 0 structured document-grounded telemetry ──────────────
-        // Observe-only: makes the existing retrieval pipeline measurable before
-        // any OKF behavior change ships. Computed from data already in scope —
-        // no extra retrieval work. okfCardCount is always 0 until Phase 3 wires
-        // OkfRetriever in; the field exists now so the telemetry shape is
-        // stable across the Phase 0→3 transition.
-        if (forceDocumentGrounding) {
-          try {
-            const pageMatches = modeContextBlock.match(/\[Page (\d+)\]/g) || [];
-            const queryMatchedPages = [...new Set(pageMatches.map((m) => Number(m.match(/\d+/)?.[0])))].filter((n) => !Number.isNaN(n));
-            const sectionMatches = modeContextBlock.match(/\[Section ([\d.]+)/g) || [];
-            const queryMatchedSections = [...new Set(sectionMatches.map((m) => m.replace(/^\[Section /, '')))];
-            const retrievedChunkCount = (modeContextBlock.match(/\[Page \d+\]|\[Section [\d.]+/g) || []).length
-              || (modeContextBlock ? modeContextBlock.split('\n\n').filter(Boolean).length : 0);
-            telemetryService.track({
-              name: 'pi_doc_grounded_retrieval_summary',
-              properties: {
-                documentGroundedCustomModeActive: forceDocumentGrounding,
-                forceDocumentGrounding,
-                retrievalSourceUsed: usedRerankPath ? 'hybrid' : 'lexical',
-                hybridAttempted: forceDocumentGrounding,
-                topKUsed: 12,
-                tokenBudgetUsed: 3600,
-                retrievedChunkCount,
-                retrievedOkfCardCount: 0,
-                queryMatchedPages,
-                queryMatchedSections,
-                evidencePayloadSize: modeContextBlock.length,
-                includedHindsightOrProfile: false,
-              },
-            });
-          } catch (_telErr: any) {
-            console.warn('[LLMHelper] doc-grounded telemetry emit failed (non-fatal):', _telErr?.message);
-          }
-        }
       } catch (_modeErr: any) {
         console.warn('[LLMHelper] ModesManager injection failed (non-fatal):', _modeErr?.message);
       }
@@ -4311,24 +4287,154 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     // causing the model to treat unrelated context as authoritative facts.
     // modeContextBlock is empty when retrieval didn't fire; in that case we
     // fall back to the standard CONTEXT: shape so we don't lose all signal.
+    // OKF Phase 3 (2026-07-01): when okfHybridRetrieval is on and the active
+    // mode is document-grounded, query OKF Knowledge Cards (generated in
+    // Phase 2) for this question and prepend them to the retrievedBlock —
+    // cards first (curated synthesis), raw chunks second (verbatim,
+    // win-on-conflict per OkfPromptFormatter). Falls through to the
+    // chunk-only block untouched on any failure or when no pack exists yet.
+    let evidenceBlockForPrompt = modeContextBlock;
+    let okfCardCountForTelemetry = 0;
+    if (forceDocumentGrounding) {
+      try {
+        const { isOkfHybridRetrievalEnabled } = require('./intelligence/intelligenceFlags');
+        if (isOkfHybridRetrievalEnabled()) {
+          const modesMgr = modesMgrForInjection || require('./services/ModesManager').ModesManager.getInstance();
+          const activeMode = modesMgr.getActiveMode?.();
+          if (activeMode) {
+            const { KnowledgeManager } = require('./services/knowledge/KnowledgeManager');
+            const { classifyQuestion } = require('./services/knowledge/QuestionClassifier');
+            const { queryOkfCards } = require('./services/knowledge/OkfRetriever');
+            const { formatCardsForPrompt, buildOkfEvidenceBlock } = require('./services/knowledge/OkfPromptFormatter');
+            const referenceFiles = modesMgr.getReferenceFiles?.(activeMode.id) || [];
+            const classification = classifyQuestion(message);
+            const km = KnowledgeManager.getInstance();
+            const allScoredCards: any[] = [];
+            const packsForGraphExpansion: any[] = [];
+            for (const file of referenceFiles) {
+              const pack = km.getPackForFile(file.id);
+              if (!pack || pack.cards.length === 0) continue;
+              const scored = queryOkfCards(pack, message, classification, { topN: 6, fileId: file.id });
+              allScoredCards.push(...scored);
+              packsForGraphExpansion.push(pack);
+            }
+            if (allScoredCards.length > 0) {
+              allScoredCards.sort((a, b) => b.score - a.score);
+              const topCards = allScoredCards.slice(0, 6);
+              okfCardCountForTelemetry = topCards.length;
+              const cardsBlock = formatCardsForPrompt(topCards);
+
+              // OKF Phase 4 (default OFF): graph expansion — related-concept
+              // HINTS only, never a citable fact on its own. Expands from the
+              // question's target entities up to depth 2 over each pack's
+              // relations. Appended AFTER the cards block so it never
+              // outranks direct card/chunk evidence in the prompt.
+              let graphHints = '';
+              try {
+                const { isOkfGraphExpansionEnabled } = require('./intelligence/intelligenceFlags');
+                if (isOkfGraphExpansionEnabled() && classification.targetEntities.length > 0) {
+                  const { resolveStartNodeIds, expandGraph, formatGraphHintsForPrompt } = require('./services/knowledge/GraphRetriever');
+                  const allHints: any[] = [];
+                  for (const pack of packsForGraphExpansion) {
+                    const startIds = resolveStartNodeIds(pack, classification.targetEntities);
+                    if (startIds.length === 0) continue;
+                    allHints.push(...expandGraph(pack, startIds, 2));
+                  }
+                  graphHints = formatGraphHintsForPrompt(allHints);
+                }
+              } catch (_graphErr: any) {
+                console.warn('[LLMHelper] OKF graph expansion skipped (non-fatal):', _graphErr?.message);
+              }
+
+              const combinedCardsBlock = graphHints ? `${cardsBlock}\n\n${graphHints}` : cardsBlock;
+              evidenceBlockForPrompt = buildOkfEvidenceBlock({ cardsBlock: combinedCardsBlock, rawChunkText: modeContextBlock });
+            }
+          }
+        }
+      } catch (_okfErr: any) {
+        console.warn('[LLMHelper] OKF card retrieval skipped (non-fatal):', _okfErr?.message);
+      }
+    }
+
+    // ── OKF Phase 0/3 structured document-grounded telemetry ────────────
+    // Observe-only: makes the retrieval pipeline (chunks AND OKF cards)
+    // measurable. No behavior change — purely descriptive of what was
+    // already decided above.
+    if (forceDocumentGrounding) {
+      try {
+        const pageMatches = modeContextBlock.match(/\[Page (\d+)\]/g) || [];
+        const queryMatchedPages = [...new Set(pageMatches.map((m) => Number(m.match(/\d+/)?.[0])))].filter((n) => !Number.isNaN(n));
+        const sectionMatches = modeContextBlock.match(/\[Section ([\d.]+)/g) || [];
+        const queryMatchedSections = [...new Set(sectionMatches.map((m) => m.replace(/^\[Section /, '')))];
+        const retrievedChunkCount = (modeContextBlock.match(/\[Page \d+\]|\[Section [\d.]+/g) || []).length
+          || (modeContextBlock ? modeContextBlock.split('\n\n').filter(Boolean).length : 0);
+        telemetryService.track({
+          name: 'pi_doc_grounded_retrieval_summary',
+          properties: {
+            documentGroundedCustomModeActive: forceDocumentGrounding,
+            forceDocumentGrounding,
+            retrievalSourceUsed: usedRerankPath ? 'hybrid' : 'lexical',
+            hybridAttempted: forceDocumentGrounding,
+            topKUsed: 12,
+            tokenBudgetUsed: 3600,
+            retrievedChunkCount,
+            retrievedOkfCardCount: okfCardCountForTelemetry,
+            queryMatchedPages,
+            queryMatchedSections,
+            evidencePayloadSize: evidenceBlockForPrompt.length,
+            includedHindsightOrProfile: false,
+          },
+        });
+      } catch (_telErr: any) {
+        console.warn('[LLMHelper] doc-grounded telemetry emit failed (non-fatal):', _telErr?.message);
+      }
+    }
+
     let userContent: string;
-    if (forceDocumentGrounding && modeContextBlock) {
+    if (forceDocumentGrounding && evidenceBlockForPrompt) {
       const { buildDocumentGroundedUserContent } = require('./llm/documentGroundedPrompt');
       const shaped = buildDocumentGroundedUserContent({
         question: message,
-        retrievedBlock: modeContextBlock,
+        retrievedBlock: evidenceBlockForPrompt,
+        // F7 fix: pass the sanitized prior-conversation snapshot so follow-up
+        // pronoun resolution ("what about the approach mentioned earlier?")
+        // works. buildDocumentGroundedUserContent labels this block
+        // "for pronoun resolution only — not a source of facts" so it can
+        // never be treated as document evidence.
+        priorContext: callerSuppliedContextForPriorResolution,
         active: true,
       });
       userContent = shaped || (combinedContext
         ? `CONTEXT:\n${combinedContext}\n\nUSER QUESTION:\n${message}`
         : message);
-    } else if (forceDocumentGrounding && combinedContext) {
-      // Doc-grounded path but retrieval returned nothing (e.g. no reference
-      // files, or all chunks below the relevance floor). Don't claim there
-      // is uploaded material — fall through to the standard CONTEXT: shape.
-      userContent = combinedContext
-        ? `CONTEXT:\n${combinedContext}\n\nUSER QUESTION:\n${message}`
-        : message;
+    } else if (forceDocumentGrounding) {
+      // OKF Phase 1 (F6 fix, docGroundedStrictIsolation): retrieval returned
+      // NOTHING (no reference files, or all chunks below the relevance
+      // floor). Previously this fell through to the generic CONTEXT: shape
+      // with combinedContext — which can carry Hindsight recall facts,
+      // rolling transcript, or other non-document context — under a header
+      // that implies it IS the uploaded material. That lets non-document
+      // context substitute for a missing doc-grounded answer (positive
+      // isolation gate from the OKF migration plan). When the gate is
+      // active we fail closed: answer from the priorContext (pronoun
+      // resolution only) plus an explicit instruction that nothing was
+      // retrieved, rather than silently promoting non-document context to
+      // document evidence.
+      const { isDocGroundedStrictIsolationEnabled } = require('./intelligence/intelligenceFlags');
+      if (isDocGroundedStrictIsolationEnabled()) {
+        const { buildDocumentGroundedUserContent } = require('./llm/documentGroundedPrompt');
+        const shaped = buildDocumentGroundedUserContent({
+          question: message,
+          retrievedBlock: '',
+          priorContext: callerSuppliedContextForPriorResolution,
+          active: true,
+        });
+        userContent = shaped || message;
+      } else {
+        userContent = combinedContext
+          ? `CONTEXT:\n${combinedContext}\n\nUSER QUESTION:\n${message}`
+          : message;
+      }
     } else {
       userContent = combinedContext
         ? `CONTEXT:\n${combinedContext}\n\nUSER QUESTION:\n${message}`

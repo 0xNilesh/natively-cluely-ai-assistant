@@ -1398,7 +1398,18 @@ export function initializeIpcHandlers(appState: AppState): void {
         // isAvailable() = configured AND a recent health-check passed (cached ~30s, primed
         // at startup). Short-circuit a known-down server so the live answer NEVER pays the
         // 800ms recall timeout when Hindsight is unreachable (2026-06-14 fix).
+        //
+        // OKF Phase 1 (F6 fix, docGroundedStrictIsolation): document-grounded
+        // custom modes must NEVER let Hindsight substitute for missing document
+        // evidence. Previously Hindsight facts were merged into `context`
+        // unconditionally, and on a retrieval miss (modeContextBlock empty)
+        // LLMHelper's combinedContext fallback would ship them under the
+        // generic CONTEXT: header as if they were document truth. Gating the
+        // recall call itself at the source is simpler and more robust than
+        // trying to strip it back out downstream.
+        const _isDocGroundedTurn = manualActiveMode?.documentGroundedCustomModeActive === true;
         if (!isCodingChat && !isContractEnforced
+            && !(_isDocGroundedTurn && isIntelligenceFlagEnabled('docGroundedStrictIsolation'))
             && isIntelligenceFlagEnabled('hindsightLiveRecall')
             && isIntelligenceFlagEnabled('hindsightMemory')
             && _liveHsCfg
@@ -2099,6 +2110,41 @@ export function initializeIpcHandlers(appState: AppState): void {
                 ) || '';
               } catch (reErr: any) {
                 console.warn('[DocGrounded] re-retrieval for validator failed (non-fatal):', reErr?.message);
+              }
+              // OKF Phase 3: also fold in OKF card text so the strong-evidence
+              // check below (term overlap / high-signal entity match) considers
+              // curated card content, not just raw chunks — a synthesis question
+              // may be answerable entirely from cards even when the raw-chunk
+              // re-retrieval misses (different topK/scoring than the main path).
+              try {
+                if (isIntelligenceFlagEnabled('okfHybridRetrieval')) {
+                  const { ModesManager: _MM } = require('./services/ModesManager');
+                  const activeMode = _MM.getInstance().getActiveMode?.();
+                  if (activeMode) {
+                    const { KnowledgeManager } = require('./services/knowledge/KnowledgeManager');
+                    const { classifyQuestion } = require('./services/knowledge/QuestionClassifier');
+                    const { queryOkfCards } = require('./services/knowledge/OkfRetriever');
+                    const referenceFiles = _MM.getInstance().getReferenceFiles?.(activeMode.id) || [];
+                    const classification = classifyQuestion(message);
+                    const km = KnowledgeManager.getInstance();
+                    const cardTexts: string[] = [];
+                    for (const file of referenceFiles) {
+                      const pack = km.getPackForFile(file.id);
+                      if (!pack || pack.cards.length === 0) continue;
+                      // OKF Phase 7: this is the SAME (fileId, question) the
+                      // main answer path just scored a moment earlier in
+                      // LLMHelper — pass fileId so the retrieval cache serves
+                      // it instead of re-running lexical scoring.
+                      const scored = queryOkfCards(pack, message, classification, { topN: 6, fileId: file.id });
+                      for (const { card } of scored) cardTexts.push(`${card.title}\n${card.body}`);
+                    }
+                    if (cardTexts.length > 0) {
+                      docContextBlock = docContextBlock ? `${cardTexts.join('\n\n')}\n\n${docContextBlock}` : cardTexts.join('\n\n');
+                    }
+                  }
+                }
+              } catch (okfRetryErr: any) {
+                console.warn('[DocGrounded] OKF card augmentation for validator skipped (non-fatal):', okfRetryErr?.message);
               }
               // False-refusal detector: does the answer claim "not mentioned / not
               // found" while at least two meaningful question terms ARE present in
@@ -7824,6 +7870,197 @@ export function initializeIpcHandlers(appState: AppState): void {
     } catch (e: any) {
       console.error('[IPC] modes:delete-reference-file error:', e);
       return { success: false, error: e.message };
+    }
+  });
+
+  // ── OKF Knowledge Packs (Phase 5 UI) ────────────────────────────
+  // All handlers are no-ops (empty result) when okfKnowledgeUi is off, so
+  // the renderer can safely call them unconditionally — the UI itself is
+  // gated behind the flag and simply won't render if these return nothing.
+
+  // OKF Phase 7: forward KnowledgeIndexQueue progress events to every
+  // renderer window (mirrors the mode-file-index-status pattern above).
+  // Registered once — safe to call setupIpcHandlers multiple times since
+  // EventEmitter.on would otherwise stack duplicate listeners, so guard
+  // with a module-level flag.
+  try {
+    const { knowledgeIndexQueue } = require('./services/knowledge/KnowledgeIndexQueue');
+    if (!(global as any).__okfIndexProgressListenerAttached) {
+      (global as any).__okfIndexProgressListenerAttached = true;
+      knowledgeIndexQueue.on('progress', (progress: any) => {
+        BrowserWindow.getAllWindows().forEach((win) => {
+          if (!win.isDestroyed()) win.webContents.send('knowledge-index-progress', progress);
+        });
+      });
+    }
+  } catch (e: any) {
+    console.warn('[IPC] KnowledgeIndexQueue progress forwarding setup failed (non-fatal):', e?.message);
+  }
+
+  safeHandle('knowledge:list-packs', async (_, modeId: string) => {
+    try {
+      const { isOkfKnowledgeUiEnabled } = require('./intelligence/intelligenceFlags');
+      if (!isOkfKnowledgeUiEnabled()) return { success: true, packs: [] };
+      const { KnowledgeManager } = require('./services/knowledge/KnowledgeManager');
+      const packs = KnowledgeManager.getInstance().getPacksForMode(modeId);
+      // Summary shape only — full cards fetched via knowledge:get-pack to
+      // keep the list view light for modes with many reference files.
+      return {
+        success: true,
+        packs: packs.map((p: any) => ({
+          id: p.id, sourceId: p.sourceId, fileName: p.fileName,
+          cardCount: p.stats.cardCount, entityCount: p.stats.entityCount, relationCount: p.stats.relationCount,
+          packVersion: p.packVersion, updatedAt: p.updatedAt,
+        })),
+      };
+    } catch (e: any) {
+      console.error('[IPC] knowledge:list-packs error:', e);
+      return { success: false, error: e.message, packs: [] };
+    }
+  });
+
+  safeHandle('knowledge:get-pack', async (_, fileId: string) => {
+    try {
+      const { isOkfKnowledgeUiEnabled } = require('./intelligence/intelligenceFlags');
+      if (!isOkfKnowledgeUiEnabled()) return { success: true, pack: null };
+      const { KnowledgeManager } = require('./services/knowledge/KnowledgeManager');
+      const pack = KnowledgeManager.getInstance().getPackForFile(fileId);
+      return { success: true, pack };
+    } catch (e: any) {
+      console.error('[IPC] knowledge:get-pack error:', e);
+      return { success: false, error: e.message, pack: null };
+    }
+  });
+
+  safeHandle('knowledge:regenerate-pack', async (_, params: { fileId: string; modeId: string; fileName: string }) => {
+    try {
+      if (!isProOrTrialActive()) return { success: false, error: 'pro_required' };
+      const { isOkfKnowledgeUiEnabled } = require('./intelligence/intelligenceFlags');
+      if (!isOkfKnowledgeUiEnabled()) return { success: false, error: 'okf_knowledge_ui_disabled' };
+      const { ModesManager } = require('./services/ModesManager');
+      const { KnowledgeManager } = require('./services/knowledge/KnowledgeManager');
+      const files: any[] = ModesManager.getInstance().getReferenceFiles(params.modeId);
+      const file = files.find((f) => f.id === params.fileId);
+      if (!file) return { success: false, error: 'reference_file_not_found' };
+      // Background job (fire-and-forget from the caller's perspective — the
+      // renderer polls knowledge:get-pack for the updated packVersion).
+      // force=true bypasses the content-hash no-op check so a user-triggered
+      // "Regenerate" always re-extracts, even on unchanged content (e.g.
+      // after an extractor code update).
+      const result = KnowledgeManager.getInstance().generateForFile(
+        { id: file.id, modeId: file.modeId, fileName: file.fileName, content: file.content, pageCount: file.pageCount, extractedPageCount: file.extractedPageCount },
+        true,
+      );
+      return { success: result.status === 'generated', status: result.status, pack: result.pack || null, error: result.error };
+    } catch (e: any) {
+      console.error('[IPC] knowledge:regenerate-pack error:', e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle('knowledge:export-pack', async (_, fileId: string) => {
+    try {
+      if (!isProOrTrialActive()) return { success: false, error: 'pro_required' };
+      const { isOkfMarkdownExportEnabled } = require('./intelligence/intelligenceFlags');
+      if (!isOkfMarkdownExportEnabled()) return { success: false, error: 'okf_markdown_export_disabled' };
+      const { KnowledgeManager } = require('./services/knowledge/KnowledgeManager');
+      const pack = KnowledgeManager.getInstance().getPackForFile(fileId);
+      if (!pack || pack.cards.length === 0) return { success: false, error: 'no_pack_for_file' };
+
+      const result: any = await dialog.showOpenDialog({
+        title: 'Choose a folder to export the OKF Knowledge Bundle',
+        properties: ['openDirectory', 'createDirectory'],
+      });
+      if (result.canceled || !result.filePaths?.[0]) return { success: false, cancelled: true };
+      const destRoot = result.filePaths[0];
+
+      const { exportPack, exportBundleRoot } = require('./services/knowledge/OkfMarkdownExporter');
+      const files = [...exportBundleRoot([pack]), ...exportPack(pack, { sourceFileId: fileId, sourceFileName: pack.fileName })];
+
+      const fsMod = require('node:fs');
+      const pathMod = require('node:path');
+      for (const f of files) {
+        const fp = pathMod.join(destRoot, f.path);
+        fsMod.mkdirSync(pathMod.dirname(fp), { recursive: true });
+        fsMod.writeFileSync(fp, f.content);
+      }
+      return { success: true, exportedFileCount: files.length, destRoot };
+    } catch (e: any) {
+      console.error('[IPC] knowledge:export-pack error:', e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  // ── OKF Knowledge Card edit/approval (Phase 6) ──────────────────
+  // All handlers require both Pro AND okfUserEditableCards — the flag is
+  // the feature gate, isProOrTrialActive is the existing paywall each
+  // reference-file-touching handler already applies.
+
+  safeHandle('knowledge:edit-card', async (_, params: { cardId: string; title?: string; body?: string; entities?: string[]; tags?: string[] }) => {
+    try {
+      if (!isProOrTrialActive()) return { success: false, error: 'pro_required' };
+      const { isOkfUserEditableCardsEnabled } = require('./intelligence/intelligenceFlags');
+      if (!isOkfUserEditableCardsEnabled()) return { success: false, error: 'okf_user_editable_cards_disabled' };
+      const { editCard } = require('./services/knowledge/OkfCardEditor');
+      const card = editCard(params);
+      return card ? { success: true, card } : { success: false, error: 'card_not_found' };
+    } catch (e: any) {
+      console.error('[IPC] knowledge:edit-card error:', e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle('knowledge:approve-card', async (_, cardId: string) => {
+    try {
+      if (!isProOrTrialActive()) return { success: false, error: 'pro_required' };
+      const { isOkfUserEditableCardsEnabled } = require('./intelligence/intelligenceFlags');
+      if (!isOkfUserEditableCardsEnabled()) return { success: false, error: 'okf_user_editable_cards_disabled' };
+      const { approveCard } = require('./services/knowledge/OkfCardEditor');
+      const card = approveCard(cardId);
+      return card ? { success: true, card } : { success: false, error: 'card_not_found' };
+    } catch (e: any) {
+      console.error('[IPC] knowledge:approve-card error:', e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle('knowledge:reject-card', async (_, cardId: string) => {
+    try {
+      if (!isProOrTrialActive()) return { success: false, error: 'pro_required' };
+      const { isOkfUserEditableCardsEnabled } = require('./intelligence/intelligenceFlags');
+      if (!isOkfUserEditableCardsEnabled()) return { success: false, error: 'okf_user_editable_cards_disabled' };
+      const { rejectCard } = require('./services/knowledge/OkfCardEditor');
+      const card = rejectCard(cardId);
+      return card ? { success: true, card } : { success: false, error: 'card_not_found' };
+    } catch (e: any) {
+      console.error('[IPC] knowledge:reject-card error:', e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle('knowledge:restore-card-version', async (_, params: { cardId: string; versionId: string }) => {
+    try {
+      if (!isProOrTrialActive()) return { success: false, error: 'pro_required' };
+      const { isOkfUserEditableCardsEnabled } = require('./intelligence/intelligenceFlags');
+      if (!isOkfUserEditableCardsEnabled()) return { success: false, error: 'okf_user_editable_cards_disabled' };
+      const { restoreCardVersion } = require('./services/knowledge/OkfCardEditor');
+      const card = restoreCardVersion(params.cardId, params.versionId);
+      return card ? { success: true, card } : { success: false, error: 'card_or_version_not_found' };
+    } catch (e: any) {
+      console.error('[IPC] knowledge:restore-card-version error:', e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle('knowledge:get-card-history', async (_, cardId: string) => {
+    try {
+      const { isOkfUserEditableCardsEnabled } = require('./intelligence/intelligenceFlags');
+      if (!isOkfUserEditableCardsEnabled()) return { success: true, versions: [] };
+      const { getCardHistory } = require('./services/knowledge/OkfCardEditor');
+      return { success: true, versions: getCardHistory(cardId) };
+    } catch (e: any) {
+      console.error('[IPC] knowledge:get-card-history error:', e);
+      return { success: false, error: e.message, versions: [] };
     }
   });
 

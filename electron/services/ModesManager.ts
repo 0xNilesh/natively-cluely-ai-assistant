@@ -464,6 +464,20 @@ export class ModesManager {
             content: params.content,
         });
         this.invalidateActiveModeCache();
+        // OKF Phase 2 (2026-07-01): generate a Knowledge Pack alongside the
+        // existing chunk pipeline. Synchronous (heuristic v1 is pure string
+        // work, ~2-5s on a 66-page PDF) but fully additive — a thrown error
+        // here is caught and logged, never blocking the upload. No-ops when
+        // okfKnowledgePacks is OFF (production default).
+        try {
+            const { KnowledgeManager } = require('./knowledge/KnowledgeManager') as typeof import('./knowledge/KnowledgeManager');
+            KnowledgeManager.getInstance().generateForFile({
+                id, modeId: params.modeId, fileName: params.fileName, content: params.content,
+                pageCount: params.pageCount, extractedPageCount: params.extractedPageCount,
+            });
+        } catch (err: any) {
+            console.warn('[ModesManager] OKF knowledge pack generation skipped (non-fatal):', err?.message);
+        }
         return {
             id,
             modeId: params.modeId,
@@ -480,6 +494,16 @@ export class ModesManager {
         this.invalidateActiveModeCache();
         // PI v3 (W3): drop the persisted chunk vectors + index state too.
         try { this.modeContextRetriever.removeReferenceFileIndex(id); } catch { /* non-fatal */ }
+        // OKF Phase 2: invalidate the file's Knowledge Pack (the knowledge_*
+        // tables also cascade-delete via FK on mode_reference_files deletion,
+        // but this explicit call makes the intent visible and works even if
+        // FK cascading is disabled in a given SQLite build).
+        try {
+            const { KnowledgeManager } = require('./knowledge/KnowledgeManager') as typeof import('./knowledge/KnowledgeManager');
+            KnowledgeManager.getInstance().deleteForFile(id);
+        } catch (err: any) {
+            console.warn('[ModesManager] OKF knowledge pack invalidation skipped (non-fatal):', err?.message);
+        }
     }
 
     // ── PI v3 (W3): upload-time reference-file indexing ───────────

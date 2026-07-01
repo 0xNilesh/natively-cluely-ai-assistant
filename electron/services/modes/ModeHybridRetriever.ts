@@ -961,8 +961,9 @@ export class ModeHybridRetriever {
             }
         }
 
-        // Deduplicate: keep highest-scoring chunk per file
-        const deduped = this.deduplicateChunks(candidates, reranked);
+        // Deduplicate: keep highest-scoring chunk per file (default), or per
+        // section when document-grounded (preserves multi-section answers).
+        const deduped = this.deduplicateChunks(candidates, reranked, forceDocumentGrounding);
 
         // Enforce token budget
         const selected = this.enforceTokenBudget(deduped, tokenBudget, reranked, topK);
@@ -1253,24 +1254,44 @@ export class ModeHybridRetriever {
      * Deduplicate chunks from the same file, keeping highest-scoring. When
      * `byRerank` is true the "highest" is by cross-encoder score.
      */
-    private deduplicateChunks(candidates: ChunkCandidate[], byRerank: boolean = false): ChunkCandidate[] {
-        const bestByFile = new Map<string, ChunkCandidate>();
+    /**
+     * Dedup key: prefer the section number from the `[Section N.N | pX-Y]`
+     * chunk-text prefix (section-aware chunking, see chunkText()) so a long
+     * doc-grounded PDF can surface multiple distinct sections from the SAME
+     * file instead of collapsing to one chunk per file (OKF Phase 1 fix —
+     * F4 from knowledge-architecture-okf-upgrade-plan.md). Falls back to
+     * chunkIndex when no section prefix is present (flat-prose chunking,
+     * !hasToc path) so non-sectioned files still dedup per-chunk rather than
+     * per-file.
+     */
+    private dedupeGroupKey(candidate: ChunkCandidate): string {
+        const sectionMatch = candidate.text.match(/^\[Section ([\d.]+)/);
+        return sectionMatch ? `${candidate.sourceId}#${sectionMatch[1]}` : `${candidate.sourceId}#chunk${candidate.chunkIndex}`;
+    }
+
+    private deduplicateChunks(candidates: ChunkCandidate[], byRerank: boolean = false, forceDocumentGrounding: boolean = false): ChunkCandidate[] {
+        // Document-grounded mode: dedup per-section (or per-chunk when no
+        // section prefix) so multi-section answers survive. Non-doc-grounded
+        // callers keep the original per-file behavior (unchanged default
+        // mode UX — one best chunk per reference file).
+        const bestByKey = new Map<string, ChunkCandidate>();
 
         for (const candidate of candidates) {
-            const existing = bestByFile.get(candidate.sourceId);
+            const key = forceDocumentGrounding ? this.dedupeGroupKey(candidate) : candidate.sourceId;
+            const existing = bestByKey.get(key);
 
             if (!existing) {
-                bestByFile.set(candidate.sourceId, candidate);
+                bestByKey.set(key, candidate);
             } else {
                 const currentScore = this.rankScore(candidate, byRerank);
                 const existingScore = this.rankScore(existing, byRerank);
                 if (currentScore > existingScore) {
-                    bestByFile.set(candidate.sourceId, candidate);
+                    bestByKey.set(key, candidate);
                 }
             }
         }
 
-        return Array.from(bestByFile.values());
+        return Array.from(bestByKey.values());
     }
 
     /**
