@@ -1,8 +1,10 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useId } from 'react';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
 import { ArrowLeft, Search, Mail, Link, ChevronDown, Play, ArrowUp, Copy, Check, MoreHorizontal, Settings, ArrowRight, RefreshCw, Info, Eye, EyeOff, History, Pencil, X, ChevronRight } from 'lucide-react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import { genMessageId } from '../utils/messageId';
+import { mapLanguageForPrism, isBlockCode } from '../utils/prismLanguage';
+import { registerPrismLanguages } from '../utils/registerPrismLanguages';
 import MeetingChatOverlay from './MeetingChatOverlay';
 import EditableTextBlock from './EditableTextBlock';
 import NativelyLogo from './icon.png';
@@ -10,95 +12,8 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import SyntaxHighlighter from 'react-syntax-highlighter/dist/esm/prism-light';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import python from 'react-syntax-highlighter/dist/esm/languages/prism/python';
-import javascript from 'react-syntax-highlighter/dist/esm/languages/prism/javascript';
-import typescript from 'react-syntax-highlighter/dist/esm/languages/prism/typescript';
-import bash from 'react-syntax-highlighter/dist/esm/languages/prism/bash';
-import yaml from 'react-syntax-highlighter/dist/esm/languages/prism/yaml';
-import sql from 'react-syntax-highlighter/dist/esm/languages/prism/sql';
-import go from 'react-syntax-highlighter/dist/esm/languages/prism/go';
-import rust from 'react-syntax-highlighter/dist/esm/languages/prism/rust';
-import cpp from 'react-syntax-highlighter/dist/esm/languages/prism/cpp';
-import csharp from 'react-syntax-highlighter/dist/esm/languages/prism/csharp';
-import css from 'react-syntax-highlighter/dist/esm/languages/prism/css';
-import json from 'react-syntax-highlighter/dist/esm/languages/prism/json';
-import markdown from 'react-syntax-highlighter/dist/esm/languages/prism/markdown';
-import markup from 'react-syntax-highlighter/dist/esm/languages/prism/markup';
 
-SyntaxHighlighter.registerLanguage('python', python);
-SyntaxHighlighter.registerLanguage('py', python);
-SyntaxHighlighter.registerLanguage('javascript', javascript);
-SyntaxHighlighter.registerLanguage('js', javascript);
-SyntaxHighlighter.registerLanguage('typescript', typescript);
-SyntaxHighlighter.registerLanguage('ts', typescript);
-SyntaxHighlighter.registerLanguage('bash', bash);
-SyntaxHighlighter.registerLanguage('sh', bash);
-SyntaxHighlighter.registerLanguage('shell', bash);
-SyntaxHighlighter.registerLanguage('yaml', yaml);
-SyntaxHighlighter.registerLanguage('yml', yaml);
-SyntaxHighlighter.registerLanguage('sql', sql);
-SyntaxHighlighter.registerLanguage('go', go);
-SyntaxHighlighter.registerLanguage('rust', rust);
-SyntaxHighlighter.registerLanguage('rs', rust);
-SyntaxHighlighter.registerLanguage('cpp', cpp);
-SyntaxHighlighter.registerLanguage('c++', cpp);
-SyntaxHighlighter.registerLanguage('csharp', csharp);
-SyntaxHighlighter.registerLanguage('cs', csharp);
-SyntaxHighlighter.registerLanguage('css', css);
-SyntaxHighlighter.registerLanguage('json', json);
-SyntaxHighlighter.registerLanguage('markdown', markdown);
-SyntaxHighlighter.registerLanguage('md', markdown);
-SyntaxHighlighter.registerLanguage('markup', markup);
-SyntaxHighlighter.registerLanguage('html', markup);
-
-const mapLanguageForPrism = (lang: string, code: string): string => {
-  if (!lang) {
-    if (code.includes('def ') || code.includes('import ') || code.includes('elif ') || code.includes('print(') || code.includes(':\n')) {
-      return 'python';
-    }
-    return 'javascript';
-  }
-  const lower = lang.toLowerCase().trim();
-  const mapper: Record<string, string> = {
-    'js': 'javascript',
-    'javascript': 'javascript',
-    'ts': 'typescript',
-    'typescript': 'typescript',
-    'py': 'python',
-    'python': 'python',
-    'rb': 'ruby',
-    'ruby': 'ruby',
-    'sh': 'bash',
-    'bash': 'bash',
-    'shell': 'bash',
-    'zsh': 'bash',
-    'go': 'go',
-    'golang': 'go',
-    'rs': 'rust',
-    'rust': 'rust',
-    'cs': 'csharp',
-    'csharp': 'csharp',
-    'cpp': 'cpp',
-    'c++': 'cpp',
-    'h': 'cpp',
-    'c': 'c',
-    'java': 'java',
-    'kt': 'kotlin',
-    'kotlin': 'kotlin',
-    'swift': 'swift',
-    'yml': 'yaml',
-    'yaml': 'yaml',
-    'xml': 'markup',
-    'html': 'markup',
-    'svg': 'markup',
-    'json': 'json',
-    'css': 'css',
-    'md': 'markdown',
-    'markdown': 'markdown',
-    'sql': 'sql',
-  };
-  return mapper[lower] || lower;
-};
+registerPrismLanguages();
 
 const formatTime = (ms: number) => {
     const date = new Date(ms);
@@ -124,31 +39,138 @@ interface CodingSection {
     body: string;
 }
 
-type DetailKind = 'dry-run' | 'complexity' | 'followup';
+type DetailKind = 'approach' | 'dry-run' | 'complexity' | 'followup';
 
+// Ordered labels for the detail pill strip. "Approach" only appears when the full
+// reasoning is longer than the one-line thesis we already show above the code.
 const DETAIL_PILLS: { kind: DetailKind; label: string }[] = [
+    { kind: 'approach',   label: 'Approach'       },
     { kind: 'dry-run',    label: 'Dry run'        },
     { kind: 'complexity', label: 'Complexity'     },
     { kind: 'followup',   label: 'Follow-up tips' },
 ];
 
-const PANEL_VARIANTS = {
-    hidden: {
-        opacity: 0,
-        height: 0,
-        transition: {
-            height:  { duration: 0.15, ease: [0.23, 1, 0.32, 1] as [number,number,number,number] },
-            opacity: { duration: 0.08 },
-        },
-    },
-    visible: {
-        opacity: 1,
-        height: 'auto' as const,
-        transition: {
-            height:  { duration: 0.22, ease: [0.23, 1, 0.32, 1] as [number,number,number,number] },
-            opacity: { duration: 0.18 },
-        },
-    },
+// iOS drawer easing (Vaul/Ionic) for the panel height reveal; content crossfade
+// uses a snappier out-curve.
+const DRAWER_EASE = [0.32, 0.72, 0, 1] as [number, number, number, number];
+const CROSSFADE_EASE = [0.23, 1, 0.32, 1] as [number, number, number, number];
+
+// Mount cascade: blocks settle in with a short blur-bridged stagger.
+const MOUNT_CONTAINER = {
+    hidden: {},
+    show: { transition: { staggerChildren: 0.05, delayChildren: 0.04 } },
+};
+const MOUNT_CHILD = {
+    hidden: { opacity: 0, y: 6, filter: 'blur(4px)' },
+    show:   { opacity: 1, y: 0, filter: 'blur(0px)', transition: { duration: 0.32, ease: CROSSFADE_EASE } },
+};
+const MOUNT_CHILD_REDUCED = {
+    hidden: { opacity: 0 },
+    show:   { opacity: 1, transition: { duration: 0.2 } },
+};
+
+// Pull the first sentence from the approach so we can lead with a one-line thesis
+// and tuck the full reasoning into a pill. Avoids cutting on common false
+// terminators — decimals (3.4x), abbreviations (e.g., i.e., etc.), and single
+// initials — by requiring the terminator to be followed by a space + a capital or
+// end-of-string, and rejecting matches that end in a known abbreviation. Falls
+// back to a length cap so a run-on paragraph never becomes the whole thesis.
+const ABBREV_RE = /(?:^|\s)(?:e\.g|i\.e|etc|vs|approx|Dr|Mr|Ms|Mrs|Fig|No|cf|al)\.$/i;
+function firstSentence(text: string): string {
+    const flat = text.replace(/\s+/g, ' ').trim();
+    // Terminator = .!? not preceded by a digit (decimals) and followed by space +
+    // uppercase/quote/end. Scan for the first that isn't a known abbreviation.
+    const re = /(?<!\d)[.!?](?=\s+["'“(]?[A-Z0-9]|\s*$)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(flat)) !== null) {
+        const candidate = flat.slice(0, m.index + 1);
+        if (!ABBREV_RE.test(candidate)) {
+            return candidate.trim();
+        }
+    }
+    // No clean sentence boundary — cap length so the thesis stays one line.
+    return flat.length > 160 ? flat.slice(0, 157).trimEnd() + '…' : flat;
+}
+
+// Extract a compact "O(n) time · O(1) space" chip from the complexity section so
+// the single most-scanned fact is never hidden behind a click. Returns null when
+// nothing parseable is found (caller then keeps complexity as a pill).
+function extractComplexity(body: string): string | null {
+    // NOTE: a negated class like [^O] under /i also excludes lowercase 'o', which
+    // breaks on the common phrasing "Time complexity: O(n)" (the 'o' in
+    // "complexity" blocks the lazy scan). Match Big-O on the SAME line as the
+    // time/space keyword instead, so any prose in between is fine.
+    const time  = /time[^\n]*?(O\([^)]*\))/i.exec(body)?.[1];
+    const space = /space[^\n]*?(O\([^)]*\))/i.exec(body)?.[1];
+    if (time || space) {
+        return [time && `${time} time`, space && `${space} space`].filter(Boolean).join('  ·  ');
+    }
+    const bare = body.match(/O\([^)]*\)/g);
+    return bare && bare.length ? Array.from(new Set(bare)).slice(0, 2).join('  ·  ') : null;
+}
+
+// Pull out the fenced code from the "Code" section, but ONLY take the single-hero
+// fast-path (custom header + technique chip) when the body is EXACTLY one fenced
+// block and nothing else. Anything richer (multiple blocks, or code interleaved
+// with prose) returns null so the caller falls back to the full markdown renderer
+// and nothing is dropped.
+function extractCodeBlock(body: string): { lang: string; code: string } | null {
+    const trimmed = body.trim();
+    const matches = Array.from(trimmed.matchAll(/```([\w+#-]*)\n?([\s\S]*?)```/g));
+    if (matches.length !== 1) return null;
+    const m = matches[0];
+    if (trimmed.replace(m[0], '').trim().length > 0) return null; // prose outside fence
+    return { lang: m[1] || '', code: m[2].replace(/\n$/, '') };
+}
+
+// Short, single-line label for the technique chip in the code header.
+function techniqueLabel(body: string): string {
+    return body
+        .replace(/[`*_#>]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/^(via|using|use|technique[:\s-]*)\s*/i, '')
+        .slice(0, 48);
+}
+
+// Copy-to-clipboard control for the code hero. Ghosted until hover on desktop,
+// icon crossfades copy → check on success and reverts after 2s.
+const CopyButton: React.FC<{ text: string }> = ({ text }) => {
+    const [copied, setCopied] = useState(false);
+    const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+    const handle = () => {
+        // navigator.clipboard is undefined outside a secure context; the optional
+        // chain guards .writeText but the whole expression is then undefined, so
+        // guard the promise before calling .then/.catch on it.
+        const p = navigator.clipboard?.writeText(text);
+        if (!p) return;
+        p.then(() => {
+            setCopied(true);
+            if (timer.current) clearTimeout(timer.current);
+            timer.current = setTimeout(() => setCopied(false), 2000);
+        }).catch(() => {});
+    };
+    return (
+        <button
+            type="button"
+            onClick={handle}
+            aria-label={copied ? 'Copied' : 'Copy code'}
+            className="relative w-6 h-6 inline-flex items-center justify-center rounded-md text-white/40 hover:text-white/80 hover:bg-white/[0.06] transition-[color,background-color,transform] duration-100 ease-out active:scale-[0.92] opacity-100 md:opacity-0 md:group-hover:opacity-100 focus:outline-none focus-visible:opacity-100 focus-visible:ring-1 focus-visible:ring-white/20"
+        >
+            <AnimatePresence mode="wait" initial={false}>
+                {copied ? (
+                    <motion.span key="check" initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.8 }} transition={{ duration: 0.14 }} className="absolute inset-0 flex items-center justify-center">
+                        <Check className="w-3.5 h-3.5 text-emerald-400" strokeWidth={2.5} />
+                    </motion.span>
+                ) : (
+                    <motion.span key="copy" initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.8 }} transition={{ duration: 0.14 }} className="absolute inset-0 flex items-center justify-center">
+                        <Copy className="w-3.5 h-3.5" strokeWidth={2} />
+                    </motion.span>
+                )}
+            </AnimatePresence>
+        </button>
+    );
 };
 
 function classifySection(title: string): 'approach' | 'technique' | 'code' | DetailKind | 'other' {
@@ -189,19 +211,6 @@ function parseCodingTemplate(answer: string): CodingSection[] | null {
     return sections;
 }
 
-// Compact markdown renderer for the "via …" technique annotation line.
-// Must be module-level so react-markdown gets stable component references.
-const mdComponentsTechnique = {
-    p: ({ node, ...props }: any) => <p className="text-[12px] text-text-tertiary font-normal leading-snug m-0" {...props} />,
-    strong: ({ node, ...props }: any) => <strong className="font-medium text-text-secondary" {...props} />,
-    ul: ({ node, ...props }: any) => <ul className="list-disc ml-4 space-y-0.5" {...props} />,
-    li: ({ node, ...props }: any) => <li className="text-[12px] text-text-tertiary font-normal" {...props} />,
-    code: ({ node, className, children, ...props }: any) => (
-        <code className="text-[11px] font-mono text-blue-300/60 bg-white/[0.05] px-1 py-px rounded" {...props}>{children}</code>
-    ),
-    pre: ({ children }: any) => <div>{children}</div>,
-};
-
 // Shared markdown renderer config — used by both CodingAnswerBlock and plain answers.
 const mdComponents = {
     h1: ({ node, ...props }: any) => <p className="text-[15px] text-text-secondary font-semibold leading-relaxed mb-2" {...props} />,
@@ -212,32 +221,15 @@ const mdComponents = {
     ol: ({ node, ...props }: any) => <ol className="list-decimal ml-4 mb-2 space-y-1.5" {...props} />,
     li: ({ node, ...props }: any) => <li className="text-[15px] text-text-secondary font-normal leading-relaxed" {...props} />,
     strong: ({ node, ...props }: any) => <strong className="font-semibold text-text-primary" {...props} />,
-    a: ({ node, ...props }: any) => <a className="text-blue-400 hover:text-blue-300 underline underline-offset-2 transition-colors duration-150" {...props} />,
+    a: ({ node, ...props }: any) => <a target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 underline underline-offset-2 transition-colors duration-150" {...props} />,
     pre: ({ children }: any) => <div className="mb-3 last:mb-0">{children}</div>,
     code: ({ node, className, children, ...props }: any) => {
-        const match = /language-(\w+)/.exec(className || '');
+        const match = /language-([\w+#-]+)/.exec(className || '');
         const lang = match ? match[1] : '';
         const codeStr = String(children);
-        const isBlock = Boolean(match) || codeStr.endsWith('\n');
+        const isBlock = isBlockCode(className, codeStr);
         return isBlock ? (
-            <div className="rounded-xl overflow-hidden border border-white/[0.08] shadow-xl shadow-black/20 bg-zinc-900/80">
-                <div className="flex items-center justify-between px-3.5 py-2 border-b border-white/[0.06] bg-white/[0.025]">
-                    <span className="text-[10px] uppercase tracking-[0.13em] font-semibold text-white/30 font-mono select-none">
-                        {lang || 'code'}
-                    </span>
-                </div>
-                <SyntaxHighlighter
-                    language={mapLanguageForPrism(lang, codeStr)}
-                    style={vscDarkPlus}
-                    customStyle={{ margin: 0, borderRadius: 0, fontSize: '13px', lineHeight: '1.65', background: 'transparent', padding: '14px 16px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' }}
-                    wrapLongLines={true}
-                    showLineNumbers={true}
-                    lineNumberStyle={{ minWidth: '2.2em', paddingRight: '1.2em', color: 'rgba(255,255,255,0.15)', textAlign: 'right', fontSize: '11px', userSelect: 'none' }}
-                    {...props}
-                >
-                    {codeStr.replace(/\n$/, '')}
-                </SyntaxHighlighter>
-            </div>
+            <CodeHero lang={lang} code={codeStr.replace(/\n$/, '')} />
         ) : (
             <code className="bg-white/[0.07] px-1.5 py-0.5 rounded-md text-[13px] font-mono text-blue-300/80 border border-white/[0.06]" {...props}>
                 {children}
@@ -246,15 +238,58 @@ const mdComponents = {
     },
 };
 
+// Bespoke code hero: custom header (language label · technique chip · copy button),
+// inner top-edge highlight instead of a drop shadow, line numbers only past 8 lines.
+const CodeHero: React.FC<{ lang: string; code: string; technique?: string }> = ({ lang, code, technique }) => {
+    const resolved = mapLanguageForPrism(lang, code);
+    const lineCount = code.split('\n').length;
+    return (
+        <div className="group relative rounded-xl overflow-hidden border border-white/[0.08] ring-1 ring-inset ring-white/[0.05] bg-zinc-900/80 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.05)]">
+            <div className="flex items-center gap-2 h-9 px-3 border-b border-white/[0.05] bg-white/[0.02]">
+                <span className="text-[11px] uppercase tracking-[0.04em] font-medium text-text-tertiary font-mono select-none">
+                    {resolved || 'code'}
+                </span>
+                <div className="flex-1" />
+                {technique && (
+                    <span className="hidden sm:inline-flex items-center max-w-[220px] truncate text-[11px] font-medium text-white/45 select-none">
+                        {technique}
+                    </span>
+                )}
+                <CopyButton text={code} />
+            </div>
+            <div className="overflow-x-auto">
+                <SyntaxHighlighter
+                    language={resolved}
+                    style={vscDarkPlus}
+                    customStyle={{ margin: 0, borderRadius: 0, fontSize: '13px', lineHeight: '1.6', background: 'transparent', padding: '14px 16px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' }}
+                    showLineNumbers={lineCount > 8}
+                    lineNumberStyle={{ minWidth: '2.2em', paddingRight: '1.2em', color: 'rgba(255,255,255,0.2)', textAlign: 'right', fontSize: '11px', userSelect: 'none' }}
+                >
+                    {code}
+                </SyntaxHighlighter>
+            </div>
+        </div>
+    );
+};
+
 /**
  * Apple-quality coding answer renderer.
- * - Approach and Code render immediately, without labels (self-evident).
- * - Technique appears as a quiet "via …" annotation between approach and code.
- * - Dry run / Complexity / Follow-up are tucked into a pill strip below the code.
- *   One pill expands at a time with asymmetric spring animation (enter 220ms, exit 150ms).
+ * - Leads with a one-line thesis (first sentence of the approach), then the code.
+ * - Technique rides as a chip inside the code header; complexity as an always-visible
+ *   chip beneath it — the fact people came for is never behind a click.
+ * - Deep reasoning (full approach / dry run / follow-up) collapses into one pill row
+ *   with a sliding highlight and a single continuous-height panel (blur-bridged
+ *   crossfade when switching, iOS drawer curve for open/close).
  */
 const CodingAnswerBlock: React.FC<{ sections: CodingSection[] }> = ({ sections }) => {
+    const reduce = useReducedMotion();
     const [activeDetail, setActiveDetail] = useState<DetailKind | null>(null);
+    const panelRef = useRef<HTMLDivElement>(null);
+    const [panelHeight, setPanelHeight] = useState(0);
+    // framer-motion resolves layoutId GLOBALLY. The usage tab renders one
+    // CodingAnswerBlock per Q&A, so a shared literal id would cross-animate the
+    // active-pill highlight between separate answers. Scope it per instance.
+    const pillLayoutId = useId();
 
     const tagged = sections.map(s => ({ ...s, kind: classifySection(s.title) }));
 
@@ -263,117 +298,157 @@ const CodingAnswerBlock: React.FC<{ sections: CodingSection[] }> = ({ sections }
     const code      = tagged.find(s => s.kind === 'code');
     const others    = tagged.filter(s => s.kind === 'other');
 
-    const detailMap = new Map(
-        tagged
-            .filter(s => (['dry-run','complexity','followup'] as string[]).includes(s.kind))
-            .map(s => [s.kind as DetailKind, s])
-    );
+    const thesis = approach ? firstSentence(approach.body.trim()) : '';
+    // Only surface the full approach as a pill when it says more than the thesis.
+    const approachIsRicher = approach ? approach.body.trim().length > thesis.length + 24 : false;
+
+    const parsedCode = code ? extractCodeBlock(code.body) : null;
+    const techniqueChip = technique ? techniqueLabel(technique.body) : '';
+
+    const complexitySection = tagged.find(s => s.kind === 'complexity');
+    const complexityChip = complexitySection ? extractComplexity(complexitySection.body) : null;
+
+    // Build the ordered detail map. Approach (full) is optional; complexity stays a
+    // pill only when we couldn't distil a chip from it.
+    const detailMap = new Map<DetailKind, CodingSection>();
+    if (approach && approachIsRicher) detailMap.set('approach', approach);
+    const dryRun = tagged.find(s => s.kind === 'dry-run');
+    if (dryRun) detailMap.set('dry-run', dryRun);
+    if (complexitySection && !complexityChip) detailMap.set('complexity', complexitySection);
+    const followup = tagged.find(s => s.kind === 'followup');
+    if (followup) detailMap.set('followup', followup);
 
     const availablePills = DETAIL_PILLS.filter(p => detailMap.has(p.kind));
     const activeSection  = activeDetail != null ? detailMap.get(activeDetail) : undefined;
 
+    // Measure active content so the container height animates continuously (no
+    // collapse-to-zero flicker) even when switching directly between pills.
+    // Key on stable primitives — activeSection is a fresh object each render
+    // (detailMap is rebuilt from sections.map), so depending on it would tear
+    // down and rebuild the observer on every parent re-render.
+    const activeBody = activeSection?.body;
+    useEffect(() => {
+        if (activeBody == null) { setPanelHeight(0); return; }
+        const el = panelRef.current;
+        if (!el) return;
+        setPanelHeight(el.scrollHeight);
+        const ro = new ResizeObserver(() => setPanelHeight(el.scrollHeight));
+        ro.observe(el);
+        return () => ro.disconnect();
+    }, [activeDetail, activeBody]);
+
+    const childVariant = reduce ? MOUNT_CHILD_REDUCED : MOUNT_CHILD;
+
     return (
-        <div className="flex flex-col gap-4">
-            {/* Approach — plain prose, no label */}
-            {approach && (
-                <div>
-                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
-                        {cleanMarkdown(approach.body.trim())}
-                    </ReactMarkdown>
-                </div>
+        <motion.div
+            className="flex flex-col gap-4"
+            variants={MOUNT_CONTAINER}
+            initial="hidden"
+            animate="show"
+        >
+            {/* Thesis — one-line claim, the answer at a glance */}
+            {thesis && (
+                <motion.p variants={childVariant} className="text-[15px] leading-[1.6] text-text-primary m-0">
+                    {thesis}
+                </motion.p>
             )}
 
-            {/* Technique — quiet "via" whisper between approach and code */}
-            {technique && (
-                <div className="flex items-start gap-2 -mt-1">
-                    <span className="shrink-0 mt-[3px] text-[9px] font-semibold uppercase tracking-[0.14em] text-white/20 leading-none select-none">
-                        via
-                    </span>
-                    <div className="flex-1">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponentsTechnique}>
-                            {cleanMarkdown(technique.body.trim())}
-                        </ReactMarkdown>
-                    </div>
-                </div>
-            )}
-
-            {/* Code — hero block */}
-            {code && (
-                <div className="rounded-xl overflow-hidden border border-white/[0.07] ring-1 ring-inset ring-white/[0.03] shadow-xl shadow-black/25">
+            {/* Code — hero block with technique chip + copy button */}
+            {parsedCode ? (
+                <motion.div variants={childVariant}>
+                    <CodeHero lang={parsedCode.lang} code={parsedCode.code} technique={techniqueChip} />
+                </motion.div>
+            ) : code ? (
+                <motion.div variants={childVariant} className="flex flex-col gap-3">
                     <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
                         {cleanMarkdown(code.body.trim())}
                     </ReactMarkdown>
-                </div>
+                </motion.div>
+            ) : null}
+
+            {/* Complexity — always-visible chip, never behind a click */}
+            {complexityChip && (
+                <motion.div variants={childVariant} className="flex items-center gap-1.5 -mt-1">
+                    <span className="text-[10px] uppercase tracking-[0.1em] font-semibold text-white/25 select-none">cost</span>
+                    <span className="text-[12px] tabular-nums text-text-secondary font-medium">{complexityChip}</span>
+                </motion.div>
             )}
 
             {/* Unrecognised sections — graceful fallthrough */}
             {others.map(s => (
-                <div key={s.title} className="flex flex-col gap-1.5">
+                <motion.div key={s.title} variants={childVariant} className="flex flex-col gap-1.5">
                     <p className="text-[10px] font-semibold uppercase tracking-widest text-white/20 select-none">{s.title}</p>
                     <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
                         {cleanMarkdown(s.body.trim())}
                     </ReactMarkdown>
-                </div>
+                </motion.div>
             ))}
 
-            {/* Detail pill strip + animated panel */}
+            {/* Detail pill strip + continuous-height panel */}
             {availablePills.length > 0 && (
-                <div className="flex flex-col gap-2">
-                    {/* Separator with centred pill row */}
+                <motion.div variants={childVariant} className="flex flex-col gap-2">
                     <div className="flex items-center gap-2">
                         <div className="h-px flex-1 bg-white/[0.06]" />
-                        <div className="flex items-center">
-                            {availablePills.map((pill, i) => {
+                        <div className="flex items-center gap-0.5">
+                            {availablePills.map((pill) => {
                                 const isActive = activeDetail === pill.kind;
                                 return (
-                                    <span key={pill.kind} className="flex items-center">
-                                        {i > 0 && (
-                                            <span className="mx-1.5 text-[10px] text-white/[0.12] select-none leading-none">·</span>
+                                    <button
+                                        key={pill.kind}
+                                        aria-pressed={isActive}
+                                        aria-expanded={isActive}
+                                        onClick={() => setActiveDetail(prev => prev === pill.kind ? null : pill.kind)}
+                                        className={[
+                                            'relative px-2.5 py-1 rounded-full text-[12.5px] font-medium select-none',
+                                            'transition-[color,transform] duration-150 ease-out active:scale-[0.97]',
+                                            'focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20',
+                                            isActive ? 'text-text-primary' : 'text-white/35 hover:text-text-tertiary',
+                                        ].join(' ')}
+                                    >
+                                        {isActive && (
+                                            <motion.span
+                                                layoutId={`codingActivePill-${pillLayoutId}`}
+                                                className="absolute inset-0 rounded-full bg-white/[0.08] ring-1 ring-inset ring-white/[0.06]"
+                                                transition={reduce ? { duration: 0 } : { type: 'spring', duration: 0.4, bounce: 0.15 }}
+                                            />
                                         )}
-                                        <button
-                                            onClick={() => setActiveDetail(prev => prev === pill.kind ? null : pill.kind)}
-                                            className={[
-                                                'px-2 py-1 rounded-lg text-[11px] font-medium select-none',
-                                                'active:scale-[0.97] transition-[color,background-color,box-shadow,transform] duration-150 ease-out',
-                                                'focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20',
-                                                isActive
-                                                    ? 'text-text-primary bg-white/[0.08] shadow-[inset_0_1px_0_rgba(255,255,255,0.07)]'
-                                                    : 'text-white/30 hover:text-text-tertiary hover:bg-white/[0.04]',
-                                            ].join(' ')}
-                                        >
-                                            {pill.label}
-                                        </button>
-                                    </span>
+                                        <span className="relative z-10">{pill.label}</span>
+                                    </button>
                                 );
                             })}
                         </div>
                         <div className="h-px flex-1 bg-white/[0.06]" />
                     </div>
 
-                    {/* Animated detail panel — one section at a time */}
-                    <AnimatePresence mode="wait">
-                        {activeSection && (
-                            <motion.div
-                                key={activeSection.kind}
-                                variants={PANEL_VARIANTS}
-                                initial="hidden"
-                                animate="visible"
-                                exit="hidden"
-                                className="overflow-hidden"
-                            >
-                                <div className="pt-0.5">
-                                    <div className="rounded-xl px-4 py-3.5 bg-white/[0.025] border border-white/[0.05] ring-1 ring-inset ring-white/[0.02]">
-                                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
-                                            {cleanMarkdown(activeSection.body.trim())}
-                                        </ReactMarkdown>
-                                    </div>
-                                </div>
-                            </motion.div>
-                        )}
-                    </AnimatePresence>
-                </div>
+                    {/* One container; height retargets continuously, content crossfades w/ blur */}
+                    <motion.div
+                        animate={{ height: activeSection ? panelHeight : 0 }}
+                        transition={reduce ? { duration: 0.12 } : { duration: 0.26, ease: DRAWER_EASE }}
+                        style={{ overflow: 'hidden' }}
+                    >
+                        <div ref={panelRef} className="pt-0.5">
+                            <AnimatePresence initial={false} mode="popLayout">
+                                {activeSection && (
+                                    <motion.div
+                                        key={activeDetail ?? 'none'}
+                                        initial={reduce ? { opacity: 0 } : { opacity: 0, y: 4, filter: 'blur(3px)' }}
+                                        animate={reduce ? { opacity: 1 } : { opacity: 1, y: 0, filter: 'blur(0px)' }}
+                                        exit={reduce ? { opacity: 0 } : { opacity: 0, y: -4, filter: 'blur(3px)' }}
+                                        transition={{ duration: 0.18, ease: CROSSFADE_EASE }}
+                                    >
+                                        <div className="rounded-xl px-4 py-3.5 bg-white/[0.025] border border-white/[0.05] ring-1 ring-inset ring-white/[0.02]">
+                                            <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                                                {cleanMarkdown(activeSection.body.trim())}
+                                            </ReactMarkdown>
+                                        </div>
+                                    </motion.div>
+                                )}
+                            </AnimatePresence>
+                        </div>
+                    </motion.div>
+                </motion.div>
             )}
-        </div>
+        </motion.div>
     );
 };
 
@@ -921,11 +996,14 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                                             initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 6 }}
                                             animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
                                             transition={{ duration: 0.24, ease: [0.25, 0.46, 0.45, 0.94] }}
-                                            className="mb-4 px-4 py-3.5 rounded-2xl border border-[rgba(255,159,10,0.18)] bg-[rgba(255,159,10,0.06)] backdrop-blur-sm shadow-[inset_0_1px_0_rgba(255,159,10,0.12),0_1px_4px_rgba(0,0,0,0.2)]"
+                                            className="mb-4 flex items-start gap-2.5 px-4 py-3 rounded-lg bg-white/[0.08]"
                                         >
-                                            {realIssues.map((w, i) => (
-                                                <p key={i} className="text-[13px] text-white/60 leading-snug">{w}</p>
-                                            ))}
+                                            <Info className="w-3.5 h-3.5 text-text-tertiary shrink-0 mt-[1px]" strokeWidth={2} />
+                                            <div className="space-y-0.5">
+                                                {realIssues.map((w, i) => (
+                                                    <p key={i} className="text-[12.5px] text-text-secondary leading-snug">{w}</p>
+                                                ))}
+                                            </div>
                                         </motion.div>
                                     );
                                 })()}
@@ -1009,40 +1087,40 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                                         disabled={isRegenerating}
                                         initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 6 }}
                                         animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
-                                        whileTap={prefersReducedMotion || isRegenerating ? undefined : { scale: 0.982, transition: { duration: 0.1 } }}
+                                        whileTap={prefersReducedMotion || isRegenerating ? undefined : { scale: 0.99, transition: { duration: 0.1 } }}
                                         transition={{ duration: 0.24, ease: [0.25, 0.46, 0.45, 0.94], delay: prefersReducedMotion ? 0 : 0.06 }}
-                                        className="mb-5 w-full text-left flex items-center justify-between gap-3 px-4 py-4 rounded-2xl border border-[rgba(10,132,255,0.20)] bg-[rgba(10,132,255,0.07)] backdrop-blur-sm shadow-[inset_0_1px_0_rgba(10,132,255,0.15),0_1px_4px_rgba(0,0,0,0.2)] hover:bg-[rgba(10,132,255,0.10)] hover:border-[rgba(10,132,255,0.28)] active:bg-[rgba(10,132,255,0.05)] disabled:opacity-40 transition-[background-color,border-color] duration-150 group"
+                                        className="mb-5 w-full text-left flex items-center justify-between gap-3 px-4 py-3.5 rounded-lg bg-white/[0.08] hover:bg-white/[0.11] active:bg-white/[0.06] disabled:opacity-40 transition-colors duration-150 group"
                                     >
                                         <div className="min-w-0">
-                                            <p className="text-[11.5px] text-white/40 mb-1 tracking-[0.01em]">
-                                                {v3Mode.selectedModeName ? `notes used ${v3Mode.selectedModeName}` : 'suggested template'}
+                                            <p className="text-[11px] font-medium uppercase tracking-[0.06em] text-text-tertiary mb-1">
+                                                {v3Mode.selectedModeName ? `This looks like a ${v3Mode.detectedModeName}` : 'Better template available'}
                                             </p>
-                                            <p className="text-[15px] font-semibold text-white/90 tracking-[-0.02em] truncate leading-tight">
-                                                {isRegenerating ? 'Regenerating…' : v3Mode.detectedModeName}
+                                            <p className="text-[14px] font-semibold text-text-primary tracking-[-0.01em] truncate leading-tight">
+                                                {isRegenerating
+                                                    ? 'Regenerating…'
+                                                    : <>Regenerate notes as <span className="text-accent-primary">{v3Mode.detectedModeName}</span></>}
                                             </p>
                                         </div>
-                                        <ChevronRight className="w-4 h-4 text-white/25 shrink-0 group-hover:text-white/50 transition-colors duration-150" strokeWidth={2} />
+                                        <ChevronRight className="shrink-0 w-4 h-4 text-text-tertiary group-hover:text-accent-primary group-hover:translate-x-0.5 transition-all duration-150" strokeWidth={2} />
                                     </motion.button>
                                 )}
 
                                 {/* 4. Cross-meeting recall — still-open carryover from prior meetings (Phase 13). */}
                                 {isV3Summary && meeting.detailedSummary?.crossMeeting?.stillOpen && meeting.detailedSummary.crossMeeting.stillOpen.length > 0 && (
                                     <motion.section
-                                        initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 12 }}
+                                        initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 6 }}
                                         animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
-                                        transition={{ duration: 0.22, ease: [0.23, 1, 0.32, 1], delay: prefersReducedMotion ? 0 : 0.15 }}
-                                        className="mb-6 p-3 rounded-[10px] border border-purple-400/30 bg-purple-500/5"
+                                        transition={{ duration: 0.24, ease: [0.25, 0.46, 0.45, 0.94], delay: prefersReducedMotion ? 0 : 0.12 }}
+                                        className="mb-6 px-4 py-3.5 rounded-lg bg-white/[0.08]"
                                     >
-                                        <div className="flex items-center gap-2 mb-1.5">
-                                            <span className="inline-flex items-center justify-center w-5 h-5 rounded-md bg-purple-500/15 text-purple-300 shrink-0">
-                                                <History className="w-3.5 h-3.5" strokeWidth={2} />
-                                            </span>
-                                            <p className="text-sm font-semibold text-text-primary">Carried over from earlier meetings</p>
+                                        <div className="flex items-center gap-2 mb-2.5">
+                                            <History className="w-3.5 h-3.5 text-text-tertiary shrink-0" strokeWidth={2} />
+                                            <p className="text-[11px] font-medium uppercase tracking-[0.06em] text-text-tertiary">From earlier meetings</p>
                                         </div>
-                                        <ul className="space-y-1 pl-7">
+                                        <ul className="space-y-2">
                                             {meeting.detailedSummary.crossMeeting.stillOpen.map((line, i) => (
-                                                <li key={i} className="flex items-start gap-2 text-[12.5px] text-text-secondary leading-relaxed">
-                                                    <span className="mt-[7px] w-1 h-1 rounded-full bg-purple-400/70 shrink-0" />
+                                                <li key={i} className="flex items-start gap-2.5 text-[12.5px] text-text-secondary leading-snug">
+                                                    <span className="mt-[7px] w-[3px] h-[3px] rounded-full bg-text-tertiary shrink-0" />
                                                     <span>{line}</span>
                                                 </li>
                                             ))}
