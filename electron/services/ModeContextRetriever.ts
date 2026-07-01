@@ -269,6 +269,75 @@ function chunkText(content: string, fineChunk: boolean = false): string[] {
         emit();
         if (units.length === 0 && headingLine) chunks.push(headingLine);
     }
+
+    // Round-7 safety net (2026-07-01, hardened after test-engineer review):
+    // if the chunker produced very few chunks (< 3) for a non-trivial
+    // document (>= 600 words), the content was probably one giant section
+    // without any sub-split surface — common for pathological inputs (all-
+    // caps policy text, CSV blobs, scan OCR without sentence punctuation,
+    // long single-paragraph markdown without `\n\n`).
+    //
+    // The fineChunk path normally splits on sentence/line boundaries via
+    // splitIntoUnits; if THAT also returned 1 unit (e.g. all-lowercase, no
+    // punctuation, no newlines), the chunker would return exactly 1 chunk
+    // and topK would only see that one chunk. This safety net first tries
+    // paragraph-boundary splits (`\n\s*\n+`); if the doc still has only
+    // 1 paragraph (the canonical pathological case), it falls back to a
+    // forced SUBCHUNK_WORDS word-window split so a 600+ word single blob
+    // gets broken into SUBCHUNK_WORDS-word candidates. Either way the
+    // downstream `adaptiveThreshold` filter has multiple candidates to
+    // SELECT from instead of a single guaranteed-winner.
+    if (fineChunk && chunks.length < 3) {
+        const totalWords = chunks.reduce((n, c) => n + c.split(/\s+/).filter(Boolean).length, 0);
+        // Senior-review observability 2026-07-01: emit a debug log so support
+        // can confirm the safety net actually fired when a user reports bad
+        // retrieval against a long single-paragraph / scan-OCR doc.
+        console.debug(`[ModeContextRetriever] chunkText safety net triggered (existingChunks=${chunks.length}, totalWords=${totalWords})`);
+        if (totalWords >= 600) {
+            const paragraphs = content
+                .split(/\n\s*\n+/)
+                .map(p => p.trim())
+                .filter(p => p.length > 0);
+            // Originally required paragraphs.length >= 3, but test-engineer
+            // (2026-07-01) traced 800-word single-paragraph markdown and saw
+            // it collapse to 1 chunk (no \n\n at all). Relaxed to >= 2 so a
+            // 2-paragraph 1200-word doc also benefits. For the truly single-
+            // paragraph case, paragraphs.length === 1 → falls through to
+            // the word-window fallback below.
+            if (paragraphs.length >= 2) {
+                const paraChunks: string[] = [];
+                for (const para of paragraphs) {
+                    const words = para.split(/\s+/).filter(Boolean);
+                    if (words.length === 0) continue;
+                    if (words.length <= SUBCHUNK_WORDS) { paraChunks.push(para); continue; }
+                    for (let i = 0; i < words.length; i += SUBCHUNK_WORDS - 5) {
+                        const window = words.slice(i, i + SUBCHUNK_WORDS);
+                        if (window.length === 0) break;
+                        paraChunks.push(window.join(' '));
+                        if (i + SUBCHUNK_WORDS >= words.length) break;
+                    }
+                }
+                if (paraChunks.length >= 3) chunks.length = 0, chunks.push(...paraChunks);
+            } else if (paragraphs.length === 1 && paragraphs[0].split(/\s+/).filter(Boolean).length >= 600) {
+                // Canonical pathological case: one giant paragraph, >=600
+                // words, no sentence punctuation, no \n\n. Force a word-
+                // window split on SUBCHUNK_WORDS boundaries so topK gets
+                // multiple candidates. This catches scan-OCR + all-caps
+                // policy text + single-paragraph markdown.
+                const para = paragraphs[0];
+                const words = para.split(/\s+/).filter(Boolean);
+                const windowChunks: string[] = [];
+                for (let i = 0; i < words.length; i += SUBCHUNK_WORDS - 5) {
+                    const window = words.slice(i, i + SUBCHUNK_WORDS);
+                    if (window.length === 0) break;
+                    windowChunks.push(window.join(' '));
+                    if (i + SUBCHUNK_WORDS >= words.length) break;
+                }
+                if (windowChunks.length >= 3) chunks.length = 0, chunks.push(...windowChunks);
+            }
+        }
+    }
+
     return chunks;
 }
 

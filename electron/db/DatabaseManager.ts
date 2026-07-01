@@ -1,6 +1,7 @@
 
 import Database from 'better-sqlite3';
 import path from 'path';
+import os from 'os';
 import { app } from 'electron';
 import fs from 'fs';
 import * as sqliteVec from 'sqlite-vec';
@@ -70,7 +71,30 @@ export class DatabaseManager {
     private initError: Error | null = null;
 
     private constructor() {
-        const userDataPath = app.getPath('userData');
+        // Resolve the userData directory. Normally this is Electron's real
+        // per-user app-data path. But under `ELECTRON_RUN_AS_NODE=1` (the
+        // `test:electron` runner) or before `app` is ready, `app` may be
+        // undefined or `app.getPath` may throw — in those contexts fall back
+        // to an explicit override (NATIVELY_TEST_USERDATA) or an OS-temp dir
+        // so importing a module that lazily constructs DatabaseManager (e.g.
+        // ModesManager.getInstance() inside a unit test) degrades gracefully
+        // instead of crashing with "Cannot read properties of undefined
+        // (reading 'getPath')". Production (real Electron main process) is
+        // unaffected — app.getPath succeeds and this fallback never runs.
+        let userDataPath: string;
+        try {
+            const fromEnv = process.env.NATIVELY_TEST_USERDATA;
+            if (fromEnv) {
+                userDataPath = fromEnv;
+            } else if (app && typeof app.getPath === 'function') {
+                userDataPath = app.getPath('userData');
+            } else {
+                userDataPath = path.join(os.tmpdir(), 'natively-no-electron-app');
+            }
+        } catch {
+            userDataPath = path.join(os.tmpdir(), 'natively-no-electron-app');
+        }
+        try { fs.mkdirSync(userDataPath, { recursive: true }); } catch { /* best effort */ }
         this.dbPath = path.join(userDataPath, 'natively.db');
         // IMPORTANT: never throw out of the constructor. If init() throws and
         // escapes, `DatabaseManager.instance` is never assigned — so every
@@ -909,6 +933,122 @@ export class DatabaseManager {
             this.db.pragma('user_version = 21');
         }
 
+        if (version < 22) {
+            // FIX 2026-07-01: backfill page_count / extracted_page_count on
+            // existing reference_file rows where the column is NULL. The cause:
+            // the v18→v19 schema migration added the columns and the v19→v21
+            // rounds shipped the upstream producer-side forwarding fix (see
+            // ModesManager.addReferenceFile). Rows inserted BEFORE that fix
+            // shipped still have NULL page_count, which forces
+            // ModeContextRetriever.reportReferenceFilePageCounts into its
+            // heuristic branch (`referenceFileIngestedByPageHeuristic: true`)
+            // until the user re-uploads the file. This migration derives the
+            // value from [Page N] markers already embedded in content (round-2
+            // injected those into pdf-parse output). Two phases:
+            //   1) Derive a count from [Page N] markers for PDFs (fast, exact).
+            //   2) Fall back to a character-length estimate for any non-PDF
+            //      where markers don't match. Conservative divisor of 3000
+            //      mirrors the live in-app heuristic exactly so downstream
+            //      behavior is stable.
+            // Safe on WAL — single bulk UPDATE per phase, no FK cascade
+            // impact (page_count is a leaf integer column, no schema change).
+            // Idempotent: WHERE page_count IS NULL ensures re-runs are no-ops.
+            console.log('[DatabaseManager] Applying migration v21 → v22: Backfill NULL page_count + extracted_page_count on mode_reference_files');
+            try {
+                // Phase 1: derive exact count from every [Page N] marker via
+                // recursive CTE. The CTE seeds with the first occurrence offset,
+                // then iterates `instr(content, '[Page ', prev + 1)` to find
+                // each subsequent occurrence until instr returns 0 (no more
+                // matches). Each iteration extracts `CAST(... AS INTEGER)` of
+                // the trailing number. MAX() then returns the largest page
+                // number found, which == total page count for any document
+                // with sequentially-numbered markers.
+                //
+                // CRITICAL: the first draft of Phase 1 used a single
+                // `instr(content, '[Page ')` call which returns ONLY the FIRST
+                // occurrence offset — so substr() extracted the page number
+                // from the first marker only (returned 1 for a 66-page PDF).
+                // The recursive CTE walks EVERY occurrence so MAX() finds the
+                // actual total. Test-engineer caught this on 2026-07-01.
+                const phaseOne = this.db.prepare(`
+                    UPDATE mode_reference_files
+                    SET page_count = (
+                        -- Each row's content is its own subquery scope. CTE walks
+                        -- by chopping "rest" to everything-after the [Page N]
+                        -- header, finding the next [Page marker in that rest,
+                        -- extracting its integer, and recursing. The seeded
+                        -- row finds marker #1, the recursive step finds #N+1,
+                        -- and so on until no more markers remain.
+                        -- SQLite's built-in instr() takes (haystack, needle)
+                        -- only — no 3-arg form — so we walk by carving the
+                        -- string instead of using absolute offsets.
+                        -- If no markers exist this SELECT returns NULL (no
+                        -- rows); the WHERE phase_count IS NULL guard in Phase 2
+                        -- picks those rows back up for the heuristic fallback.
+                        WITH RECURSIVE cte_pages(rest, page_num) AS (
+                            SELECT
+                                substr(content, instr(content, '[Page ') + 6),
+                                CASE
+                                    WHEN instr(content, '[Page ') > 0
+                                    THEN CAST(
+                                        substr(
+                                            content,
+                                            instr(content, '[Page ') + 6,
+                                            instr(substr(content, instr(content, '[Page ') + 6), ']') - 1
+                                        ) AS INTEGER
+                                    )
+                                    ELSE NULL
+                                END
+                            FROM mode_reference_files
+                            WHERE mode_reference_files.id = mode_reference_files.id
+                              AND page_count IS NULL
+                              AND content LIKE '%[Page %]%'
+                        UNION ALL
+                            SELECT
+                                substr(rest, instr(rest, '[Page ') + 6),
+                                CASE
+                                    WHEN instr(rest, '[Page ') > 0
+                                    THEN CAST(
+                                        substr(
+                                            rest,
+                                            instr(rest, '[Page ') + 6,
+                                            instr(substr(rest, instr(rest, '[Page ') + 6), ']') - 1
+                                        ) AS INTEGER
+                                    )
+                                    ELSE NULL
+                                END
+                            FROM cte_pages
+                            WHERE instr(rest, '[Page ') > 0
+                            LIMIT 5000
+                        )
+                        SELECT MAX(page_num) FROM cte_pages WHERE page_num IS NOT NULL
+                    )
+                    WHERE page_count IS NULL
+                      AND content LIKE '%[Page %]%'
+                `).run();
+                // Phase 2: heuristic for non-marked content (rare — only old
+                // pre-round-2 content or non-PDF text). Use 3000 chars/page to
+                // match the live ModeContextRetriever heuristic exactly.
+                const phaseTwo = this.db.prepare(`
+                    UPDATE mode_reference_files
+                    SET page_count = MAX(1, CAST(LENGTH(content) / 3000 AS INTEGER)),
+                        extracted_page_count = MAX(1, CAST(LENGTH(content) / 3000 AS INTEGER))
+                    WHERE page_count IS NULL
+                `).run();
+                console.log(`[DatabaseManager] v22 backfill: derived ${phaseOne.changes} rows from [Page N] markers, heuristically estimated ${phaseTwo.changes} remaining rows`);
+                // Senior-review fix 2026-07-01: only advance the schema version
+                // when BOTH phases complete without throwing. The catch block
+                // below now re-throws so we don't get stuck re-running a
+                // partial migration on every app start (which would retry
+                // any deterministic SQLite failure — e.g. recursion limit on
+                // a 5000+ marker pathological doc — forever).
+                this.db.pragma('user_version = 22');
+            } catch (e) {
+                console.error('[DatabaseManager] v22 backfill migration failed (re-throwing to halt startup so user sees the error):', e);
+                throw e;
+            }
+        }
+
         console.log('[DatabaseManager] Migrations completed.');
     }
 
@@ -1213,7 +1353,7 @@ export class DatabaseManager {
         body: string; bodyMarkdown?: string; sourcePagesJson: string; sourceSectionsJson: string;
         sourceQuotesJson: string; entitiesJson: string; tagsJson: string; relatedCardIdsJson: string;
         confidence: string; generatedFrom: string; sourceChecksum: string; cardVersion: number;
-    }>): void {
+    }>, newSourceChecksum?: string): void {
         if (!this.db) throw new Error('Database not initialized');
         const txn = this.db.transaction(() => {
             // OKF Phase 6: a user-edited card whose source_checksum no longer
@@ -1221,12 +1361,24 @@ export class DatabaseManager {
             // changed since the edit) is flagged needs_review instead of being
             // silently kept stale or silently overwritten. The card body
             // itself is left untouched — only the review flag changes.
-            const newChecksum = cards[0]?.sourceChecksum;
-            if (newChecksum) {
+            //
+            // BUG FIX (2026-07-01, senior review): this used to derive the new
+            // checksum from `cards[0]?.sourceChecksum` — if a regeneration
+            // produces ZERO cards (content too short/unparseable to extract
+            // any section, or every candidate rejected by OkfVerifier),
+            // `cards[0]` is undefined, the checksum falls through to
+            // `undefined`, the `if (newChecksum)` guard is falsy, and this
+            // UPDATE never runs — a user-edited card whose source became
+            // degenerate silently keeps its stale approval_status forever,
+            // exactly the "silently kept stale" outcome this mechanism exists
+            // to prevent. Callers now pass the checksum explicitly (always
+            // known — it's the content hash of what was JUST extracted,
+            // regardless of how many cards came out of it).
+            if (newSourceChecksum) {
                 this.db!.prepare(`
                     UPDATE knowledge_cards SET approval_status = 'needs_review'
                     WHERE pack_id = ? AND user_edited = 1 AND source_checksum != ? AND approval_status != 'needs_review'
-                `).run(packId, newChecksum);
+                `).run(packId, newSourceChecksum);
             }
             this.db!.prepare('DELETE FROM knowledge_cards WHERE pack_id = ? AND user_edited = 0').run(packId);
             const ins = this.db!.prepare(`
@@ -1672,6 +1824,23 @@ export class DatabaseManager {
         return this.db;
     }
 
+    /**
+     * Run `fn` inside a single better-sqlite3 transaction (BEGIN/COMMIT, with
+     * automatic ROLLBACK if `fn` throws). Use this to make a multi-statement
+     * write sequence atomic ACROSS several DatabaseManager methods that each
+     * do their own internal `this.db.transaction(...)` — nested better-sqlite3
+     * transactions are savepoint-based, so an inner method's transaction
+     * commits to the OUTER one, and a throw anywhere rolls the whole thing
+     * back. Without this, e.g. KnowledgePackStore.savePack's four separate
+     * writes (pack/cards/entities/relations) + the source-row write can leave
+     * a half-written, permanently-stuck pack if one fails mid-sequence (the
+     * source's contentHash gate would then skip regeneration forever).
+     */
+    public runInTransaction<T>(fn: () => T): T {
+        if (!this.db) throw new Error('DatabaseManager.runInTransaction: database not initialized');
+        return this.db.transaction(fn)();
+    }
+
     /** Path to the SQLite database file on disk. Used by worker threads. */
     public getDbPath(): string {
         return this.dbPath;
@@ -2109,18 +2278,27 @@ export class DatabaseManager {
     public seedDemoMeeting() {
         if (!this.db) return;
 
-        // Check if demo meeting already exists
-        const existing = this.db.prepare('SELECT id FROM meetings WHERE id = ?').get('demo-meeting');
-        if (existing) {
-            console.log('[DatabaseManager] Demo meeting already exists, skipping seed.');
-            return;
-        }
-
-        // Do NOT flush all meetings. Preserving user data is critical.
-        // If we really need to clean up old demo data, we should delete only that ID.
-        // this.deleteMeeting('demo-meeting'); // Optional safety if we wanted to force update
-
         const demoId = 'demo-meeting';
+
+        // If a demo meeting already exists, only re-seed when it's the older
+        // legacy shape. A demo already carrying the V3 detailedSummary
+        // (schemaVersion === 3) is left untouched so we don't clobber it on
+        // every launch. Older legacy demos are deleted + re-seeded so users
+        // pick up the richer V3 cards without a manual reset.
+        const existing = this.db.prepare('SELECT summary_json FROM meetings WHERE id = ?').get(demoId) as { summary_json?: string } | undefined;
+        if (existing) {
+            let isV3Demo = false;
+            try {
+                const parsed = existing.summary_json ? JSON.parse(existing.summary_json) : null;
+                isV3Demo = parsed?.detailedSummary?.schemaVersion === 3;
+            } catch { /* corrupt row → treat as legacy, re-seed */ }
+            if (isV3Demo) {
+                console.log('[DatabaseManager] V3 demo meeting already exists, skipping seed.');
+                return;
+            }
+            console.log('[DatabaseManager] Upgrading legacy demo meeting to V3.');
+            this.deleteMeeting(demoId);
+        }
 
         // Set date to today 9:30 AM
         const today = new Date();
@@ -2259,9 +2437,86 @@ natively.contact@gmail.com`;
             duration: "5:00",
             summary: "Complete guide to using Natively - your real-time AI meeting assistant.",
             detailedSummary: {
+                // schemaVersion: 3 unlocks the full V3 notes layout + all four cards.
+                schemaVersion: 3,
                 overview: summaryMarkdown,
                 actionItems: [],
-                keyPoints: []
+                keyPoints: [],
+
+                // Summary bullets (blue-dot list at the top of the notes).
+                tldr: [
+                    "Natively runs live during calls — real-time answers plus structured notes after.",
+                    "Five quick actions: What to answer, Clarify, Recap, Follow-up, and Answer.",
+                    "Cmd/Ctrl + B hides the widget instantly; screenshots via Cmd + H.",
+                ],
+
+                // The mode's note-section template — primary notes layout.
+                sectionsV3: [
+                    {
+                        id: 'sec_getting_started',
+                        title: 'Getting started',
+                        order: 0,
+                        bullets: [
+                            { id: 'b1', text: "Click Start Session from the dashboard to begin a call.", confidence: 'high' },
+                            { id: 'b2', text: "Show or hide Natively anytime with Cmd + B (Mac) or Ctrl + B (Windows).", confidence: 'high' },
+                        ],
+                    },
+                    {
+                        id: 'sec_features',
+                        title: 'Key features',
+                        order: 1,
+                        bullets: [
+                            { id: 'b3', text: "Five quick-action buttons give real-time, context-aware assistance.", confidence: 'high' },
+                            { id: 'b4', text: "Smart note-taking captures key points, action items, and a structured summary.", confidence: 'medium' },
+                        ],
+                    },
+                    {
+                        id: 'sec_setup',
+                        title: 'Setup',
+                        order: 2,
+                        bullets: [
+                            { id: 'b5', text: "Add Gemini and Groq API keys under Settings → Credentials.", confidence: 'high' },
+                            { id: 'b6', text: "Select a Google Cloud service-account JSON to enable live transcription.", confidence: 'medium' },
+                        ],
+                    },
+                ],
+
+                // CARD 1 — source quality warning (non-benign warnings render).
+                sourceQuality: {
+                    transcriptCoverage: 0.82,
+                    speakerQuality: 'mixed' as const,
+                    actionItemConfidence: 'medium' as const,
+                    warnings: [
+                        "Speaker labels are low quality; verify owners and quotes before sharing.",
+                    ],
+                },
+
+                // CARD 2 — mode auto-detect suggestion (detected differs from selected, conf ≥ 0.5).
+                mode: {
+                    selectedModeId: 'mode_general_default',
+                    selectedModeName: 'General',
+                    selectedTemplateType: 'general',
+                    detectedModeId: 'mode_product_demo',
+                    detectedModeName: 'Product Demo',
+                    detectedConfidence: 0.78,
+                    summaryModeUsed: 'general',
+                },
+
+                // CARD 3 — cross-meeting recall (stillOpen non-empty).
+                crossMeeting: {
+                    stillOpen: [
+                        "Finish uploading your resume / project brief for tailored answers (from Onboarding).",
+                        "Enable Undetectability before your next screen-shared call (from Setup walkthrough).",
+                    ],
+                },
+
+                // Follow-up draft — exercises the copy / regenerate / tone dropdown row.
+                followUpDraft: {
+                    type: 'email',
+                    subject: "Getting started with Natively",
+                    body: "Hi there,\n\nThanks for trying Natively! A quick recap: start a session from the dashboard, use the five quick actions during your call, and press Cmd + B to hide the widget anytime. Notes, transcript, and follow-ups are waiting for you after every meeting.\n\nBest,\nThe Natively team",
+                    tone: 'professional',
+                },
             },
             transcript: [
                 { speaker: 'interviewer', text: "Welcome to Natively! Let me show you how it works.", timestamp: 0 },

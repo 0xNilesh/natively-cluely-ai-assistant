@@ -59,6 +59,11 @@ export interface DocumentMap {
     /** True if a recognisable Table of Contents was detected and excluded AND
      *  enough real sections were found to chunk by section. */
     hasToc: boolean;
+    /** Senior-review observability 2026-07-01: which path triggered hasToc.
+     *  'A' = classic dotted-leader ToC (path A), 'B' = numbered-headings-only
+     *  generalization (path B), null = hasToc=false (no path triggered).
+     *  Surfaces in telemetry so support can distinguish structural types. */
+    hasTocPath?: 'A' | 'B' | null;
 }
 
 const PAGE_MARKER_RE = /^\s*\[Page\s+(\d+)\]\s*$/;
@@ -186,13 +191,32 @@ export function buildDocumentMap(content: string): DocumentMap {
     }
     flush();
 
-    // hasToc gates section-based chunking: require a real ToC AND enough real
-    // numbered sections, else a flat-prose doc with a few incidental dotted
-    // lines would wrongly trigger section-chunking with one giant section.
+    // hasToc gates section-based chunking. Two valid paths qualify:
+    //
+    //   PATH A (traditional): a dotted-leader Table of Contents removed during
+    //   parse + at least 3 numbered sections afterwards. This is the original
+    //   thesis-style detection.
+    //
+    //   PATH B (round-6 generalization, 2026-07-01): a document WITHOUT a
+    //   ToC but WITH ≥5 numbered section headings inline (e.g. modern two-
+    //   column journals, slide-deck PDFs, academic papers with numbered
+    //   headings only). The count is conservative at ≥5 AND requires at
+    //   least one multi-level heading (depth ≥ 2, e.g. "1.1 Background") so
+    //   flat to-do lists / numbered FAQ formats with all depth-1 entries
+    //   ("1 First\n2 Second\n...") don't false-positive into section
+    //   chunking. Hardened after test-engineer review 2026-07-01.
+    //
+    // A pure flat-prose document (no ToC, no numbered headings) keeps
+    // hasToc=false so callers fall back to their word-window chunker — see
+    // DocumentMap.test.mjs "flat-prose doc with no ToC does NOT set hasToc".
     const numberedSections = sections.filter(s => s.num).length;
-    const hasToc = tocLinesRemoved >= 5 && numberedSections >= 3;
+    const hasMultiLevel = sections.some(s => s.depth >= 2);
+    const isPathA = tocLinesRemoved >= 5 && numberedSections >= 3;
+    const isPathB = !isPathA && numberedSections >= 5 && hasMultiLevel;
+    const hasToc = isPathA || isPathB;
+    const hasTocPath: 'A' | 'B' | null = isPathA ? 'A' : isPathB ? 'B' : null;
 
-    return { sections, pageCount: maxPage, tocLinesRemoved, hasToc };
+    return { sections, pageCount: maxPage, tocLinesRemoved, hasToc, hasTocPath };
 }
 
 /**

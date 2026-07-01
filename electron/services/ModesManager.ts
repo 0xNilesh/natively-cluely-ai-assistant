@@ -187,6 +187,16 @@ export function encodeModeContextPayload(value: unknown): string {
     return JSON.stringify(value).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
 }
 
+// OKF Phase 7: reference-file content length threshold above which
+// KnowledgeManager.generateForFile (deterministic extraction) is routed
+// through KnowledgeIndexQueue's background path instead of running
+// synchronously inline with addReferenceFile. 300k chars ≈ 150-200 pages of
+// dense text — well above the 66-page/128k-char benchmark thesis this
+// feature was tuned against (which stays comfortably on the synchronous
+// path, preserving existing test/smoke-script assumptions that the pack is
+// queryable immediately after addReferenceFile returns).
+const OKF_BACKGROUND_INDEX_THRESHOLD_CHARS = 300_000;
+
 const DOCUMENT_SOURCE_RE = /\b(uploaded|attached|provided|reference|source material|course material|seminar material|lecture material|presentation|slides?|deck|papers?|pdfs?|files?|documents?|docs?|notes?|attached material|uploaded content|provided material)\b/i;
 const DOCUMENT_CONSTRAINT_RE = /\b(source[-\s]?of[-\s]?truth|from the files?|from the documents?|from the uploaded|answer(?:s|ing)?\s+from\s+(?:the\s+)?(?:uploaded|attached|provided|reference|files?|documents?)|based on (?:uploaded|provided|attached|the\s+(?:uploaded|attached|provided|reference)|my\s+(?:uploaded|attached|provided|reference|files?|documents?|docs?|notes?|papers?|slides?|presentation))|use only|only use|rely only|use\s+the\s+(?:uploaded|attached|provided|reference|files?|documents?|docs?|notes?|papers?|slides?|presentation)|(?:stick to|restrict to|limit to|draw from)\s+the\s+(?:uploaded|attached|provided|reference|files?|documents?|docs?|notes?|papers?|slides?|presentation|material)|do not use knowledge outside|(?:don['’]?t|do not)\s+(?:use|rely on|draw on)\s+(?:anything\s+)?(?:outside|beyond|other than)|ground(?:ed)? (?:your )?answers? in|ground(?:ed)? in)\b/i;
 
@@ -429,6 +439,22 @@ export class ModesManager {
         // persisted chunk vectors (mode_reference_chunks / index_state) have no
         // FK on purpose (the table is owned by the retriever) — drop them
         // explicitly BEFORE the cascade removes the file rows we enumerate.
+        //
+        // CORRECTION (OKF hardening pass, 2026-07-01): this codebase never
+        // runs `PRAGMA foreign_keys = ON` (confirmed zero references
+        // anywhere in electron/), so declared FK CASCADE clauses are
+        // actually inert — `DatabaseManager.deleteMode` below is a bare
+        // `DELETE FROM modes` that does NOT remove `mode_reference_files`
+        // rows either. That's a pre-existing gap outside OKF's scope to fix
+        // wholesale here; explicitly clean up the OKF knowledge_* rows for
+        // this mode's reference files, same reasoning as the chunk-vector
+        // cleanup right below.
+        try {
+            const { KnowledgeManager } = require('./knowledge/KnowledgeManager');
+            KnowledgeManager.getInstance().deleteForMode(id);
+        } catch (err: any) {
+            console.warn('[ModesManager] OKF knowledge cleanup on deleteMode skipped (non-fatal):', err?.message);
+        }
         try {
             for (const file of this.getReferenceFiles(id)) {
                 this.modeContextRetriever.removeReferenceFileIndex(file.id);
@@ -457,24 +483,63 @@ export class ModesManager {
         extractedPageCount?: number;
     }): ModeReferenceFile {
         const id = `ref_${crypto.randomUUID()}`;
+        // FIX 2026-07-01: forward pageCount + extractedPageCount to the DB.
+        // Previously these fields were accepted on the input params but dropped
+        // before the INSERT, leaving NULL page_count on every row written after
+        // the v18→v19 migration. Upstream consumers (ModeContextRetriever
+        // reportReferenceFilePageCounts telemetry) then triggered their
+        // 3000-char heuristic instead of using the real pdf-parse-extracted
+        // count. Round 1 — see also v22 backfill migration for existing rows.
         DatabaseManager.getInstance().addReferenceFile({
             id,
             modeId: params.modeId,
             fileName: params.fileName,
             content: params.content,
+            pageCount: params.pageCount,
+            extractedPageCount: params.extractedPageCount,
         });
         this.invalidateActiveModeCache();
-        // OKF Phase 2 (2026-07-01): generate a Knowledge Pack alongside the
-        // existing chunk pipeline. Synchronous (heuristic v1 is pure string
-        // work, ~2-5s on a 66-page PDF) but fully additive — a thrown error
-        // here is caught and logged, never blocking the upload. No-ops when
-        // okfKnowledgePacks is OFF (production default).
+        // OKF Phase 2/7 (2026-07-01): generate a Knowledge Pack alongside the
+        // existing chunk pipeline. Heuristic v1 extraction is pure string
+        // work — fast enough on typical documents (~2-5s on the 66-page
+        // benchmark thesis) to run synchronously without a perceptible
+        // upload-UI stall, but for a genuinely large document (the exact
+        // case KnowledgeIndexQueue's background path exists for — see its
+        // header comment) blocking would be user-visible. Route through
+        // KnowledgeIndexQueue.generateForFileInBackground for content over
+        // OKF_BACKGROUND_INDEX_THRESHOLD_CHARS; small/typical files stay
+        // synchronous so callers (including this method's own return value
+        // and the existing test/smoke-script suite) can rely on the pack
+        // being queryable immediately after addReferenceFile returns, same
+        // as before this change. A thrown error is caught and logged inside
+        // generateForFile itself (returns {status:'failed'}, never throws)
+        // and additionally guarded here. No-ops when okfKnowledgePacks is
+        // OFF (production default) — the flag is checked HERE, before the
+        // sync-vs-background routing, so a large-document upload with the
+        // feature off never even enqueues a background job (senior review
+        // MEDIUM, 2026-07-01: previously generateForFileInBackground was
+        // invoked unconditionally for >300k content and only generateForFile
+        // INSIDE checked the flag, so a flag-off large upload still spun up a
+        // queue promise + broadcast queued/running/done progress events for
+        // nothing). The synchronous branch was already safe — generateForFile
+        // short-circuits on the flag — but gating up front keeps the chunk
+        // path completely untouched when OKF is off.
         try {
-            const { KnowledgeManager } = require('./knowledge/KnowledgeManager') as typeof import('./knowledge/KnowledgeManager');
-            KnowledgeManager.getInstance().generateForFile({
-                id, modeId: params.modeId, fileName: params.fileName, content: params.content,
-                pageCount: params.pageCount, extractedPageCount: params.extractedPageCount,
-            });
+            const { isOkfKnowledgePacksEnabled } = require('../intelligence/intelligenceFlags') as typeof import('../intelligence/intelligenceFlags');
+            if (isOkfKnowledgePacksEnabled()) {
+                const { KnowledgeManager } = require('./knowledge/KnowledgeManager') as typeof import('./knowledge/KnowledgeManager');
+                const fileInput = {
+                    id, modeId: params.modeId, fileName: params.fileName, content: params.content,
+                    pageCount: params.pageCount, extractedPageCount: params.extractedPageCount,
+                };
+                if (params.content.length > OKF_BACKGROUND_INDEX_THRESHOLD_CHARS) {
+                    void KnowledgeManager.getInstance().generateForFileInBackground(fileInput).catch((err: any) => {
+                        console.warn('[ModesManager] OKF background knowledge pack generation failed (non-fatal):', err?.message);
+                    });
+                } else {
+                    KnowledgeManager.getInstance().generateForFile(fileInput);
+                }
+            }
         } catch (err: any) {
             console.warn('[ModesManager] OKF knowledge pack generation skipped (non-fatal):', err?.message);
         }

@@ -147,6 +147,95 @@ test('flat-prose doc with no ToC does NOT set hasToc', async () => {
   assert.equal(map.hasToc, false, 'flat prose with no ToC must not trigger section-chunking');
 });
 
+// Round-6 generalization (2026-07-01): PDFs WITHOUT a dotted-leader Table of
+// Contents but WITH ≥5 inline numbered section headings (modern two-column
+// journals, slide-deck-derived PDFs, academic papers with numbered headings
+// only) must also enter the section-aware chunking path. Without this, all
+// such documents would fall through to the flat chunkText and lose section
+// provenance + page-range fidelity.
+test('numbered-headings-only doc (no ToC) sets hasToc when ≥5 sections exist (PATH B)', async () => {
+  const { buildDocumentMap, sectionAwareChunksFromMap } = await loadMap();
+  const doc = [
+    '[Page 1]', '3.1 Methodology',
+    'We used a randomized controlled trial design.',
+    '[Page 3]', '3.2 Participants',
+    '32 participants were recruited across three sites.',
+    '[Page 5]', '3.3 Materials',
+    'Standardized questionnaires were administered.',
+    '[Page 7]', '3.4 Procedure',
+    'Each session lasted approximately 45 minutes.',
+    '[Page 9]', '3.5 Data Analysis',
+    'Mixed-effects models were fitted using lme4.',
+  ].join('\n');
+  const map = buildDocumentMap(doc);
+  assert.equal(map.hasToc, true, 'numbered-headings-only doc with ≥5 sections must set hasToc (round-6 PATH B)');
+  assert.equal(map.tocLinesRemoved, 0, 'no dotted-leader lines means tocLinesRemoved stays 0 (PATH B is via numberedSections only)');
+  const chunks = sectionAwareChunksFromMap(map, 140, 30);
+  assert.ok(Array.isArray(chunks) && chunks.length > 0, 'numbered-headings-only doc must yield section chunks');
+});
+
+test('numbered-headings-only doc with 4 sections does NOT set hasToc (conservative threshold)', async () => {
+  const { buildDocumentMap } = await loadMap();
+  // 4 numbered sections falls below the ≥5 threshold — must stay flat so the
+  // strict threshold doesn't false-positive on small docs with stray numbers.
+  const doc = [
+    '[Page 1]', '1 Introduction', 'intro text',
+    '[Page 3]', '2 Background', 'background text',
+    '[Page 5]', '3 Methods', 'methods text',
+    '[Page 7]', '4 Results', 'results text',
+  ].join('\n');
+  const map = buildDocumentMap(doc);
+  assert.equal(map.hasToc, false, '4-section numbered-only doc must NOT set hasToc (≥5 threshold)');
+});
+
+test('classic dotted-leader ToC path A still works after PATH B generalization', async () => {
+  const { buildDocumentMap } = await loadMap();
+  const map = buildDocumentMap(THESIS);
+  assert.equal(map.hasToc, true, 'classic ToC path A still triggers hasToc');
+  assert.ok(map.tocLinesRemoved >= 5, `PATH A still requires ≥5 ToC lines removed (got ${map.tocLinesRemoved})`);
+});
+
+test('PATH B rejects flat depth-1 lists (5+ single-digit headings → hasToc=false)', async () => {
+  const { buildDocumentMap } = await loadMap();
+  // A flat to-do list / FAQ format with 5+ single-digit numbered entries has
+  // no multi-level depth, so PATH B's `&& hasMultiLevel` guard rejects it.
+  // The user-facing harm of false-positives is bounded (graceful degrade), but
+  // this guard eliminates the false-positive entirely.
+  const todo = [
+    '[Page 1]',
+    '1 Buy groceries',
+    '2 Walk the dog',
+    '3 Call mom',
+    '4 Pay bills',
+    '5 Read thesis chapter',
+    '6 Submit to advisor',
+  ].join('\n');
+  const map = buildDocumentMap(todo);
+  assert.equal(map.hasToc, false, 'flat depth-1 list with 5+ entries must NOT set hasToc');
+});
+
+// Senior-review observability 2026-07-01: hasTocPath tells downstream
+// telemetry whether the classic ToC path A triggered or the generalized
+// PATH B triggered, so support can distinguish misclassification causes.
+test('hasTocPath is "A" for classic dotted-leader ToC and "B" for numbered-headings-only', async () => {
+  const { buildDocumentMap } = await loadMap();
+  // PATH A: classic thesis with dotted-leader ToC
+  const pathAMap = buildDocumentMap(THESIS);
+  assert.equal(pathAMap.hasTocPath, 'A', 'THESIS fixture should set hasTocPath = "A" (classic ToC)');
+  // PATH B: numbered-headings-only doc with multi-level depth
+  const pathBMap = buildDocumentMap([
+    '[Page 1]', '3.1 Methodology', 'methodology text',
+    '[Page 3]', '3.2 Participants', 'participants text',
+    '[Page 5]', '3.3 Materials', 'materials text',
+    '[Page 7]', '3.4 Procedure', 'procedure text',
+    '[Page 9]', '3.5 Data Analysis', 'analysis text',
+  ].join('\n'));
+  assert.equal(pathBMap.hasTocPath, 'B', 'multi-level numbered-only doc should set hasTocPath = "B"');
+  // hasToc=false → hasTocPath=null
+  const flatMap = buildDocumentMap('Mercury X1 has 19 degrees of freedom. Sensors include LiDAR.');
+  assert.equal(flatMap.hasTocPath, null, 'flat prose should set hasTocPath = null');
+});
+
 test('resolveTargetSections maps questions to the right sections', async () => {
   const { buildDocumentMap, resolveTargetSections } = await loadMap();
   const map = buildDocumentMap(THESIS);

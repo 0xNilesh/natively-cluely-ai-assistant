@@ -1668,19 +1668,24 @@ export function initializeIpcHandlers(appState: AppState): void {
                   : buildCodingContractPrompt(null);
                 const regenPrompt = `${regenContract}\n\nThe previous answer was cut off before the code finished. Output the COMPLETE code now, nothing truncated.\n\nProblem: ${message}`;
                 let regen = '';
+                // HIGH #3 (audit 2026-06-29): iterator.return() alone can't
+                // cancel a parked fetch; without an abort the upstream
+                // gemini-3.1-flash-lite request keeps consuming rate-limit /
+                // billing for the rest of its natural response. Pass a real
+                // AbortController signal into streamChat (positional arg #8,
+                // after extraDataScopes) and fire it in onCleanup so the
+                // provider fetch is released immediately when we stop reading.
+                // (Previously this called a non-existent
+                // `llmHelper.abortActiveStream()` — optional-chained so it
+                // silently no-op'd at runtime AND failed the typecheck.)
+                const regenAbort = new AbortController();
                 await raceStreamWithDeadline({
-                  stream: llmHelper.streamChat(regenPrompt, undefined, codingPriorProblemBlock || undefined, undefined, true, true) as AsyncGenerator<string>,
+                  stream: llmHelper.streamChat(regenPrompt, undefined, codingPriorProblemBlock || undefined, undefined, true, true, [], regenAbort.signal) as AsyncGenerator<string>,
                   firstUsefulDeadlineMs: usingLocalLlm ? LIVE_LOCAL_FIRST_USEFUL_TIMEOUT_MS : 8000,
                   isUsefulYet: () => regen.length >= 10,
                   shouldAbort: () => regen.length > 4000,
                   onToken: (tok: string) => { regen += tok; },
-                  // HIGH #3 (audit 2026-06-29): iterator.return() alone can't
-                  // cancel a parked fetch; without onCleanup the upstream
-                  // gemini-3.1-flash-lite request keeps consuming rate-limit
-                  // / billing for the rest of its natural response. Abort the
-                  // stream's underlying fetch so the provider is released
-                  // immediately when we stop reading.
-                  onCleanup: () => { try { llmHelper.abortActiveStream?.(); } catch { /* best effort */ } },
+                  onCleanup: () => { try { regenAbort.abort(); } catch { /* best effort */ } },
                 });
                 const regenTrim = regen.trim();
                 // Accept the regen only if it is itself complete (don't replace a truncated
@@ -2116,6 +2121,15 @@ export function initializeIpcHandlers(appState: AppState): void {
               // curated card content, not just raw chunks — a synthesis question
               // may be answerable entirely from cards even when the raw-chunk
               // re-retrieval misses (different topK/scoring than the main path).
+              // OKF Phase 3: computed alongside docContextBlock below —
+              // isTier1Or2Evidence feeds the strong-evidence OR-condition in
+              // the false-refusal repair gate further down (senior review
+              // fix, 2026-07-01: EvidenceAssembler.computeTier previously had
+              // zero production call sites — this wires it in as an
+              // ADDITIONAL strong-evidence signal alongside the existing
+              // term-count heuristic, never replacing it, so the already-
+              // verified 19/19 benchmark behavior can't regress).
+              let isTier1Or2Evidence = false;
               try {
                 if (isIntelligenceFlagEnabled('okfHybridRetrieval')) {
                   const { ModesManager: _MM } = require('./services/ModesManager');
@@ -2124,10 +2138,12 @@ export function initializeIpcHandlers(appState: AppState): void {
                     const { KnowledgeManager } = require('./services/knowledge/KnowledgeManager');
                     const { classifyQuestion } = require('./services/knowledge/QuestionClassifier');
                     const { queryOkfCards } = require('./services/knowledge/OkfRetriever');
+                    const { assembleEvidence } = require('./services/knowledge/EvidenceAssembler');
                     const referenceFiles = _MM.getInstance().getReferenceFiles?.(activeMode.id) || [];
                     const classification = classifyQuestion(message);
                     const km = KnowledgeManager.getInstance();
                     const cardTexts: string[] = [];
+                    let bestTier = 4;
                     for (const file of referenceFiles) {
                       const pack = km.getPackForFile(file.id);
                       if (!pack || pack.cards.length === 0) continue;
@@ -2137,7 +2153,10 @@ export function initializeIpcHandlers(appState: AppState): void {
                       // it instead of re-running lexical scoring.
                       const scored = queryOkfCards(pack, message, classification, { topN: 6, fileId: file.id });
                       for (const { card } of scored) cardTexts.push(`${card.title}\n${card.body}`);
+                      const evidence = assembleEvidence({ pack, scoredCards: scored, rawChunkText: '', classification });
+                      if (evidence.tier < bestTier) bestTier = evidence.tier;
                     }
+                    isTier1Or2Evidence = bestTier <= 2;
                     if (cardTexts.length > 0) {
                       docContextBlock = docContextBlock ? `${cardTexts.join('\n\n')}\n\n${docContextBlock}` : cardTexts.join('\n\n');
                     }
@@ -2165,7 +2184,44 @@ export function initializeIpcHandlers(appState: AppState): void {
               // possibly wrong.
               const SYSTEM_REFUSAL_RE = /^I could not find that in the retrieved sections? of the (?:document|uploaded material)\b/i;
               const isSystemOwnRefusalPhrase = SYSTEM_REFUSAL_RE.test(trimmed);
-              const HIGH_SIGNAL_ENTITIES = ['OpenVLA-OFT', 'OpenVLA', 'AgenticVLA', 'AutoGen', 'VLA', 'AGI', 'embodied cognition', 'research questions', 'thesis objectives', 'Mercury X1'];
+              // High-signal entities are derived from the QUESTION itself
+              // (via QuestionClassifier.classifyQuestion's targetEntities —
+              // capitalized multi-word phrases and acronym-style tokens) and
+              // cross-checked against the active OKF pack's own extracted
+              // entity names, rather than a fixed list. A prior version
+              // hardcoded ['OpenVLA-OFT', 'OpenVLA', 'AgenticVLA', 'AutoGen',
+              // 'VLA', 'AGI', ...] — literal terms from the one thesis PDF
+              // this feature was developed/tuned against — which made this
+              // branch of the false-refusal repair effectively inert for any
+              // OTHER uploaded document (matchedHighSignalEntity could never
+              // be true outside that fixture). Falls back to an empty list
+              // (matching the old behavior for non-doc-grounded/OKF-off
+              // paths) on any failure — never throws into the answer path.
+              let highSignalEntities: string[] = [];
+              try {
+                if (isIntelligenceFlagEnabled('okfHybridRetrieval')) {
+                  const { classifyQuestion } = require('./services/knowledge/QuestionClassifier');
+                  const { ModesManager: _MM2 } = require('./services/ModesManager');
+                  const activeMode2 = _MM2.getInstance().getActiveMode?.();
+                  if (activeMode2) {
+                    const { KnowledgeManager: _KM2 } = require('./services/knowledge/KnowledgeManager');
+                    const targetEntities = classifyQuestion(message).targetEntities || [];
+                    const km2 = _KM2.getInstance();
+                    const packEntityNames = new Set<string>();
+                    for (const file of _MM2.getInstance().getReferenceFiles?.(activeMode2.id) || []) {
+                      const pack = km2.getPackForFile(file.id);
+                      if (!pack) continue;
+                      for (const e of pack.entities) packEntityNames.add(e.name.toLowerCase());
+                      for (const c of pack.cards) packEntityNames.add(c.title.toLowerCase());
+                    }
+                    // Only treat a question's target entity as "high-signal"
+                    // if the active document's own extracted knowledge
+                    // actually contains it — this is the document-derived
+                    // equivalent of the old fixed allowlist.
+                    highSignalEntities = targetEntities.filter((e: string) => packEntityNames.has(e.toLowerCase()));
+                  }
+                }
+              } catch { /* best effort — falls back to empty list, same as OKF-off behavior */ }
               let isFalseRefusal = false;
               const falseRefusalRepairEnabled = isIntelligenceFlagEnabled('docGroundedFalseRefusalRepair');
               try {
@@ -2183,10 +2239,14 @@ export function initializeIpcHandlers(appState: AppState): void {
                   const chunkLower = docContextBlock.toLowerCase();
                   const present = qTerms.filter((t: string) => chunkLower.includes(t.toLowerCase()));
                   const messageLower = message.toLowerCase();
-                  const matchedHighSignalEntity = HIGH_SIGNAL_ENTITIES.find(
+                  const matchedHighSignalEntity = highSignalEntities.find(
                     (e) => messageLower.includes(e.toLowerCase()) && chunkLower.includes(e.toLowerCase()),
                   );
-                  const hasStrongEvidence = present.length >= 3 || Boolean(matchedHighSignalEntity);
+                  // isTier1Or2Evidence: EvidenceAssembler.computeTier's
+                  // confident/synthesis-tier verdict for this exact question,
+                  // OR'd in as an additional (never a replacing) strong-
+                  // evidence signal — see the computation above.
+                  const hasStrongEvidence = present.length >= 3 || Boolean(matchedHighSignalEntity) || isTier1Or2Evidence;
                   // For the system's OWN refusal phrase, only repair on STRONG evidence
                   // (never on the ≥2-term threshold alone) — that phrase is the model
                   // correctly following instructions, not an obvious mistake.
@@ -2265,8 +2325,11 @@ export function initializeIpcHandlers(appState: AppState): void {
                     // Pass regenAbort.signal so streamChat/_streamChatInner can
                     // abort the underlying provider fetch when onCleanup fires.
                     // streamChat() finds AbortSignal instances by instanceof scan
-                    // (LLMHelper.ts:3897), so position doesn't matter.
-                    stream: llmHelper.streamChat(strictPrompt, undefined, undefined, undefined, true, true, regenAbort.signal) as AsyncGenerator<string>,
+                    // (LLMHelper.ts:3897) so it works at runtime regardless of
+                    // position, but the signal must go in its typed slot (#8,
+                    // after extraDataScopes) to also satisfy the compiler —
+                    // passing it as arg #7 typechecked as ProviderDataScope[].
+                    stream: llmHelper.streamChat(strictPrompt, undefined, undefined, undefined, true, true, [], regenAbort.signal) as AsyncGenerator<string>,
                     firstUsefulDeadlineMs: usingLocalLlm ? LIVE_LOCAL_FIRST_USEFUL_TIMEOUT_MS : 7000,
                     isUsefulYet: () => regen.length >= 8,
                     shouldAbort: () => regen.length > 2000,
