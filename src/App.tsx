@@ -194,16 +194,20 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!isLauncherWindow && !isDefault) return;
     let cancelled = false;
+    let stopFn: (() => void) | null = null;
     import('./lib/onboarding/orchestrator').then(({ getOrchestrator }) => {
       if (cancelled) return;
       import('./lib/onboarding/stageCatalog').then(({ STAGES, QUIET_WINDOW_STAGE }) => {
         if (cancelled) return;
         const orch = getOrchestrator();
         orch.start([...STAGES, QUIET_WINDOW_STAGE]);
-        return () => orch.stop();
+        stopFn = () => orch.stop();
       });
     });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      stopFn?.();
+    };
   }, [isLauncherWindow, isDefault]);
 
   // Push user-state patches to the orchestrator as plan/profile state evolves.
