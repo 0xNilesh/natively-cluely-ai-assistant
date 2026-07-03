@@ -233,6 +233,47 @@ export function buildDocumentMap(content: string): DocumentMap {
  * exact bug that let production keep serving ToC fragments while the lexical
  * path was fixed.
  */
+/**
+ * Split text into sentences, then pack WHOLE sentences into ~targetWords windows
+ * with a sentence-boundary overlap. Guarantees a clause — e.g. "Implementations
+ * MUST NOT add a byte order mark…" — is never cut across a chunk boundary (which
+ * dropped "MUST NOT" from the chunk carrying "byte order mark"). A single sentence
+ * longer than targetWords is emitted whole. Progress is always forced (no
+ * re-evaluation loop) so it can't infinite-loop when overlap >= target.
+ */
+export function sentenceAwareWindows(text: string, targetWords: number, overlapWords: number): string[] {
+    const clean = text.replace(/\s+/g, ' ').trim();
+    if (!clean) return [];
+    const wordCount = (s: string) => (s.match(/\S+/g) || []).length;
+    if (wordCount(clean) <= targetWords) return [clean];
+    const sentences: string[] = [];
+    for (const part of clean.split(/(?<=[.!?][")\]]?)\s+(?=[A-Z0-9"[(])/)) {
+        const p = part.trim();
+        if (p) sentences.push(p);
+    }
+    if (sentences.length <= 1) return [clean];
+    const windows: string[] = [];
+    let cur: string[] = [];
+    let curWords = 0;
+    for (let i = 0; i < sentences.length; i++) {
+        const s = sentences[i];
+        const sw = wordCount(s);
+        if (cur.length > 0 && curWords + sw > targetWords) {
+            windows.push(cur.join(' '));
+            const overlap: string[] = [];
+            let ow = 0;
+            for (let j = cur.length - 1; j >= 0 && ow < overlapWords; j--) { overlap.unshift(cur[j]); ow += wordCount(cur[j]); }
+            cur = overlap;
+            curWords = ow;
+        }
+        cur.push(s);
+        curWords += sw;
+        if (curWords >= targetWords) { windows.push(cur.join(' ')); cur = []; curWords = 0; }
+    }
+    if (cur.length > 0) windows.push(cur.join(' '));
+    return windows.filter((w, idx) => idx === 0 || w !== windows[idx - 1]);
+}
+
 export function sectionAwareChunksFromMap(
     map: DocumentMap,
     chunkWords: number,
@@ -254,12 +295,8 @@ export function sectionAwareChunksFromMap(
             chunks.push(`${headingLine}\n${body}`);
             continue;
         }
-        const step = Math.max(1, chunkWords - chunkOverlap);
-        for (let i = 0; i < words.length; i += step) {
-            const window = words.slice(i, i + chunkWords);
-            if (window.length === 0) break;
-            chunks.push(`${headingLine}\n${window.join(' ')}`);
-            if (i + chunkWords >= words.length) break;
+        for (const window of sentenceAwareWindows(body, chunkWords, chunkOverlap)) {
+            chunks.push(`${headingLine}\n${window}`);
         }
     }
     return chunks.length > 0 ? chunks : null;

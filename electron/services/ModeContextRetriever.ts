@@ -1355,6 +1355,10 @@ export class ModeContextRetriever {
             topK: options.topK,
             hasTranscript,
             allowRerank: options.allowRerank,
+            // CRITICAL: forward the document-grounding flag so the hybrid retriever
+            // applies the doc-grounded budget/topK upgrade (3600/12) instead of the
+            // default 1800/6 — grounded answers were retrieving too small a window.
+            forceDocumentGrounding: options.forceDocumentGrounding,
         });
 
         return result;

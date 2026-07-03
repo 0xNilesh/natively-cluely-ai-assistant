@@ -7,7 +7,7 @@ import { ModeReferenceFile } from '../ModesManager';
 import { VectorStore, ScoredChunk } from '../../rag/VectorStore';
 import { EmbeddingPipeline } from '../../rag/EmbeddingPipeline';
 import Database from 'better-sqlite3';
-import { buildDocumentMap, sectionAwareChunksFromMap } from './DocumentMap';
+import { buildDocumentMap, sectionAwareChunksFromMap, sentenceAwareWindows } from './DocumentMap';
 
 export interface ModeRetrievedChunk {
     sourceId: string;
@@ -570,14 +570,12 @@ export class ModeHybridRetriever {
                 chunks.push(fullText);
                 continue;
             }
-            for (let i = 0; i < words.length; i += CHUNK_WORDS - CHUNK_OVERLAP) {
-                const window = words.slice(i, i + CHUNK_WORDS);
-                if (window.length === 0) break;
-                const chunkText = headingLine
-                    ? `${headingLine}\n${window.join(' ')}`
-                    : window.join(' ');
+            // Sentence-aware windowing: never split a normative clause across a
+            // chunk boundary (the RFC "MUST NOT add a byte order mark" bug).
+            const bodyForWindows = headingLine ? bodyText : fullText;
+            for (const window of sentenceAwareWindows(bodyForWindows, CHUNK_WORDS, CHUNK_OVERLAP)) {
+                const chunkText = headingLine ? `${headingLine}\n${window}` : window;
                 if (chunkText.trim()) chunks.push(chunkText);
-                if (i + CHUNK_WORDS >= words.length) break;
             }
         }
         return chunks;

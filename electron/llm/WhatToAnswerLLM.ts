@@ -29,6 +29,13 @@ import type { WhatToAnswerRequestSnapshot } from "./whatToAnswerRequestSnapshot"
 // synchronous lexical retrieval on timeout, so a slow embedder can never stall
 // first-useful-token. Mirrors the bounded grounding race in IntelligenceEngine.
 const HYBRID_RETRIEVAL_BUDGET_MS = 1500;
+// Document-grounded custom modes answer STRICTLY from uploaded files, so their
+// vector retrieval is not optional — a cloud query-embed routinely exceeds 1500ms,
+// and falling to lexical-only makes the model miss facts that ARE in the docs and
+// false-refuse. Grounded answers get a larger (but still bounded) budget so their
+// hybrid retrieval completes. Env-overridable.
+const HYBRID_RETRIEVAL_BUDGET_DOC_GROUNDED_MS =
+    Number(process.env.NATIVELY_HYBRID_RETRIEVAL_DOC_GROUNDED_MS) || 6000;
 
 /**
  * Resolve `promise` or, after `ms`, resolve `fallback` instead — whichever is
@@ -305,7 +312,7 @@ ANSWER SHAPE: ${intentResult.answerShape}
                                 modesManager.buildRetrievedActiveModeContextBlockHybrid(
                                     cleanedTranscript, cleanedTranscript, forceDocumentGrounding ? undefined : 1800, answerPlan?.answerType, true, requestSnapshot?.modeUniqueId, allowRerank, retrievalOptions,
                                 ),
-                                HYBRID_RETRIEVAL_BUDGET_MS,
+                                forceDocumentGrounding ? HYBRID_RETRIEVAL_BUDGET_DOC_GROUNDED_MS : HYBRID_RETRIEVAL_BUDGET_MS,
                                 '',
                             );
                             modeContextBlock = value;
