@@ -1027,8 +1027,11 @@ export class ModeHybridRetriever {
         // section when document-grounded (preserves multi-section answers).
         const deduped = this.deduplicateChunks(candidates, reranked, forceDocumentGrounding);
 
-        // Enforce token budget
-        const selected = this.enforceTokenBudget(deduped, tokenBudget, reranked, topK);
+        // Enforce token budget. For document-grounded modes with MULTIPLE files,
+        // guarantee each file contributes its best chunk so a large dataset can't
+        // starve a small one out of the retrieved set.
+        const guaranteePerFile = forceDocumentGrounding && files.length > 1;
+        const selected = this.enforceTokenBudget(deduped, tokenBudget, reranked, topK, guaranteePerFile);
 
         // Format output with citations
         const formattedContext = this.formatContext(selected);
@@ -1360,25 +1363,40 @@ export class ModeHybridRetriever {
      * Enforce token budget by selecting highest-scoring chunks that fit. When
      * `byRerank` is true, "highest" is the cross-encoder order.
      */
-    private enforceTokenBudget(candidates: ChunkCandidate[], budget: number, byRerank: boolean = false, topK: number = DEFAULT_TOP_K): ChunkCandidate[] {
+    private enforceTokenBudget(candidates: ChunkCandidate[], budget: number, byRerank: boolean = false, topK: number = DEFAULT_TOP_K, guaranteePerFile = false): ChunkCandidate[] {
         const sorted = [...candidates].sort((a, b) => this.rankScore(b, byRerank) - this.rankScore(a, byRerank));
 
         const selected: ChunkCandidate[] = [];
+        const picked = new Set<ChunkCandidate>();
         let totalTokens = 0;
+        const tryAdd = (candidate: ChunkCandidate): boolean => {
+            if (picked.has(candidate)) return false;
+            const tokens = estimateTokens(candidate.text);
+            if (totalTokens + tokens > budget && selected.length > 0) return false;
+            selected.push(candidate);
+            picked.add(candidate);
+            totalTokens += tokens;
+            return true;
+        };
+
+        // PER-FILE FLOOR (multi-doc grounded modes): a large file (e.g. a 14k-row
+        // dataset → 120 chunks) can crowd every slot and starve a small file (e.g. a
+        // 142-row dataset), so a query for an entity in the small file retrieves
+        // nothing from it and the model says "not in the documents". Guarantee the
+        // single highest-scoring chunk from EACH file first, then fill the rest by
+        // global score. Cheap: at most (#files) reserved slots.
+        if (guaranteePerFile) {
+            const bestByFile = new Map<string, ChunkCandidate>();
+            for (const c of sorted) if (!bestByFile.has(c.sourceId)) bestByFile.set(c.sourceId, c);
+            for (const c of bestByFile.values()) {
+                if (selected.length >= topK) break;
+                tryAdd(c);
+            }
+        }
 
         for (const candidate of sorted) {
-            const tokens = estimateTokens(candidate.text);
-
-            // If adding this chunk would exceed budget and we already have content, skip
-            if (totalTokens + tokens > budget && selected.length > 0) {
-                continue;
-            }
-
-            selected.push(candidate);
-            totalTokens += tokens;
-
-            // Stop if we've reached topK
             if (selected.length >= topK) break;
+            tryAdd(candidate);
         }
 
         return selected;

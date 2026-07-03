@@ -260,9 +260,15 @@ export function tabularChunks(content: string, rowsPerChunk = 40): string[] | nu
 
     const headerLine = header.trim();
     const rows = lines.slice(1);
+    // Bound the number of chunks so a very large table (e.g. a 14k-row dataset)
+    // doesn't produce hundreds of embeddings — that inflates index memory/time and
+    // can OOM. Grow rows-per-chunk to keep the total under MAX_TABLE_CHUNKS. Each
+    // chunk still repeats the header, so per-entity rows remain labelled + findable.
+    const MAX_TABLE_CHUNKS = Number(process.env.NATIVELY_MAX_TABLE_CHUNKS) || 120;
+    const effRows = Math.max(rowsPerChunk, Math.ceil(rows.length / MAX_TABLE_CHUNKS));
     const chunks: string[] = [];
-    for (let i = 0; i < rows.length; i += rowsPerChunk) {
-        const slice = rows.slice(i, i + rowsPerChunk);
+    for (let i = 0; i < rows.length; i += effRows) {
+        const slice = rows.slice(i, i + effRows);
         // Repeat the header on every chunk so column semantics travel with the rows.
         chunks.push(`[Table rows ${i + 1}-${i + slice.length}]\n${headerLine}\n${slice.join('\n')}`);
     }
