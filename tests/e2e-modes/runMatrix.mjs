@@ -140,13 +140,27 @@ async function main() {
       }, draft);
     } catch (e) { crashCount++; modeRec.error = `create: ${e.message}`; modeSummaries.push(modeRec); continue; }
 
-    // 2. ingest mapped documents, wait for index 'ready'
+    // 2. ingest mapped documents. Ingest + index files ONE AT A TIME with a short
+    // settle for 3+-doc modes: adding several large PDFs at once makes their
+    // indexing (embedding hundreds of chunks) overlap and spike renderer memory to
+    // an OOM ("no window") — the conference-talk 3-paper mode. Serial ingest keeps
+    // peak memory bounded to one file's index at a time.
     const ingested = [];
+    const serialIngest = plan.documents.length >= 3;
     for (const rel of plan.documents) {
       try {
         const { text, pages } = await extractText(rel);
         const ing = await R('__e2e__:add-reference-file', { modeId, fileName: path.basename(rel), content: text, pageCount: pages });
         ingested.push({ rel, ok: ing?.success, chars: text.length });
+        if (serialIngest) {
+          // let this file's index settle before adding the next
+          for (let i = 0; i < 15; i++) {
+            const st = await R('__e2e__:index-status', modeId);
+            const done = (st?.statuses || []).filter((s) => s.status === 'ready' || s.status === 'lexical_only').length;
+            if (done >= ingested.length) break;
+            await new Promise((r) => setTimeout(r, 1500));
+          }
+        }
       } catch (e) { ingested.push({ rel, ok: false, error: e.message }); }
     }
     if (plan.documents.length) {
