@@ -626,6 +626,22 @@ export class EmbeddingPipeline {
         return this.fallbackProvider?.space ?? null;
     }
 
+    /**
+     * Fraction (0-1) of the active provider's key pool that is currently healthy
+     * (not cooling from a 429), or null when the provider doesn't expose pool
+     * health (e.g. a single-key or non-Gemini provider — treat as healthy).
+     * Lets a caller doing an indexing burst then an immediate query decide
+     * whether to settle a moment first, rather than a blind delay every time.
+     */
+    get primaryPoolHealth(): number | null {
+        const p = this.provider as any;
+        if (p && typeof p.healthyKeyCount === 'function' && typeof p.keyPoolSize === 'function') {
+            const total = p.keyPoolSize();
+            return total > 0 ? p.healthyKeyCount() / total : null;
+        }
+        return null;
+    }
+
     async getEmbeddingForQueryLocalOnly(text: string): Promise<number[] | null> {
         const local = this.fallbackProvider;
         if (!local) return null;

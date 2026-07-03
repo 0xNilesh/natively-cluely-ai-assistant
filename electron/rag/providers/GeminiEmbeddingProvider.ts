@@ -83,6 +83,22 @@ export class GeminiEmbeddingProvider implements IEmbeddingProvider {
     return soonest === Infinity ? 0 : soonest;
   }
 
+  /**
+   * Number of keys NOT currently cooling from a 429. Exposed so a caller doing a
+   * burst of indexing followed by a latency-sensitive query (e.g. the live WTA
+   * path, or the E2E harness settling before asking) can check pool health and
+   * only pay a settle delay when it's actually degraded, instead of a blind wait.
+   */
+  healthyKeyCount(): number {
+    const now = this.nowMs();
+    return this.coolingUntil.filter((until) => until <= now).length;
+  }
+
+  /** Total keys in the rotation pool (for computing a health fraction). */
+  keyPoolSize(): number {
+    return this.apiKeys.length;
+  }
+
   // Parse a Gemini 429 body for RetryInfo.retryDelay (e.g. "57s" / "1200ms").
   // Returns ms, or 0 if not present. Capped so a hostile/huge value can't stall us.
   private parseRetryDelayMs(body: string): number {

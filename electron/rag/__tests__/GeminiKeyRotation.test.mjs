@@ -104,4 +104,15 @@ describe('GeminiEmbeddingProvider — key rotation', () => {
     assert.ok(out.every((v) => v.length === DIMS));
     assert.ok(log.includes('k2'), 'rotated to healthy key for the batch');
   });
+
+  test('healthyKeyCount/keyPoolSize reflect cooling state', async () => {
+    const p = new GeminiEmbeddingProvider(['k1', 'k2', 'k3'], 'gemini-embedding-2', DIMS);
+    assert.equal(p.keyPoolSize(), 3);
+    assert.equal(p.healthyKeyCount(), 3, 'all keys start healthy');
+
+    global.fetch = stubFetch({ k1: '429', k2: 'ok', k3: 'ok' });
+    await p.embed('x'); // k1 429s and cools, rotates to k2
+    assert.equal(p.healthyKeyCount(), 2, 'one key now cooling');
+    assert.equal(p.keyPoolSize(), 3, 'pool size unchanged');
+  });
 });

@@ -1193,7 +1193,11 @@ export class ModeHybridRetriever {
         try {
             queryEmbedding = await this.embeddingPipeline.getEmbeddingForQuery(queryText);
         } catch (error) {
-            throw new Error('Query embedding failed: ' + error);
+            // Surface key-pool health in the failure so a 429-burst (vs. a genuine
+            // outage) is distinguishable in logs without re-running with tracing on.
+            const health = (this.embeddingPipeline as any).primaryPoolHealth;
+            const healthNote = typeof health === 'number' ? ` (key pool health: ${Math.round(health * 100)}%)` : '';
+            throw new Error('Query embedding failed: ' + error + healthNote);
         }
 
         const activeSpace = this.embeddingPipeline.getActiveSpaceKey?.() ?? null;
