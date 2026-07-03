@@ -6,7 +6,7 @@ import { DatabaseManager } from '../db/DatabaseManager';
 // Imported from the leaf module (not the ../llm barrel) to avoid a require cycle.
 import { classifyCustomContext, selectCustomContextForAnswer } from '../llm/customContextClassifier';
 import type { AnswerType } from '../llm/AnswerPlanner';
-import { buildDocumentMap, resolveTargetSections, sectionAwareChunksFromMap, type DocumentMap } from './modes/DocumentMap';
+import { buildDocumentMap, resolveTargetSections, sectionAwareChunksFromMap, sentenceAwareWindows, tabularChunks, type DocumentMap } from './modes/DocumentMap';
 
 /**
  * Gate the mode's raw customContext blob by answer type (Phase 3). Returns only
@@ -169,6 +169,13 @@ function wordsOf(text: string): string[] {
 }
 
 function chunkText(content: string, fineChunk: boolean = false): string[] {
+    // TABULAR data (CSV/TSV) → row-aware chunks with the header repeated, so a
+    // query for one entity retrieves its labelled row instead of a giant blob
+    // (prose chunkers made the model fabricate dataset figures). Mirror of
+    // ModeHybridRetriever.chunkText.
+    const table = tabularChunks(content);
+    if (table) return table;
+
     // Section-aware chunker (audit 2026-06-27): splits on heading boundaries so
     // a query like "What is OpenVLA-OFT?" reliably retrieves a chunk that
     // STARTS with "OpenVLA-OFT" rather than a mid-paragraph fragment. The
@@ -232,12 +239,12 @@ function chunkText(content: string, fineChunk: boolean = false): string[] {
                 chunks.push(fullText);
                 continue;
             }
-            for (let i = 0; i < words.length; i += CHUNK_WORDS - CHUNK_OVERLAP) {
-                const window = words.slice(i, i + CHUNK_WORDS);
-                if (window.length === 0) break;
-                const ct = headingLine ? `${headingLine}\n${window.join(' ')}` : window.join(' ');
+            // Sentence-aware windowing: never split a normative clause mid-sentence
+            // across a chunk boundary (mirror of ModeHybridRetriever).
+            const bodyForWindows = headingLine ? bodyText : fullText;
+            for (const window of sentenceAwareWindows(bodyForWindows, CHUNK_WORDS, CHUNK_OVERLAP)) {
+                const ct = headingLine ? `${headingLine}\n${window}` : window;
                 if (ct.trim()) chunks.push(ct);
-                if (i + CHUNK_WORDS >= words.length) break;
             }
             continue;
         }

@@ -7,7 +7,7 @@ import { ModeReferenceFile } from '../ModesManager';
 import { VectorStore, ScoredChunk } from '../../rag/VectorStore';
 import { EmbeddingPipeline } from '../../rag/EmbeddingPipeline';
 import Database from 'better-sqlite3';
-import { buildDocumentMap, sectionAwareChunksFromMap, sentenceAwareWindows } from './DocumentMap';
+import { buildDocumentMap, sectionAwareChunksFromMap, sentenceAwareWindows, tabularChunks } from './DocumentMap';
 
 export interface ModeRetrievedChunk {
     sourceId: string;
@@ -523,6 +523,12 @@ export class ModeHybridRetriever {
      * ingest are SOFT boundaries — they don't close a section.
      */
     private chunkText(content: string): string[] {
+        // TABULAR data (CSV/TSV) is chunked by ROWS with the header repeated, so a
+        // query for one entity retrieves its row with columns labelled instead of a
+        // giant undifferentiated blob (which caused fabricated figures on datasets).
+        const table = tabularChunks(content);
+        if (table) return table;
+
         // STRUCTURED documents (real ToC + numbered sections, e.g. a thesis PDF)
         // are chunked by the shared Document Map, which EXCLUDES the Table of
         // Contents and tags each chunk `[Section N.N | pX-Y]`. This is the same
