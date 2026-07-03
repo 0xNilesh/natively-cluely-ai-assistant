@@ -1383,14 +1383,19 @@ export class ModeHybridRetriever {
         // dataset → 120 chunks) can crowd every slot and starve a small file (e.g. a
         // 142-row dataset), so a query for an entity in the small file retrieves
         // nothing from it and the model says "not in the documents". Guarantee the
-        // single highest-scoring chunk from EACH file first, then fill the rest by
-        // global score. Cheap: at most (#files) reserved slots.
+        // top-N highest-scoring chunks from EACH file first, then fill the rest by
+        // global score. N=2 (not 1) because the single top chunk of a file is often
+        // not the one holding the specific fact (a normative clause / a particular
+        // data row / an equation), so one extra per file materially improves recall
+        // without blowing topK. Cheap: at most (#files * PER_FILE_FLOOR) reserved slots.
+        const PER_FILE_FLOOR = Number(process.env.NATIVELY_RETRIEVAL_PER_FILE_FLOOR) || 2;
         if (guaranteePerFile) {
-            const bestByFile = new Map<string, ChunkCandidate>();
-            for (const c of sorted) if (!bestByFile.has(c.sourceId)) bestByFile.set(c.sourceId, c);
-            for (const c of bestByFile.values()) {
+            const perFileCount = new Map<string, number>();
+            for (const c of sorted) {
                 if (selected.length >= topK) break;
-                tryAdd(c);
+                const n = perFileCount.get(c.sourceId) || 0;
+                if (n >= PER_FILE_FLOOR) continue;
+                if (tryAdd(c)) perFileCount.set(c.sourceId, n + 1);
             }
         }
 
