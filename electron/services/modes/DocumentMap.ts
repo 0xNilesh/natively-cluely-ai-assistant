@@ -243,7 +243,7 @@ export function buildDocumentMap(content: string): DocumentMap {
  * entity's row with its columns labelled. Returns null when the text is not a
  * consistent delimited table.
  */
-export function tabularChunks(content: string, rowsPerChunk = 40): string[] | null {
+export function tabularChunks(content: string, rowsPerChunk?: number): string[] | null {
     const lines = content.split(/\r?\n/).filter((l) => l.trim().length > 0);
     if (lines.length < 3) return null; // need a header + at least a couple rows
     // Pick the delimiter from the header: comma or tab, whichever splits into >=2
@@ -260,12 +260,17 @@ export function tabularChunks(content: string, rowsPerChunk = 40): string[] | nu
 
     const headerLine = header.trim();
     const rows = lines.slice(1);
-    // Bound the number of chunks so a very large table (e.g. a 14k-row dataset)
-    // doesn't produce hundreds of embeddings — that inflates index memory/time and
-    // can OOM. Grow rows-per-chunk to keep the total under MAX_TABLE_CHUNKS. Each
-    // chunk still repeats the header, so per-entity rows remain labelled + findable.
+    // ADAPTIVE granularity: small tables get SMALL chunks (finer granularity → each
+    // chunk's embedding is specific to a few entities, so a query for one entity —
+    // "United States population" — ranks that entity's chunk highly). Large tables
+    // grow rows-per-chunk to stay under MAX_TABLE_CHUNKS (index memory/OOM bound).
+    // Every chunk repeats the header so rows stay labelled + findable.
     const MAX_TABLE_CHUNKS = Number(process.env.NATIVELY_MAX_TABLE_CHUNKS) || 120;
-    const effRows = Math.max(rowsPerChunk, Math.ceil(rows.length / MAX_TABLE_CHUNKS));
+    const MIN_ROWS = Number(process.env.NATIVELY_TABLE_MIN_ROWS_PER_CHUNK) || 10;
+    // Base target: ~10 rows/chunk for finer specific-entity recall; but never so many
+    // chunks that a large table blows the cap.
+    const base = rowsPerChunk ?? MIN_ROWS;
+    const effRows = Math.max(base, Math.ceil(rows.length / MAX_TABLE_CHUNKS));
     const chunks: string[] = [];
     for (let i = 0; i < rows.length; i += effRows) {
         const slice = rows.slice(i, i + effRows);
