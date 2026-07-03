@@ -97,12 +97,40 @@ async function main() {
         if (dead && relaunches < 6) {
           relaunches++;
           try { await app.close(); } catch { /* ignore */ }
-          await new Promise((r) => setTimeout(r, 1500));
-          const { _electron: e2 } = await import('@playwright/test');
-          app = await e2.launch({ args: ['dist-electron/electron/main.js'], env: launchEnv, timeout: 60000 });
-          await app.firstWindow({ timeout: 30000 });
-          await app.windows()[0].waitForLoadState('domcontentloaded').catch(() => {});
-          await app.windows()[0].evaluate(async () => (window.electronAPI || window.api).e2eInvoke('__e2e__:enable-pro')).catch(() => {});
+          // Remove a stale Electron singleton lock left by the crashed process —
+          // otherwise the relaunch below can ALSO fail to acquire a window (the
+          // new instance blocks on the dead process's lock), and that failure was
+          // uncaught here, escaping the retry loop as a mode-ending "matrix fatal".
+          try {
+            const os = await import('node:os');
+            const fsp = await import('node:fs/promises');
+            const lockDir = `${os.homedir()}/Library/Application Support/Electron`;
+            await Promise.all(['SingletonLock', 'SingletonCookie', 'SingletonSocket']
+              .map((f) => fsp.unlink(`${lockDir}/${f}`).catch(() => {})));
+          } catch { /* best-effort, non-fatal */ }
+          // A crashed instance can leave orphaned Helper (network/GPU utility)
+          // processes bound to this run's --user-data-dir; those alone were
+          // enough to make the relaunch's fresh Electron.launch() itself fail
+          // ("Process failed to launch!"), which then exhausted all 6 relaunch
+          // attempts. Kill any Electron Helper still holding a natively-e2e
+          // temp profile before retrying.
+          try {
+            const { execSync } = await import('node:child_process');
+            execSync("pkill -9 -f 'natively-e2e-udd' 2>/dev/null || true");
+          } catch { /* best-effort, non-fatal */ }
+          await new Promise((r) => setTimeout(r, 2500));
+          try {
+            const { _electron: e2 } = await import('@playwright/test');
+            app = await e2.launch({ args: ['dist-electron/electron/main.js'], env: launchEnv, timeout: 60000 });
+            await app.firstWindow({ timeout: 30000 });
+            await app.windows()[0].waitForLoadState('domcontentloaded').catch(() => {});
+            await app.windows()[0].evaluate(async () => (window.electronAPI || window.api).e2eInvoke('__e2e__:enable-pro')).catch(() => {});
+          } catch (relaunchErr) {
+            // Relaunch itself failed — don't let it escape uncaught; fall through
+            // to the retry loop (attempt+1) which will try again up to attempt===3.
+            log(`  relaunch attempt ${relaunches} failed: ${relaunchErr.message}`);
+            await new Promise((r) => setTimeout(r, 1500));
+          }
         } else {
           await new Promise((r) => setTimeout(r, 1000));
         }
@@ -146,7 +174,9 @@ async function main() {
     // an OOM ("no window") — the conference-talk 3-paper mode. Serial ingest keeps
     // peak memory bounded to one file's index at a time.
     const ingested = [];
-    const serialIngest = plan.documents.length >= 3;
+    // 2-doc heavy modes (a 14k-row CSV, or an RFC + 66-page thesis) hit the same
+    // renderer OOM as 3-doc modes — lower the threshold to 2+ rather than 3+.
+    const serialIngest = plan.documents.length >= 2;
     for (const rel of plan.documents) {
       try {
         const { text, pages } = await extractText(rel);
