@@ -97,13 +97,20 @@ interface ReviewPromptHostProps {
     // Force the host to be hidden (e.g. when another modal is open). Defaults
     // to false — the host is invisible by default.
     paused?: boolean
+    // Orchestrator-controlled visibility. When undefined, falls back to the
+    // pre-orchestrator behavior (check backend eligibility + dev hooks).
+    isOpen?: boolean
+    onClose?: () => void
 }
 
-const ReviewPromptHost: React.FC<ReviewPromptHostProps> = ({ paused }) => {
-    const [isOpen, setIsOpen] = useState(false)
+const ReviewPromptHost: React.FC<ReviewPromptHostProps> = ({ paused, isOpen: isOpenProp, onClose: onCloseProp }) => {
+    const [isOpenInternal, setIsOpen] = useState(false)
     const [forceTick, setForceTick] = useState(0)
     const checkedRef = useRef(false)
     const isOpenRef = useRef(false)
+
+    const isOrchestratorControlled = isOpenProp !== undefined
+    const isOpen = isOrchestratorControlled ? isOpenProp : isOpenInternal
 
     // Expose dev helpers on `window` so we can re-show / reset state from devtools
     // without re-launching the app. These are no-ops in production.
@@ -158,6 +165,9 @@ const ReviewPromptHost: React.FC<ReviewPromptHostProps> = ({ paused }) => {
 
     useEffect(() => {
         if (paused) return
+        // When orchestrator-controlled, the host is purely presentational —
+        // visibility comes from the prop, no auto-scheduling.
+        if (isOrchestratorControlled) return
         let mounted = true
         const firstDelay = IS_DEV_BUILD ? DEV_FIRST_CHECK_DELAY_MS : FIRST_CHECK_DELAY_MS
         const first = setTimeout(() => {
@@ -192,8 +202,12 @@ const ReviewPromptHost: React.FC<ReviewPromptHostProps> = ({ paused }) => {
 
     const onClose = useCallback(() => {
         isOpenRef.current = false
-        setIsOpen(false)
-    }, [])
+        if (isOrchestratorControlled) {
+            onCloseProp?.()
+        } else {
+            setIsOpen(false)
+        }
+    }, [isOrchestratorControlled, onCloseProp])
 
     const handleDismissLater = useCallback(() => {
         void window.electronAPI?.reviewDismissLater?.()
