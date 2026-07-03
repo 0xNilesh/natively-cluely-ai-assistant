@@ -10,21 +10,10 @@
 /**
  * Pure decision function — given a stage config and a context, returns whether
  * the toaster should fire. Mirrors `OnboardingOrchestrator.shouldShowToaster`.
- *
- * @param {object} config — StageConfig (id, triggers, skipWhen, requiresStages, cooldownMs, onceEver, reEligibility, customPredicate)
- * @param {object} ctx    — Ctx (startupCount, totalUsageMs, turnCount, homepageMountedFor, appInForeground, homepageCurrentlyMounted, meetingActive, userState, completed, skipped, lastShownTimes, now)
- * @returns {boolean}
  */
 export function shouldShowToaster(config, ctx) {
-  // 1. Hard skip — user-state. Stage is treated as skipped (durable).
-  if (config.skipWhen && config.skipWhen(ctx.userState)) {
-    if (!ctx.skipped.has(config.id)) {
-      // Mark as skipped so downstream requiresStages are unblocked.
-      // (We use a side-channel here; the real class persists this on
-      // evaluateAndDispatch. For tests we accept the read-only behavior.)
-    }
-    return false;
-  }
+  // 1. Hard skip — user-state
+  if (config.skipWhen && config.skipWhen(ctx.userState)) return false;
 
   // 2. Already done forever
   if (
@@ -64,10 +53,64 @@ export function shouldShowToaster(config, ctx) {
 }
 
 /**
- * Returns true if the stage would be skipped given the current user state.
- * Used by the orchestrator to auto-populate the `skipped` set so downstream
- * `requiresStages` are unblocked.
+ * Default UserState — exported here so the orchestrator.ts source-of-truth
+ * is mirrored in the .mjs companion that the Vite bundle resolves to.
  */
-export function isStageSkipped(config, userState) {
-  return Boolean(config.skipWhen && config.skipWhen(userState));
+export const DEFAULT_USER_STATE = {
+  isPremium: false,
+  hasProfile: false,
+  hasNativelyKey: false,
+  hasTrialToken: false,
+  extensionConnected: false,
+  extensionSupported: true,
+  permsShown: false,
+  macTCCBlocked: false,
+  seenProfileOnboarding: false,
+  seenModesOnboarding: false,
+  activeModeSet: false,
+  donationShouldShow: false,
+  isV2_8_OrNewer: true,
+};
+
+/**
+ * No-op orchestrator handle for use in test/static contexts where the real
+ * singleton isn't available. Returns the same shape as getOrchestrator() so
+ * callers can call .emit() / .subscribe() without crashing — but they're
+ * all no-ops.
+ */
+export function getOrchestrator() {
+  if (!getOrchestrator.__instance) {
+    getOrchestrator.__instance = createNoopOrchestrator();
+  }
+  return getOrchestrator.__instance;
+}
+
+function createNoopOrchestrator() {
+  const noop = () => {};
+  return {
+    start: noop,
+    stop: noop,
+    emit: noop,
+    subscribe: () => noop,
+    getSnapshot: () => ({
+      version: '1.0',
+      startupCount: 0,
+      totalUsageMs: 0,
+      turnCount: 0,
+      homepageMountedAt: null,
+      homepageFrozenAt: null,
+      homepageCurrentlyMounted: false,
+      appInForeground: true,
+      meetingActive: false,
+      queue: [],
+      completed: {},
+      skipped: new Set(),
+      activeToasterId: null,
+      lastShownTimes: {},
+    }),
+    markDismissed: noop,
+    markSkipped: noop,
+    setUserState: noop,
+    getUserState: () => DEFAULT_USER_STATE,
+  };
 }
