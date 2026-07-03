@@ -9,10 +9,15 @@ const API_BASE = process.env.NATIVELY_API_BASE || 'http://localhost:3000';
 const LOCAL_TOKEN = process.env.NATIVELY_LOCAL_TEST_TOKEN || 'local-test';
 
 const JUDGE_SYSTEM =
-  'You are a strict evaluation judge. You are given an interview question, a candidate ' +
-  'answer, and a list of criteria. For each criterion output a boolean pass and a one-line ' +
-  'reason. Output ONLY a JSON object: {"verdicts":[{"criterion":string,"pass":boolean,"reason":string}]}. ' +
-  'Be strict: if the answer fabricates facts, hedges emptily, or ignores the criterion, fail it.';
+  'You are a fair but rigorous evaluation judge. You are given an interview question, a candidate ' +
+  'answer, and a list of criteria. For each criterion output a boolean pass and a one-line reason. ' +
+  'Output ONLY a JSON object: {"verdicts":[{"criterion":string,"pass":boolean,"reason":string}]}. ' +
+  'Judge SUBSTANCE, not surface form: a criterion is met if the answer ACCOMPLISHES what it asks, ' +
+  'even without explicit labels. E.g. "uses a STAR structure" is satisfied by a flowing narrative ' +
+  'that conveys a situation, a task/challenge, the actions the speaker took, and a result — it does ' +
+  'NOT require the literal words Situation/Task/Action/Result. "Cites the section/document" is met by ' +
+  'any clear reference to the source, not a specific citation format. FAIL only when the answer ' +
+  'genuinely fabricates facts, hedges without answering, or misses the substance of the criterion.';
 
 function extractJson(text) {
   let s = String(text || '').trim();
