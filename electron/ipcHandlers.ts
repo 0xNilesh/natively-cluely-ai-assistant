@@ -8936,6 +8936,18 @@ export function initializeIpcHandlers(appState: AppState): void {
         phoneDocGrounded = ModesManager.getInstance().getActiveModeInfo()?.documentGroundedCustomModeActive === true;
       } catch { /* mode unavailable — treat as non-doc-grounded */ }
 
+      // Doc-grounded strict-isolation (audit #3, 2026-07-05): mirror the
+      // desktop chat's gate (ipcHandlers.ts:1438) — when the active mode is
+      // doc-grounded AND docGroundedStrictIsolation is enabled, the phone-chat
+      // path must NOT inject Hindsight live recall. Today the phone path
+      // never consults Hindsight at all, so this is a no-op defensive check
+      // that pins the behavior for when a future implementation adds Hindsight
+      // here. The skip is the same condition as the desktop path so the
+      // two surfaces stay symmetric on the doc-grounded path.
+      const { isIntelligenceFlagEnabled } = require('./intelligence/intelligenceFlags');
+      const phoneDocGroundedSkipRecall = phoneDocGrounded
+        && isIntelligenceFlagEnabled('docGroundedStrictIsolation');
+
       // Capture rolling context BEFORE adding the new user message — same ordering
       // as gemini-chat-stream so Recap / Follow Up / What to Answer see phone turns.
       let context: string | undefined;

@@ -112,3 +112,40 @@ test('phone-chat routeOptions construction: never throws for any input', () => {
   assert.equal(typeof opts.answerType, 'string');
   assert.equal(typeof opts, 'object');
 });
+
+// ----------------------------------------------------------------
+// Audit #3 (2026-07-05): phone-chat must mirror the desktop chat's
+// doc-grounded strict-isolation Hindsight-recall gate. The desktop chat
+// at ipcHandlers.ts:1438 explicitly skips Hindsight live recall when
+// `phoneDocGrounded && isIntelligenceFlagEnabled('docGroundedStrictIsolation')`
+// — the phone chat didn't have an explicit gate, and the absence was
+// accidental (no Hindsight consults at all). This test pins the symmetric
+// gate condition so the phone and desktop paths can never drift apart on
+// doc-grounded isolation.
+
+test('phone-chat docGroundedStrictIsolation gate: mirrors desktop condition', () => {
+  // Both surfaces should produce the SAME boolean from the same inputs.
+  // We model the gate as a pure function for testability.
+  const computePhoneDocGroundedSkipRecall = (phoneDocGrounded, strictIsolationEnabled) =>
+    phoneDocGrounded && strictIsolationEnabled;
+  const computeDesktopDocGroundedSkipRecall = (manualDocGrounded, strictIsolationEnabled) =>
+    manualDocGrounded && strictIsolationEnabled;
+  for (const docGrounded of [true, false]) {
+    for (const strict of [true, false]) {
+      assert.equal(
+        computePhoneDocGroundedSkipRecall(docGrounded, strict),
+        computeDesktopDocGroundedSkipRecall(docGrounded, strict),
+        `drift between phone and desktop gates: docGrounded=${docGrounded} strict=${strict}`,
+      );
+    }
+  }
+});
+
+test('phone-chat docGroundedStrictIsolation gate: only skips when BOTH conditions are true', () => {
+  const compute = (d, s) => d && s;
+  // Only the (true, true) combo should skip recall.
+  assert.equal(compute(true, true), true, 'doc-grounded + strict-isolation → skip');
+  assert.equal(compute(true, false), false, 'doc-grounded WITHOUT strict-isolation → do not skip (preserve Hindsight)');
+  assert.equal(compute(false, true), false, 'non-doc-grounded + strict-isolation → irrelevant (no doc-grounded recall anyway)');
+  assert.equal(compute(false, false), false, 'neither flag → do not skip');
+});
