@@ -4079,8 +4079,18 @@ const isMultimodal = !!(imagePaths?.length);
 
     // ============================================================
     // KNOWLEDGE MODE INTERCEPT (Streaming)
-    // Skip when fast-text mode is active — intent classification +
-    // hybrid search add 300-800ms that defeat the purpose of fast mode.
+    // Skip when fast-text mode (`groqFastTextMode`) is active. The rationale
+    // is broader than latency: skipping the knowledge intercept also DROPS
+    // the orchestrator's `feedForDepthScoring` call (the depth score
+    // doesn't reach the answer), the `isIntroQuestion` shortcut (identity
+    // recall), the persona `systemPromptInjection` override, and the live
+    // negotiation-coaching short-circuit. The trade is intentional — fast
+    // mode trades these for sub-second TTFT — but the comment previously
+    // stated only the latency rationale and hid the rest (audit #4).
+    // `documentGroundedCustomModeActive` already exempts the doc-grounded
+    // case from this gate (so a document-grounded answer can never lose
+    // retrieval to fast mode), even though fast mode is otherwise allowed
+    // with any other active mode.
     // ============================================================
     const documentGroundedCustomModeActive = (() => {
       try {
