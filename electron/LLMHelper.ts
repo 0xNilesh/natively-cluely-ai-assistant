@@ -1925,6 +1925,28 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           retrievalRequired: true,
         });
       }
+      // DOCUMENT-GROUNDED custom-mode manual chat: the generic knowledge intercept
+      // is gated off for these modes, but the manual path still NEEDS the uploaded
+      // reference files surfaced into the prompt — otherwise the model answers
+      // "please upload your document" because it literally has no context. Pull the
+      // grounded context block directly from the ModesManager's hybrid retriever
+      // (same call the WTA live path uses) and fold it into the user-facing context.
+      if (documentGroundedCustomModeActive) {
+        try {
+          const { ModesManager } = require('./services/ModesManager');
+          const groundingInfo = ModesManager.getInstance().getActiveModeDocumentGroundingInfo?.();
+          const groundedContext = await ModesManager.getInstance()
+            .buildRetrievedActiveModeContextBlockHybrid(message, undefined, undefined, undefined, true);
+          if (groundedContext && groundedContext.trim()) {
+            const tagged = groundingInfo
+              ? `[Document-grounded mode: ${groundingInfo.modeName}]\n${groundedContext}`
+              : groundedContext;
+            context = context ? `${tagged}\n\n${context}` : tagged;
+          }
+        } catch (groundedErr: any) {
+          console.warn('[LLMHelper] Document-grounded manual retrieval failed, proceeding without:', groundedErr.message);
+        }
+      }
       if (this.knowledgeOrchestrator?.isKnowledgeMode() && !documentGroundedCustomModeActive) {
         try {
           // Feed only to the depth scorer — NOT feedInterviewerUtterance, which also routes to the
@@ -3981,6 +4003,28 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     // applyFullProfileGrounding gate; absent route options → allowed (legacy).
     const profileInjectionAllowed = profileInterceptAllowedByRoute(routeOptions);
 
+    // DOCUMENT-GROUNDED custom-mode manual chat (streaming path): same fix as the
+    // non-streaming path above — the generic knowledge intercept is gated off for
+    // document-grounded modes, so the manual stream must surface the uploaded
+    // reference files directly. Otherwise the model says "please upload your
+    // document" even though the files are indexed and the user just typed into
+    // the regular chat expecting grounded answers.
+    if (documentGroundedCustomModeActive) {
+      try {
+        const { ModesManager } = require('./services/ModesManager');
+        const groundingInfo = ModesManager.getInstance().getActiveModeDocumentGroundingInfo?.();
+        const groundedContext = await ModesManager.getInstance()
+          .buildRetrievedActiveModeContextBlockHybrid(message, undefined, undefined, undefined, true);
+        if (groundedContext && groundedContext.trim()) {
+          const tagged = groundingInfo
+            ? `[Document-grounded mode: ${groundingInfo.modeName}]\n${groundedContext}`
+            : groundedContext;
+          context = context ? `${tagged}\n\n${context}` : tagged;
+        }
+      } catch (groundedErr: any) {
+        console.warn('[LLMHelper.stream] Document-grounded manual retrieval failed, proceeding without:', groundedErr.message);
+      }
+    }
     if (shouldRunKnowledge) {
       try {
         // Feed to depth scorer only (not negotiation tracker) — mirrors non-streaming path fix.
