@@ -724,3 +724,70 @@ test('SkillsManager.deleteSkill() refuses to follow a symlink pointing outside t
       'refusal error must not leak the resolved realpath or skill folder name to the renderer');
   }
 });
+
+// Regression for the user-reported "humanize-ai-text is deletable" bug
+// (2026-07-06). The humanize builtin ships with:
+//   - on-disk folder name: 'humanize-text'
+//   - parsed frontmatter id (slugified from `name:`): 'humanize-ai-text'
+//
+// These two names diverge. If classification only checks the folder name,
+// a future maintainer who renames the folder would silently re-classify the
+// builtin as 'userData' and make it deletable from the Settings UI. The fix
+// makes classification accept EITHER the folder name OR the parsed id as a
+// match against the canonical BUILTIN_SKILL_IDS set.
+//
+// This test pins the contract by verifying that:
+//   (a) the humanize-text folder is classified source=builtin (folder-keyed match)
+//   (b) deleteSkill('humanize-ai-text') is refused with the built-in error
+//   (c) if the folder is renamed to a non-builtin name, classification still
+//       succeeds via the parsed-id fallback (i.e. the protection survives
+//       folder renames as long as the visible /skill id stays in the set).
+test('SkillsManager classifies humanize-ai-text as builtin even when folder is renamed', () => {
+  const { manager, tmpUserData } = freshManager();
+
+  // (a) Baseline — the seeded builtin folder should be classified as builtin.
+  const baselineList = manager.listSkills();
+  const baselineHumanize = baselineList.find(s => s.id === 'humanize-ai-text');
+  assert.ok(baselineHumanize, 'baseline: humanize-ai-text must be discoverable');
+  assert.equal(baselineHumanize.source, 'builtin',
+    'baseline: humanize-ai-text must be classified as builtin (folder keyed)');
+
+  // (b) deleteSkill must refuse the builtin.
+  const baselineDelete = manager.deleteSkill('humanize-ai-text');
+  assert.equal(baselineDelete.success, false, 'baseline: humanize-ai-text must not be deletable');
+  assert.match(baselineDelete.error || '', /built-in/i,
+    'baseline: refusal error must match /built-in/i so the UI surfaces a clear message');
+
+  // (c) Rename the seeded builtin folder to something NOT in BUILTIN_SKILL_IDS
+  // (simulating a future maintainer's folder-renaming mistake, OR a user's
+  // manual filesystem edit). The parsed id from SKILL.md's `name: humanize-ai-text`
+  // stays in the set, so the parsed-id fallback must catch it.
+  const oldDir = path.join(tmpUserData, 'skills', 'humanize-text');
+  const renamedDir = path.join(tmpUserData, 'skills', 'humanize-ai-text-2026');
+  // If anything else (e.g. the sidecar .skills-state.json) lives in the dir,
+  // renameSync will fail with ENOTEMPTY. Use copy+remove-then-move semantics.
+  // Tests run in fresh tmp dirs so this shouldn't happen here — be defensive.
+  if (fs.existsSync(renamedDir)) fs.rmSync(renamedDir, { recursive: true, force: true });
+  fs.renameSync(oldDir, renamedDir);
+
+  // The listSkills result must STILL classify this skill as builtin,
+  // because the parsed id ('humanize-ai-text') matches BUILTIN_SKILL_IDS.
+  const list = manager.listSkills();
+  const humanize = list.find(s => s.id === 'humanize-ai-text');
+  assert.ok(humanize,
+    'humanize-ai-text must still be discoverable after folder rename (id-based fallback)');
+  assert.equal(humanize.source, 'builtin',
+    'humanize-ai-text must be classified as builtin via the parsed-id fallback, ' +
+    'even when the on-disk folder name no longer matches BUILTIN_SKILL_IDS. ' +
+    'This is the core regression for the user-reported deletable-builtin bug.');
+
+  // deleteSkill must STILL refuse.
+  const deleteResult = manager.deleteSkill('humanize-ai-text');
+  assert.equal(deleteResult.success, false,
+    'after folder rename: humanize-ai-text must STILL not be deletable');
+  assert.match(deleteResult.error || '', /built-in/i,
+    'after folder rename: refusal error must still match /built-in/i');
+
+  // No explicit cleanup — tmp dir is destroyed when freshManager's caller
+  // exits. Restoring oldDir would race with the dirty-sidecar issue above.
+});

@@ -474,14 +474,28 @@ You are a precise writing editor. Rewrite the user's text so it reads like a rea
 const BUILTIN_SKILLS: Array<{ id: string; content: string }> = [
   { id: 'humanize-text', content: BUILTIN_HUMANIZE_TEXT },
 ];
-// CONTRACT: BUILTIN_SKILL_IDS[i] MUST equal the on-disk folder name
-// (e.g. <skillsDir>/<id>/SKILL.md). If a future builtin ships with a folder
-// name that differs from this id, loadUserSkills() will mis-classify it as
-// 'userData' (deleteable in the UI and via the IPC handler), which is a
-// silent correctness bug. Keep this invariant in sync with the ensureBuiltinSkills()
-// `for (const builtin of BUILTIN_SKILLS) { ... path.join(skillsDir, builtin.id) ... }`
-// loop above.
-const BUILTIN_SKILL_IDS = new Set(BUILTIN_SKILLS.map(skill => skill.id));
+// Canonical set of builtin skill identifiers. Includes BOTH the on-disk folder
+// names AND the parsed frontmatter ids because the two diverge today:
+//
+//   - Folder name (where ensureBuiltinSkills writes the SKILL.md):
+//     <skillsDir>/humanize-text/SKILL.md
+//   - Parsed id (slugified from the frontmatter name: 'humanize-ai-text'):
+//     the value shown to the user as /humanize-ai-text and as skill.id
+//     in SkillSummary.
+//
+// loadUserSkills() classifies a skill as 'builtin' if EITHER the folder name
+// OR the parsed id matches this set — this prevents the silent bug where a
+// builtin's folder is renamed or a skill is installed under a name that
+// happens to collide with a builtin's parsed id.
+//
+// KEEP THIS IN SYNC with electron/services/skills/SkillValidator.ts
+// DEFAULT_BUILTIN_SKILL_IDS — that set is the canonical source for upload-
+// time collision checks; this set is the canonical source for source-
+// classification. Adding a new builtin requires updating BOTH.
+const BUILTIN_SKILL_IDS = new Set<string>([
+  'humanize-text',     // on-disk folder name (matches BUILTIN_SKILLS[].id)
+  'humanize-ai-text',  // slugified frontmatter name: (the visible /skill id)
+]);
 
 function slugify(value: string): string {
   return value
@@ -840,13 +854,29 @@ ${skill.instructions}
         }
 
         const content = fs.readFileSync(skillPath, 'utf8');
-        const source: SkillSource = BUILTIN_SKILL_IDS.has(entry.name) ? 'builtin' : 'userData';
-        // parseSkillMarkdown is a pure frontmatter parser — it does NOT set
-        // `enabled`. We inject it here from the disabledFolders set so every
-        // skill object produced by loadUserSkills has a fully-populated
-        // enabled: boolean field as the SkillDetails type requires.
-        const skill = parseSkillMarkdown(content, entry.name, source, skillPath);
-        skills.push({ ...skill, enabled: !disabledFolders.has(entry.name) });
+        // parseSkillMarkdown: pass source=undefined initially — we'll
+        // overwrite with the canonical classification below. (Passing a
+        // throwaway value just to overwrite it wastes a tiny bit of work;
+        // a future refactor could make parseSkillMarkdown return `Omit<
+        // SkillDetails, 'source'> | { source?: SkillSource }`.)
+        const skill = parseSkillMarkdown(content, entry.name, 'userData', skillPath);
+        // Classify as 'builtin' if EITHER the on-disk folder name OR the
+        // parsed frontmatter id is in the canonical builtin set. This is the
+        // single point of truth for source classification — the UI uses it
+        // to gate the delete button (SkillsSettings.tsx), and the IPC handler
+        // uses it via getSkill() to route /skill-name lookups.
+        //
+        // Why both keys? Today's humanize-text builtin has folder='humanize-text'
+        // but parsed id='humanize-ai-text' (the SKILL.md frontmatter was renamed
+        // in a prior version). If only folder was checked, a future maintainer
+        // who renames the folder would silently re-classify the builtin as
+        // 'userData' and make it deletable. Checking the parsed id too means
+        // the protection survives folder renames as long as the visible
+        // /skill id is still in the canonical set.
+        const source: SkillSource = (
+          BUILTIN_SKILL_IDS.has(entry.name) || BUILTIN_SKILL_IDS.has(skill.id)
+        ) ? 'builtin' : 'userData';
+        skills.push({ ...skill, source, enabled: !disabledFolders.has(entry.name) });
       } catch (error: any) {
         if (error?.code !== 'ENOENT') {
           console.warn(`[SkillsManager] Skipping invalid skill "${entry.name}":`, error?.message || error);
