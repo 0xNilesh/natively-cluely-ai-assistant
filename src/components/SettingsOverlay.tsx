@@ -1214,6 +1214,20 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
         return () => unsubs.forEach(unsub => unsub());
     }, [isOpen, onClose]);
 
+    // Escape closes Settings — except during opacity preview (slider is the
+    // active gesture, dismiss-on-Escape would interrupt the drag).
+    useEffect(() => {
+        if (!isOpen) return;
+        const handler = (e: KeyboardEvent) => {
+            if (e.key !== 'Escape') return;
+            if (isPreviewingOpacity) return;
+            e.preventDefault();
+            onClose();
+        };
+        window.addEventListener('keydown', handler);
+        return () => window.removeEventListener('keydown', handler);
+    }, [isOpen, isPreviewingOpacity, onClose]);
+
 
 
     useEffect(() => {
@@ -1380,7 +1394,16 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                     exit={{ opacity: 0 }}
                     transition={{ duration: 0.2 }}
                     id="settings-backdrop"
-                    className={`fixed inset-0 z-50 flex items-center justify-center p-8 transition-colors duration-150 ${isPreviewingOpacity ? 'bg-transparent backdrop-blur-none' : 'bg-black/60 backdrop-blur-sm'}`}
+                    className={`fixed inset-0 z-50 flex items-center justify-center p-8 transition-colors duration-150 ${isPreviewingOpacity ? 'bg-transparent backdrop-blur-none pointer-events-none' : 'bg-black/60 backdrop-blur-sm'}`}
+                    onClick={(e) => {
+                        // Mirror Modes/Profile (App.tsx) close-on-outside-click.
+                        // Skip when opacity slider preview is active — backdrop is
+                        // invisible but pointer-active; clicking during preview
+                        // would otherwise dismiss Settings mid-drag.
+                        if (e.target !== e.currentTarget) return;
+                        if (isPreviewingOpacity) return;
+                        onClose();
+                    }}
                 >
                     <motion.div
                         id="settings-panel-wrapper"
