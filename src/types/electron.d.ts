@@ -359,6 +359,11 @@ export interface ElectronAPI {
   onGeminiStreamToken: (callback: (token: string, meta?: { streamId?: number }) => void) => () => void
   onGeminiStreamDone: (callback: (data?: { finalText?: string; streamId?: number }) => void) => () => void
   onGeminiStreamError: (callback: (error: string) => void) => () => void;
+
+  // NOTE: onSkillsChanged broadcast subscription was removed. Skills are
+  // toggled only via delete; the picker refreshes on Settings unmount, and
+  // the overlay fetches its own copy on mount. Add a broadcast here if/when
+  // a future "skill changed" event needs to cross surfaces live.
   cancelChatStream: () => void;
 
   // Model Management
@@ -604,6 +609,10 @@ export interface ElectronAPI {
   // Skills
   skillsRefresh: () => Promise<SkillSummary[]>;
   skillsOpenFolder: () => Promise<{ success: boolean; path: string; error?: string }>;
+  // Per-skill management: hard-delete. Built-ins are refused inside the
+  // manager. Enable/disable is intentionally NOT exposed on the renderer —
+  // users who don't want a skill delete it instead.
+  skillsDelete: (id: string) => Promise<{ success: boolean; error?: string }>;
   // Skill upload — step-3 wiring. `skillsUpload(payload, { autoInstall: true })`
   // is a one-shot validate+install; `skillsPreview(payload)` always sets
   // `autoInstall: false` so the renderer can show a confirm card first.
@@ -786,6 +795,7 @@ export interface SkillSummary {
   name: string;
   description: string;
   source: 'builtin' | 'userData';
+  enabled: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -856,6 +866,8 @@ export interface PhoneMirrorInfo {
   qrDataUrl: string | null;
   clients: number;
   extensionConnected: boolean;
+  /** Resolved bind host — '127.0.0.1' for loopback-only, '0.0.0.0' when LAN-exposed. */
+  bindAddress: string;
 }
 
 declare global {

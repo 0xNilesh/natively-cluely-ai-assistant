@@ -37,6 +37,7 @@ import { CHAT_MODE_PROMPT } from './llm/prompts';
 import { isAssistantIdentityQuestion, profileFactsReady } from './llm/manualProfileIntelligence';
 import { buildManualProfileBackendAnswer } from './llm/profileAnswerBackend';
 import { DOC_GROUNDED_TOKEN_BUDGET } from './services/ModeContextRetriever';
+import { detectIncompleteNumericAnswer, completenessRegenFabricates } from './llm/documentGroundedPrompt';
 
 // Generic tokens excluded when splitting OKF entity names / card titles into
 // distinctive words for the document-grounded false-refusal gate (2026-07-02).
@@ -926,6 +927,17 @@ export function initializeIpcHandlers(appState: AppState): void {
             const candidateId = skillPrefixMatch[1];
             const skill = SkillsManager.getInstance().getSkill(candidateId);
             if (skill) {
+              // Disabled skills still resolve by name but must NOT inject their
+              // instructions into the prompt — the user turned them off in
+              // Settings → Skills. Surface a clear error rather than silently
+              // proceeding (which would invoke the skill anyway).
+              if (skill.enabled === false) {
+                event.sender.send(
+                  'gemini-stream-error',
+                  `Skill "/${skill.id}" is disabled. Enable it in Settings → Skills.`,
+                );
+                return;
+              }
               skillPromptBlock = SkillsManager.getInstance().buildPromptBlock(skill);
               const strippedQuery = skillPrefixMatch[2].trim();
               message = strippedQuery || `Please help me with the ${skill.name} skill.`;
@@ -1575,7 +1587,19 @@ export function initializeIpcHandlers(appState: AppState): void {
             // path so the knowledge intercept + active-mode injection HONOR the
             // answer type's forbidden layers (no profile for coding/technical/
             // sales/lecture) and scope custom context by the real answer type.
-            { answerType: answerPlan.answerType, forbiddenContextLayers: answerPlan.forbiddenContextLayers },
+            // Round-7 Failure-2: for a document-grounded follow-up, pass the
+            // previous assistant answer as followUpReferentHint so the retriever
+            // can resolve an anaphoric query ("What processor controls it?") to
+            // the previously-named subject. Retrieval-scoring only — the hint is
+            // never added to the model-visible prompt (the doc-grounded prompt
+            // still strips prior assistant turns), so anti-contamination holds.
+            {
+              answerType: answerPlan.answerType,
+              forbiddenContextLayers: answerPlan.forbiddenContextLayers,
+              ...(manualActiveMode?.documentGroundedCustomModeActive === true
+                ? { followUpReferentHint: (intelligenceManager.getLastAssistantMessage() || '').trim() || undefined }
+                : {}),
+            },
           );
 
           // Coding chat STREAMS LIVE through a gate that holds tokens only until
@@ -1848,24 +1872,32 @@ export function initializeIpcHandlers(appState: AppState): void {
               }
 
               // Phase 4/7: CRITICAL-violation REPAIR (manual path). A profile/
-              // identity answer must never answer as "Natively / an AI" or falsely
+              // identity answer must never answer as "Natively / an AI", falsely
               // refuse ("I can't share that", "I don't have your resume loaded")
-              // when the profile IS loaded. On such a violation we do ONE bounded
-              // regeneration grounded in the candidate facts and hand the renderer
-              // a corrective finalText (in-place replace via gemini-stream-done).
-              // Only fires on a real detected violation → zero happy-path latency.
-              const CRITICAL_CODES = new Set(['assistant_identity_leak', 'false_no_access_refusal', 'false_no_experience_refusal']);
+              // when the profile IS loaded, OR cite a specific metric/number the
+              // resume never stated (audit finding, Phase 3: validateProfileEvidence
+              // was detecting `unsupported_metric` but the violation was LOG-ONLY —
+              // no repair, no strip, delivered to the user verbatim). On such a
+              // violation we do ONE bounded regeneration grounded in the candidate
+              // facts and hand the renderer a corrective finalText (in-place replace
+              // via gemini-stream-done). Only fires on a real detected violation →
+              // zero happy-path latency. Sourced from profileValidation.violations
+              // (validateProfileEvidence), which already composes the base
+              // validateProfileOutput checks — so this is now the single
+              // enforcement point for both classes of critical violation.
+              const CRITICAL_CODES = new Set(['assistant_identity_leak', 'false_no_access_refusal', 'false_no_experience_refusal', 'unsupported_metric']);
               const critical = profileAvailable
                 && answerPlan.profileContextPolicy === 'required'
-                && validateProfileOutput({ answer: fullResponse, plan: answerPlan, profileAvailable: true, candidateDirected: true })
-                  .violations.find(v => v.severity === 'error' && CRITICAL_CODES.has(v.code));
+                && profileValidation.violations.find(v => v.severity === 'error' && CRITICAL_CODES.has(v.code));
               if (critical && _chatStreamsBySender.get(senderId)?.streamId === myStreamId) {
                 try {
                   const orch2 = llmHelper.getKnowledgeOrchestrator?.();
                   let facts = '';
                   try { facts = (await orch2?.processQuestion?.(message))?.contextBlock || ''; } catch { /* best effort */ }
                   if (!facts) facts = `${JSON.stringify(activeResume || {})}`;
-                  const repairInstruction = buildProfileRepairInstruction({ ok: false, violations: [critical] } as any);
+                  const repairInstruction = critical.code === 'unsupported_metric'
+                    ? profileValidation.repairInstruction || buildProfileRepairInstruction({ ok: false, violations: [critical] } as any)
+                    : buildProfileRepairInstruction({ ok: false, violations: [critical] } as any);
                   const safeFacts = sanitizeRepairPromptText(facts, 8000);
                   const safeQuestion = sanitizeRepairPromptText(message, 1000);
                   // Wrap the directive so MiniMax can't echo it as the answer (F-PROMPT,
@@ -1897,7 +1929,7 @@ export function initializeIpcHandlers(appState: AppState): void {
                   });
                   const repairedTrim = repaired.trim();
                   if (repairedTrim.length >= 5) {
-                    const reCheck = validateProfileOutput({ answer: repairedTrim, plan: answerPlan, profileAvailable: true, candidateDirected: true });
+                    const reCheck = validateProfileEvidence({ answer: repairedTrim, plan: answerPlan, evidence, profileAvailable, candidateDirected: true });
                     const stillCritical = reCheck.violations.some(v => v.severity === 'error' && CRITICAL_CODES.has(v.code));
                     if (!stillCritical) {
                       fullResponse = repairedTrim;
@@ -2455,10 +2487,49 @@ export function initializeIpcHandlers(appState: AppState): void {
                 }
               } catch { /* never throws into the answer path */ }
 
+              // COMPLETENESS detector (round-7 Failure-3). A confident, non-refusal
+              // answer to a multi-value question ("what specs / rates / success
+              // rates / GPU memory?") frequently drops a value that is LITERALLY
+              // present in the retrieved excerpts (gemini-flash-lite stops after the
+              // first figure — e.g. gives 96GB but omits the 16GB deployment VRAM,
+              // or 480+25Hz but omits the 50Hz control rate). This is an INCOMPLETE
+              // answer the old validator never caught (it only fired on refusals).
+              // We detect it GENERICALLY: collect distinct number+unit tokens that
+              // appear in the retrieved block, and flag the answer when it names
+              // some of them (so it IS a numeric/factual answer on-topic) but omits
+              // OTHERS that are present in the block. Re-ask shows the block and
+              // asks for all values — it can only surface IN-BLOCK values, so it
+              // never fabricates. Tightly gated: needs a numeric answer + ≥2 extra
+              // distinct in-block values missing, and only for questions that ask
+              // for a set/multiple values.
+              let incompleteMissing: string[] = [];
+              let isIncomplete = false;
+              try {
+                // A PURE refusal (short, dominated by "not found", no values)
+                // skips completeness. An answer that DOES surface values but
+                // hedges on a sub-part ("...96 GB. The model is not mentioned.")
+                // is NOT a refusal — it is exactly the incomplete answer we want
+                // to complete, so it must NOT be gated out here.
+                const answerIsRefusalLike = isFalseRefusal
+                  || (isSystemOwnRefusalPhrase && trimmed.length < 120)
+                  || (trimmed.length < 120
+                      && /^(?:\s*I could not find|.*\bnot (?:directly )?(?:mentioned|found|present)\b)/i.test(trimmed)
+                      && !/\d[\d,]*(?:\.\d+)?\s?(?:gb|mb|hz|kg|mm|%|dof|steps?|episodes?)/i.test(trimmed));
+                const detect = detectIncompleteNumericAnswer({
+                  question: message,
+                  answer: trimmed,
+                  retrievedBlock: docContextBlock,
+                  answerIsRefusal: answerIsRefusalLike,
+                });
+                incompleteMissing = detect.missing;
+                isIncomplete = detect.incomplete;
+              } catch { incompleteMissing = []; isIncomplete = false; }
+
               const reason = isGreeting ? 'greeting'
                 : isEmpty ? 'empty'
                 : isExactRepeat ? 'exact_repeat_of_prior_answer'
                 : isFalseRefusal ? 'false_refusal'
+                : isIncomplete ? 'incomplete'
                 : null;
 
               if (reason) {
@@ -2469,7 +2540,22 @@ export function initializeIpcHandlers(appState: AppState): void {
                 // simple grounding prompt is sufficient.
                 let regen = '';
                 try {
-                  const strictPrompt = reason === 'false_refusal'
+                  const strictPrompt = reason === 'incomplete'
+                    ? [
+                        'You gave a partial answer. The document excerpts below contain ADDITIONAL relevant values you left out.',
+                        'Re-answer the question COMPLETELY, including EVERY value that appears in the excerpts for this question.',
+                        `Values present in the excerpts that your previous answer omitted: ${incompleteMissing.slice(0, 8).join(', ')}.`,
+                        'Include those ONLY if they are genuinely part of the answer to this question — never invent a value that is not in the excerpts below.',
+                        'Answer in natural sentences (or a short list). Do not restate the question.',
+                        '',
+                        '## DOCUMENT EXCERPTS',
+                        docContextBlock || '(no retrieved material)',
+                        '',
+                        `QUESTION: ${message}`,
+                        '',
+                        'COMPLETE ANSWER (include all applicable values from the excerpts):',
+                      ].join('\n')
+                    : reason === 'false_refusal'
                     ? [
                         'You are synthesizing an answer from the document excerpts below.',
                         'IMPORTANT: The excerpts DO contain relevant information for this question.',
@@ -2523,19 +2609,47 @@ export function initializeIpcHandlers(appState: AppState): void {
                 // For false_refusal regen, also reject if the model still refuses
                 // after the synthesis-focused prompt — treat it as a true not-found
                 // and fall through to the safe failure line so telemetry is honest.
-                const regenIsStillRefusing = reason === 'false_refusal'
-                  && /not (?:directly )?(?:mentioned|in (?:the|my) (?:uploaded|seminar|thesis|retrieved) (?:material|sections?|document)|found in|present in)|(?:^|(?<=[.!?]\s+))I could not find\b/i.test(regenTrim);
+                const regenIsStillRefusing = (reason === 'false_refusal' || reason === 'incomplete')
+                  && /not (?:directly )?(?:mentioned|in (?:the|my) (?:uploaded|seminar|thesis|retrieved) (?:material|sections?|document)|found in|present in|specified)|do(?:es)? not (?:specify|mention|state|provide)|(?:^|(?<=[.!?]\s+))I could not find\b/i.test(regenTrim);
+                // Anti-fabrication guard for the completeness re-ask: reject the
+                // regen if it introduced ANY number+unit value that is NOT present
+                // in the retrieved block (the re-ask must only surface in-block
+                // values, never invent one). Zero-fabrication is sacred.
+                let incompleteRegenFabricates = false;
+                let incompleteRecoveredValue = true; // non-incomplete reasons don't gate on this
+                if (reason === 'incomplete' && regenTrim) {
+                  try {
+                    incompleteRegenFabricates = completenessRegenFabricates(regenTrim, docContextBlock);
+                    // Accept the completeness re-ask ONLY if it actually recovered
+                    // ≥1 of the flagged missing values. A re-ask that just re-hedges
+                    // without adding a value (the D-question case) recovers nothing
+                    // → rejected, and the original honest answer stands.
+                    const { extractNumericUnitTokens: _ext } = require('./llm/documentGroundedPrompt');
+                    const regenVals: Set<string> = _ext(regenTrim);
+                    incompleteRecoveredValue = incompleteMissing.some((mv) => regenVals.has(mv));
+                  } catch { incompleteRegenFabricates = false; incompleteRecoveredValue = false; }
+                }
                 const regenValid = regenTrim.length >= 8
                   && !GREETING_RE.test(regenTrim)
                   && !/what would you like help with/i.test(regenTrim)
                   && regenTrim !== priorAnswer
-                  && !regenIsStillRefusing;
+                  && !regenIsStillRefusing
+                  && !incompleteRegenFabricates
+                  && incompleteRecoveredValue;
                 if (regenValid) {
                   fullResponse = regenTrim;
                   finalText = regenTrim;
                   _attr.assistant_voice_guard_triggered = true;
                   piTelemetry.emit('pi_doc_grounded_regenerated', { reason });
                   console.warn('[DocGrounded] regeneration applied', { reason, chars: regenTrim.length });
+                } else if (reason === 'incomplete') {
+                  // The ORIGINAL answer was valid — just missing some values — and
+                  // the completeness re-ask didn't cleanly improve it (refused,
+                  // fabricated, or empty). KEEP the original answer; NEVER downgrade
+                  // a correct-but-incomplete answer to a refusal. Leave finalText
+                  // unset so the already-streamed original stands.
+                  piTelemetry.emit('pi_doc_grounded_completeness_kept_original', {});
+                  console.warn('[DocGrounded] completeness re-ask did not cleanly improve — keeping original answer', { missing: incompleteMissing.slice(0, 6) });
                 } else {
                   // Retry didn't help → ship a SAFE failure line (NOT a greeting),
                   // referencing the uploaded material (not "the conversation"), and
@@ -3484,6 +3598,27 @@ export function initializeIpcHandlers(appState: AppState): void {
       // Re-init IntelligenceManager
       appState.getIntelligenceManager().initializeLLMs();
 
+      // 2026-07-05 fix: this handler updated the CHAT client (llmHelper.setApiKey)
+      // but never told RAGManager's EmbeddingPipeline about the new Gemini key —
+      // only ProcessingHelper.loadStoredCredentials (boot-time) and the Ollama-pull
+      // completion handler (main.ts bootstrapOllamaEmbeddings) did that. A key
+      // entered here via Settings never reached the embedder, so reference files
+      // stayed marked lexical_only and mode retrieval kept falling back to lexical
+      // (users see "reference files not indexing" until app restart). Mirror the
+      // same re-init + retry the Ollama-pull path already does.
+      if (keyChanged) {
+        const ragManager = appState.getRAGManager();
+        if (ragManager) {
+          ragManager.initializeEmbeddings({
+            openaiKey: cm.getOpenaiApiKey() || process.env.OPENAI_API_KEY || undefined,
+            geminiKey: apiKey || undefined,
+            ollamaUrl: process.env.OLLAMA_URL || 'http://localhost:11434',
+            providerDataScopes: (() => { try { const { SettingsManager } = require('./services/SettingsManager'); return SettingsManager.getInstance().get('providerDataScopes'); } catch { return undefined; } })(),
+          });
+          appState.scheduleModeReferenceIndexRetry();
+        }
+      }
+
       // Hindsight: an app-managed companion server inherited the OLD key in its env at
       // spawn — it won't pick up the new one until restart. Surface the hint (log + IPC),
       // but only when the key genuinely changed.
@@ -3541,6 +3676,23 @@ export function initializeIpcHandlers(appState: AppState): void {
       appState.getIntelligenceManager().resetEngine();
       // Re-init IntelligenceManager
       appState.getIntelligenceManager().initializeLLMs();
+
+      // 2026-07-05 fix: see set-gemini-api-key for full rationale — this handler
+      // updated the chat client but never re-initialized RAGManager's
+      // EmbeddingPipeline with the new OpenAI key, so reference files stayed
+      // lexical_only until app restart. Mirror the Ollama-pull re-init pattern.
+      if (keyChanged) {
+        const ragManager = appState.getRAGManager();
+        if (ragManager) {
+          ragManager.initializeEmbeddings({
+            openaiKey: apiKey || undefined,
+            geminiKey: cm.getGeminiApiKey() || process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || undefined,
+            ollamaUrl: process.env.OLLAMA_URL || 'http://localhost:11434',
+            providerDataScopes: (() => { try { const { SettingsManager } = require('./services/SettingsManager'); return SettingsManager.getInstance().get('providerDataScopes'); } catch { return undefined; } })(),
+          });
+          appState.scheduleModeReferenceIndexRetry();
+        }
+      }
 
       // Hindsight: see set-gemini-api-key for rationale (only when the key changed).
       if (keyChanged) {
@@ -8650,6 +8802,27 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
+  // Hard-delete a user-installed skill. Built-ins are blocked inside
+  // SkillsManager.deleteSkill (they'd be silently re-seeded by
+  // ensureBuiltinSkills()). Errors are surfaced as { success, error } so the
+  // preload bridge doesn't need a try/catch.
+  safeHandle('skills:delete', async (_evt, id: string) => {
+    try {
+      return SkillsManager.getInstance().deleteSkill(id);
+    } catch (e: any) {
+      console.warn('[IPC] skills:delete error:', e?.message || e);
+      return { success: false, error: e?.message || 'failed to delete skill' };
+    }
+  });
+
+  // NOTE: skills:set-enabled IPC was removed. SkillsManager.setSkillEnabled()
+  // remains as a defense-in-depth gate in case future code paths want to
+  // disable skills without going through delete (e.g., a per-mode default
+  // skill concept, a "never invoke during sensitive flows" toggle, etc.). The
+  // skillPromptBlock injection site at line ~930 still consults skill.enabled
+  // before calling buildPromptBlock(), so any caller that flips it via a
+  // direct SkillsManager call gets the gate for free.
+
   // Step 3 of the Skill Upload feature — validate (and optionally install)
   // an uploaded skill payload. Errors are NEVER thrown across the IPC
   // boundary; they're surfaced as { stage: 'failed', errors: [...] } so the
@@ -8721,9 +8894,35 @@ export function initializeIpcHandlers(appState: AppState): void {
   });
 
   safeHandle('phone-mirror:set-lan', async (_, exposeOnLan: boolean) => {
+    const service = PhoneMirrorService.getInstance();
     try {
-      return await PhoneMirrorService.getInstance().setExposeOnLan(!!exposeOnLan);
+      return await service.setExposeOnLan(!!exposeOnLan);
     } catch (e: any) {
+      // LAN exposure is a deliberate security widening — bound 0.0.0.0 lets any
+      // device on the Wi-Fi connect with the pairing token. Surface a modal
+      // confirmation; only flip the toggle if the user picks "Allow".
+      if (e?.name === 'LANBindConfirmationRequired') {
+        const win = appState.getMainWindow() ?? undefined;
+        const { response } = dialog.showMessageBoxSync(win as BrowserWindow | undefined, {
+          type: 'warning',
+          message: 'Allow LAN access?',
+          detail:
+            'This will bind Natively to 0.0.0.0:4123 so any device on this Wi-Fi network can connect with the pairing token. Continue?',
+          buttons: ['Cancel', 'Allow LAN access'],
+          defaultId: 0,
+          cancelId: 0,
+        });
+        if (response !== 1) {
+          return { ok: false, declined: true };
+        }
+        service.markLanBindDialogShown();
+        try {
+          return await service.setExposeOnLan(!!exposeOnLan);
+        } catch (e2: any) {
+          console.error('[IPC] phone-mirror:set-lan retry error:', e2);
+          return { error: e2?.message || 'failed to update lan setting' };
+        }
+      }
       console.error('[IPC] phone-mirror:set-lan error:', e);
       return { error: e?.message || 'failed to update lan setting' };
     }

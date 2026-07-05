@@ -6,6 +6,7 @@ import {
     FileUp,
     FolderOpen,
     RefreshCw,
+    Trash2,
     X,
 } from 'lucide-react';
 import type {
@@ -73,6 +74,10 @@ export const SkillsSettings: React.FC = () => {
     } | null>(null);
     const [installing, setInstalling] = useState(false);
     const [uploading, setUploading] = useState(false);
+    // Per-skill in-flight tracking for delete. A Set (not boolean) so each
+    // row can independently be "currently mutating" — without this,
+    // double-clicking Delete fires two concurrent rmSyncs.
+    const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
     const [isDragging, setIsDragging] = useState(false);
     // Counter for dragenter/dragleave. A simple boolean flag would flicker
     // every time the cursor crossed a child boundary inside the card (icon,
@@ -99,6 +104,20 @@ export const SkillsSettings: React.FC = () => {
             setLoading(false);
         }
     }, []);
+
+    // Tiny helper for set-(Set<string>) with one new value — used by the
+    // delete handler to flip the in-flight bit. Functional update so
+    // concurrent setter calls don't clobber each other.
+    const markInFlight = (
+        setter: React.Dispatch<React.SetStateAction<Set<string>>>,
+        id: string,
+        inFlight: boolean,
+    ) => setter(prev => {
+        const next = new Set(prev);
+        if (inFlight) next.add(id);
+        else next.delete(id);
+        return next;
+    });
 
     useEffect(() => {
         loadSkills();
@@ -267,6 +286,37 @@ export const SkillsSettings: React.FC = () => {
     const handleCancel = () => {
         setPreview(null);
         setStatus(null);
+    };
+
+    // Delete a user-installed skill. Built-ins are blocked inside SkillsManager
+    // (no delete button is shown for them in the row JSX either, as a UX guard).
+    // Matches the confirm-then-call pattern used elsewhere in Settings (see
+    // AIProvidersSettings.tsx → handleDeleteCustom).
+    const handleDeleteSkill = async (id: string, name: string) => {
+        if (typeof window.electronAPI?.skillsDelete !== 'function') {
+            setStatus(BRIDGE_MISSING_MSG);
+            return;
+        }
+        if (deletingIds.has(id)) return; // already in flight — drop the duplicate click
+        if (!window.confirm(`Delete "${name}"? This cannot be undone.`)) return;
+        // Banner hygiene: clear BOTH success and status so a stale red banner
+        // from a prior action doesn't linger above a fresh green one.
+        setSuccess(null);
+        setStatus(null);
+        markInFlight(setDeletingIds, id, true);
+        try {
+            const result = await window.electronAPI.skillsDelete(id);
+            if (result?.success) {
+                setSuccess(`Deleted "${name}".`);
+                await loadSkills();
+            } else {
+                setStatus(result?.error || 'Could not delete skill.');
+            }
+        } catch (error: any) {
+            setStatus(error?.message || 'Could not delete skill.');
+        } finally {
+            markInFlight(setDeletingIds, id, false);
+        }
     };
 
     // Truncate the instructions preview to RENDER_PREVIEW_MAX chars + ellipsis.
@@ -477,16 +527,38 @@ export const SkillsSettings: React.FC = () => {
                                         /{skill.id}
                                     </span>
                                 </div>
-                                <span
-                                    className={[
-                                        'shrink-0 text-[11px] font-medium',
-                                        skill.source === 'builtin'
-                                            ? 'text-green-500'
-                                            : 'text-blue-500',
-                                    ].join(' ')}
-                                >
-                                    {skill.source === 'builtin' ? 'Built-in' : 'Local'}
-                                </span>
+                                <div className="flex items-center gap-2 shrink-0">
+                                    <span
+                                        className={[
+                                            'text-[11px] font-medium',
+                                            skill.source === 'builtin'
+                                                ? 'text-green-500'
+                                                : 'text-blue-500',
+                                        ].join(' ')}
+                                    >
+                                        {skill.source === 'builtin' ? 'Built-in' : 'Local'}
+                                    </span>
+                                    {/* Delete button — hidden for built-ins (the
+                                        manager blocks builtin deletes anyway, so
+                                        we don't even show the affordance).
+                                        `group-focus-within:` ensures keyboard
+                                        users can SEE the button when tabbing
+                                        through — without this the button
+                                        remains invisible via Tab navigation. */}
+                                    {skill.source !== 'builtin' && (
+                                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity">
+                                            <button
+                                                onClick={() => handleDeleteSkill(skill.id, skill.name)}
+                                                disabled={deletingIds.has(skill.id)}
+                                                className="p-1.5 rounded-lg text-text-secondary hover:text-red-400 hover:bg-red-500/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+                                                title="Delete"
+                                                aria-label={`Delete ${skill.name}`}
+                                            >
+                                                <Trash2 size={14} />
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
                             </div>
                             {skill.description && (
                                 <p className="text-[11px] text-text-secondary mt-1 ml-5 leading-snug line-clamp-2">

@@ -967,6 +967,7 @@ interface ElectronAPI {
   // (structurally compatible) in src/types/electron.d.ts.
   skillsRefresh: () => Promise<unknown[]>;
   skillsOpenFolder: () => Promise<{ success: boolean; path: string; error?: string }>;
+  skillsDelete: (id: string) => Promise<{ success: boolean; error?: string }>;
   skillsUpload: (
     payload: SkillUploadPayload,
     opts?: { autoInstall?: boolean }
@@ -1185,6 +1186,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Skills — local SKILL.md instructions surfaced in Settings and the overlay.
   skillsRefresh: () => ipcRenderer.invoke('skills:list'),
   skillsOpenFolder: () => ipcRenderer.invoke('skills:open-folder'),
+  // Per-skill management: hard-delete. Built-ins are refused inside the
+  // manager. Enable/disable is intentionally NOT exposed — users who don't
+  // want a skill delete it instead (see SkillsSettings.tsx).
+  skillsDelete: (id: string) => ipcRenderer.invoke('skills:delete', id),
   // Skill upload — step-3 wiring. `skillsUpload` is the general call (opts.autoInstall
   // defaults to false on the renderer side; main process uses ?? false). `skillsPreview`
   // is sugar for `autoInstall: false` — the renderer's confirm step calls `skillsUpload`
@@ -1851,6 +1856,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.removeListener('gemini-stream-error', subscription);
     };
   },
+
+  // NOTE: onSkillsChanged broadcast subscription was removed. The main
+  // process no longer broadcasts on delete (the only mutation left); the
+  // Settings panel re-fetches via skillsRefresh after a successful delete,
+  // and the overlay's autocomplete picker is fetched once on mount — users
+  // who delete a skill in Settings then switch to the overlay will see the
+  // stale autocomplete until the next mount, which is acceptable for v1.
 
   // Model Management
   getDefaultModel: () => ipcRenderer.invoke('get-default-model'),
