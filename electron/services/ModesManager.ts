@@ -918,7 +918,21 @@ export class ModesManager {
         const custom = isCustomMode(mode);
         const hasReferenceFiles = files.some(file => file.content.trim());
         const hasCustomPrompt = mode.customContext.trim().length > 0;
-        const documentGrounded = custom && hasReferenceFiles && detectCustomModeDocumentGrounding(mode.customContext);
+        // A mode is "document-grounded" if it has reference files AND a custom
+        // prompt that declares source-of-truth on the uploaded material. We
+        // intentionally do NOT gate this on `custom` (= templateType === 'general'
+        // && name !== 'General') because users legitimately create deeply
+        // document-grounded prompts for built-in templates (e.g. a Seminar
+        // mode that explicitly says "answer only from the uploaded seminar file"
+        // — see live repro: a team-meet mode with 2k chars of doc-grounded
+        // customContext + 1 PDF, but documentGrounded=false because custom=false
+        // → retrieval never fires → model says "please upload your document").
+        // `documentGroundedCustomModeActive` (the strict gate for the
+        // active-mode injection block — see Fix #1) is unchanged: it still
+        // requires a TRUE custom mode. Only the loose `documentGrounded`
+        // flag, used to decide "should we do doc-grounded retrieval at all?",
+        // is broadened.
+        const documentGrounded = hasReferenceFiles && detectCustomModeDocumentGrounding(mode.customContext);
         const documentGroundedCustomModeActive = custom && hasCustomPrompt && documentGrounded && hasReferenceFiles;
         return {
             isCustom: custom,
