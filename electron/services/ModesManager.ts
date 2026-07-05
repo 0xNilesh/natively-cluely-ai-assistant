@@ -927,13 +927,29 @@ export class ModesManager {
         // — see live repro: a team-meet mode with 2k chars of doc-grounded
         // customContext + 1 PDF, but documentGrounded=false because custom=false
         // → retrieval never fires → model says "please upload your document").
-        // `documentGroundedCustomModeActive` (the strict gate for the
-        // active-mode injection block — see Fix #1) is unchanged: it still
-        // requires a TRUE custom mode. Only the loose `documentGrounded`
-        // flag, used to decide "should we do doc-grounded retrieval at all?",
-        // is broadened.
         const documentGrounded = hasReferenceFiles && detectCustomModeDocumentGrounding(mode.customContext);
-        const documentGroundedCustomModeActive = custom && hasCustomPrompt && documentGrounded && hasReferenceFiles;
+        // CRITICAL (code-review audit 2026-07-05, following the fix above):
+        // `documentGroundedCustomModeActive` — NOT `documentGrounded` — is the
+        // flag every production retrieval/prompt-shaping call site actually
+        // reads (WhatToAnswerLLM.ts forceDocumentGrounding, both LLMHelper.ts
+        // active-mode-injection sites, IntelligenceEngine.ts's context
+        // suppression + profile bypass, ipcHandlers.ts's Hindsight/OKF
+        // isolation gates and phone-chat). `documentGrounded` alone is
+        // essentially write-only (only 2 diagnostic console.log fields read
+        // it) — broadening ONLY `documentGrounded` (as an earlier, incomplete
+        // fix did) left every real behavior still gated on the unbroadened
+        // `custom` requirement below, so the original "please upload your
+        // document" bug persisted for built-in-template modes even after
+        // that fix landed. The name retains "CustomMode" for historical/API
+        // -compat reasons (~65 call sites reference this exact field name)
+        // but it no longer requires `isCustomMode` — any mode (built-in
+        // template or user-created) with reference files + a document-
+        // grounded prompt now activates the full doc-grounded behavior.
+        // `hasCustomPrompt` and `hasReferenceFiles` are both already implied
+        // by `documentGrounded` (empty customContext can't match either
+        // regex; documentGrounded requires hasReferenceFiles) — kept as
+        // explicit conjuncts only for readability/defense-in-depth.
+        const documentGroundedCustomModeActive = hasCustomPrompt && documentGrounded && hasReferenceFiles;
         return {
             isCustom: custom,
             hasReferenceFiles,

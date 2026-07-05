@@ -243,13 +243,18 @@ export function normalizeDraft(brief: ModeBrief, parsed: any, raw: string): Mode
             : 'general';
     }
 
-    // CRITICAL runtime interaction: document grounding only activates for CUSTOM
-    // modes, and isCustomMode() requires templateType === 'general' (a non-general
-    // template routes to that template's canonical prompt, and
-    // getActiveModeDocumentGroundingInfo gates documentGroundedCustomModeActive on
-    // isCustom). So a grounding-required mode assigned e.g. 'lecture' would carry
-    // the grounding TEXT but never engage forced retrieval / profile suppression at
-    // runtime. Force 'general' for grounded modes so the guard actually fires.
+    // A non-general template routes to that template's own canonical system
+    // prompt (electron/llm/prompts.ts's per-template prompt), which would
+    // compete with/dilute the AI-generated grounding instructions in the
+    // customContext. Force 'general' for grounded modes so the generated
+    // prompt is the mode's ENTIRE voice, not layered under a template prompt.
+    // NOTE (2026-07-05): getActiveModeDocumentGroundingInfo's
+    // documentGroundedCustomModeActive no longer requires isCustomMode() —
+    // a hand-authored non-general-template mode with reference files + a
+    // document-grounded customContext now DOES engage forced retrieval /
+    // profile suppression at runtime (see ModesManager.ts). This
+    // general-template force is now a prompt-clarity choice for the AI
+    // generation pipeline specifically, not a runtime-correctness requirement.
     if (brief.requiresGrounding && templateType !== 'general') {
         templateType = 'general';
     }

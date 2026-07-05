@@ -199,8 +199,8 @@ test('active mode context includes custom instructions and only active-mode refe
   assert.doesNotMatch(block, /candidate-b-resume/);
 });
 
-test('documentGrounded flag is true for BUILT-IN template modes with reference files + doc-grounded prompt', () => {
-  // Live repro (2026-07-05): a Seminar mode with templateType=team-meat, a
+test('documentGrounded + documentGroundedCustomModeActive are BOTH true for BUILT-IN template modes with reference files + doc-grounded prompt', () => {
+  // Live repro (2026-07-05): a Seminar mode with templateType=team-meet, a
   // 2k-char doc-grounded customContext ("answer only from the uploaded
   // seminar file" — explicitly mentions "uploaded", "from the uploaded",
   // "do not make up facts"), AND a PDF reference file, previously returned
@@ -209,14 +209,21 @@ test('documentGrounded flag is true for BUILT-IN template modes with reference f
   // retrieval) and the model answered "please upload your thesis" for a
   // file that was already indexed.
   //
-  // Fix: documentGrounded now requires only hasReferenceFiles +
-  // detectCustomModeDocumentGrounding(customContext), NOT isCustomMode.
-  // `documentGroundedCustomModeActive` (the strict gate the active-mode
-  // injection block keys off) still requires isCustomMode — so the only
-  // behavior change is that retrieval/hybrid-search will now fire for
-  // built-in templates with clearly-doc-grounded prompts. The
-  // active-mode-injection block behavior is unchanged for actually-custom
-  // modes.
+  // ROUND 1 fix (incomplete, code-review caught it): broadened only
+  // `documentGrounded` to drop the isCustomMode requirement. But EVERY
+  // production call site that actually fires retrieval / prompt-shaping /
+  // profile-suppression (WhatToAnswerLLM.forceDocumentGrounding, both
+  // LLMHelper active-mode-injection sites, IntelligenceEngine's context
+  // suppression, ipcHandlers' Hindsight/OKF isolation gates, phone-chat)
+  // reads `documentGroundedCustomModeActive`, NOT `documentGrounded` —
+  // `documentGrounded` alone is essentially write-only. So Round 1 flipped
+  // the flag but changed no actual behavior; the bug persisted.
+  //
+  // ROUND 2 fix (this test): `documentGroundedCustomModeActive` ALSO drops
+  // the isCustomMode requirement — it now equals
+  // `hasCustomPrompt && documentGrounded && hasReferenceFiles`, with no
+  // `custom` conjunct. The field name is kept for API/call-site
+  // compatibility (~65 references) but no longer implies isCustomMode.
   installDb(makeDb({
     modes: [
       modeRow({
@@ -237,15 +244,14 @@ test('documentGrounded flag is true for BUILT-IN template modes with reference f
     ],
   }));
   const info = ModesManager.getInstance().getActiveModeDocumentGroundingInfo();
-  assert.equal(info.isCustom, false, 'team-meet is not a custom mode');
+  assert.equal(info.isCustom, false, 'team-meet is not a custom mode (isCustom tracks templateType, unrelated to grounding now)');
   assert.equal(info.hasReferenceFiles, true);
   assert.equal(info.hasCustomPrompt, true);
-  // The fix: documentGrounded is now TRUE despite isCustom=false.
   assert.equal(info.documentGrounded, true,
     'documentGrounded must be true for built-in template with ref files + doc-grounded prompt');
-  // documentGroundedCustomModeActive still requires isCustom — unchanged.
-  assert.equal(info.documentGroundedCustomModeActive, false,
-    'documentGroundedCustomModeActive (the strict gate) still requires isCustom');
+  // THE ACTUAL FIX: documentGroundedCustomModeActive no longer requires isCustom.
+  assert.equal(info.documentGroundedCustomModeActive, true,
+    'documentGroundedCustomModeActive must be true so retrieval/prompt-shaping actually fires — this is the flag every real call site reads');
 });
 
 test('documentGrounded flag is false when there are no reference files, even with a doc-grounded prompt', () => {
