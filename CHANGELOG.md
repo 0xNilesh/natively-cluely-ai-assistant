@@ -8,9 +8,65 @@
 
     ### Improvements & Fixes
 
+    - **Close Settings on outside click + Escape, matching Modes/Profile**: `SettingsOverlay` now closes when you click the dimmed area around the card, mirroring the `e.target === e.currentTarget` backdrop pattern that Modes Manager and Profile Intelligence already used (App.tsx:774/807). Pressing **Escape** closes whichever of the three center overlays is open (top-most-wins order: Settings > Modes > Profile) via a shared listener in App.tsx, plus an internal listener inside `SettingsOverlay` and `ProfileIntelligenceSettings` for consistency. The opacity-slider preview is guarded both with a JS early-return and `pointer-events: none` on the backdrop so dragging the slider can never dismiss Settings mid-drag. (`2299895` — 3 files, +121/-9.)
+
     - **Prompt caching for Claude Opus 4.8**: `getClaudeCacheMinChars` now matches the whole `claude-opus-4-` family instead of enumerating point releases, so `claude-opus-4-8` uses the correct 4,096-token (16,384-char) cache minimum. It previously fell through to the generic 1,024-token floor, which silently disabled prompt caching for prompts between those two sizes.
 
-    ## [2.7.0] - 2026-06-05
+    ### Code Review Fixes (2026-07-06)
+
+Hardening pass from a launch-log code review on the `hardening/v2.7.0` branch. Eight items: two CRITICAL, two HIGH, two MEDIUM, two LOW.
+
+#### Critical
+
+- **Native module rebuild for Apple Silicon (better-sqlite3, keytar)**: Resolved `ERR_DLOPEN_FAILED` from an x86_64 `.node` binary on arm64 hardware (Rosetta-drift during a prior install). Rebuilt both modules from source against the real hardware arch via `scripts/rebuild-native-electron.js`. Verified arm64 via `file` + `lipo -info`. Smoke load test + `ReferenceFilePageCountPersistence.test.mjs` (5/5) green under `ELECTRON_RUN_AS_NODE`. Required version bump `better-sqlite3` 12.6.2 → 12.11.1 to compile against the current Electron V8 headers.
+- **PhoneMirror LAN-bind confirmation dialog + bind-address UI**: Closing the plaintext-HTTP-on-LAN attack surface on `0.0.0.0:4123`. The first `phone-mirror:set-lan` flip to ON per session now triggers a native `dialog.showMessageBoxSync` ("Allow LAN access? This will bind Natively to 0.0.0.0:4123 so any device on this Wi-Fi network can connect with the pairing token. Continue?" — Cancel is the default button). On Cancel the toggle stays off and the UI does not flip optimistically. Phone token is regenerated on every `exposeOnLan` transition (already in place; now documented). Settings now surfaces the live bind address in the Enable row — `On — port 4123 · bound to 0.0.0.0 (LAN) · 0 phones connected` vs `bound to 127.0.0.1 (loopback only)`.
+
+#### High
+
+- **Vite dynamic-import warnings resolved**: Two modules were both statically AND dynamically imported, defeating code-splitting. Dropped the dead dynamic import of `analytics.service` in `ConnectCalendarButton.tsx` (use the static import — calendar button cannot render before the app shell). Dropped the dead dynamic import of `orchestrator` in `App.tsx` (already statically imported by both `App.tsx` itself and `OrchestratedToasterHost.tsx`). Vite build is now clean of dynamic-import warnings for these two modules.
+- **Renderer bundle vendor split**: Added `build.rollupOptions.output.manualChunks` to `vite.config.mts`, partitioning deps into seven vendor buckets (`react-vendor`, `animation-vendor`, `icon-vendor`, `radix-vendor`, `markdown-vendor`, `media-vendor`, `data-vendor`). Renderer main entry dropped from **2.38 MB raw / 662 kB gzip** to **1.32 MB raw / 328 kB gzip**. Largest single chunk is now `markdown-vendor` at 628 kB (dominated by `react-syntax-highlighter` — orthogonal follow-up).
+
+#### Medium
+
+- **`ModelVersionManager` tier label split**: Operator-facing summary was collapsing T2 and T3 into a single slot (`T1=… | T2/T3=…`), which silently drops `tier3` from telemetry if a third tier is populated. Reformatted both the Vision and Text summaries to `T1=… | T2=… | T3=…`.
+- **Whisper Apple Silicon dtype default**: Default per-module dtype on Apple Silicon flipped from uniform `fp32` to `WHISPER_SAFE_DTYPE` (fp32 encoder + q8 decoders) — ~4× size and latency win on CoreML-backed inference with negligible WER impact. New `whisperAppleSiliconDtype` setting (`fp32` / `q8` / `q4` / `int8` / `mixed`) lets users opt back to fp32 if a particular model's quantized variant regresses on their hardware.
+
+#### Low / Verified
+
+- **`HindsightManager` round-4 `isAppManaged` fix verified intact**: The debounced-Settings-save clobbering bug (orphan server tree, held port 8888) stays fixed. Guards at line 573 (`if (!isAppManaged) broadcastStatus('ready')`) and line 935 (`stopSync` bail-out) are present and correct.
+
+### Crash & Launch Fixes (2026-07-06)
+
+Black-screen and silent-crash debugging pass on the `hardening/v2.7.0` branch, traced from the user's `MEASURE_LATENCY=true npm start` log. Three distinct root causes, all fixed and verified via Chrome DevTools Protocol.
+
+#### Critical
+
+- **`electron:dev` npm script was missing the `build:electron` step**: A prior onboarding commit silently dropped `node scripts/build-electron.js` from the dev script, replacing it with `npm run build` (which only compiles the renderer). Without `build:electron`, `dist-electron/electron/main.js` was never produced, Electron's Node bootstrap threw `Cannot find module ...` on `require()` of the missing entry, and the process exited with code 1 and zero stdout/stderr — manifesting as "the app crashed with no error message." Script restored to `npm run build && npm run build:electron && cross-env NODE_ENV=development electron .` so both bundles are always present.
+
+- **Black-screen from `.mjs`/`.ts` module-shadowing (Vite extension precedence)**: Latent module-resolution landmine that surfaced the instant the renderer was actually reachable. Vite's default extension order (`['.mjs', '.js', '.mts', '.ts', '.jsx', '.tsx', '.json']`) silently resolves any unqualified import (no extension) to the `.mjs`/`.js` twin of a `.ts`/`.tsx` basename — including no-op test stubs and stale manually-compiled copies. The actual trigger was `src/lib/onboarding/orchestrator.mjs` (a no-op test stub with a non-referentially-stable `getSnapshot()`) being picked over `orchestrator.ts` (the real `OnboardingOrchestrator`); feeding the unstable snapshot into React's `useSyncExternalStore` triggered "Maximum update depth exceeded" during the commit phase, unmounting the entire React tree, and leaving the window blank while the main-process log stayed completely green. Fixed all current instances and closed the whole bug class:
+  - `src/App.tsx`, `src/components/onboarding/OrchestratedToasterHost.tsx`, `src/lib/onboarding/orchestrator.ts` — unqualified orchestrator / persistence imports now use explicit `.ts` extensions.
+  - `src/components/NativelyInterface.tsx` — explicit `.ts` on the `rollingTranscriptState` import (was silently resolving to a stale hand-compiled `.js` sibling instead of the live `.ts` source).
+  - `premium/src/RemoteCampaignToaster.tsx` — explicit `.ts` on the `useAdCampaigns` import.
+  - `electron/utils/rollingTranscriptState.js` — deleted (stale committed build artifact; its only test consumer reads from `dist-electron/` output).
+  - 11 stale `.js` build artifacts in `premium/src/` deleted (`JDAwarenessToaster.js`, `MaxUltraUpgradeToaster.js`, `ModesSettings.js`, `NativelyApiPromoToaster.js`, `NegotiationCoachingCard.js`, `PremiumPromoToaster.js`, `PremiumUpgradeModal.js`, `ProfileFeatureToaster.js`, `ProfileVisualizer.js`, `RemoteCampaignToaster.js`, `useAdCampaigns.js`) — zero live consumers; all references in `src/premium/index.tsx` already use fully-qualified `.tsx`/`.ts` globs.
+  - `vite.config.mts` — added `resolve.extensions: ['.mts', '.ts', '.tsx', '.mjs', '.js', '.jsx', '.json']` so `.ts`/`.tsx` always win over `.js`/`.mjs` project-wide as one-line defense-in-depth.
+  - `src/lib/onboarding/orchestrator.mjs` — hardened the no-op stub's `getSnapshot()` to return a single cached module-level snapshot (referentially stable across calls) so any future unqualified import that still hits the stub cannot trigger the React infinite-render cycle.
+
+- **`src/main.tsx` referenced the undeclared global `process`**: `document.documentElement.setAttribute('data-platform', window.electronAPI?.platform ?? process?.platform ?? '')` ran at module top-level inside the renderer (`contextIsolation: true` / `nodeIntegration: false`). `process` isn't `undefined` here — it's literally undeclared — and optional chaining `?.` does not protect against referencing an undeclared identifier, so the line threw `ReferenceError: process is not defined` synchronously, aborted the module before `ReactDOM.createRoot(...).render(<App/>)`, and produced a black window with no renderer-side diagnostics. Replaced with `typeof process !== 'undefined' ? process.platform : ''` (the only safe check). Repo-wide sweep confirmed no other unguarded `process` / `require` / `__dirname` / `__filename` / `global` / `Buffer` references in `src/` or `premium/src/` (`process.env.NODE_ENV` hits are safe — Vite inlines them at build time).
+
+#### Side effect (silent dead-code surfaced)
+
+- **Onboarding orchestrator was silently `no-op`'d in the running app**: Before the module-shadowing fix, every `getOrchestrator()` call resolved to the `.mjs` stub, meaning the entire onboarding feature (permissions toaster, browser-extension toaster, profile/modes onboarding gates, trial promo, support/donation toaster, ad rotation gating, review prompt) had been wired up correctly in source but produced zero effects in the running app for weeks. It only became visible once `useSyncExternalStore` was introduced, which is why this "hardening" branch's headline onboarding feature had appeared to land cleanly while users never actually saw any of the toaster flows. Explicit-extension fix restores the real orchestrator in production.
+
+### Known Follow-ups (not fixed in this pass)
+
+The review surfaced pre-existing structural issues that this commit intentionally does **not** change. Flagged for a follow-up commit:
+
+- `package.json` at repo root has no `devDependencies` block. `electron`, `@electron/rebuild`, `@types/electron`, `@types/ws`, `@types/better-sqlite3` are all missing, so `npm ci` does not install them and `tsc --noEmit` produces hundreds of phantom module-not-found errors. A fresh clone will break the rebuild step.
+- No `preinstall` guard against running `npm install` under Rosetta on Apple Silicon — a future contributor would silently regress the native module ABI mismatch fixed here.
+- No `scripts.build` at repo root. Build is invoked via `scripts/build-electron.js` + `vite build` directly. Worth adding for CI parity.
+
+## [2.7.0] - 2026-06-05
 
     ### What's New
 
