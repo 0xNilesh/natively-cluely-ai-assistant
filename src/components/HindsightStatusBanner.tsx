@@ -69,9 +69,33 @@ export const HindsightStatusBanner: React.FC<{ variant?: 'top-strip' | 'floating
   const copy = STATUS_BODY[status.state];
   if (!copy) return null;
 
+  // Bug 3: the overlay/meeting window (top-strip variant) must NEVER surface
+  // Hindsight lifecycle failures during a meeting — the floating-card belongs
+  // exclusively to the launcher. Settings chip + post-call floating card are
+  // the launcher-resident surfaces; the overlay mount returns null here so
+  // the line-802 mount in App.tsx becomes a no-op for any non-ready state.
+  if (variant === 'top-strip') return null;
+
   // Spawning: neutral (working) — smaller, less alarming. Failures: amber, with action.
   const isFailing = status.state === 'spawn-failed' || status.state === 'unreachable' || status.state === 'auth-failed';
 
+  // Floating card (launcher window only). Translucent liquid-glass surface — one
+  // notch more glass than the opaque onboarding toaster family (TrialPromoToaster,
+  // PermissionsToaster) but not as far as the `backdrop-blur-[40px] saturate-[180%]`
+  // top-right pills in Launcher.tsx:516-520 (those are smaller popovers, not
+  // anchored toasters). Anchored on Launcher.tsx:1269 — bottom-right pill,
+  // translucency ratio, inner top-highlight ring + wide soft drop shadow.
+  //   - Surface: rgba(26,26,30,0.55) + backdropFilter blur(28px) saturate(180%)
+  //   - Inner top highlight: inset 0 1px 0 rgba(255,255,255,0.18) — the "glass" cue
+  //   - 1px hairline border rgba(255,255,255,0.08) with brighter top edge
+  //   - 24px border-radius, softened layered shadow (translucent surfaces don't
+  //     need as much lift as opaque ones)
+  //   - Spring entrance with blur-filter: stiffness 290, damping 25, mass 0.82
+  //   - Fine SVG fractalNoise grain overlay — works on translucent surfaces too
+  //     (mixBlendMode: overlay blends against whatever's behind)
+  //   - Position: fixed bottom-7 right-7 z-9999 width: 360px
+  // Amber failure cue: tinted glow + icon recolor; the chrome stays in family
+  // with the rest of the launcher onboarding toasters.
   if (variant === 'floating-card') {
     return (
       <AnimatePresence>
@@ -80,37 +104,99 @@ export const HindsightStatusBanner: React.FC<{ variant?: 'top-strip' | 'floating
             key="hindsight-floating-card"
             role="status"
             aria-live="polite"
-            initial={{ opacity: 0, y: 50, scale: 0.95 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.95, y: 20 }}
-            className="fixed bottom-6 right-6 z-50 pointer-events-auto"
+            initial={{ opacity: 0, scale: 0.93, y: 22, filter: 'blur(10px)' }}
+            animate={{ opacity: 1, scale: 1, y: 0, filter: 'blur(0px)' }}
+            exit={{ opacity: 0, scale: 0.95, y: 14, filter: 'blur(4px)' }}
+            transition={{ type: 'spring', stiffness: 290, damping: 25, mass: 0.82 }}
+            style={{
+              position: 'fixed', bottom: 28, right: 28, zIndex: 9999,
+              width: 360,
+              borderRadius: 24,
+              background: 'rgba(26, 26, 30, 0.55)',
+              backdropFilter: 'blur(28px) saturate(180%)',
+              WebkitBackdropFilter: 'blur(28px) saturate(180%)',
+              boxShadow: isFailing
+                ? '0 24px 80px -16px rgba(0,0,0,0.55), 0 0 80px rgba(245,158,11,0.14), inset 0 1px 0 rgba(255,255,255,0.18)'
+                : '0 24px 80px -16px rgba(0,0,0,0.55), 0 0 80px rgba(255,255,255,0.02), inset 0 1px 0 rgba(255,255,255,0.18)',
+              padding: 20,
+              pointerEvents: 'auto',
+              fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif',
+            } as React.CSSProperties}
           >
-            <div className={`bg-[#1A1A1A] border ${isFailing ? 'border-amber-500/40' : 'border-white/10'} shadow-2xl rounded-2xl p-5 max-w-[340px] flex flex-col gap-3`}>
-              <div className="flex items-start gap-3">
-                <AlertTriangle className={`w-5 h-5 shrink-0 mt-0.5 ${isFailing ? 'text-amber-400' : 'text-[#A0A0A0]'}`} />
-                <div className="flex-1 min-w-0">
-                  <h3 className="text-[#E0E0E0] font-medium text-sm">{copy.title}</h3>
-                  <p className="text-[#A0A0A0] text-xs mt-1 leading-relaxed">
+            {/* Fine organic grain — verbatim from TrialPromoToaster */}
+            <div aria-hidden style={{
+              position: 'absolute', inset: 0, borderRadius: 24, pointerEvents: 'none', zIndex: 0,
+              opacity: 0.024, mixBlendMode: 'overlay',
+              backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='300' height='300' filter='url(%23n)'/%3E%3C/svg%3E")`,
+              backgroundSize: '180px 180px',
+            }} />
+            {/* Top inner-ring highlight — the "glass" feel from TrialPromoToaster */}
+            <div aria-hidden style={{
+              position: 'absolute', inset: 0, borderRadius: 24, pointerEvents: 'none', zIndex: 0,
+              border: '1px solid rgba(255,255,255,0.08)',
+              borderTopColor: 'rgba(255,255,255,0.16)',
+            }} />
+
+            <div style={{ position: 'relative', zIndex: 1, display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+                <AlertTriangle
+                  size={18}
+                  style={{ marginTop: 2, flexShrink: 0, color: isFailing ? '#FBBF24' : 'rgba(255,255,255,0.5)' }}
+                />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <h3 style={{ color: '#FFFFFF', fontSize: 14, fontWeight: 600, letterSpacing: '-0.015em', margin: 0 }}>
+                    {copy.title}
+                  </h3>
+                  <p style={{ color: 'rgba(230,230,235,0.78)', fontSize: 12, marginTop: 6, lineHeight: 1.5 }}>
                     {copy.body}
-                    {status.reason ? <> — <span className="font-mono opacity-80">{status.reason}</span></> : null}
+                    {status.reason ? <> — <span style={{ fontFamily: 'ui-monospace, SFMono-Regular, monospace', opacity: 0.85 }}>{status.reason}</span></> : null}
                   </p>
                 </div>
                 <button
                   type="button"
                   onClick={() => setDismissed(true)}
                   aria-label="Dismiss"
-                  className="shrink-0 text-white/30 hover:text-white/70 transition-colors"
+                  style={{
+                    flexShrink: 0, background: 'none', border: 'none', cursor: 'pointer',
+                    width: 26, height: 26, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    borderRadius: '50%', opacity: 0.4, padding: 0, color: '#FFFFFF',
+                    transition: 'opacity 150ms, background 150ms',
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.opacity = '0.85';
+                    e.currentTarget.style.background = 'rgba(255,255,255,0.08)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.opacity = '0.4';
+                    e.currentTarget.style.background = 'transparent';
+                  }}
                 >
-                  <X size={14} />
+                  <X size={14} strokeWidth={2.2} />
                 </button>
               </div>
               {isFailing && status.logPath ? (
-                <div className="flex justify-end">
+                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
                   <button
                     type="button"
                     onClick={openLog}
-                    className="px-3 py-1.5 rounded-lg text-xs font-medium text-[#A0A0A0] hover:text-white hover:bg-white/5 transition-colors"
                     title={status.logPath}
+                    style={{
+                      padding: '6px 12px', borderRadius: 10,
+                      fontSize: 12, fontWeight: 500,
+                      color: 'rgba(255,255,255,0.7)',
+                      background: 'rgba(255,255,255,0.06)',
+                      border: '1px solid rgba(255,255,255,0.12)',
+                      cursor: 'pointer',
+                      transition: 'background 150ms, color 150ms',
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = 'rgba(255,255,255,0.12)';
+                      e.currentTarget.style.color = '#FFFFFF';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = 'rgba(255,255,255,0.06)';
+                      e.currentTarget.style.color = 'rgba(255,255,255,0.7)';
+                    }}
                   >
                     View log
                   </button>
