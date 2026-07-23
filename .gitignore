@@ -438,4 +438,7 @@ traces2/
 traces3/
 --help/
 .remember/
+fixtures/
+tools/
+
 
