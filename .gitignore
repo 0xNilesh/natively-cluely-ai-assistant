@@ -441,4 +441,9 @@ traces3/
 fixtures/
 tools/
 
+# Vision benchmark source documentation + generated reports
+!docs/
+docs/*
+!docs/VISION_MODEL_BENCHMARK.md
+benchmark-results/
 
