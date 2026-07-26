@@ -34,6 +34,7 @@ import { PiLatencyTrace } from './services/telemetry/PiLatencyTracer';
 import { beginTrace, commitTrace } from './intelligence/IntelligenceTrace';
 import { ProfileTreeService } from './intelligence/ProfileTreeService';
 import { isIntelligenceFlagEnabled, getSourceOwnerEnforcementStage } from './intelligence/intelligenceFlags';
+import { isCurrentAttempt, mintTurnId, type AttemptId } from './llm/turnIdentity';
 import { recordAttribution, hindsightModeFor, type AttributionInput } from './intelligence/IntelligenceAttribution';
 import { routeContext, isBackwardLookingQuery } from './intelligence/ContextRouter';
 import { SearchOrchestrator, type SearchCandidate } from './intelligence/SearchOrchestrator';
@@ -41,6 +42,7 @@ import { CHAT_MODE_PROMPT } from './llm/prompts';
 import { isAssistantIdentityQuestion, profileFactsReady } from './llm/manualProfileIntelligence';
 import { buildManualProfileEvidenceRoute } from './llm/profileAnswerBackend';
 import { DOC_GROUNDED_TOKEN_BUDGET } from './services/ModeContextRetriever';
+import { registerVisionBenchmarkIpc } from './visionBenchmark/ipc';
 import { detectIncompleteNumericAnswer, completenessRegenFabricates, isDocGroundedAnswerType, isAssistantRefusal, SYSTEM_REFUSAL_RE } from './llm/documentGroundedPrompt';
 
 // Generic tokens excluded when splitting OKF entity names / card titles into
@@ -184,6 +186,8 @@ export function initializeIpcHandlers(appState: AppState): void {
     ipcMain.removeAllListeners(channel);
     ipcMain.on(channel, listener);
   };
+
+  registerVisionBenchmarkIpc(safeHandle, appState);
 
   const broadcastCredentialsChanged = (): void => {
     BrowserWindow.getAllWindows().forEach((win) => {
@@ -801,7 +805,36 @@ export function initializeIpcHandlers(appState: AppState): void {
   // Streaming IPC Handler
   let _chatStreamId = 0;
   // Keep IDs globally unique for phone/desktop message correlation; supersession is per sender.
-  const _chatStreamsBySender = new Map<number, { streamId: number; controller: AbortController }>();
+  // `attemptId` (Phase 6 Slice 1, context-rebuild) is the SAME value as `streamId` — this is
+  // the "streamId renamed/generalized to currentAttemptId" the migration plan calls for,
+  // computed alongside the legacy field rather than replacing it. Both run in PARALLEL
+  // (gated by the `turnIdentityV2` flag) until a documented promotion decision; production
+  // behavior at every one of the 13 guard sites below still comes from `streamId` alone.
+  const _chatStreamsBySender = new Map<number, { streamId: number; attemptId: AttemptId; controller: AbortController }>();
+
+  /**
+   * The one shared predicate every "is this still the current attempt, or has
+   * it been superseded" guard site below calls (Phase 6 Slice 1). Returns the
+   * LEGACY `streamId` comparison verbatim — production behavior is unchanged
+   * by construction. When `turnIdentityV2` is enabled, also computes the new
+   * `isCurrentAttempt` (electron/llm/turnIdentity.ts) check from the parallel
+   * `attemptId` field and warns loudly on any disagreement, so a real
+   * divergence between the two schemes is caught in dev/test before the old
+   * scheme is ever retired.
+   */
+  function _isCurrentStream(senderId: number, myStreamId: number, myAttemptId: AttemptId): boolean {
+    const entry = _chatStreamsBySender.get(senderId);
+    const legacyResult = entry?.streamId === myStreamId;
+    if (isIntelligenceFlagEnabled('turnIdentityV2')) {
+      const v2Result = isCurrentAttempt(entry?.attemptId, myAttemptId);
+      if (v2Result !== legacyResult) {
+        console.warn('[TurnIdentityV2] parity mismatch between legacy streamId and attemptId checks', {
+          senderId, myStreamId, myAttemptId, legacyResult, v2Result,
+        });
+      }
+    }
+    return legacyResult;
+  }
   // Phone-mirror chat supersession is tracked SEPARATELY from the global id counter.
   // `_chatStreamId` is shared with the desktop chat path purely to keep correlation ids
   // globally unique, so checking it for phone supersession let a desktop message (which
@@ -869,7 +902,16 @@ export function initializeIpcHandlers(appState: AppState): void {
           try { priorStream.controller.abort(); } catch { /* noop */ }
         }
         myController = new AbortController();
-        _chatStreamsBySender.set(senderId, { streamId: myStreamId, controller: myController });
+        // attemptId === streamId (Phase 6 Slice 1): the SAME globally-monotonic
+        // counter, just also exposed under the new formal type — see
+        // _isCurrentStream's doc comment.
+        const myAttemptId: AttemptId = myStreamId;
+        // Renderer-submit mint point for manual chat (Phase 6 Slice 1, "what
+        // changes" item 1): the TurnId this turn keeps for its whole
+        // lifetime, threaded into SourceAuthorityKernel.build below instead
+        // of letting it mint its own randomUUID().
+        const myTurnId = mintTurnId();
+        _chatStreamsBySender.set(senderId, { streamId: myStreamId, attemptId: myAttemptId, controller: myController });
 
         // Reap this sender's conversation memory when the renderer goes away, so the
         // per-process store cannot grow unbounded across window reloads / churn and
@@ -920,7 +962,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             // Guard against a newer chat stream having taken over while we were computing
             // the canned reply — matches the protection the LLM path uses around its token
             // loop. Prevents cross-stream UI bleed.
-            if (_chatStreamsBySender.get(senderId)?.streamId !== myStreamId) {
+            if (!_isCurrentStream(senderId, myStreamId, myAttemptId)) {
               console.log(
                 `[IPC] gemini-chat-stream ${myStreamId} (identity probe) superseded for sender ${senderId}, skipping emit.`,
               );
@@ -1201,6 +1243,82 @@ export function initializeIpcHandlers(appState: AppState): void {
           }
         }
 
+        // ── CANONICAL TURN on manual chat (Phase 6 Slice 3, context-rebuild,
+        // SHADOW-ONLY, 2026-07-25) ──────────────────────────────────────────
+        // resolveCanonicalTurn called from manual chat for the FIRST TIME —
+        // "riskiest slice" per the migration plan, since this classifier has
+        // never run on this surface at all. Gated by canonicalTurnManualChat
+        // (dev/test-only default) and wrapped in try/catch, mirroring the
+        // SourceArbiter's own best-effort pattern immediately above: a
+        // failure here MUST NOT affect the real answer. This block is PURE
+        // OBSERVATION — it only logs a divergence trace when the shadow
+        // classification disagrees with the legacy one; `answerPlan`/
+        // `manualSourceContract`/`manualTurnSourceDecision` (computed above)
+        // remain the ONLY values consumed for the real generation path.
+        // Promotion to actually CONSUMING canonicalTurn's decision requires,
+        // per this slice's own bar, a benchmark-corpus regression pass
+        // across multiple live-Electron runs — not attempted here.
+        if (isIntelligenceFlagEnabled('canonicalTurnManualChat')) {
+          try {
+            const { resolveCanonicalTurn } = require('./llm/resolveCanonicalTurn') as typeof import('./llm/resolveCanonicalTurn');
+            const { deriveQuestionNeed } = require('./llm/questionNeed') as typeof import('./llm/questionNeed');
+            const _ctOrch = llmHelper.getKnowledgeOrchestrator?.();
+            const _ctHasRefFiles = Boolean((manualActiveMode as any)?.hasReferenceFiles);
+            const _ctHasProfileFacts = _hasProfileFactsForTurn;
+            const _ctHasJobDescription = Boolean(_ctOrch?.activeJD?.structured_data);
+            const _ctHasLiveTranscript = Boolean(intelligenceManager.getFormattedContext(100)?.trim());
+            const canonicalTurn = resolveCanonicalTurn({
+              answerInput: {
+                question: message,
+                source: 'manual_input',
+                speakerPerspective: 'user',
+                activeMode: manualActiveMode,
+              },
+              sourceContract: manualActiveMode?.sourceContract
+                ? {
+                  defaultOwner: manualActiveMode.sourceContract.defaultOwner,
+                  sourceAuthority: manualActiveMode.sourceContract.sourceAuthority,
+                  groundingProfile: manualActiveMode.sourceContract.groundingProfile,
+                  allowedExplicitSwitches: manualActiveMode.sourceContract.allowedExplicitSwitches ?? [],
+                  templateType: manualActiveMode.templateType,
+                }
+                : null,
+              availability: {
+                hasReferenceFiles: _ctHasRefFiles,
+                hasProfileFacts: _ctHasProfileFacts,
+                hasJobDescription: _ctHasJobDescription,
+                hasLiveTranscript: _ctHasLiveTranscript,
+                hasMeetingRag: false,
+              },
+            });
+            const questionNeed = deriveQuestionNeed(canonicalTurn);
+            const divergedAnswerType = canonicalTurn.answerPlan.answerType !== answerPlan.answerType;
+            const divergedSourceOwner = (canonicalTurn.turnSourceDecision?.owner ?? null)
+              !== (manualTurnSourceDecision?.owner ?? null);
+            if (divergedAnswerType || divergedSourceOwner) {
+              console.warn('[CanonicalTurnV2] shadow divergence (manual chat, observe-only, no behavior change)', {
+                legacyAnswerType: answerPlan.answerType,
+                canonicalAnswerType: canonicalTurn.answerPlan.answerType,
+                legacySourceOwner: manualTurnSourceDecision?.owner ?? null,
+                canonicalSourceOwner: canonicalTurn.turnSourceDecision?.owner ?? null,
+                resolvedQuestionKind: canonicalTurn.resolvedQuestionKind,
+                resolvedQuestionKindSource: canonicalTurn.resolvedQuestionKindSource,
+                turnPlanFailed: canonicalTurn.turnPlanFailed,
+                questionNeed,
+              });
+            } else if (isIntelligenceFlagEnabled('trace')) {
+              console.log('[CanonicalTurnV2] shadow agreement (manual chat, observe-only)', {
+                answerType: canonicalTurn.answerPlan.answerType,
+                questionNeed,
+              });
+            }
+          } catch (canonicalTurnErr: any) {
+            if (isIntelligenceFlagEnabled('trace')) {
+              console.warn('[CanonicalTurnV2] shadow call skipped (non-fatal):', canonicalTurnErr?.message);
+            }
+          }
+        }
+
         // ── CONTEXT OS (Phase 7, 2026-07-10) ────────────────────────────────
         // Build the TurnContextContract from the SAME sourceAuthority the
         // legacy arbiter computed, so the two systems agree by construction.
@@ -1236,12 +1354,14 @@ export function initializeIpcHandlers(appState: AppState): void {
               hasReferenceFiles: Boolean((manualActiveMode as any)?.hasReferenceFiles),
               hasProfileFacts: _hasProfileFactsForTurn,
               hasLiveTranscript: Boolean(intelligenceManager.getFormattedContext(100)?.trim()),
+              hasJobDescription: Boolean(llmHelper.getKnowledgeOrchestrator?.()?.activeJD?.structured_data),
               // Evidence-execution-repair (2026-07-11): same explicit switch
               // resolved above for the legacy arbiter — the kernel needs it
               // too so sourceOwner reflects the SAME per-turn switch, not the
               // mode's persisted default. See explicitSourceSwitch.ts.
               userExplicitSource: _userExplicitSource,
               turnSourceDecision: manualTurnSourceDecision,
+              turnId: myTurnId,
             });
             // Real-custom-mode-repair (2026-07-11), Phase 4/7: the trace used to
             // be emitted HERE with a hardcoded `finalAction: 'answer'` — before
@@ -1487,7 +1607,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             else if (tpl === 'sales') clarSurface = 'sales';
           } catch { /* default manual */ }
           const clarification = buildContextFreeClarification(clarSurface);
-          if (_chatStreamsBySender.get(senderId)?.streamId !== myStreamId) return null;
+          if (!_isCurrentStream(senderId, myStreamId, myAttemptId)) return null;
           event.sender.send('gemini-stream-token', clarification);
           event.sender.send('gemini-stream-done', { finalText: clarification });
           try { PhoneMirrorService.getInstance().publishToken(String(myStreamId), clarification); } catch (_) { /* noop */ }
@@ -1559,7 +1679,7 @@ export function initializeIpcHandlers(appState: AppState): void {
                 hasProfileFacts: _hasProfileFactsForTurn,
                 hasLiveTranscript: Boolean(intelligenceManager.getFormattedContext(100)?.trim()),
               });
-            if (_chatStreamsBySender.get(senderId)?.streamId !== myStreamId) return null;
+            if (!_isCurrentStream(senderId, myStreamId, myAttemptId)) return null;
             event.sender.send('gemini-stream-token', clarify);
             event.sender.send('gemini-stream-done', { finalText: clarify });
             try { PhoneMirrorService.getInstance().publishToken(String(myStreamId), clarify); } catch (_) { /* noop */ }
@@ -1707,7 +1827,7 @@ export function initializeIpcHandlers(appState: AppState): void {
           try {
             const { buildSourceSwitchClarification } = require('./llm/sourceOwnership');
             const clarify = buildSourceSwitchClarification(manualOwnership.owner);
-            if (_chatStreamsBySender.get(senderId)?.streamId !== myStreamId) return null;
+            if (!_isCurrentStream(senderId, myStreamId, myAttemptId)) return null;
             event.sender.send('gemini-stream-token', clarify);
             event.sender.send('gemini-stream-done', { finalText: clarify });
             try { PhoneMirrorService.getInstance().publishToken(String(myStreamId), clarify); } catch (_) { /* noop */ }
@@ -2590,7 +2710,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             firstUsefulDeadlineMs: firstUsefulDeadlineMs(answerPlan.answerType, usingLocalLlm),
             isUsefulYet: () => manualFirstUseful,
             shouldAbort: () => {
-              if (_chatStreamsBySender.get(senderId)?.streamId !== myStreamId) {
+              if (!_isCurrentStream(senderId, myStreamId, myAttemptId)) {
                 console.log(`[IPC] gemini-chat-stream ${myStreamId} superseded for sender ${senderId}, stopping.`);
                 manualSuperseded = true; return true;
               }
@@ -2695,7 +2815,7 @@ export function initializeIpcHandlers(appState: AppState): void {
                 retryEnabledForContract
                 && looksMeta
                 && !hasCodeFence
-                && _chatStreamsBySender.get(senderId)?.streamId === myStreamId
+                && _isCurrentStream(senderId, myStreamId, myAttemptId)
               ) {
                 piTelemetry.emit('pi_coding_meta_retry_attempted', { answerType: answerPlan.answerType });
                 console.warn('[IPC] coding answer looks like meta-reply, regenerating once', { snippetLen: fullResponse.length });
@@ -2782,7 +2902,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             // CODE-ONLY COMPLETENESS (spoken-answer-quality sprint 2026-06-15): a code answer
             try {
               const completeness = checkCodeCompleteness(fullResponse);
-              if (!completeness.ok && _chatStreamsBySender.get(senderId)?.streamId === myStreamId) {
+              if (!completeness.ok && _isCurrentStream(senderId, myStreamId, myAttemptId)) {
                 piTelemetry.emit('pi_context_policy_applied', { answerType: answerPlan.answerType, via: 'code_truncation_detected', markerCount: completeness.issues.length });
                 console.warn('[IPC] code-only answer looks truncated, regenerating once', { issues: completeness.issues.map(i => i.code) });
                 const regenContract = explicitCodingContract
@@ -2886,7 +3006,7 @@ export function initializeIpcHandlers(appState: AppState): void {
                   repairPath: 'profileFallbackRepair',
                 });
               }
-              if (critical && _chatStreamsBySender.get(senderId)?.streamId === myStreamId) {
+              if (critical && _isCurrentStream(senderId, myStreamId, myAttemptId)) {
                 try {
                   const orch2 = llmHelper.getKnowledgeOrchestrator?.();
                   let facts = '';
@@ -2929,10 +3049,24 @@ export function initializeIpcHandlers(appState: AppState): void {
                   if (repairedTrim.length >= 5) {
                     const reCheck = validateProfileEvidence({ answer: repairedTrim, plan: answerPlan, evidence, profileAvailable, candidateDirected: true });
                     const stillCritical = reCheck.violations.some(v => v.severity === 'error' && CRITICAL_CODES.has(v.code));
-                    if (!stillCritical) {
+                    // RC4 fix (2026-07-25, context-rebuild): this repair prompt uses
+                    // the same <rewrite_instructions> shape IntelligenceEngine.ts's
+                    // sibling repair sites already re-check with these two guards
+                    // before accepting a repaired candidate (see e.g.
+                    // IntelligenceEngine.ts:2852) — this call site lacked them
+                    // entirely, so a model echo of the wrapped instruction (a
+                    // documented tendency, answerPolish.ts's own header) could ship
+                    // verbatim as the visible answer. Reject and fall through with
+                    // the pre-repair text unchanged if either check fires, same
+                    // discipline as stillCritical above.
+                    const { isLeakedAnswerArtifact, isLeakedInternalTagBlock } = require('./llm/answerPolish') as typeof import('./llm/answerPolish');
+                    const leaked = isLeakedAnswerArtifact(repairedTrim) || isLeakedInternalTagBlock(repairedTrim);
+                    if (!stillCritical && !leaked) {
                       fullResponse = repairedTrim;
                       finalText = repairedTrim;
                       console.warn('[ProfileIntelligence] manual profile repair applied', { code: critical.code });
+                    } else if (leaked) {
+                      console.warn('[ProfileIntelligence] manual profile repair rejected (leaked instruction artifact)', { code: critical.code });
                     }
                   }
                 } catch (repairErr: any) {
@@ -3290,7 +3424,7 @@ export function initializeIpcHandlers(appState: AppState): void {
           // is already pure, has unit coverage, and is answer-type-aware.
           if (manualActiveMode?.documentGroundedCustomModeActive
             && isDocGroundedAnswerType(answerPlan.answerType)
-            && _chatStreamsBySender.get(senderId)?.streamId === myStreamId) {
+            && _isCurrentStream(senderId, myStreamId, myAttemptId)) {
             try {
               const GREETING_RE = /^\s*(?:hey|hi|hello)[!,.]?\s*(?:there)?[!,.]?\s*(?:what would you like help with|how can i help|what can i (?:help|do)(?: you with| for you)?|how may i (?:help|assist))\b/i;
               const trimmed = fullResponse.trim();
@@ -4046,7 +4180,7 @@ export function initializeIpcHandlers(appState: AppState): void {
           }
 
           // Final check: only send done if we are still the active stream
-          if (_chatStreamsBySender.get(senderId)?.streamId === myStreamId) {
+          if (_isCurrentStream(senderId, myStreamId, myAttemptId)) {
             // finalText is set ONLY when repair changed the streamed answer — the
             // renderer replaces the streamed row in place (no double-render). When
             // the streamed answer was already valid, finalText is undefined and the
@@ -4249,7 +4383,7 @@ export function initializeIpcHandlers(appState: AppState): void {
                       return fixed;
                     },
                   });
-                  if (_chatStreamsBySender.get(senderId)?.streamId !== myStreamId) return; // superseded
+                  if (!_isCurrentStream(senderId, myStreamId, myAttemptId)) return; // superseded
                   if (outcome.verdict.passed) {
                     event.sender.send('intelligence-code-verified', {
                       question: message,
@@ -4281,7 +4415,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             const klass = classifyProviderError(streamError);
             piTelemetry.emit('pi_provider_error_classified', { kind: klass.kind, outage: klass.isOutage, retryable: klass.retryable, surface: 'manual' });
             if (answerPlan.profileContextPolicy === 'required' && !fullResponse.trim()
-                && _chatStreamsBySender.get(senderId)?.streamId === myStreamId) {
+                && _isCurrentStream(senderId, myStreamId, myAttemptId)) {
               const safe = "The model failed before generating an answer, so I won't guess from your profile. Please try again.";
               finalGenerationMode = 'provider_error_no_answer';
               sessionWriteDecision = decideSessionWritePolicy({
@@ -4297,7 +4431,7 @@ export function initializeIpcHandlers(appState: AppState): void {
               return null;
             }
           } catch (classifyErr: any) { console.warn('[IPC] provider-error classify/fallback skipped:', classifyErr?.message); }
-          if (_chatStreamsBySender.get(senderId)?.streamId === myStreamId) {
+          if (_isCurrentStream(senderId, myStreamId, myAttemptId)) {
             event.sender.send(
               'gemini-stream-error',
               streamError.message || 'Unknown streaming error',
@@ -4527,6 +4661,15 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle('set-verbose-logging', async (_, enabled: boolean) => {
     appState.setVerboseLogging(enabled);
+    return { success: true };
+  });
+
+  safeHandle('get-ambient-chat-enabled', async () => {
+    return appState.getAmbientChatEnabled();
+  });
+
+  safeHandle('set-ambient-chat-enabled', async (_, enabled: boolean) => {
+    appState.setAmbientChatEnabled(enabled);
     return { success: true };
   });
 
@@ -9139,7 +9282,13 @@ export function initializeIpcHandlers(appState: AppState): void {
         return { success: false, error: 'Knowledge engine not initialized' };
       }
       const { DocType } = require('../premium/electron/knowledge/types');
-      orchestrator.deleteDocumentsByType(DocType.RESUME);
+      // Phase 6 Slice 5 (context-rebuild, 2026-07-25, item 4): upgrades the
+      // 2026-07-25 RC6 two-call fix (which warned-and-swallowed a Tier 2
+      // failure, leaving Tier 1 deleted and Tier 2 orphaned) to a single
+      // transactional entrypoint — see deleteProfileTransactional.ts for why
+      // this is a real cross-tier transaction, not just sequencing.
+      const { deleteProfileTransactional } = require('./services/knowledge/deleteProfileTransactional') as typeof import('./services/knowledge/deleteProfileTransactional');
+      deleteProfileTransactional(orchestrator, DocType.RESUME, 'resume');
       return { success: true };
     } catch (error: any) {
       return { success: false, error: error.message };
@@ -9265,7 +9414,10 @@ export function initializeIpcHandlers(appState: AppState): void {
         return { success: false, error: 'Knowledge engine not initialized' };
       }
       const { DocType } = require('../premium/electron/knowledge/types');
-      orchestrator.deleteDocumentsByType(DocType.JD);
+      // Phase 6 Slice 5 (context-rebuild, 2026-07-25, item 4) — see the
+      // matching fix + rationale in profile:delete above.
+      const { deleteProfileTransactional } = require('./services/knowledge/deleteProfileTransactional') as typeof import('./services/knowledge/deleteProfileTransactional');
+      deleteProfileTransactional(orchestrator, DocType.JD, 'jd');
       return { success: true };
     } catch (error: any) {
       return { success: false, error: error.message };
