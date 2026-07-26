@@ -116,8 +116,6 @@ export interface BuildTurnContractForSurfaceInput {
   hasReferenceFiles: boolean;
   hasProfileFacts: boolean;
   hasLiveTranscript: boolean;
-  /** See BuildTurnContractInput.hasJobDescription (2026-07-26 bug fix). */
-  hasJobDescription?: boolean;
   userExplicitSource?: BuildTurnContractInput['userExplicitSource'];
   /** Canonical turn source decision from electron/llm/turnSourceDecision. */
   turnSourceDecision?: import('../../llm/turnSourceDecision').TurnSourceDecision | null;
@@ -128,14 +126,6 @@ export interface BuildTurnContractForSurfaceInput {
    * legacy behavior (grant everything the authority permits).
    */
   allowedExplicitSwitches?: readonly ('reference_files' | 'profile' | 'job_description' | 'transcript')[] | null;
-  /**
-   * Phase 6 Slice 1 (context-rebuild, 2026-07-25): the caller's own
-   * TurnIdentity.turnId (electron/llm/turnIdentity.ts), forwarded verbatim to
-   * SourceAuthorityKernel.build instead of letting it mint its own. Optional
-   * — every existing caller keeps the kernel's own randomUUID() mint until
-   * updated.
-   */
-  turnId?: string;
 }
 
 function normalizeSourceAuthority(value: string | null | undefined): SourceAuthority {
@@ -177,11 +167,9 @@ export function buildTurnContractForSurface(input: BuildTurnContractForSurfaceIn
     hasReferenceFiles: input.hasReferenceFiles,
     hasProfileFacts: input.hasProfileFacts,
     hasLiveTranscript: input.hasLiveTranscript,
-    hasJobDescription: input.hasJobDescription,
     userExplicitSource: input.userExplicitSource ?? null,
     turnSourceDecision: input.turnSourceDecision ?? null,
     allowedExplicitSwitches: input.allowedExplicitSwitches ?? null,
-    turnId: input.turnId,
   });
 }
 
@@ -207,13 +195,34 @@ export function contractBlocks(contract: Pick<TurnContextContract, 'enforcement'
   return Boolean(contract && contract.enforcement === 'enforce');
 }
 
-// `assertNoAuthorityContradiction` (a dev-only tripwire for
-// sourceOwner=clarify + finalAction=answer under enforcement) was removed
-// 2026-07-25: zero production callers, zero test coverage, and it checked a
-// condition distinct from the one actually implicated in the Phase 0-3
-// context-rebuild investigation (RC1: finalAction hardcoded to 'answer'
-// regardless of evidenceCoverage.confidence, ipcHandlers.ts:1605-1611) — see
-// docs/context-rebuild/03_ROOT_CAUSES.md and 05_COMPONENT_DISPOSITION.md §A6.
-// A real, CI-wired assertion against the actual condition is a Phase 6
-// Slice 4 requirement (target-arch §5's "required piece 2"), not a
-// resuscitation of this one.
+// ── Authority-contradiction guard (real-custom-mode-repair, Phase 4/7) ──────
+//
+// The incident investigation found an apparent contradiction in the trace:
+// `sourceOwner=clarify` next to `finalAction=answer` on the same turn. Root
+// cause turned out to be a MISLEADING TRACE (a hardcoded provisional value
+// logged before the clarification decision ran — fixed at the ipcHandlers.ts
+// call site), not a genuine three-way authority disagreement — see
+// docs/context-os/real-custom-mode-repair/04_AUTHORITY_CONFLICT_REPORT.md.
+//
+// This assertion is a development/test-only tripwire against a REAL
+// regression of that class: it fires when enforcement is armed AND the
+// kernel decided `sourceOwner === 'clarify'` AND the caller nonetheless
+// recorded `finalAction === 'answer'` — i.e. a turn where Context OS
+// determined a clarification was required, enforcement was ON, and the
+// pipeline answered anyway. Never called in production hot paths; wire it
+// into tests and dev-only post-turn checks.
+export interface AuthorityContradictionCheck {
+  contract: Pick<TurnContextContract, 'sourceOwner' | 'enforcement'>;
+  finalAction: 'answer' | 'refuse_insufficient_evidence' | 'clarify' | 'fallback';
+}
+
+export function assertNoAuthorityContradiction(check: AuthorityContradictionCheck): void {
+  const { contract, finalAction } = check;
+  if (contract.enforcement === 'enforce' && contract.sourceOwner === 'clarify' && finalAction === 'answer') {
+    throw new Error(
+      '[CONTEXT-OS] authority contradiction: sourceOwner=clarify under enforce, but finalAction=answer. '
+      + 'A clarify decision under enforcement must never fall through to answer — see '
+      + 'docs/context-os/real-custom-mode-repair/04_AUTHORITY_CONFLICT_REPORT.md',
+    );
+  }
+}
