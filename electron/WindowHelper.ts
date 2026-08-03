@@ -417,6 +417,10 @@ export class WindowHelper {
         webSecurity: !isDev, // DEBUG: Disable web security only in dev
       },
       show: false, // DEBUG: Force show -> Fixed white screen, now relies on ready-to-show
+      // Taskbar presence must track stealth state, not be a hardcoded constant:
+      // a cold start with undetectable persisted must not paint a taskbar entry
+      // before setUndetectable() ever runs. Re-asserted on every toggle.
+      skipTaskbar: this.appState.getUndetectable(),
       // Platform-specific frame settings
       ...(isMac
         ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 14, y: 14 } }
@@ -1096,6 +1100,7 @@ export class WindowHelper {
   public syncOverlayInteractionPolicy(quiet = false): void {
     if (!this.overlayWindow || this.overlayWindow.isDestroyed()) return;
 
+
     const passthrough = this.appState.getOverlayMousePassthrough();
     // The pill and toggle windows follow ONLY the stealth passthrough — they
     // are fully painted (no transparent margins), so the hover gate never
@@ -1125,7 +1130,6 @@ export class WindowHelper {
       this.overlayWindow.setIgnoreMouseEvents(true, { forward: true });
     } else {
       this.overlayWindow.setIgnoreMouseEvents(false);
-      // Restore full interactivity when capturing clicks.
       this.overlayWindow.setFocusable(true);
     }
     auxWindows.forEach((w) => {
@@ -1813,7 +1817,6 @@ export class WindowHelper {
   public showOverlay(): void {
     if (!this.overlayWindow || this.overlayWindow.isDestroyed()) return;
 
-    // Restore opacity in case it was zeroed by hideMainWindow() before a screenshot.
     this.overlayWindow.setOpacity(1);
     this.pillWindow?.setOpacity(1);
     this.toggleWindow?.setOpacity(1);
@@ -2007,6 +2010,7 @@ export class WindowHelper {
         expanded: true,
       });
 
+  
       // Restore opacity before showing (it may have been zeroed by hideMainWindow).
       if (process.platform === 'win32' && this.contentProtection) {
         // Opacity Shield: Show at 0 opacity first to prevent frame leak.
