@@ -16,6 +16,13 @@ import os from "os"
 import dns from "dns"
 import { SystemAudioHealthClassifier } from "./audio/systemAudioHealthClassifier.mjs"
 import { autoUpdater } from "electron-updater"
+import {
+  DisguiseMode,
+  normalizeDisguiseMode,
+  disguiseAppName,
+  disguiseIconPath,
+  appIconPath,
+} from "./disguise"
 
 // Override global dns.lookup to resolve macOS system resolver issues with api.natively.software
 const originalLookup = dns.lookup;
@@ -1258,13 +1265,9 @@ const nativeOomTrace = new NativeOomTrace()
 // window falls back to the terminal icon. That identity mismatch reads as an
 // extra/duplicate dock tile. Coerce any out-of-union value to 'none' on load
 // and at the runtime entry point so app, dock, and window always agree.
-type DisguiseMode = 'terminal' | 'settings' | 'activity' | 'none'
-const VALID_DISGUISE_MODES: readonly DisguiseMode[] = ['terminal', 'settings', 'activity', 'none'] as const
-function normalizeDisguiseMode(value: unknown): DisguiseMode {
-  return (VALID_DISGUISE_MODES as readonly string[]).includes(value as string)
-    ? (value as DisguiseMode)
-    : 'none'
-}
+// Moved to electron/disguise.ts so WindowHelper's launcher-icon resolution and
+// the tray/dock identity here cannot drift apart. Re-exported for callers that
+// imported these from main.
 
 export class AppState {
   private static instance: AppState | null = null
@@ -6455,18 +6458,9 @@ export class AppState {
   // so reading it here silently depends on that having already run — a tray
   // created first would show the real name. Names mirror _applyDisguise().
   private getTrayTooltip(): string {
-    const isWin = process.platform === 'win32';
-    switch (this.disguiseMode) {
-      case 'terminal':
-        return isWin ? 'Command Prompt' : 'Terminal';
-      case 'settings':
-        return isWin ? 'Settings' : 'System Settings';
-      case 'activity':
-        return isWin ? 'Task Manager' : 'Activity Monitor';
-      case 'none':
-      default:
-        return 'Natively';
-    }
+    // Trimmed: disguiseAppName carries a deliberate trailing space for
+    // process.title/app.setName parity, which must not reach the tooltip.
+    return disguiseAppName(this.disguiseMode).trim();
   }
 
   // Single source of truth for the tray image. Both the initial Tray() and the
@@ -6476,19 +6470,8 @@ export class AppState {
   // that no longer inverts for light/dark. Template flag must follow the file.
   private buildTrayImage(): Electron.NativeImage {
     const resourcesPath = app.isPackaged ? process.resourcesPath : app.getAppPath();
-    const isWin = process.platform === 'win32';
 
-    let iconToUse = "";
-    if (this.disguiseMode !== 'none') {
-      const mode = this.disguiseMode;
-      let iconName = 'settings.png';
-      if (mode === 'terminal') iconName = 'terminal.png';
-      if (mode === 'activity') iconName = 'activity.png';
-      const platformDir = isWin ? 'win' : 'mac';
-      iconToUse = app.isPackaged
-        ? path.join(process.resourcesPath, `assets/fakeicon/${platformDir}/${iconName}`)
-        : path.join(app.getAppPath(), `assets/fakeicon/${platformDir}/${iconName}`);
-    }
+    let iconToUse = disguiseIconPath(this.disguiseMode) ?? "";
 
     if (!iconToUse || !fs.existsSync(iconToUse)) {
       const templatePath = path.join(resourcesPath, 'assets', 'iconTemplate.png');
@@ -6881,8 +6864,31 @@ export class AppState {
   // to call redundantly — it no-ops immediately off-darwin or when not
   // undetectable, and stops early via the isUndetectable guard inside the loop.
   public reassertUndetectableStealth(maxAttempts: number = 10): void {
-    if (process.platform !== 'darwin') return;
     if (!this.isUndetectable) return;
+
+    if (process.platform === 'win32') {
+      // Windows has no dock or activation policy, so there is no self-verifying
+      // loop to run — but the two things that DO carry the app's identity here
+      // can come back on their own mid-session, and previously nothing put them
+      // back. The launcher's taskbar button returns on an explorer.exe restart,
+      // and setDisguise() re-registers the AUMID (app.setAppUserModelId) while
+      // stealth is on, which re-associates the window with a taskbar identity.
+      // Either way the user has no reason to re-toggle, so the entry would sit
+      // there under the real title for the rest of the session.
+      //
+      // Content protection is re-asserted for the same reason it is on macOS:
+      // it is the screen-capture half of stealth and is cheap to reapply.
+      this.reassertAllContentProtection();
+
+      const launcherWin = this.windowHelper.getLauncherWindow();
+      if (launcherWin && !launcherWin.isDestroyed()) {
+        launcherWin.setSkipTaskbar(true);
+      }
+      this.hideTray();
+      return;
+    }
+
+    if (process.platform !== 'darwin') return;
     // Collapse any in-flight enforcement chain from a PRIOR re-assert before
     // starting a fresh one — same discipline as setUndetectable(). Without this,
     // a burst of launcher shows (rapid Stop→Start→Stop, or a cold-start
@@ -6974,68 +6980,13 @@ export class AppState {
   }
 
   private _applyDisguise(mode: DisguiseMode): void {
-    let appName = "Natively";
-    let iconPath = "";
-
     const isWin = process.platform === 'win32';
     const isMac = process.platform === 'darwin';
 
-    switch (mode) {
-      case 'terminal':
-        appName = isWin ? "Command Prompt " : "Terminal ";
-        if (isWin) {
-          iconPath = app.isPackaged
-            ? path.join(process.resourcesPath, "assets/fakeicon/win/terminal.png")
-            : path.join(app.getAppPath(), "assets/fakeicon/win/terminal.png");
-        } else {
-          iconPath = app.isPackaged
-            ? path.join(process.resourcesPath, "assets/fakeicon/mac/terminal.png")
-            : path.join(app.getAppPath(), "assets/fakeicon/mac/terminal.png");
-        }
-        break;
-      case 'settings':
-        appName = isWin ? "Settings " : "System Settings ";
-        if (isWin) {
-          iconPath = app.isPackaged
-            ? path.join(process.resourcesPath, "assets/fakeicon/win/settings.png")
-            : path.join(app.getAppPath(), "assets/fakeicon/win/settings.png");
-        } else {
-          iconPath = app.isPackaged
-            ? path.join(process.resourcesPath, "assets/fakeicon/mac/settings.png")
-            : path.join(app.getAppPath(), "assets/fakeicon/mac/settings.png");
-        }
-        break;
-      case 'activity':
-        appName = isWin ? "Task Manager " : "Activity Monitor ";
-        if (isWin) {
-          iconPath = app.isPackaged
-            ? path.join(process.resourcesPath, "assets/fakeicon/win/activity.png")
-            : path.join(app.getAppPath(), "assets/fakeicon/win/activity.png");
-        } else {
-          iconPath = app.isPackaged
-            ? path.join(process.resourcesPath, "assets/fakeicon/mac/activity.png")
-            : path.join(app.getAppPath(), "assets/fakeicon/mac/activity.png");
-        }
-        break;
-
-      case 'none':
-      default:
-        appName = "Natively";
-        if (isMac) {
-          iconPath = app.isPackaged
-            ? path.join(process.resourcesPath, "natively.icns")
-            : path.join(app.getAppPath(), "assets/natively.icns");
-        } else if (isWin) {
-          iconPath = app.isPackaged
-            ? path.join(process.resourcesPath, "assets/icons/win/icon.ico")
-            : path.join(app.getAppPath(), "assets/icons/win/icon.ico");
-        } else {
-          iconPath = app.isPackaged
-            ? path.join(process.resourcesPath, "assets/icon.png")
-            : path.join(app.getAppPath(), "assets/icon.png");
-        }
-        break;
-    }
+    // Identity comes from electron/disguise.ts — the same source the launcher
+    // icon and the tray use, so all three can never disagree about a mode.
+    const appName = disguiseAppName(mode);
+    const iconPath = disguiseIconPath(mode) ?? appIconPath();
 
     console.log(`[AppState] Applying disguise: ${mode} (${appName}) on ${process.platform}`);
 
