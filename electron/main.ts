@@ -6626,8 +6626,8 @@ export class AppState {
     this.modelSelectorWindowHelper.setContentProtection(state)
     this.cropperWindowHelper.setContentProtection(state)
 
-    this.windowHelper.syncOverlayInteractionPolicy();
     if (process.platform === 'win32') {
+      this.windowHelper.syncOverlayInteractionPolicy();
       this.settingsWindowHelper.syncActivationPolicy();
       this.modelSelectorWindowHelper.syncActivationPolicy();
       // The tray must follow undetectable state on Windows too. On macOS the
