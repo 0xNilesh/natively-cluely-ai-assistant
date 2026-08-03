@@ -6627,27 +6627,24 @@ export class AppState {
     this.cropperWindowHelper.setContentProtection(state)
 
     this.windowHelper.syncOverlayInteractionPolicy();
-    const launcherWin = this.windowHelper.getLauncherWindow();
-    if (launcherWin && !launcherWin.isDestroyed()) {
-      // Must follow the stealth state. Hardcoding false kept the launcher in the
-      // Windows taskbar while undetectable was ON — the window stayed listed and
-      // Alt-Tab-able with its real title, defeating the mode.
-      launcherWin.setSkipTaskbar(state);
-    }
     if (process.platform === 'win32') {
-      // Tray parity with macOS. On darwin the tray is destroyed/restored at the
-      // end of _enforceDockState(), driven by the desired state — but that
-      // function early-returns on non-darwin, so Windows previously had NO
-      // hideTray() call site at all: toggling undetectable ON left a tray icon
-      // whose tooltip still read the real app name for the whole session.
-      if (state) {
-        this.hideTray();
-      } else {
-        this.showTray();
-      }
-
       this.settingsWindowHelper.syncActivationPolicy();
       this.modelSelectorWindowHelper.syncActivationPolicy();
+      // The tray must follow undetectable state on Windows too. On macOS the
+      // _enforceDockState loop hides the tray alongside the dock and restores
+      // both on the way out — but that loop returns immediately off darwin, and
+      // it holds the ONLY showTray()/hideTray() call sites besides startup. So
+      // nothing drove the tray on Windows: launching with undetectable ON never
+      // created it, and toggling back OFF never created it either, leaving the
+      // user with no tray menu (show window / quit) until they restarted in
+      // normal mode. hideTray() is null-guarded and showTray() is idempotent,
+      // so this is safe to call on every real state change.
+      if (state) this.hideTray();
+      else this.showTray();
+      // Undetectable also means "no taskbar button" — the launcher is the only
+      // window without skipTaskbar (it needs one in normal mode). macOS achieves
+      // the equivalent by dropping the Dock tile.
+      this.windowHelper.syncLauncherTaskbarForStealth();
     }
 
     // Persist state via SettingsManager
