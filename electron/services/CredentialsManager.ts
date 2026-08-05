@@ -347,9 +347,19 @@ export class CredentialsManager {
         // broken state (key cleared then re-entered via a path that skipped auto-promote,
         // or credentials restored from backup). Silently restore to 'natively' so STT works.
         if (provider === 'none' && this.credentials.nativelyApiKey) {
+            // The in-memory heal is safe and useful even when the store is
+            // degraded (STT works this session), so it is NOT gated. Only the
+            // PERSIST is skipped — writing would either be refused anyway or,
+            // worse, log a success the disk never saw. Deliberately not routed
+            // through refuseWriteWhileDegraded(): this is a derived value, not
+            // a user edit, so there is nothing to report and nothing lost.
             this.credentials.sttProvider = 'natively';
-            this.saveCredentials();
-            console.log('[CredentialsManager] Self-healed sttProvider: none→natively (Natively key present)');
+            if (this.keyringUnreadable) {
+                console.log('[CredentialsManager] Self-healed sttProvider in memory only (credential store is degraded)');
+            } else {
+                this.saveCredentials();
+                console.log('[CredentialsManager] Self-healed sttProvider: none→natively (Natively key present)');
+            }
             return 'natively';
         }
         return provider;
@@ -844,6 +854,7 @@ export class CredentialsManager {
     }
 
     public saveCustomProvider(provider: CustomProvider): void {
+        if (this.refuseWriteWhileDegraded('save custom provider')) return;
         if (!this.credentials.customProviders) {
             this.credentials.customProviders = [];
         }
@@ -859,6 +870,7 @@ export class CredentialsManager {
     }
 
     public deleteCustomProvider(id: string): void {
+        if (this.refuseWriteWhileDegraded('delete custom provider')) return;
         if (!this.credentials.customProviders) return;
         this.credentials.customProviders = this.credentials.customProviders.filter(p => p.id !== id);
         this.saveCredentials();
@@ -870,6 +882,7 @@ export class CredentialsManager {
     }
 
     public saveCurlProvider(provider: CurlProvider): void {
+        if (this.refuseWriteWhileDegraded('save curl provider')) return;
         if (!this.credentials.curlProviders) {
             this.credentials.curlProviders = [];
         }
@@ -884,6 +897,7 @@ export class CredentialsManager {
     }
 
     public deleteCurlProvider(id: string): void {
+        if (this.refuseWriteWhileDegraded('delete curl provider')) return;
         if (!this.credentials.curlProviders) return;
         this.credentials.curlProviders = this.credentials.curlProviders.filter(p => p.id !== id);
         this.saveCredentials();

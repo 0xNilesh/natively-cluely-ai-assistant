@@ -224,6 +224,52 @@ test('a refused Codex token rotation does not stick in memory', () => {
   assert.equal(cm3.getCodexOAuthTokens()?.refreshToken, 'refresh-ORIGINAL');
 });
 
+// ── structural: no future mutator may skip the guard ────────────────────────
+
+test('EVERY method that calls saveCredentials() checks the degraded guard first', () => {
+  // A per-method behavioural test cannot cover a setter that does not exist yet,
+  // and the first pass at this fix missed four real mutators (saveCustomProvider,
+  // deleteCustomProvider, saveCurlProvider, deleteCurlProvider) precisely because
+  // they are not named set*/clear*. This walks the source instead, so a NEW
+  // mutator added later fails here rather than silently reintroducing the
+  // memory/disk divergence.
+  const src = fs.readFileSync(
+    path.resolve(path.dirname(new URL(import.meta.url).pathname), '../CredentialsManager.ts'),
+    'utf8',
+  );
+  const lines = src.split('\n');
+  const unguarded = [];
+  let i = 0;
+  while (i < lines.length) {
+    const m = /^\s*(?:public|private|protected)?\s*(\w+)\(/.exec(lines[i]);
+    if (m && lines[i].includes('{')) {
+      const name = m[1];
+      let depth = (lines[i].match(/\{/g) || []).length - (lines[i].match(/\}/g) || []).length;
+      let j = i + 1;
+      const body = [];
+      while (j < lines.length && depth > 0) {
+        depth += (lines[j].match(/\{/g) || []).length - (lines[j].match(/\}/g) || []).length;
+        body.push(lines[j]);
+        j++;
+      }
+      const b = body.join('\n');
+      // loadCredentials legitimately calls save() for the migrate-up, and it is
+      // the thing that SETS the flag; the two write primitives are the guard's home.
+      const exempt = ['saveCredentials', 'writeCredentials', 'loadCredentials'];
+      if (b.includes('this.saveCredentials()') && !exempt.includes(name)
+          && !b.includes('refuseWriteWhileDegraded') && !b.includes('keyringUnreadable')) {
+        unguarded.push(name);
+      }
+      i = j;
+      continue;
+    }
+    i++;
+  }
+  assert.deepEqual(unguarded, [],
+    'these methods write credentials without checking the degraded guard, so in a degraded session '
+    + 'they mutate in-memory state that never reaches disk: ' + unguarded.join(', '));
+});
+
 // ── the escape hatch ────────────────────────────────────────────────────────
 
 test('resetDegradedCredentialStore() is the only thing that discards the preserved file', () => {
