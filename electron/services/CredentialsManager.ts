@@ -159,6 +159,26 @@ export class CredentialsManager {
     /** Memoized AES-256 key for the app-managed fallback (derived once per process). */
     private fallbackKey?: Buffer;
 
+    /**
+     * Set when a keyring file EXISTS but would not decrypt/parse at load, so
+     * `this.credentials` does not reflect what is on disk.
+     *
+     * This is the load→save half of the guard. Skipping the boot-time migrate-up
+     * is not enough on its own: `saveCredentials()` writes the WHOLE credential
+     * object, so the first ordinary write of a degraded session (a Codex OAuth
+     * refresh, any settings write) would re-encrypt an empty-or-partial object
+     * over the intact keyring file and destroy every stored key. The failure is
+     * silent and unrecoverable when no fallback exists.
+     *
+     * decryptString throws for TRANSIENT reasons too — a locked macOS keychain,
+     * a denied access prompt, a roaming DPAPI profile that has not synced — so
+     * the right move is to preserve the file and let the next healthy launch
+     * read it, not to overwrite it from a degraded in-memory view.
+     *
+     * Cleared by an explicit user-initiated overwrite (see allowDegradedOverwrite).
+     */
+    private keyringUnreadable = false;
+
     private constructor() {
         // Load on construction after app ready
     }
@@ -571,10 +591,22 @@ export class CredentialsManager {
         console.log('[CredentialsManager] LiteLLM config updated');
     }
 
-    public setGoogleServiceAccountPath(filePath: string): void {
-        this.credentials.googleServiceAccountPath = filePath;
-        this.saveCredentials();
-        console.log('[CredentialsManager] Google Service Account path updated');
+    /**
+     * Returns saveCredentials()'s boolean (true = the write actually reached
+     * disk), per the convention documented on the STT key setters below, so the
+     * IPC layer can surface a REAL error instead of a false "Saved".
+     */
+    public setGoogleServiceAccountPath(filePath: string): boolean {
+        // Empty/whitespace normalizes to `undefined`, not `''` — same convention as
+        // the STT key setters below, so the key is absent from the persisted JSON
+        // rather than present-and-empty. Callers clear the path by passing ''.
+        const trimmed = (filePath || '').trim();
+        this.credentials.googleServiceAccountPath = trimmed || undefined;
+        const persisted = this.saveCredentials();
+        console.log(trimmed
+            ? `[CredentialsManager] Google Service Account path updated (persisted=${persisted})`
+            : `[CredentialsManager] Google Service Account path cleared (persisted=${persisted})`);
+        return persisted;
     }
 
     public setSttProvider(provider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local-whisper'): boolean {
@@ -992,6 +1024,25 @@ export class CredentialsManager {
      * to decide whether to warn.
      */
     private saveCredentials(): boolean {
+        // REFUSE to write over a keyring file we could not read at load.
+        // `this.credentials` is empty-or-partial in that state, and this method
+        // serializes the whole object, so writing would replace intact stored
+        // keys with nothing. The read failure may well be transient (locked
+        // keychain, denied prompt, unsynced roaming profile), so the file is
+        // preserved for the next launch instead. See `keyringUnreadable`.
+        //
+        // Returns false — the same contract as an unwritable disk — so the STT
+        // key handlers surface a real error rather than a false "Saved".
+        if (this.keyringUnreadable) {
+            console.error(
+                '[CredentialsManager] Refusing to save: the stored credential file could not be read this '
+                + 'session, so saving would overwrite it with an incomplete set. RECOVERY: quit and reopen the '
+                + 'app with your keychain unlocked (on Windows, signed in to the profile that saved the keys) — '
+                + 'a launch that can read the file clears this automatically and nothing is lost.',
+            );
+            return false;
+        }
+
         // Try the OS keyring first. When safeStorage is available, this is the
         // preferred path. On Windows the underlying DPAPI can still throw after
         // isEncryptionAvailable() returns true (e.g. policy restrictions, roaming
@@ -1081,7 +1132,42 @@ export class CredentialsManager {
         }
     }
 
+    /**
+     * Deliberately discard an unreadable keyring file and start fresh.
+     *
+     * Kept explicit and user-initiated because it destroys whatever the
+     * unreadable file held — the automatic behaviour is always to preserve it,
+     * since the read failure is often transient.
+     *
+     * NOT YET WIRED TO ANY UI. There is deliberately no IPC handler for this: a
+     * one-click "wipe my credentials" is the wrong first thing to hand someone
+     * whose keychain is merely locked, and the recovery that loses nothing is a
+     * restart. It exists so the escape hatch is a decision already made (and
+     * tested) if a support case ever needs it. `isCredentialStoreDegraded()` is
+     * the read-only half and is the one to surface first if this state ever
+     * shows up in the wild — a Settings banner explaining why saving is off.
+     */
+    public resetDegradedCredentialStore(): void {
+        if (!this.keyringUnreadable) return;
+        console.warn('[CredentialsManager] Discarding the unreadable keyring file at explicit user request');
+        this.removeKeyringFile();
+        this.keyringUnreadable = false;
+    }
+
+    /** True when the credential store could not be read this session and writes are being refused. */
+    public isCredentialStoreDegraded(): boolean {
+        return this.keyringUnreadable;
+    }
+
     private loadCredentials(): void {
+        // True when the keyring reported itself AVAILABLE but the keyring file
+        // still failed to decrypt/parse. Distinct from "keyring unavailable":
+        // an unavailable keyring is a stable platform state, whereas a failed
+        // decrypt may be transient, so the two lead to different write-back
+        // behaviour in step 2. See the migrate-up comment there.
+        let keyringReadFailed = false;
+        // Recomputed from scratch on every load (init() may run more than once).
+        this.keyringUnreadable = false;
         try {
             // 1) Encrypted keyring file is authoritative when the keyring is available.
             //    However, if a previous saveCredentials() hit the fallback path AND the
@@ -1143,27 +1229,38 @@ export class CredentialsManager {
 
                 if (keyringAvailable && fs.existsSync(CREDENTIALS_PATH)) {
                     const encrypted = fs.readFileSync(CREDENTIALS_PATH);
-                    const decrypted = safeStorage.decryptString(encrypted);
+                    let keyringSuccess = false;
                     try {
+                        const decrypted = safeStorage.decryptString(encrypted);
                         const parsed = JSON.parse(decrypted);
                         if (typeof parsed === 'object' && parsed !== null) {
                             this.credentials = parsed;
                             console.log('[CredentialsManager] Loaded encrypted credentials');
+                            keyringSuccess = true;
                         } else {
                             throw new Error('Decrypted credentials is not a valid object');
                         }
-                    } catch (parseError) {
-                        console.error('[CredentialsManager] Failed to parse decrypted credentials — file may be corrupted. Starting fresh:', parseError);
-                        this.credentials = {};
+                    } catch (keyringReadError) {
+                        console.error('[CredentialsManager] Failed to read/decrypt keyring credentials. Falling through to app-managed fallback:', keyringReadError);
+                        keyringReadFailed = true;
                     }
-                    // Keyring is authoritative — clean up any stale fallback + plaintext.
-                    this.removeFallbackFile();
-                    this.removePlaintextFile();
-                    return;
+
+                    if (keyringSuccess) {
+                        // Keyring is authoritative — clean up any stale fallback + plaintext.
+                        this.removeFallbackFile();
+                        this.removePlaintextFile();
+                        return;
+                    }
                 }
-                // Keyring file exists but keyring is unavailable: fall through to try
-                // the app-managed fallback below (we cannot decrypt the keyring file).
-                console.warn('[CredentialsManager] Encrypted credentials present but keyring unavailable; trying app-managed fallback');
+                // Either the keyring is unavailable, or it is available but the file
+                // would not decrypt/parse. Both fall through to the app-managed
+                // fallback below; `keyringReadFailed` distinguishes them for the
+                // migrate-up decision in step 2.
+                console.warn(
+                    keyringReadFailed
+                        ? '[CredentialsManager] Encrypted credentials present but unreadable; trying app-managed fallback'
+                        : '[CredentialsManager] Encrypted credentials present but keyring unavailable; trying app-managed fallback',
+                );
             }
 
             // 2) App-managed encrypted fallback.
@@ -1185,9 +1282,35 @@ export class CredentialsManager {
 
                 // Migrate up: if the keyring is now available, re-persist via safeStorage
                 // (saveCredentials prefers the keyring and deletes the fallback).
+                //
+                // NOT when we got here because the keyring file failed to decrypt.
+                // safeStorage.decryptString can throw for reasons that are TRANSIENT
+                // and have nothing to do with the file being corrupt — a locked
+                // macOS keychain, a denied keychain-access prompt, a roaming DPAPI
+                // profile that has not synced yet. Migrating up in that state would
+                // overwrite intact keyring data with whatever the fallback holds,
+                // which may be older (the staleness guard above only removes the
+                // keyring when the fallback is NEWER, so an older fallback reaches
+                // here untouched). Silently reverting a user to a previous set of
+                // credentials is worse than running this session off the fallback
+                // and leaving the keyring alone: the next successful boot recovers
+                // everything.
+                //
+                // Writes are then refused for the rest of the session
+                // (`keyringUnreadable` → saveCredentials returns false). Note this
+                // has to be a FULL refusal, not "write to the fallback only and
+                // leave the keyring alone": the mtime staleness guard at the top of
+                // this method removes the keyring whenever the fallback is NEWER, so
+                // a fallback-only write would make the NEXT boot delete the very
+                // keyring file we are preserving here.
                 let keyringNow = false;
                 try { keyringNow = safeStorage.isEncryptionAvailable(); } catch { keyringNow = false; }
-                if (keyringNow && Object.keys(this.credentials).length > 0) {
+                if (keyringReadFailed) {
+                    this.keyringUnreadable = true;
+                    console.warn('[CredentialsManager] Running from the app-managed fallback because the keyring file would not decrypt. '
+                        + 'Leaving the keyring file untouched in case the failure was transient — some recently-saved credentials may be missing '
+                        + 'this session, and saves are disabled until a launch that can read it.');
+                } else if (keyringNow && Object.keys(this.credentials).length > 0) {
                     console.log('[CredentialsManager] Keyring now available — migrating fallback credentials to keyring');
                     this.saveCredentials();
                 }
@@ -1197,10 +1320,34 @@ export class CredentialsManager {
 
             // 3) Nothing stored. Clean up any legacy plaintext file regardless.
             this.removePlaintextFile();
-            console.log('[CredentialsManager] No stored credentials found');
+            if (keyringReadFailed) {
+                // NOT a fresh install: there IS a keyring file, it just would not
+                // decrypt, and there is no fallback to recover from. This is the
+                // most dangerous shape of the degraded state — `credentials` is
+                // EMPTY, so an unguarded save would replace every stored key with
+                // nothing and leave no copy anywhere. Refuse writes and keep the
+                // file for a launch that can read it.
+                this.keyringUnreadable = true;
+                console.warn(
+                    '[CredentialsManager] Keyring credentials unreadable and no fallback present — starting with empty '
+                    + 'credentials this session. The existing credential file is preserved and saves are DISABLED so it '
+                    + 'cannot be overwritten; restart after unlocking your keychain / signing in to your profile.',
+                );
+            } else {
+                console.log('[CredentialsManager] No stored credentials found');
+            }
         } catch (error) {
+            // The catch-all also lands here with a partial/empty `credentials`
+            // while a credential file may still exist on disk. Same reasoning as
+            // above: refuse writes rather than risk overwriting it.
             console.error('[CredentialsManager] Failed to load credentials:', error);
             this.credentials = {};
+            try {
+                if (fs.existsSync(CREDENTIALS_PATH) || fs.existsSync(FALLBACK_PATH)) {
+                    this.keyringUnreadable = true;
+                    console.warn('[CredentialsManager] A credential file exists but the load failed — saves are DISABLED this session to protect it');
+                }
+            } catch { /* best-effort */ }
         }
     }
 }
