@@ -304,12 +304,18 @@ export class CredentialsManager {
     }
 
     public setCodexOAuthTokens(tokens: { accessToken: string; refreshToken: string; idToken?: string; expiresAt: number; email?: string; accountId?: string; lastRefreshAt?: number }): void {
+        // ChatGPT OAuth ROTATES the refresh token on every refresh. If we accept
+        // a rotation in memory but fail to persist it, the session keeps working
+        // off CodexOAuthService's own cache and the loss only surfaces at the
+        // next launch as an invalid_grant re-auth. Refuse up front instead.
+        if (this.refuseWriteWhileDegraded('set Codex OAuth tokens')) return;
         this.credentials.codexOAuthTokens = { ...tokens };
         this.saveCredentials();
         console.log('[CredentialsManager] Codex OAuth tokens updated');
     }
 
     public clearCodexOAuthTokens(): void {
+        if (this.refuseWriteWhileDegraded('clear Codex OAuth tokens')) return;
         this.credentials.codexOAuthTokens = undefined;
         this.saveCredentials();
         console.log('[CredentialsManager] Codex OAuth tokens cleared');
@@ -421,6 +427,7 @@ export class CredentialsManager {
     }
 
     public setDisabledProviders(providers: string[]): void {
+        if (this.refuseWriteWhileDegraded('set disabled providers')) return;
         this.credentials.disabledProviders = providers;
         this.saveCredentials();
         console.log(`[CredentialsManager] Disabled providers updated (${providers.length})`);
@@ -432,6 +439,7 @@ export class CredentialsManager {
     }
 
     public setCloudEnabledModels(provider: string, models: string[]): boolean {
+        if (this.refuseWriteWhileDegraded('set cloud enabled models')) return false;
         if (!this.credentials.cloudEnabledModels) this.credentials.cloudEnabledModels = {};
         this.credentials.cloudEnabledModels[provider] = models;
         const persisted = this.saveCredentials();
@@ -453,6 +461,7 @@ export class CredentialsManager {
     }
 
     public setCloudFetchedModels(provider: string, models: { id: string; label: string }[], fetchedAt: number): boolean {
+        if (this.refuseWriteWhileDegraded('set cloud fetched models')) return false;
         if (!this.credentials.cloudFetchedModels) this.credentials.cloudFetchedModels = {};
         if (!this.credentials.cloudFetchedAt) this.credentials.cloudFetchedAt = {};
         this.credentials.cloudFetchedModels[provider] = models;
@@ -467,6 +476,7 @@ export class CredentialsManager {
     }
 
     public setLitellmModels(models: string[]): void {
+        if (this.refuseWriteWhileDegraded('set litellm models')) return;
         this.credentials.litellmModels = models;
         this.saveCredentials();
         console.log(`[CredentialsManager] LiteLLM model cache updated (${models.length} model(s))`);
@@ -517,6 +527,7 @@ export class CredentialsManager {
     // =========================================================================
 
     public setGeminiApiKey(key: string): void {
+        if (this.refuseWriteWhileDegraded('set gemini api key')) return;
         const trimmed = (key || '').trim();
         this.credentials.geminiApiKey = trimmed || undefined;
         this.saveCredentials();
@@ -524,6 +535,7 @@ export class CredentialsManager {
     }
 
     public setGroqApiKey(key: string): void {
+        if (this.refuseWriteWhileDegraded('set groq api key')) return;
         const trimmed = (key || '').trim();
         this.credentials.groqApiKey = trimmed || undefined;
         this.saveCredentials();
@@ -531,6 +543,7 @@ export class CredentialsManager {
     }
 
     public setOpenaiApiKey(key: string): void {
+        if (this.refuseWriteWhileDegraded('set openai api key')) return;
         const trimmed = (key || '').trim();
         this.credentials.openaiApiKey = trimmed || undefined;
         this.saveCredentials();
@@ -538,6 +551,7 @@ export class CredentialsManager {
     }
 
     public setClaudeApiKey(key: string): void {
+        if (this.refuseWriteWhileDegraded('set claude api key')) return;
         const trimmed = (key || '').trim();
         this.credentials.claudeApiKey = trimmed || undefined;
         this.saveCredentials();
@@ -545,6 +559,7 @@ export class CredentialsManager {
     }
 
     public setDeepseekApiKey(key: string): void {
+        if (this.refuseWriteWhileDegraded('set deepseek api key')) return;
         const trimmed = key.trim();
         this.credentials.deepseekApiKey = trimmed || undefined;
         this.saveCredentials();
@@ -558,6 +573,7 @@ export class CredentialsManager {
      * NOT persisted (per-session, LAN-exposed) and is intentionally separate.
      */
     public setPhoneMirrorToken(token: string): void {
+        if (this.refuseWriteWhileDegraded('set phone mirror token')) return;
         this.credentials.phoneMirrorToken = token || undefined;
         this.saveCredentials();
         console.log('[CredentialsManager] Extension pairing token updated');
@@ -570,6 +586,7 @@ export class CredentialsManager {
      * Passing an empty baseURL clears everything, disabling the provider.
      */
     public setLitellmConfig(apiKey: string, baseURL: string, maxTokens?: number): void {
+        if (this.refuseWriteWhileDegraded('set litellm config')) return;
         const trimmedURL = (baseURL || '').trim();
         const trimmedKey = (apiKey || '').trim();
         if (!trimmedURL) {
@@ -597,6 +614,7 @@ export class CredentialsManager {
      * IPC layer can surface a REAL error instead of a false "Saved".
      */
     public setGoogleServiceAccountPath(filePath: string): boolean {
+        if (this.refuseWriteWhileDegraded('set google service account path')) return false;
         // Empty/whitespace normalizes to `undefined`, not `''` — same convention as
         // the STT key setters below, so the key is absent from the persisted JSON
         // rather than present-and-empty. Callers clear the path by passing ''.
@@ -610,6 +628,7 @@ export class CredentialsManager {
     }
 
     public setSttProvider(provider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local-whisper'): boolean {
+        if (this.refuseWriteWhileDegraded('set stt provider')) return false;
         this.credentials.sttProvider = provider;
         const persisted = this.saveCredentials();
         console.log(`[CredentialsManager] STT Provider set to: ${provider}`);
@@ -625,6 +644,7 @@ export class CredentialsManager {
     // reload — matching `setNativelyApiKey` / `setDeepseekApiKey`. The Remove button
     // (which calls these with `''`) still correctly clears the stored key.
     public setDeepgramApiKey(key: string): boolean {
+        if (this.refuseWriteWhileDegraded('set deepgram api key')) return false;
         const trimmed = (key || '').trim();
         this.credentials.deepgramApiKey = trimmed || undefined;
         const persisted = this.saveCredentials();
@@ -633,6 +653,7 @@ export class CredentialsManager {
     }
 
     public setGroqSttApiKey(key: string): boolean {
+        if (this.refuseWriteWhileDegraded('set groq stt api key')) return false;
         const trimmed = (key || '').trim();
         this.credentials.groqSttApiKey = trimmed || undefined;
         const persisted = this.saveCredentials();
@@ -641,6 +662,7 @@ export class CredentialsManager {
     }
 
     public setOpenAiSttApiKey(key: string): boolean {
+        if (this.refuseWriteWhileDegraded('set open ai stt api key')) return false;
         const trimmed = (key || '').trim();
         this.credentials.openAiSttApiKey = trimmed || undefined;
         const persisted = this.saveCredentials();
@@ -649,6 +671,7 @@ export class CredentialsManager {
     }
 
     public setOpenAiSttBaseUrl(url: string): void {
+        if (this.refuseWriteWhileDegraded('set open ai stt base url')) return;
         // Store undefined (not empty string) when clearing, so callers can fall back
         // to the default api.openai.com endpoint with a simple truthiness check.
         const trimmed = url.trim();
@@ -658,12 +681,14 @@ export class CredentialsManager {
     }
 
     public setGroqSttModel(model: string): void {
+        if (this.refuseWriteWhileDegraded('set groq stt model')) return;
         this.credentials.groqSttModel = model;
         this.saveCredentials();
         console.log(`[CredentialsManager] Groq STT Model set to: ${model}`);
     }
 
     public setElevenLabsApiKey(key: string): boolean {
+        if (this.refuseWriteWhileDegraded('set eleven labs api key')) return false;
         const trimmed = (key || '').trim();
         this.credentials.elevenLabsApiKey = trimmed || undefined;
         const persisted = this.saveCredentials();
@@ -672,6 +697,7 @@ export class CredentialsManager {
     }
 
     public setAzureApiKey(key: string): boolean {
+        if (this.refuseWriteWhileDegraded('set azure api key')) return false;
         const trimmed = (key || '').trim();
         this.credentials.azureApiKey = trimmed || undefined;
         const persisted = this.saveCredentials();
@@ -680,12 +706,14 @@ export class CredentialsManager {
     }
 
     public setAzureRegion(region: string): void {
+        if (this.refuseWriteWhileDegraded('set azure region')) return;
         this.credentials.azureRegion = region;
         this.saveCredentials();
         console.log(`[CredentialsManager] Azure Region set to: ${region}`);
     }
 
     public setIbmWatsonApiKey(key: string): boolean {
+        if (this.refuseWriteWhileDegraded('set ibm watson api key')) return false;
         const trimmed = (key || '').trim();
         this.credentials.ibmWatsonApiKey = trimmed || undefined;
         const persisted = this.saveCredentials();
@@ -694,12 +722,14 @@ export class CredentialsManager {
     }
 
     public setIbmWatsonRegion(region: string): void {
+        if (this.refuseWriteWhileDegraded('set ibm watson region')) return;
         this.credentials.ibmWatsonRegion = region;
         this.saveCredentials();
         console.log(`[CredentialsManager] IBM Watson Region set to: ${region}`);
     }
 
     public setSonioxApiKey(key: string): boolean {
+        if (this.refuseWriteWhileDegraded('set soniox api key')) return false;
         const trimmed = (key || '').trim();
         this.credentials.sonioxApiKey = trimmed || undefined;
         const persisted = this.saveCredentials();
@@ -708,6 +738,7 @@ export class CredentialsManager {
     }
 
     public setTavilyApiKey(key: string): void {
+        if (this.refuseWriteWhileDegraded('set tavily api key')) return;
         // Store undefined (not empty string) when removing, so hasKey() checks stay consistent
         this.credentials.tavilyApiKey = key.trim() || undefined;
         this.saveCredentials();
@@ -715,6 +746,7 @@ export class CredentialsManager {
     }
 
     public setSttLanguage(language: string): void {
+        if (this.refuseWriteWhileDegraded('set stt language')) return;
         this.credentials.sttLanguage = language;
         this.saveCredentials();
         console.log(`[CredentialsManager] STT Language set to: ${language}`);
@@ -745,17 +777,20 @@ export class CredentialsManager {
     }
 
     public setAiResponseLanguage(language: string): void {
+        if (this.refuseWriteWhileDegraded('set ai response language')) return;
         this.credentials.aiResponseLanguage = language;
         this.saveCredentials();
         console.log(`[CredentialsManager] AI Response Language set to: ${language}`);
     }
     public setDefaultModel(model: string): void {
+        if (this.refuseWriteWhileDegraded('set default model')) return;
         this.credentials.defaultModel = model;
         this.saveCredentials();
         console.log(`[CredentialsManager] Default Model set to: ${model}`);
     }
 
     public setNativelyApiKey(key: string): void {
+        if (this.refuseWriteWhileDegraded('set natively api key')) return;
         const trimmed = key.trim();
         this.credentials.nativelyApiKey = trimmed || undefined;
 
@@ -801,6 +836,7 @@ export class CredentialsManager {
     }
 
     public setPreferredModel(provider: 'gemini' | 'groq' | 'openai' | 'claude' | 'deepseek', modelId: string): void {
+        if (this.refuseWriteWhileDegraded('set preferred model')) return;
         const key = `${provider}PreferredModel` as keyof StoredCredentials;
         (this.credentials as any)[key] = modelId;
         this.saveCredentials();
@@ -872,6 +908,7 @@ export class CredentialsManager {
     }
 
     public setTrialToken(token: string, expiresAt: string, startedAt: string): void {
+        if (this.refuseWriteWhileDegraded('set trial token')) return;
         this.credentials.trialToken = token;
         this.credentials.trialExpiresAt = expiresAt;
         this.credentials.trialStartedAt = startedAt;
@@ -881,6 +918,7 @@ export class CredentialsManager {
     }
 
     public clearTrialToken(): void {
+        if (this.refuseWriteWhileDegraded('clear trial token')) return;
         delete this.credentials.trialToken;
         delete this.credentials.trialExpiresAt;
         delete this.credentials.trialStartedAt;
@@ -1042,6 +1080,40 @@ export class CredentialsManager {
             );
             return false;
         }
+        return this.writeCredentials();
+    }
+
+    /**
+     * Reject a mutation BEFORE it touches `this.credentials`.
+     *
+     * 21 of the setters on this class are `void` — they mutate in-memory state,
+     * call saveCredentials(), and discard the result. Before the degraded-store
+     * guard existed, saveCredentials() effectively always succeeded, so that was
+     * harmless. Now it can refuse, and a `void` setter would leave the in-memory
+     * value diverged from disk: Settings would show a key as saved that vanishes
+     * on restart, and worse, CodexOAuthService caches its own copy of a rotated
+     * refresh token in memory — so an unpersisted rotation reads as fine until
+     * the next launch forces a re-auth.
+     *
+     * Every setter therefore calls this FIRST and returns without mutating when
+     * it says no. Rejecting before the mutation (rather than reporting after) is
+     * what keeps memory and disk in agreement on every path, including the ones
+     * that cannot report a failure.
+     */
+    private refuseWriteWhileDegraded(op: string): boolean {
+        if (!this.keyringUnreadable) return false;
+        console.error(
+            `[CredentialsManager] Refusing "${op}": the stored credential file could not be read this session. `
+            + 'The change was NOT applied in memory either, so what you see still matches what is on disk. '
+            + 'RECOVERY: quit and reopen the app with your keychain unlocked (on Windows, signed in to the '
+            + 'profile that saved the keys).',
+        );
+        return true;
+    }
+
+    /** The actual write. Split from saveCredentials() so the degraded check has
+     *  exactly one home and cannot be bypassed by a future caller. */
+    private writeCredentials(): boolean {
 
         // Try the OS keyring first. When safeStorage is available, this is the
         // preferred path. On Windows the underlying DPAPI can still throw after

@@ -168,6 +168,62 @@ test('keyring unreadable + an OLDER fallback: saves refuse, and neither file is 
   assert.equal(cm4.getDeepgramApiKey(), SECRET, 'the newer keyring value wins once it is readable again');
 });
 
+// ── memory must not diverge from disk (Greptile P1 on PR #435) ──────────────
+
+test('a refused write does not mutate in-memory state either', () => {
+  // The first cut of this guard refused inside saveCredentials(), i.e. AFTER
+  // the setter had already mutated `this.credentials`. 21 of the setters on
+  // this class return void and discard the save result, so the value stayed
+  // live in memory while never reaching disk: Settings would show a key as
+  // saved that vanishes on restart. Reject BEFORE mutating instead.
+  const env = makeEnv();
+  const cm1 = freshManager(env);
+  cm1.setDeepgramApiKey(SECRET);
+  cm1.setGeminiApiKey('sk-gemini-ORIGINAL');
+
+  env.state.decryptShouldThrow = true;
+  const cm2 = freshManager(env);
+  assert.equal(cm2.isCredentialStoreDegraded(), true);
+
+  // A void setter (no way to report failure) must leave memory untouched.
+  cm2.setGeminiApiKey('sk-gemini-SHOULD-NOT-STICK');
+  assert.notEqual(cm2.getGeminiApiKey(), 'sk-gemini-SHOULD-NOT-STICK',
+    'a void setter must not leave an unpersisted value live in memory — the UI reads this back '
+    + 'and would report a save that never reached disk');
+
+  // A boolean setter must report false AND not mutate.
+  assert.equal(cm2.setSonioxApiKey('sk-soniox-SHOULD-NOT-STICK'), false);
+  assert.notEqual(cm2.getSonioxApiKey(), 'sk-soniox-SHOULD-NOT-STICK');
+});
+
+test('a refused Codex token rotation does not stick in memory', () => {
+  // ChatGPT OAuth rotates the refresh token on every refresh, and
+  // CodexOAuthService caches its own copy. Accepting a rotation that never
+  // reaches disk means the session works until the next launch, which then
+  // hits invalid_grant and forces a re-auth.
+  const env = makeEnv();
+  const cm1 = freshManager(env);
+  cm1.setCodexOAuthTokens({
+    accessToken: 'access-ORIGINAL', refreshToken: 'refresh-ORIGINAL', expiresAt: Date.now() + 3600_000,
+  });
+
+  env.state.decryptShouldThrow = true;
+  const cm2 = freshManager(env);
+  assert.equal(cm2.isCredentialStoreDegraded(), true);
+
+  cm2.setCodexOAuthTokens({
+    accessToken: 'access-ROTATED', refreshToken: 'refresh-ROTATED', expiresAt: Date.now() + 3600_000,
+  });
+  const live = cm2.getCodexOAuthTokens();
+  assert.notEqual(live?.refreshToken, 'refresh-ROTATED',
+    'an unpersisted rotation must not be accepted in memory');
+
+  // And the original is intact once the keychain unlocks.
+  env.state.decryptShouldThrow = false;
+  const cm3 = freshManager(env);
+  assert.equal(cm3.getCodexOAuthTokens()?.refreshToken, 'refresh-ORIGINAL');
+});
+
 // ── the escape hatch ────────────────────────────────────────────────────────
 
 test('resetDegradedCredentialStore() is the only thing that discards the preserved file', () => {
