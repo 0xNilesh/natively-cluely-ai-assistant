@@ -5161,8 +5161,13 @@ let isMultimodal = !!(imagePaths?.length);
     // return unconditionally (Ollama, OpenAI, Claude, DeepSeek, LiteLLM) alike.
     // See MAX_STREAM_OUTPUT_CHARS for why this is a character cap and not a
     // wall-clock one, and why it is defence in depth rather than the real fix.
-    const { MAX_STREAM_OUTPUT_CHARS } = await import('./llm/liveDeadlines');
-    const { testOutputCharCeiling } = await import('./llm/streamFaultInjection');
+    // Loaded together: the two imports are independent, and awaiting them in
+    // sequence costs an extra microtask hop on every streamed turn for nothing
+    // (react-doctor server-sequential-independent-await).
+    const [{ MAX_STREAM_OUTPUT_CHARS }, { testOutputCharCeiling }] = await Promise.all([
+      import('./llm/liveDeadlines'),
+      import('./llm/streamFaultInjection'),
+    ]);
     // Test switch (dev-only, opt-in) lets the cap be provoked without waiting
     // for a model to actually loop. Null in any packaged build.
     //
@@ -5266,8 +5271,10 @@ let isMultimodal = !!(imagePaths?.length);
     state: { chars: number },
     label: string,
   ): AsyncGenerator<string, void, unknown> {
-    const { MAX_STREAM_OUTPUT_CHARS } = await import('./llm/liveDeadlines');
-    const { testOutputCharCeiling } = await import('./llm/streamFaultInjection');
+    const [{ MAX_STREAM_OUTPUT_CHARS }, { testOutputCharCeiling }] = await Promise.all([
+      import('./llm/liveDeadlines'),
+      import('./llm/streamFaultInjection'),
+    ]);
     const ceiling = testOutputCharCeiling() ?? MAX_STREAM_OUTPUT_CHARS;
     for await (const chunk of inner) {
       yield chunk;
