@@ -490,11 +490,21 @@ describe('Context OS — multi-family coordinator admission predicate (2026-07-1
     }
   });
 
-  test('coordinator throw → legacy path resets coordinatorGovernedProfileEvidence and manualContextOsGeneration', async () => {
-    // Drive the real TurnEvidenceCoordinator with a resolver that throws, then
-    // assert the contract documented at ipcHandlers.ts:2325-2332 — the catch
-    // must reset both `coordinatorGovernedProfileEvidence` to `false` and
-    // `manualContextOsGeneration` to `null`, and must NOT crash the handler.
+  test('a thrown retriever yields a REFUSAL pack, and never discards the other family', async () => {
+    // Rewritten 2026-08-14. The original asserted that a thrown retrieval
+    // PROPAGATES out of `resolve()`, mirroring an ipcHandlers catch block. That
+    // contract was deliberately superseded on 2026-07-23
+    // (TurnEvidenceCoordinator.ts:181): the retrievers are now settled
+    // independently with `Promise.allSettled`, precisely so "a thrown profile
+    // retriever cannot discard already-retrieved reference evidence (and vice
+    // versa)" — the file header's own promise that neither retriever has
+    // authority over the other source family. `Promise.all` violated it on the
+    // failure path.
+    //
+    // So the coordinator no longer throws; it returns a FAILURE PACK. That is
+    // still fail-closed where it matters — the turn refuses rather than
+    // answering on missing evidence — which is what this now asserts. The old
+    // test had been red on main since that change.
     const co = cjsRequire(path.resolve(repoRoot, 'dist-electron/electron/intelligence/context-os/index.js'));
     const contract = co.buildTurnContractForSurface({
       surface: 'manual_chat',
@@ -514,28 +524,35 @@ describe('Context OS — multi-family coordinator admission predicate (2026-07-1
       requiredEvidenceKinds: ['reference_files', 'profile_resume', 'projects', 'profile_jd'],
       allowedEvidenceKinds: ['reference_files', 'profile_resume', 'projects', 'profile_jd'],
     };
-    // Mirror the catch-block invariants: a thrown retrieval resets both the
-    // "coordinator governed this turn" flag and the populated pack.
-    let coordinatorGovernedProfileEvidence = false;
-    let manualContextOsGeneration = null;
+
+    const { TurnEvidenceCoordinator } = co;
+    const coordinator = new TurnEvidenceCoordinator();
+
+    let threw = null;
+    let result = null;
     try {
-      const { TurnEvidenceCoordinator } = co;
-      const coordinator = new TurnEvidenceCoordinator();
-      await coordinator.resolve({
+      result = await coordinator.resolve({
         decision,
         contract,
         retrieveReferenceEvidence: async () => { throw new Error('INJECTED_RETRIEVAL_THROW'); },
-        retrieveProfileEvidence: async () => ({ packId: 'p', turnId: contract.turnId, sourceOwner: contract.sourceOwner, requestedProperty: contract.requestedProperty, items: [], rejected: [], coverage: { hasDirectEvidence: false, propertySatisfied: false, entityMatched: false, sourceOwnerSatisfied: true, confidence: 0 }, conflicts: [], answerPolicy: 'answer' }),
+        retrieveProfileEvidence: async () => ({
+          packId: 'p', turnId: contract.turnId, sourceOwner: contract.sourceOwner,
+          requestedProperty: contract.requestedProperty, items: [], rejected: [],
+          coverage: { hasDirectEvidence: false, propertySatisfied: false, entityMatched: false, sourceOwnerSatisfied: true, confidence: 0 },
+          conflicts: [], answerPolicy: 'answer',
+        }),
       });
-      // Should not reach here — coordinator is fail-closed on retrieval error.
-      manualContextOsGeneration = { contract, evidencePack: { items: [] }, govern: true };
-      coordinatorGovernedProfileEvidence = true;
-    } catch (_err) {
-      // Legacy fallback mirrors ipcHandlers.ts:2325-2332.
-      coordinatorGovernedProfileEvidence = false;
-      manualContextOsGeneration = null;
+    } catch (err) {
+      threw = err;
     }
-    assert.equal(coordinatorGovernedProfileEvidence, false, 'a thrown retrieval must reset the governed flag');
-    assert.equal(manualContextOsGeneration, null, 'a thrown retrieval must reset the populated pack');
+
+    assert.equal(threw, null, 'a thrown retriever must be contained, not propagated (allSettled contract)');
+    assert.ok(result, 'resolve() must still return a pack');
+    const pack = result.evidencePack ?? result.pack ?? result;
+    assert.equal(
+      pack.answerPolicy,
+      'refuse_insufficient_evidence',
+      'a required family that failed to retrieve must refuse the turn, not answer on what is left',
+    );
   });
 });
