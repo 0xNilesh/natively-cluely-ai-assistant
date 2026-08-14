@@ -5162,6 +5162,16 @@ let isMultimodal = !!(imagePaths?.length);
     // See MAX_STREAM_OUTPUT_CHARS for why this is a character cap and not a
     // wall-clock one, and why it is defence in depth rather than the real fix.
     const { MAX_STREAM_OUTPUT_CHARS } = await import('./llm/liveDeadlines');
+    const { testOutputCharCeiling } = await import('./llm/streamFaultInjection');
+    // Test switch (dev-only, opt-in) lets the cap be provoked without waiting
+    // for a model to actually loop. Null in any packaged build.
+    //
+    // Resolved against main deliberately: the branch this was authored on also
+    // carried a per-SURFACE ceiling (MAX_SUMMARY_OUTPUT_CHARS / long_form),
+    // which does NOT exist here — neither the constant nor the `profile`
+    // parameter. Carrying it across would have dragged another session's
+    // unmerged work into this change and broken the build.
+    const outputCeiling = testOutputCharCeiling() ?? MAX_STREAM_OUTPUT_CHARS;
     let emittedChars = 0;
     for await (const chunk of this._streamChatInner(...args)) {
       if (abortSignal?.aborted) return;
@@ -5174,14 +5184,14 @@ let isMultimodal = !!(imagePaths?.length);
       }
       yield dashReducer.reduce(chunk);
       emittedChars += typeof chunk === 'string' ? chunk.length : 0;
-      if (emittedChars > MAX_STREAM_OUTPUT_CHARS) {
+      if (emittedChars > outputCeiling) {
         outcome.truncated = true;
         outcome.reason = 'output_cap_reached';
         // End the stream the same way a post-commit provider failure now does —
         // return, never throw — so the consumer sees one consistent shape for
         // "this stream stopped early".
         console.warn(
-          `[LLMHelper] Stream exceeded MAX_STREAM_OUTPUT_CHARS (${emittedChars} > ${MAX_STREAM_OUTPUT_CHARS}) — ending the turn. The model is not converging.`,
+          `[LLMHelper] Stream exceeded MAX_STREAM_OUTPUT_CHARS (${emittedChars} > ${outputCeiling}) — ending the turn. The model is not converging.`,
         );
         return;
       }
@@ -5257,12 +5267,14 @@ let isMultimodal = !!(imagePaths?.length);
     label: string,
   ): AsyncGenerator<string, void, unknown> {
     const { MAX_STREAM_OUTPUT_CHARS } = await import('./llm/liveDeadlines');
+    const { testOutputCharCeiling } = await import('./llm/streamFaultInjection');
+    const ceiling = testOutputCharCeiling() ?? MAX_STREAM_OUTPUT_CHARS;
     for await (const chunk of inner) {
       yield chunk;
       state.chars += typeof chunk === 'string' ? chunk.length : 0;
-      if (state.chars > MAX_STREAM_OUTPUT_CHARS) {
+      if (state.chars > ceiling) {
         console.warn(
-          `[LLMHelper] ${label} exceeded MAX_STREAM_OUTPUT_CHARS (${state.chars} > ${MAX_STREAM_OUTPUT_CHARS}) — ending the turn. The model is not converging.`,
+          `[LLMHelper] ${label} exceeded MAX_STREAM_OUTPUT_CHARS (${state.chars} > ${ceiling}) — ending the turn. The model is not converging.`,
         );
         return;
       }
@@ -5273,11 +5285,27 @@ let isMultimodal = !!(imagePaths?.length);
     inner: AsyncGenerator<string, void, unknown>,
     state: { emitted: boolean },
   ): AsyncGenerator<string, void, unknown> {
+    // Test-only fault, three-gated and off unless explicitly requested; a
+    // packaged build ignores it entirely. See streamFaultInjection.ts.
+    const { failStreamAfterChars, InjectedStreamFault } = await import('./llm/streamFaultInjection');
+    const failAfter = failStreamAfterChars();
+    let seen = 0;
+
     for await (const tok of inner) {
       if (!state.emitted && typeof tok === 'string' && tok.trim().length > 0) {
         state.emitted = true;
       }
       yield tok;
+      if (failAfter !== null) {
+        seen += typeof tok === 'string' ? tok.length : 0;
+        if (seen >= failAfter) {
+          // Thrown AFTER the yield on purpose: the point is a provider that
+          // dies once output is already on screen, which is precisely the case
+          // the fall-through guard exists for.
+          console.warn(`[LLMHelper] INJECTING mid-stream fault after ${seen} chars (test switch)`);
+          throw new InjectedStreamFault(seen);
+        }
+      }
     }
   }
 
