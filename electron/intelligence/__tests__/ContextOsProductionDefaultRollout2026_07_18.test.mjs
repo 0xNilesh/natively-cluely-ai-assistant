@@ -37,7 +37,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import Module from 'node:module';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 
@@ -222,10 +222,28 @@ describe('Context OS — production-default contract build behavior (2026-07-18)
         process.platform === 'win32' ? 'junction' : 'dir',
       );
       try {
-        execSync(`node node_modules/typescript7/bin/tsc -p electron/tsconfig.emit.json --outDir ${target}`, {
-          cwd: repoRoot,
-          stdio: 'pipe',
-        });
+        // execFileSync with an ARGS ARRAY, and tsc invoked as `node <entry>`
+        // rather than through a `.bin` shim.
+        //
+        // Two Windows-only breakages, both of which made this suite's `before`
+        // hook throw "tsc emission failed" and cancel every child test:
+        //   1. `target` is a mkdtemp path — on Windows
+        //      `C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\...` — interpolated
+        //      unquoted into a shell string.
+        //   2. a `.bin` shim is extensionless on POSIX but a `.cmd` on Windows,
+        //      which execFileSync (no shell) cannot launch.
+        //
+        // CLAUDE.md: "Pass command arguments as arrays when possible. Avoid
+        // shell interpolation. Quote paths safely. Handle executable
+        // extensions correctly."
+        //
+        // The compiler stays typescript7 + tsconfig.emit.json: this suite reads
+        // the EMITTED tree, and TS7 owns the emit path as of the migration.
+        execFileSync(process.execPath, [
+          path.join('node_modules', 'typescript7', 'bin', 'tsc'),
+          '-p', path.join('electron', 'tsconfig.emit.json'),
+          '--outDir', target,
+        ], { cwd: repoRoot, stdio: 'pipe' });
       } catch (_e) { /* tsc returns 1 on unrelated errors; we only need the emit */ }
       if (!fs.existsSync(path.join(target, 'electron/intelligence/context-os/index.js'))) {
         throw new Error('tsc emission failed — context-os/index.js missing from isolated tree');
