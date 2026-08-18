@@ -12,7 +12,6 @@ import {
 import { HiCreditCard } from 'react-icons/hi2';
 import { analytics } from '../lib/analytics/analytics.service';
 import { AboutSection } from './AboutSection';
-import { HelpSettings } from './settings/HelpSettings';
 import { AIProvidersSettings } from './settings/AIProvidersSettings';
 import { PlansSettings } from './settings/PlansSettings';
 import { PhoneMirrorSettings } from './settings/PhoneMirrorSettings';
@@ -406,7 +405,6 @@ const SETTINGS_NAV_ORDER = [
     'keybinds',
     'phone-mirror',
     'intelligence',
-    'help',
     'about',
 ];
 
@@ -1729,14 +1727,6 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                         <Cpu size={16} /> {t('Intelligence')}
                                     </button>
 
-
-                                    <button
-                                        onClick={() => setActiveTab('help')}
-                                        className={navItemClass(activeTab === 'help', 'text-[13px]')}
-                                    >
-                                        {activeTab === 'help' && navActivePill}
-                                        <HelpCircle size={16} /> {t('Setup & Help')}
-                                    </button>
 
                                     <button
                                         onClick={() => setActiveTab('about')}
@@ -3479,10 +3469,6 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
 
                             {activeTab === 'intelligence' && (
                                 <IntelligenceSettings />
-                            )}
-
-                            {activeTab === 'help' && (
-                                <HelpSettings onNavigate={setActiveTab} />
                             )}
 
                             {activeTab === 'about' && (
