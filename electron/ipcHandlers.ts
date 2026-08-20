@@ -9604,8 +9604,12 @@ export function initializeIpcHandlers(appState: AppState): void {
       // Windows let renderer regressions hand Windows shell an unknown
       // protocol → Microsoft Store popup (issue #252). Gate the allowlist on
       // the actual platform so the IPC layer is the last line of defense.
+      // R-23: ms-settings: is the Windows counterpart, and Windows is the only
+      // place it resolves. Gated the same way and for the same reason — issue
+      // #252 was a renderer handing the OTHER platform's scheme to the shell.
       const allowedSystemSettingsUrl =
-        parsed.protocol === 'x-apple.systempreferences:' && process.platform === 'darwin';
+        (parsed.protocol === 'x-apple.systempreferences:' && process.platform === 'darwin')
+        || (parsed.protocol === 'ms-settings:' && process.platform === 'win32');
 
       if (allowedWebUrl || allowedSystemSettingsUrl) {
         await shell.openExternal(url);
@@ -11783,10 +11787,15 @@ export function initializeIpcHandlers(appState: AppState): void {
     if (process.platform === 'win32') {
       let microphone: string = 'granted';
       try {
-        // Any non-'granted' value (denied / restricted / not-determined) must
-        // surface; fall back to 'granted' only if the API itself is unavailable,
-        // so a query failure can never LOCK a working machine out of capture.
-        microphone = systemPreferences.getMediaAccessStatus('microphone') || 'granted';
+        // R-23: surface any ACTIONABLE non-'granted' value (denied /
+        // restricted / not-determined); treat an UNAVAILABLE one as granted so
+        // a query failure can never LOCK a working machine out of capture.
+        // 'unknown' is unavailable, not actionable — Electron's win32 path can
+        // return it when it cannot determine the state, there is nothing for
+        // the user to fix, and it is absent from the union checkPermissions
+        // declares in src/types/electron.d.ts. Normalise rather than widen.
+        const reported = systemPreferences.getMediaAccessStatus('microphone');
+        microphone = (!reported || reported === 'unknown') ? 'granted' : reported;
       } catch {
         microphone = 'granted';
       }
@@ -11796,8 +11805,14 @@ export function initializeIpcHandlers(appState: AppState): void {
     return { microphone: 'granted', screen: 'granted', platform: process.platform };
   });
 
+  // Returns true when the OS consent prompt was shown AND granted. On Windows
+  // there is no such prompt — systemPreferences.askForMediaAccess is macOS-only
+  // — so this resolves false and the renderer deep-links to the privacy pane
+  // instead. R-23: it used to return TRUE there, which told onboarding the
+  // request had succeeded while doing nothing at all, so the mic step could
+  // never be satisfied and the user was stuck on it.
   safeHandle('permissions:request-mic', async () => {
-    if (process.platform !== 'darwin') return true;
+    if (process.platform !== 'darwin') return false;
     try {
       return await systemPreferences.askForMediaAccess('microphone');
     } catch {

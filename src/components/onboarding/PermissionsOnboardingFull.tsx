@@ -238,6 +238,16 @@ export const PermissionsOnboardingFull: React.FC<Props> = ({ isOpen, onDismiss }
 
   const handleMicRequest = async () => {
     if (!canClick) return;
+    // R-23: Windows has no consent prompt — systemPreferences.askForMediaAccess
+    // is macOS-only — so requestMicPermission cannot grant anything there. It
+    // used to resolve TRUE anyway, so this step re-read the same non-granted
+    // status forever and onboarding could not be completed on a machine whose
+    // microphone privacy toggle was off. Send the user where the setting
+    // actually lives; the window-focus listener above re-reads on return.
+    if (platform === 'win32') {
+      window.electronAPI?.openExternal?.('ms-settings:privacy-microphone');
+      return;
+    }
     setRequesting(true);
     await window.electronAPI?.requestMicPermission?.();
     await refreshStatus();
@@ -274,7 +284,9 @@ export const PermissionsOnboardingFull: React.FC<Props> = ({ isOpen, onDismiss }
     }
     if (micStatus !== 'granted') {
       return {
-        label: requesting ? 'Requesting access…' : 'Request microphone access',
+        label: platform === 'win32'
+          ? 'Open microphone settings'
+          : (requesting ? 'Requesting access…' : 'Request microphone access'),
         action: handleMicRequest,
         active: !requesting,
       };

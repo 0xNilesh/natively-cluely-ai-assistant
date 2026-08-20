@@ -146,6 +146,12 @@ export const PermissionsToaster: React.FC<Props> = ({ isOpen, onDismiss }) => {
     if (micStatus === 'granted') {
       setMicStatus('denied');
     } else {
+      // R-23: no consent prompt exists on Windows; deep-link to the privacy
+      // pane instead of invoking a request that cannot grant anything.
+      if (platform === 'win32') {
+        window.electronAPI?.openExternal?.('ms-settings:privacy-microphone');
+        return;
+      }
       setRequesting(true);
       await window.electronAPI?.requestMicPermission?.();
       setMicStatus('granted');
