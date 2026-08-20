@@ -218,21 +218,21 @@ export class LiveRAGIndexer {
                         );
                         return;
                     }
+                    // R-21: settle the meeting's embedding space BEFORE storing this
+                    // batch. Re-stamping now discards the old space's vectors, so doing
+                    // it afterwards (as F-415 did) would wipe the batch we just wrote.
+                    if (provider && space && dimensions
+                        && this.vectorStore.restampMeetingSpaceOnChange?.(meetingId, provider, dimensions, space)) {
+                        // Every previously embedded chunk just lost its vector.
+                        this.indexedChunkCount = 0;
+                    }
                     for (let i = 0; i < chunkIds.length && i < embeddings.length; i++) {
                         this.vectorStore.storeEmbedding(chunkIds[i], embeddings[i]);
                         embeddedCount++;
                     }
                     if (embeddedCount > 0 && provider && space && dimensions) {
+                        // Applies on a fresh meeting, and again after a re-stamp cleared it.
                         this.vectorStore.stampMeetingSpaceIfUnset(meetingId, provider, dimensions, space);
-                        // F-415: the comment above is true WITHIN a batch, but not
-                        // ACROSS ticks. If a later tick falls back to a different
-                        // provider, the meeting is already stamped and
-                        // stampMeetingSpaceIfUnset is a no-op — so the row keeps
-                        // claiming the old space while these chunks are in the new
-                        // one, and the query-time space filter then excludes the
-                        // meeting entirely (zero live results precisely when the
-                        // cloud provider is down). Re-stamp on an actual change.
-                        this.vectorStore.restampMeetingSpaceOnChange?.(meetingId, provider, dimensions, space);
                     }
                 } catch (err) {
                     console.warn(`[LiveRAGIndexer] Failed to embed live chunk batch for ${meetingId}:`, err);
