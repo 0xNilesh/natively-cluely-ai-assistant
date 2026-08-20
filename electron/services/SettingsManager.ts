@@ -400,9 +400,16 @@ export class SettingsManager {
             // could not READ must not be overwritten from an empty in-memory
             // object. (A genuinely absent file is handled by the existsSync
             // branch above and stays writable, so first-run is unaffected.)
-            console.error('[SettingsManager] Failed to read settings file; continuing READ-ONLY for this session:', e);
-            this.settings = {};
-            this.settingsUnreadable = true;
+            // R-19: R-15 gave the PARSE failure a quarantine-and-recover path but
+            // left this one latching read-only with no way out. A deterministic
+            // read error — EACCES on a root-owned settings.json, EISDIR — is not
+            // transient, so every launch re-latched and the user could never
+            // change a setting again: the exact permanent brick F-703's own
+            // docstring claims to have eliminated. Quarantine here too; renaming
+            // needs directory write permission, not readability of the file, so
+            // it succeeds in precisely the cases that used to be terminal.
+            console.error('[SettingsManager] Failed to read settings file:', e);
+            this.quarantineUnreadableSettings(e);
         }
     }
 
@@ -464,15 +471,15 @@ export class SettingsManager {
             fs.renameSync(this.settingsPath, quarantinePath);
             this.settingsUnreadable = false;
             console.error(
-                `[SettingsManager] settings.json could not be parsed and was moved to ${quarantinePath}. `
+                `[SettingsManager] settings.json could not be read and was moved to ${quarantinePath}. `
                 + 'Continuing with defaults on a writable store; the original file is preserved for recovery. Cause:',
                 cause,
             );
         } catch (renameErr) {
             this.settingsUnreadable = true;
             console.error(
-                '[SettingsManager] settings.json could not be parsed AND could not be quarantined; '
-                + 'continuing READ-ONLY so the existing file is not overwritten. Parse cause:',
+                '[SettingsManager] settings.json could not be read AND could not be quarantined; '
+                + 'continuing READ-ONLY so the existing file is not overwritten. Cause:',
                 cause, 'Quarantine error:', renameErr,
             );
         }
