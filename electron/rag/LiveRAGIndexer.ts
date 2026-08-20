@@ -38,6 +38,18 @@ export class LiveRAGIndexer {
      */
     private inFlightTick: Promise<void> | null = null;
     private isActive = false;
+    /**
+     * R-16: ownership token for the CURRENT live session.
+     *
+     * The previous guards compared `meetingId`, but the only production caller
+     * (main.ts → RAGManager.startLiveIndexing) passes the CONSTANT
+     * 'live-meeting-current' for every meeting. Two consecutive sessions
+     * therefore carry the same id, so `this.meetingId === meetingId` was always
+     * true and the R-03 guards could never fire — the very race they were added
+     * for was the one case they could not detect. A monotonic token is unique
+     * per start() and restores the intended semantics.
+     */
+    private sessionToken = 0;
 
     constructor(vectorStore: VectorStore, embeddingPipeline: EmbeddingPipeline) {
         this.vectorStore = vectorStore;
@@ -54,6 +66,9 @@ export class LiveRAGIndexer {
         }
 
         this.meetingId = meetingId;
+        // Claim a fresh session identity. Anything still in flight from the
+        // previous session now fails stillOwns() and cannot write into ours.
+        this.sessionToken++;
         this.allSegments = [];
         this.indexedSegmentCount = 0;
         this.chunkCounter = 0;
@@ -109,10 +124,11 @@ export class LiveRAGIndexer {
 
         this.isProcessing = true;
         const meetingId = this.meetingId;
+        const token = this.sessionToken;
 
         // R-03(1a): register ONLY a tick that actually reached the body, so
         // stop() awaits the parked work rather than an already-settled no-op.
-        const running = this.runTick(meetingId).finally(() => {
+        const running = this.runTick(meetingId, token).finally(() => {
             this.isProcessing = false;
             if (this.inFlightTick === running) this.inFlightTick = null;
         });
@@ -130,11 +146,11 @@ export class LiveRAGIndexer {
      * all. Baseline's `= this.allSegments.length` self-clamped to the live array
      * and recovered on the next feed, so an unguarded write is a REGRESSION.
      */
-    private stillOwns(meetingId: string): boolean {
-        return this.isActive && this.meetingId === meetingId;
+    private stillOwns(token: number): boolean {
+        return this.isActive && this.sessionToken === token;
     }
 
-    private async runTick(meetingId: string): Promise<void> {
+    private async runTick(meetingId: string, token: number): Promise<void> {
         try {
             // 1. Get only new segments
             // F-414: capture the slice point and advance the high-water mark
@@ -151,14 +167,14 @@ export class LiveRAGIndexer {
             // 2. Preprocess
             const cleaned = preprocessTranscript(newSegments);
             if (cleaned.length === 0) {
-                if (this.stillOwns(meetingId)) this.indexedSegmentCount = processedUpTo;
+                if (this.stillOwns(token)) this.indexedSegmentCount = processedUpTo;
                 return;
             }
 
             // 3. Chunk with offset index
             const chunks = chunkTranscript(meetingId, cleaned);
             if (chunks.length === 0) {
-                if (this.stillOwns(meetingId)) this.indexedSegmentCount = processedUpTo;
+                if (this.stillOwns(token)) this.indexedSegmentCount = processedUpTo;
                 return;
             }
 
@@ -188,6 +204,20 @@ export class LiveRAGIndexer {
                     const { embeddings, space, provider, dimensions } = await this.embeddingPipeline.getEmbeddingsWithFallback(
                         indexedChunks.map((chunk) => chunk.text)
                     );
+                    // R-16: the two awaits above park up to ~90s. If a new
+                    // session claimed the indexer meanwhile, these chunk rows
+                    // were already purged by startLiveIndexing's F-411 delete,
+                    // so storing them writes vec0 rows that resolve to nothing,
+                    // and the meeting-space stamps below would describe THIS
+                    // session's provider on the NEXT session's meeting row
+                    // (the live meeting id is a constant, so it addresses both).
+                    if (!this.stillOwns(token)) {
+                        console.warn(
+                            `[LiveRAGIndexer] discarding a parked embedding batch for ${meetingId}: `
+                            + 'a newer live session owns the indexer.'
+                        );
+                        return;
+                    }
                     for (let i = 0; i < chunkIds.length && i < embeddings.length; i++) {
                         this.vectorStore.storeEmbedding(chunkIds[i], embeddings[i]);
                         embeddedCount++;
@@ -207,7 +237,7 @@ export class LiveRAGIndexer {
                 } catch (err) {
                     console.warn(`[LiveRAGIndexer] Failed to embed live chunk batch for ${meetingId}:`, err);
                 }
-                if (this.stillOwns(meetingId)) this.indexedChunkCount += embeddedCount;
+                if (this.stillOwns(token)) this.indexedChunkCount += embeddedCount;
                 console.log(`[LiveRAGIndexer] Embedded ${embeddedCount}/${chunkIds.length} chunks (${this.indexedChunkCount} total with embeddings)`);
             } else {
                 console.log('[LiveRAGIndexer] Embedding pipeline not ready, chunks saved without embeddings');
@@ -216,7 +246,7 @@ export class LiveRAGIndexer {
             // 6. Advance high-water mark — to what this tick actually
             //    processed (see the sliceStart note above), not to the live
             //    length, so segments appended mid-tick are picked up next time.
-            if (this.stillOwns(meetingId)) this.indexedSegmentCount = processedUpTo;
+            if (this.stillOwns(token)) this.indexedSegmentCount = processedUpTo;
 
         } catch (err) {
             console.error('[LiveRAGIndexer] Processing error:', err);
@@ -234,6 +264,7 @@ export class LiveRAGIndexer {
         // late resumption cannot flush into, or tear down, a meeting that started
         // in the meantime.
         const stopping = this.meetingId;
+        const stoppingToken = this.sessionToken;
 
         console.log(`[LiveRAGIndexer] Stopping for meeting ${this.meetingId}`);
 
@@ -250,14 +281,14 @@ export class LiveRAGIndexer {
         if (this.inFlightTick) {
             try { await this.inFlightTick; } catch { /* the tick logs its own errors */ }
         }
-        if (this.meetingId === stopping) {
+        if (this.sessionToken === stoppingToken) {
             await this.tick(true);
         }
 
-        if (this.meetingId !== stopping) {
+        if (this.sessionToken !== stoppingToken) {
             console.warn(
-                `[LiveRAGIndexer] stop(${stopping}) resumed after ${this.meetingId} had already started — `
-                + 'skipping the reset so the new session is not torn down.'
+                `[LiveRAGIndexer] stop(${stopping}) resumed after session ${this.sessionToken} had already started — `
+                + 'skipping the flush and reset so the new session is not torn down.'
             );
             return;
         }
