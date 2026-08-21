@@ -229,7 +229,18 @@ export class SettingsManager {
         return this.settings[key];
     }
 
-    public set<K extends keyof AppSettings>(key: K, value: AppSettings[K]): void {
+    /**
+     * Persist one setting.
+     *
+     * @returns true when the value was written, false when the store is degraded
+     *          and the write was refused. R-24: this used to be `void`, so a
+     *          caller could not tell the two apart — every settings IPC handler
+     *          reported success and broadcast its `*-changed` event, leaving
+     *          every window showing a value that disk never received and that
+     *          silently reverted on restart. Ignoring the result is still valid
+     *          for callers that have nothing to report.
+     */
+    public set<K extends keyof AppSettings>(key: K, value: AppSettings[K]): boolean {
         // R-15: when the store is degraded, saveSettings() refuses. Mutating
         // in-memory first left the process believing the write succeeded while
         // disk still held the old value — and roughly fifteen IPC handlers report
@@ -237,10 +248,11 @@ export class SettingsManager {
         // and disk cannot disagree.
         if (this.settingsUnreadable) {
             console.warn(`[SettingsManager] Refusing to set "${String(key)}": the settings store is degraded this session (see the quarantine warning at startup).`);
-            return;
+            return false;
         }
         this.settings[key] = value;
         this.saveSettings();
+        return true;
     }
 
     // Resolved screen-understanding mode with default and runtime validation.

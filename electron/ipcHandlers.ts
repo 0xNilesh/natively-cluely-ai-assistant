@@ -5808,7 +5808,12 @@ export function initializeIpcHandlers(appState: AppState): void {
     if (typeof enabled !== 'boolean') {
       return { success: false, error: 'invalid_type' };
     }
-    SettingsManager.getInstance().set('codeVerificationEnabled', enabled);
+    if (!SettingsManager.getInstance().set('codeVerificationEnabled', enabled)) {
+      // R-24: the write was refused (degraded settings store). Returning
+      // success here — and broadcasting below — put every window on a value
+      // disk never received, which silently reverted on the next launch.
+      return { success: false, error: 'settings_store_degraded' };
+    }
     try {
       BrowserWindow.getAllWindows().forEach((win) => {
         if (!win.isDestroyed()) {
@@ -5827,7 +5832,12 @@ export function initializeIpcHandlers(appState: AppState): void {
     if (!['forever', '7d', '30d', 'never'].includes(retention)) {
       return { success: false, error: 'invalid_retention' };
     }
-    SettingsManager.getInstance().set('meetingRetention', retention);
+    if (!SettingsManager.getInstance().set('meetingRetention', retention)) {
+      // R-24: the write was refused (degraded settings store). Returning
+      // success here — and broadcasting below — put every window on a value
+      // disk never received, which silently reverted on the next launch.
+      return { success: false, error: 'settings_store_degraded' };
+    }
     BrowserWindow.getAllWindows().forEach((win) => {
       if (!win.isDestroyed()) {
         win.webContents.send('meeting-retention-changed', retention);
@@ -5853,7 +5863,12 @@ export function initializeIpcHandlers(appState: AppState): void {
     // model-generated code to the cloud runner.
     const settings = SettingsManager.getInstance();
     const merged = mergeProviderDataScopes(settings.get('providerDataScopes'), scopes);
-    settings.set('providerDataScopes', merged as any);
+    if (!settings.set('providerDataScopes', merged as any)) {
+      // R-24: the write was refused (degraded settings store). Returning
+      // success here — and broadcasting below — put every window on a value
+      // disk never received, which silently reverted on the next launch.
+      return { success: false, error: 'settings_store_degraded' };
+    }
     BrowserWindow.getAllWindows().forEach((win) => {
       if (!win.isDestroyed()) {
         // Broadcast the MERGED object, not the incoming payload: the renderer
@@ -5893,7 +5908,12 @@ export function initializeIpcHandlers(appState: AppState): void {
     if (typeof enabled !== 'boolean') {
       return { success: false, error: 'invalid_value' };
     }
-    SettingsManager.getInstance().set('technicalInterviewVisionFirst', enabled);
+    if (!SettingsManager.getInstance().set('technicalInterviewVisionFirst', enabled)) {
+      // R-24: the write was refused (degraded settings store). Returning
+      // success here — and broadcasting below — put every window on a value
+      // disk never received, which silently reverted on the next launch.
+      return { success: false, error: 'settings_store_degraded' };
+    }
     BrowserWindow.getAllWindows().forEach((win) => {
       if (!win.isDestroyed()) {
         win.webContents.send('technical-interview-vision-first-changed', enabled);
@@ -5975,16 +5995,26 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle('hindsight-config:set', async (_, cfg: { baseUrl?: string; apiKey?: string; autoStart?: boolean; serverCommand?: string; llmProvider?: string }) => {
     try {
       const sm = SettingsManager.getInstance();
-      if (typeof cfg?.baseUrl === 'string') sm.set('hindsightBaseUrl', cfg.baseUrl.trim());
+      // R-24: this handler writes up to six keys. A refused write must not be
+      // reported as success, and must not go on to start() a server against
+      // config that was never persisted. Collect the outcomes and fail as one.
+      let persisted = true;
+      const put = <K extends Parameters<typeof sm.set>[0]>(key: K, value: any): void => {
+        if (!sm.set(key, value)) persisted = false;
+      };
+      if (typeof cfg?.baseUrl === 'string') put('hindsightBaseUrl', cfg.baseUrl.trim());
       // Blank apiKey on resave = KEEP the stored one (don't wipe a saved key with an empty
       // field — the documented blank-key-on-resave gotcha). Only write a non-empty value.
-      if (typeof cfg?.apiKey === 'string' && cfg.apiKey.trim()) sm.set('hindsightApiKey', cfg.apiKey.trim());
-      if (typeof cfg?.autoStart === 'boolean') sm.set('hindsightAutoStart', cfg.autoStart);
-      if (typeof cfg?.serverCommand === 'string') sm.set('hindsightServerCommand', cfg.serverCommand.trim());
-      if (typeof cfg?.llmProvider === 'string') sm.set('hindsightLlmProvider', cfg.llmProvider.trim());
+      if (typeof cfg?.apiKey === 'string' && cfg.apiKey.trim()) put('hindsightApiKey', cfg.apiKey.trim());
+      if (typeof cfg?.autoStart === 'boolean') put('hindsightAutoStart', cfg.autoStart);
+      if (typeof cfg?.serverCommand === 'string') put('hindsightServerCommand', cfg.serverCommand.trim());
+      if (typeof cfg?.llmProvider === 'string') put('hindsightLlmProvider', cfg.llmProvider.trim());
       // Saving ANY config reverses the explicit-opt-out sentinel. The user is engaging
       // with Hindsight again — the override should not silently re-apply.
-      if (sm.get('hindsightExplicitlyDisabled') === true) sm.set('hindsightExplicitlyDisabled', false);
+      if (sm.get('hindsightExplicitlyDisabled') === true) put('hindsightExplicitlyDisabled', false);
+      if (!persisted) {
+        return { success: false, error: 'settings_store_degraded' };
+      }
       // Re-run start() so the auto-spawn fires IN-SESSION — previously the user had to restart
       // the app for the boot-time start() to see the new config. start() is idempotent and a
       // no-op when nothing changed (e.g. user just saved the same baseUrl).
@@ -6066,7 +6096,12 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle('hindsight:disable', async () => {
     try {
       const sm = SettingsManager.getInstance();
-      sm.set('hindsightExplicitlyDisabled', true);
+      if (!sm.set('hindsightExplicitlyDisabled', true)) {
+        // R-24: the write was refused (degraded settings store). Returning
+        // success here — and broadcasting below — put every window on a value
+        // disk never received, which silently reverted on the next launch.
+        return { success: false, error: 'settings_store_degraded' };
+      }
       const { HindsightManager } = require('./services/HindsightManager') as typeof import('./services/HindsightManager');
       // If we spawned an app-managed server, kill it. Cloud / user-managed servers stay up.
       try { HindsightManager.getInstance().stopSync(); } catch { /* nothing to stop */ }
@@ -6094,7 +6129,12 @@ export function initializeIpcHandlers(appState: AppState): void {
     if (typeof enabled !== 'boolean') {
       return { success: false, error: 'invalid_value' };
     }
-    SettingsManager.getInstance().set('technicalInterviewVisionFirst', enabled);
+    if (!SettingsManager.getInstance().set('technicalInterviewVisionFirst', enabled)) {
+      // R-24: the write was refused (degraded settings store). Returning
+      // success here — and broadcasting below — put every window on a value
+      // disk never received, which silently reverted on the next launch.
+      return { success: false, error: 'settings_store_degraded' };
+    }
     BrowserWindow.getAllWindows().forEach((win) => {
       if (!win.isDestroyed()) {
         win.webContents.send('technical-interview-vision-first-changed', enabled);
@@ -8530,7 +8570,12 @@ export function initializeIpcHandlers(appState: AppState): void {
       if (!MODEL_CATALOG_IDS.has(modelId)) {
         return { success: false, error: `Unknown local Whisper model: ${modelId}` };
       }
-      SettingsManager.getInstance().set('localWhisperModel', modelId);
+      if (!SettingsManager.getInstance().set('localWhisperModel', modelId)) {
+        // R-24: the write was refused (degraded settings store). Returning
+        // success here — and broadcasting below — put every window on a value
+        // disk never received, which silently reverted on the next launch.
+        return { success: false, error: 'settings_store_degraded' };
+      }
       return { success: true };
     } catch (e: any) {
       return { success: false, error: e.message };
@@ -8551,7 +8596,12 @@ export function initializeIpcHandlers(appState: AppState): void {
       const badGlobal = sm.get('localWhisperModel');
       const badMic = sm.get('localWhisperModelMic');
       const badSystem = sm.get('localWhisperModelSystem');
-      sm.set('localWhisperModel', DEFAULT_MODEL);
+      if (!sm.set('localWhisperModel', DEFAULT_MODEL)) {
+        // R-24: the write was refused (degraded settings store). Returning
+        // success here — and broadcasting below — put every window on a value
+        // disk never received, which silently reverted on the next launch.
+        return { success: false, error: 'settings_store_degraded' };
+      }
       if (badMic) sm.set('localWhisperModelMic', DEFAULT_MODEL);
       if (badSystem) sm.set('localWhisperModelSystem', DEFAULT_MODEL);
       // Drop the recent-failure cooldown for every id we just replaced.
@@ -8599,7 +8649,12 @@ export function initializeIpcHandlers(appState: AppState): void {
         if (typeof cfg?.enabled === 'boolean') sm.set('localWhisperPerChannelEnabled', cfg.enabled);
         if (typeof cfg?.micModelId === 'string') sm.set('localWhisperModelMic', cfg.micModelId);
         if (typeof cfg?.systemModelId === 'string')
-          sm.set('localWhisperModelSystem', cfg.systemModelId);
+          if (!sm.set('localWhisperModelSystem', cfg.systemModelId)) {
+            // R-24: the write was refused (degraded settings store). Returning
+            // success here — and broadcasting below — put every window on a value
+            // disk never received, which silently reverted on the next launch.
+            return { success: false, error: 'settings_store_degraded' };
+          }
         return { success: true };
       } catch (e: any) {
         return { success: false, error: e.message };
@@ -8848,7 +8903,12 @@ export function initializeIpcHandlers(appState: AppState): void {
       llmHelper.setGroqFastTextMode(enabled);
 
       const { SettingsManager } = require('./services/SettingsManager');
-      SettingsManager.getInstance().set('groqFastTextMode', enabled);
+      if (!SettingsManager.getInstance().set('groqFastTextMode', enabled)) {
+        // R-24: the write was refused (degraded settings store). Returning
+        // success here — and broadcasting below — put every window on a value
+        // disk never received, which silently reverted on the next launch.
+        return { success: false, error: 'settings_store_degraded' };
+      }
 
       // Broadcast to all windows
       BrowserWindow.getAllWindows().forEach((win) => {
@@ -8874,7 +8934,12 @@ export function initializeIpcHandlers(appState: AppState): void {
     try {
       const normalized = CodexCliService.normalizeConfig(config || {});
       const sm = SettingsManager.getInstance();
-      sm.set('codexCliEnabled', normalized.enabled);
+      if (!sm.set('codexCliEnabled', normalized.enabled)) {
+        // R-24: the write was refused (degraded settings store). Returning
+        // success here — and broadcasting below — put every window on a value
+        // disk never received, which silently reverted on the next launch.
+        return { success: false, error: 'settings_store_degraded' };
+      }
       sm.set('codexCliPath', normalized.path);
       sm.set('codexCliModel', normalized.model);
       sm.set('codexCliFastModel', normalized.fastModel);
@@ -10094,7 +10159,12 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle('set-action-button-mode', (_, mode: 'recap' | 'brainstorm') => {
     const { SettingsManager } = require('./services/SettingsManager');
     const sm = SettingsManager.getInstance();
-    sm.set('actionButtonMode', mode);
+    if (!sm.set('actionButtonMode', mode)) {
+      // R-24: the write was refused (degraded settings store). Returning
+      // success here — and broadcasting below — put every window on a value
+      // disk never received, which silently reverted on the next launch.
+      return { success: false, error: 'settings_store_degraded' };
+    }
 
     BrowserWindow.getAllWindows().forEach((win) => {
       if (!win.isDestroyed()) {
@@ -10943,7 +11013,12 @@ export function initializeIpcHandlers(appState: AppState): void {
       orchestrator.setKnowledgeMode(enabled);
 
       const { SettingsManager } = require('./services/SettingsManager');
-      SettingsManager.getInstance().set('knowledgeMode', enabled);
+      if (!SettingsManager.getInstance().set('knowledgeMode', enabled)) {
+        // R-24: the write was refused (degraded settings store). Returning
+        // success here — and broadcasting below — put every window on a value
+        // disk never received, which silently reverted on the next launch.
+        return { success: false, error: 'settings_store_degraded' };
+      }
 
       return { success: true };
     } catch (error: any) {
