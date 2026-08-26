@@ -48,8 +48,13 @@
     html[data-window="launcher"][data-platform="linux"] body {
       background: transparent;
     }
-    html[data-window="launcher"][data-platform="win32"] #root,
-    html[data-window="launcher"][data-platform="linux"] #root {
+    /* The `:not()` mirrors src/index.css. It is not dead weight here: this copy
+       is NOT !important, so it is the rule that takes over the moment the
+       stylesheet's !important copy stops matching — i.e. exactly during the
+       Settings > Interface Opacity preview, where the launcher window is
+       supposed to go see-through. Without it the preview shows black. */
+    html[data-window="launcher"][data-platform="win32"]:not([data-opacity-preview="active"]) #root,
+    html[data-window="launcher"][data-platform="linux"]:not([data-opacity-preview="active"]) #root {
       background: #000;
     }
     html[data-window="launcher"][data-platform="win32"] body,

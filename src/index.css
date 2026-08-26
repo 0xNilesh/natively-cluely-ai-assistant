@@ -3003,9 +3003,24 @@ html[data-window="launcher"][data-platform="linux"] body {
    invisible. Once the launcher mounts, its own root div covers this entirely.
 
    `!important` is required to beat the global `html, body, #root` transparent
-   rule near the top of this file, which is itself `!important`. */
-html[data-window="launcher"][data-platform="win32"] #root,
-html[data-window="launcher"][data-platform="linux"] #root {
+   rule near the top of this file, which is itself `!important`.
+
+   SUPPRESSED DURING THE INTERFACE-OPACITY PREVIEW. Settings > Interface
+   Opacity, held down, is the one moment the launcher window is SUPPOSED to be
+   see-through: startPreviewingOpacity() in SettingsOverlay.tsx hides every DOM
+   layer and WindowHelper.setLauncherOpacityPreview() strips the native
+   backgroundColor, so the desktop shows through and the mockup can be judged
+   against it. This backing is painted on #root, ABOVE the native layer and
+   BELOW everything the preview hides, so without the `:not()` it survives all
+   of that and the preview shows a black rectangle — which is exactly what it
+   did between the corner-rounding work and this guard. macOS is unaffected
+   (this rule never matched there; its launcher is a native rounded window).
+
+   The same `:not()` has to be on index.html's early-paint mirror: that copy is
+   NOT `!important`, so the moment this rule stops matching, the mirror wins and
+   paints the same black. */
+html[data-window="launcher"][data-platform="win32"]:not([data-opacity-preview="active"]) #root,
+html[data-window="launcher"][data-platform="linux"]:not([data-opacity-preview="active"]) #root {
   background: #000000 !important;
 }
 
@@ -3066,6 +3081,21 @@ html[data-window="launcher"][data-platform="linux"][data-theme="light"] body::af
 html[data-window="launcher"][data-platform="win32"][data-window-maximized="true"] body::after,
 html[data-window="launcher"][data-platform="linux"][data-window-maximized="true"] body::after {
   box-shadow: none;
+}
+
+/* Interface-Opacity preview → no ring. The ring frames the launcher's opaque
+   surface; with that surface suppressed (see the #root rule above) there is
+   nothing left to frame, and a box-shadow paints whether or not anything is
+   behind it — so it would hang a 1px rounded rectangle in mid-air over the
+   desktop for the whole hold.
+
+   `!important` rather than a fourth `:not()` variant: the theme override above
+   is one selector MORE specific than the base pair, so an equally-specific
+   suppression here would lose to it in light theme. This is one rule that beats
+   all three regardless of source order, which also keeps it from disturbing the
+   maximized/light ordering the launcher-corner check pins. */
+html[data-opacity-preview="active"] body::after {
+  box-shadow: none !important;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

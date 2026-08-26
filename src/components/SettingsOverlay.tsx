@@ -774,6 +774,18 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
         }
     }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
+    // Last-resort clear of the preview attribute. `isOpen` going false is
+    // handled above, but an UNMOUNT mid-drag (a route/window teardown, an error
+    // boundary) never runs that branch, and a stuck
+    // data-opacity-preview="active" would leave the launcher permanently
+    // without its opaque #root backing on Windows/Linux — resurrecting the
+    // see-through splash→launcher gap that backing exists to fill. Clearing an
+    // attribute that is already absent is a no-op, so this is safe to run on
+    // every unmount.
+    useEffect(() => () => {
+        document.documentElement.removeAttribute('data-opacity-preview');
+    }, []);
+
     // The launcher window is created with `transparent: true` on every
     // platform (see createWindow() in WindowHelper.ts) so setLauncherOpacityPreview
     // can punch through it at runtime everywhere, not just macOS. Windows/Linux
@@ -789,6 +801,17 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
         if (canPreviewTransparency) {
             // Direct DOM mutation for sub-millisecond instant hide (bypassing slow React tree diffs)
             document.body.classList.add('disable-transitions');
+
+            // Windows/Linux: the launcher's frameless rounded window carries an
+            // opaque black backing on #root and a hairline ring on body::after
+            // (src/index.css, plus an early-paint mirror of the backing in
+            // index.html). Both sit ABOVE the native layer this preview strips
+            // and BELOW every DOM layer it hides, so neither is reached by any
+            // of the work below — they have to be switched off by selector.
+            // Setting it unconditionally: the attribute matches nothing on
+            // macOS, where the launcher is a native rounded window with no such
+            // rules, so there is no platform branch to keep in sync.
+            document.documentElement.setAttribute('data-opacity-preview', 'active');
 
             const backdrop = document.getElementById('settings-backdrop');
             const wrapper = document.getElementById('settings-panel-wrapper');
@@ -850,6 +873,13 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
         if (canPreviewTransparency) {
             // Direct DOM restoration
             document.body.classList.remove('disable-transitions');
+            // Restore the launcher's opaque backing + hairline ring on
+            // Windows/Linux (no-op elsewhere). Deliberately NOT gated on
+            // isPreviewingOpacity — this function is the unconditional
+            // restore path (pointerCancel, pointerLeave, close-during-drag),
+            // so it must be able to resync a window whose attribute disagrees
+            // with the flag.
+            document.documentElement.removeAttribute('data-opacity-preview');
             const backdrop = document.getElementById('settings-backdrop');
             const wrapper = document.getElementById('settings-panel-wrapper');
             const panel = document.getElementById('settings-panel');
