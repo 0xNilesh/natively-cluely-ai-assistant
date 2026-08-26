@@ -38,6 +38,13 @@ export interface NativeModule {
   // macOS makes the same call from ImeDetector.ts. Optional: requires a binary
   // rebuild; callers must `typeof`-check and treat a missing export as "no IME"
   // so a stale binary keeps today's behaviour.
+  //
+  // TYPE SOURCE OF TRUTH: this hand-maintained interface — NOT the NAPI-RS
+  // generated native-module/index.d.ts — is what the Electron code consumes
+  // (loadNativeModule() returns `NativeModule`). The generated .d.ts is built on
+  // the macOS CI host, where this fn (whole file `#![cfg(target_os="windows")]`)
+  // is compiled out, so it is ABSENT there by design. That omission is cosmetic;
+  // keep this declaration here so win32 callers stay typed regardless.
   isImeKeyboardActive?: () => boolean;
   // Stealth keyboard interception. macOS: CGEventTap. Windows:
   // WH_KEYBOARD_LL low-level hook (native-module/src/keyboard_hook_windows.rs)

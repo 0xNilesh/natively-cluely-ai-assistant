@@ -45,7 +45,11 @@ export class StealthKeyboardManager {
     private active = false;
     // Shortcut-guard: an always-on shortcut-only use of the SAME native hook
     // that swallows the app's own chords even when full stealth typing is off.
-    // Opt-in (default off) — see setShortcutGuardEnabled. Windows only.
+    // Windows only, DEFAULT ON (opt-out) — see setShortcutGuardEnabled. This
+    // field is the runtime mirror and starts `false` as a fail-safe (pre-boot /
+    // off-Windows / settings unavailable); the effective default-ON policy is
+    // driven from boot (electron/main.ts), which calls setShortcutGuardEnabled
+    // unless the user has explicitly stored `stealthShortcutGuard: false`.
     private shortcutGuardEnabled = false;
     private guardRunning = false;
     private nativeAvailable = false;
@@ -425,23 +429,37 @@ export class StealthKeyboardManager {
     // ─── Shortcut-guard (opt-in, Windows only) ───────────────────────────
 
     /**
-     * Enable/disable the always-on shortcut-guard. Persisted by the caller
-     * (SettingsManager 'stealthShortcutGuard'); this only drives the runtime.
-     * No-op off Windows. Enabling starts the guard immediately (unless full
-     * stealth typing is active, in which case stop() will start it later).
+     * Enable/disable the always-on shortcut-guard. DEFAULT ON (opt-out) on
+     * Windows — boot enables it unless the user stored `false`. Persisted by the
+     * caller (SettingsManager 'stealthShortcutGuard'); this only drives the
+     * runtime. No-op off Windows (maybeStartGuard short-circuits on non-win32).
+     * Enabling starts the guard immediately (unless full stealth typing is
+     * active, in which case stop() will start it later).
      */
     public setShortcutGuardEnabled(enabled: boolean): void {
-        if (this.shortcutGuardEnabled === enabled) return;
         this.shortcutGuardEnabled = enabled;
+        // NOT `if (=== enabled) return` first: that blocked recovery. When the
+        // guard is enabled but a prior arm FAILED (empty chord table at boot, a
+        // transient SetWindowsHookExW failure, EDR momentarily blocking the hook)
+        // guardRunning stays false, and an early-return here would leave the
+        // "bypass hotkey" protection off for the whole session with no retry.
+        // maybeStartGuard() is idempotent — it no-ops when already running — so
+        // calling it again is a safe retry.
         if (enabled) this.maybeStartGuard();
         else this.stopGuard();
     }
 
-    /** Re-arm the guard with the current chord table (call after a rebind). */
+    /**
+     * Re-arm the guard with the current chord table (call after a rebind). Also
+     * a RECOVERY point: if the guard should be running but a prior arm failed,
+     * this (re)starts it — a rebind is exactly when a boot-time arming failure
+     * would otherwise stay stuck off, since maybeStartGuard/setShortcutGuardEnabled
+     * are the only other retry paths. No-op when the feature is disabled.
+     */
     public refreshShortcutGuard(): void {
-        if (!this.guardRunning) return;
-        this.stopGuard();
-        this.maybeStartGuard();
+        if (!this.shortcutGuardEnabled) return; // feature off — nothing to guard
+        if (this.guardRunning) this.stopGuard(); // tear down to re-arm with the new table
+        this.maybeStartGuard();                   // (re)start; retries a failed prior arm
     }
 
     /** Start the shortcut-guard if it should run and isn't already. */

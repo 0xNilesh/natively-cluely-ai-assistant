@@ -51,6 +51,38 @@
 //! the shared state is reached through a process-global `Mutex<Option<...>>`.
 //! Only one tap is ever active at a time (single overlay), so a global is the
 //! natural fit.
+//!
+//! # Threat model — what this does and does NOT hide
+//!
+//! This is the authoritative in-repo statement of the hook's limits. "Stealth"
+//! here means the FOREGROUND APP does not observe our overlay's input or focus —
+//! it is NOT keystroke invisibility, and cannot be, from user mode:
+//!
+//! WHAT IT AVOIDS (all observable by the foreground app / a screen-share):
+//!   • A visible switch to another app (the overlay is WS_EX_NOACTIVATE).
+//!   • Focus/blur events on the foreground window when we type or click.
+//!   • Our OWN control shortcuts leaking their characters into the focused
+//!     field (the app-chord swallow — see app_chord.rs).
+//!
+//! WHAT IT DOES NOT — AND CANNOT — AVOID (unchanged by anything here):
+//!   • Windows still observes the physical key at the raw-input layer; we only
+//!     decide, per key, whether to forward it (`CallNextHookEx`) or swallow it
+//!     (`LRESULT(1)`) — the OS saw it either way before our proc ran.
+//!   • Another low-level keyboard hook installed by any other process.
+//!   • Raw Input (`WM_INPUT`) or GetAsyncKeyState polling by another process.
+//!   • Kernel-level monitoring / interception drivers (e.g. a keyboard filter
+//!     driver). A user-mode `WH_KEYBOARD_LL` hook sits ABOVE them and cannot
+//!     hide from them. Moving below them would require our own signed kernel
+//!     driver — which would INCREASE EDR/AV visibility, the opposite of the
+//!     goal — so it is a deliberate non-goal.
+//!   • Behavioural analysis of typing cadence.
+//!   • Security software detecting the hook itself (`SetWindowsHookExW` can be
+//!     blocked outright by corporate EDR — start() reports that and JS degrades
+//!     to a focusable overlay rather than showing a dead "engaged" state).
+//!
+//! Do not describe this module — in code, docs, or product copy — as making
+//! keystrokes "invisible" or "undetectable at the OS level". It hides the
+//! overlay's activation and shortcut leakage; it does not hide typing.
 
 #![cfg(target_os = "windows")]
 
@@ -333,6 +365,22 @@ unsafe fn keyboard_hook_inner(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRES
             match_app_chord(chords.as_slice(), vk, mods).map(|s| s.to_string())
         };
         if let Some(id) = matched {
+            // AUTO-REPEAT GUARD: if we already swallowed this chord's key-DOWN
+            // and are waiting for its key-UP, a further DOWN for the same VK is
+            // hardware auto-repeat (the user is holding the chord). Swallow it
+            // too, but do NOT re-dispatch — otherwise holding e.g. Ctrl+Enter
+            // fires the action ~20-30×/sec (a storm of process-screenshots /
+            // answer triggers). `swallowed_ups` already means exactly "down
+            // swallowed, up pending", so it doubles as the repeat detector; the
+            // key-UP handler above clears it, re-arming a genuine re-press.
+            if state
+                .swallowed_ups
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .contains(&vk)
+            {
+                return LRESULT(1);
+            }
             // Deliver on the SAME threadsafe callback as ordinary keys, tagged
             // with the action id so StealthKeyboardManager dispatches it instead
             // of typing it into the overlay.
