@@ -115,6 +115,9 @@ export interface ElectronAPI {
   onMeetingStateChanged: (callback: (data: { isActive: boolean }) => void) => () => void
   onWindowMaximizedChanged: (callback: (isMaximized: boolean) => void) => () => void
   onEnsureExpanded: (callback: () => void) => () => void
+  // Window-swap choreography cues (Windows only) — see src/lib/windowTransitions.ts.
+  onOverlayTransition: (callback: (phase: 'arm' | 'play') => void) => () => void
+  onLauncherTransition: (callback: (phase: 'recede' | 'restore') => void) => () => void
   openExternal: (url: string) => Promise<void>
   // UX2: in-app TCC repair. macOS only; returns { ok, bundleId, results, message, promptRelaunch }.
   repairTccPermissions: () => Promise<{

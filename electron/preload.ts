@@ -1352,6 +1352,26 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.removeListener('ensure-expanded', subscription);
     };
   },
+  // ── Window-swap choreography (Windows only; see WindowHelper.ts) ──────────
+  // Both are one-shot motion cues, not state. They are consumed in src/main.tsx
+  // before React mounts rather than by a component, because the surfaces they
+  // animate (#root) exist from parse time and must be in their pre-entrance
+  // state on the very first painted frame — a React effect would arrive after
+  // it. Delivered to the overlay, pill and toggle renderers.
+  onOverlayTransition: (callback: (phase: 'arm' | 'play') => void) => {
+    const subscription = (_: any, phase: 'arm' | 'play') => callback(phase);
+    ipcRenderer.on('overlay-transition', subscription);
+    return () => {
+      ipcRenderer.removeListener('overlay-transition', subscription);
+    };
+  },
+  onLauncherTransition: (callback: (phase: 'recede' | 'restore') => void) => {
+    const subscription = (_: any, phase: 'recede' | 'restore') => callback(phase);
+    ipcRenderer.on('launcher-transition', subscription);
+    return () => {
+      ipcRenderer.removeListener('launcher-transition', subscription);
+    };
+  },
   // toggleAdvancedSettings was removed (F-121): it invoked
   // 'toggle-advanced-settings', a channel no handler ever registered — any
   // caller got a silent "No handler registered" rejection. Zero call sites.

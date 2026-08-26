@@ -1055,9 +1055,16 @@ function formatPermissionMessage(reason: PermissionReason, extra?: { device?: st
       if (!isMac) return formatPermissionMessage('system-audio-stuck');
       return 'System audio is arriving silent. Toggle Natively off and on under Privacy & Security → Screen Recording, then restart.';
     case 'mic-denied':
+      // The "then restart" half is macOS-ONLY. macOS reads a TCC grant at
+      // process launch, so a fresh Microphone grant does not reach the running
+      // app — and the overlay banner promotes a Restart button for exactly that
+      // (NativelyInterface showRestartInstead, gated on isMac). Windows applies
+      // the privacy toggle live, and gets no Restart button, so telling a
+      // Windows user to restart asked for a step the UI never offered and the
+      // OS never needed. Retrying the meeting is the true next step there.
       return isMac
         ? 'Enable Natively under Privacy & Security → Microphone, then restart.'
-        : 'Enable Natively under Settings → Privacy → Microphone, then restart.';
+        : 'Enable Natively under Settings → Privacy → Microphone, then start the meeting again.';
     case 'mic-zero-fill':
       return isMac
         ? "Check the device isn't muted, and that Natively is enabled under Privacy & Security → Microphone."
@@ -5950,6 +5957,31 @@ export class AppState {
     console.log('[Main] Starting Meeting...', metadata);
     this.simpleAutoAnswer.onMeetingStart();
 
+    // ─── CLEAR THE OVERLAY BEFORE IT IS SHOWN, NOT AFTER ───────────────────
+    // The overlay BrowserWindow/renderer is persistent (created once, only
+    // hide()/show()'d), so whatever the previous meeting left mounted is what
+    // the next show() puts on screen. endMeeting() already clears it while
+    // hidden, but that clear is skipped on the cold-start / crash-recovery
+    // path AND on endMeeting()'s "teardown already in flight" early return —
+    // so this send is the safety net that path depends on.
+    //
+    // It must go out BEFORE `setWindowMode('overlay')` below. `send()` is
+    // async (the renderer picks it up on its own task queue), so a reset sent
+    // AFTER the swap races the show(): on a fast Stop→Start the window is
+    // already visible when the reset lands, and the user watches the previous
+    // meeting's messages + expanded width get torn down ON SCREEN a beat
+    // later — the "old overlay flashes, then snaps back to default" report.
+    // Sending it here, ahead of the `_pendingTeardown` await and the
+    // permission probes below, gives the renderer the whole start sequence to
+    // apply the clear while it is still hidden.
+    //
+    // Platform-neutral: the persistent-overlay reuse and the async send are
+    // the same on macOS and Windows. Windows just loses the race more often
+    // because a hidden HWND's renderer is throttled and repaints nothing
+    // until show(), so it has no clean frame banked when the swap arrives.
+    this.sendToWindow(this.getWindowHelper().getOverlayWindow(), 'session-reset');
+    this.sendToWindow(this.getWindowHelper().getLauncherWindow(), 'session-reset');
+
     // If a previous endMeeting() is still draining STT in the background, wait
     // for it to finish before we boot a new session — otherwise the BG teardown
     // could call STT.stop() on instances the new meeting just started using.
@@ -6027,6 +6059,26 @@ export class AppState {
     // the reset bounds.)
     this.windowHelper.resetOverlayPosition();
 
+    // ─── LET THE LAUNCHER START LEAVING BEFORE THE OVERLAY ARRIVES ─────────
+    // Windows only; resolves immediately (zero added latency) on macOS, with
+    // no launcher, or with the launcher already hidden.
+    //
+    // This asks the launcher's RENDERER to recede — a compositor-driven
+    // scale + fade — and then waits out a short lead so the swap below lands
+    // while that animation is still running. The launcher's window is not
+    // hidden by the swap any more either; WindowHelper keeps it alive
+    // underneath the always-on-top overlay until the recede finishes. The two
+    // windows therefore overlap instead of cutting, which is the whole point:
+    // see the WINDOWS MEETING-SWAP CHOREOGRAPHY block in WindowHelper.ts.
+    //
+    // Placed HERE, after the permission probes, and not next to the
+    // session-reset at the top: everything above can still throw (a denied mic
+    // grant aborts the start and leaves the user on the launcher), and a
+    // launcher that had already receded would be left faded out on an aborted
+    // start. Below this line the only remaining step is the swap itself, and
+    // every route back to the launcher restores it.
+    await this.windowHelper.beginLauncherRecede();
+
     // ─── WINDOW SWAP BEFORE STATE BROADCAST ───────────────────────────────
     // Switch to the overlay BEFORE flipping `isMeetingActive` to true. If we
     // broadcast meeting-state-changed:{isActive:true} while the launcher is
@@ -6082,10 +6134,6 @@ export class AppState {
         properties: { modeTemplateType: am?.templateType, hasMetadata: Boolean(metadata) },
       });
     } catch { /* non-fatal */ }
-
-    // Emit session reset to clear UI state immediately
-    this.sendToWindow(this.getWindowHelper().getOverlayWindow(), 'session-reset');
-    this.sendToWindow(this.getWindowHelper().getLauncherWindow(), 'session-reset');
 
     // LOCAL-MODEL WARMUP: if the active model is a local Ollama model, warm + pin
     // it now (fire-and-forget) so the cold weight-load (8-12s for a 7-9B model)
@@ -7733,13 +7781,19 @@ export class AppState {
   }
 
   public getStealthShortcutGuardEnabled(): boolean {
-    try { return SettingsManager.getInstance().get('stealthShortcutGuard') === true; } catch { return false; }
+    // Windows DEFAULT ON (opt-out): only an explicitly stored `false` disables
+    // the guard; an unset value (fresh install / never toggled) counts as
+    // enabled. A settings read failure falls back to the default (enabled) so
+    // the protection is not silently lost. The runtime side is inert off
+    // Windows regardless, so reporting the stored preference here is harmless.
+    try { return SettingsManager.getInstance().get('stealthShortcutGuard') !== false; } catch { return true; }
   }
 
   /**
-   * Toggle the Windows opt-in shortcut-guard (always-on hook that swallows the
-   * app's own chords so they can't leak while stealth typing is off). Persists
-   * the setting and applies it live. No-op effect off Windows (the runtime side
+   * Toggle the Windows shortcut-guard (always-on hook that swallows the app's
+   * own chords so they can't leak while stealth typing is off). DEFAULT ON
+   * (opt-out) on Windows — pass `false` to disable. Persists the setting and
+   * applies it live. No-op effect off Windows (the runtime side
    * short-circuits), but the preference still persists.
    */
   public setStealthShortcutGuardEnabled(enabled: boolean): void {
@@ -8557,21 +8611,32 @@ if (process.env.THINKING_MATRIX === '1') {
   // Register global shortcuts using KeybindManager
   KeybindManager.getInstance().registerGlobalShortcuts()
 
-  // Opt-in shortcut-guard (Windows only, default off): an always-on hook that
+  // Shortcut-guard (Windows only, DEFAULT ON / opt-out): an always-on hook that
   // swallows + self-dispatches the app's own chords so a dropped RegisterHotKey
   // registration can't leak a shortcut character into the foreground app even
   // when stealth typing is off. Enabled AFTER shortcuts register so the chord
-  // table is populated. Off by default — an always-present low-level keyboard
-  // hook is more visible to EDR/AV than one that exists only during sessions.
+  // table is populated. On by default — a dropped hotkey registration otherwise
+  // leaks a shortcut's completing character (a newline from Ctrl+Enter, a digit
+  // from Ctrl+1…) into whatever field is focused during the ~10s health-poll
+  // recovery window. Only an explicit `false` disables it; the trade-off is that
+  // an always-present low-level keyboard hook is one more thing EDR/AV can see.
   if (process.platform === 'win32') {
+    // Default ON: enable unless the user has explicitly stored `false`. A read
+    // failure falls back to the default (enabled) rather than silently losing
+    // the protection.
+    let enabled = true;
     try {
-      const enabled = SettingsManager.getInstance().get('stealthShortcutGuard') === true;
-      if (enabled) {
+      enabled = SettingsManager.getInstance().get('stealthShortcutGuard') !== false;
+    } catch (e) {
+      console.error('[Main] failed to read stealthShortcutGuard (defaulting ON):', e);
+    }
+    if (enabled) {
+      try {
         const { StealthKeyboardManager } = require('./services/StealthKeyboardManager');
         StealthKeyboardManager.getInstance().setShortcutGuardEnabled(true);
+      } catch (e) {
+        console.error('[Main] failed to init stealth shortcut-guard:', e);
       }
-    } catch (e) {
-      console.error('[Main] failed to init stealth shortcut-guard:', e);
     }
   }
 

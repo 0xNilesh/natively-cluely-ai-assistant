@@ -10,6 +10,13 @@
     try {
       var w = new URLSearchParams(location.search).get('window') || 'launcher';
       document.documentElement.setAttribute('data-window', w);
+      // Platform too, and HERE rather than only in main.tsx: the frameless
+      // launcher's corner radius is gated on data-platform, so if it is not set
+      // until the module bundle evaluates, the window paints square for the
+      // whole load and then pops round. Set at parse time it is never square.
+      // preload runs before page scripts, so electronAPI is already present.
+      var p = (window.electronAPI && window.electronAPI.platform) || '';
+      if (p) document.documentElement.setAttribute('data-platform', p);
     } catch(e) {
       document.documentElement.setAttribute('data-window', 'launcher');
     }
@@ -22,13 +29,42 @@
     html[data-window="cropper"] #root {
       background: transparent !important;
     }
+
+    /* EARLY-PAINT MIRROR of the frameless launcher's rounded window.
+       src/index.css is the source of truth, but it only arrives with the module
+       bundle; until then this block owns the window's shape. Without it the
+       launcher paints as a hard black rectangle for the whole load and then
+       snaps to rounded, which is very visible at startup.
+
+       The black has to sit on #root and NOT on html/body here: a canvas
+       background is painted over the full window rect and ignores any radius,
+       so leaving it on html/body would keep the corners square no matter what.
+
+       KEEP THE RADIUS IN SYNC with src/index.css. The launcher-corner check
+       (tests/css/launcher-corner-radius.check.mjs) fails if these two drift. */
+    html[data-window="launcher"][data-platform="win32"],
+    html[data-window="launcher"][data-platform="linux"],
+    html[data-window="launcher"][data-platform="win32"] body,
+    html[data-window="launcher"][data-platform="linux"] body {
+      background: transparent;
+    }
+    html[data-window="launcher"][data-platform="win32"] #root,
+    html[data-window="launcher"][data-platform="linux"] #root {
+      background: #000;
+    }
+    html[data-window="launcher"][data-platform="win32"] body,
+    html[data-window="launcher"][data-platform="linux"] body {
+      border-radius: 16px;
+      overflow: hidden;
+      contain: paint;
+    }
   </style>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <meta http-equiv="Content-Security-Policy"
     content="default-src 'self'; script-src 'self' 'unsafe-inline' https://www.googletagmanager.com; img-src 'self' data: https:; connect-src 'self' https://generativelanguage.googleapis.com https://api.groq.com https://*.google-analytics.com https://analytics.google.com https://www.googletagmanager.com https://campaign-sand.vercel.app; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com;">
 </head>
 
-<body style="background-color: #000000; margin: 0; overflow: hidden;">
+<body style="margin: 0; overflow: hidden;">
   <!-- Synchronously apply cached theme before any render — prevents flash/mixed theme -->
   <script>
     try {

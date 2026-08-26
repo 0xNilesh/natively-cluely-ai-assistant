@@ -2877,11 +2877,323 @@ a,
 /* ── Windows / Linux window chrome – rounded corners ──────────────────────────
    Using positive selectors (not :not()) avoids a brief border-radius flash on
    macOS during cold-start, before the data-platform attribute is set.
+
+   macOS is excluded because it needs nothing: the launcher there is a native
+   `titleBarStyle: 'hiddenInset'` window, so the OS rounds and masks the rect
+   itself. Windows/Linux are `frame: false`, so the curve has to come from the
+   DOM — this rule is the only thing producing it.
+
+   This rule is HALF of the effect. The pixels outside the radius are still
+   inside the window rect, and they render the BrowserWindow's native
+   `backgroundColor`. That value is `LAUNCHER_TRANSPARENT_BG` on win32/linux in
+   electron/WindowHelper.ts (createWindow's launcherSettings, and again in
+   setLauncherOpacityPreview) precisely so the corners composite to the
+   desktop. If someone makes it opaque there, this radius stops reading as a
+   rounded window and starts reading as rounded UI floating inside four square
+   corner wedges. Change the two together or not at all.
+
+   SHAPE. macOS window corners are continuous (a superellipse), and
+   `corner-shape: squircle` reproduces that. It was tried here and REJECTED on
+   measurement - do not reach for it again without re-measuring:
+
+     1. A squircle's `border-radius` is not its apparent size. It hugs the
+        corner far more tightly, so `squircle 16px` reads as a ~6px corner.
+        Matching a 16px circular corner needed `squircle 26px`.
+     2. Worse, it concentrates its curvature. Measured horizontal inset per
+        scanline down the arc:
+
+           round 16px     17 14 12 11 10  9  8  7  6  5  5   (steps: 3,2,1,1...)
+           squircle 26px  17 13 11  9  8  7  7  6  5  5  4   (steps: 4,2,2,1...)
+
+        Same apparent depth, but the squircle is near-flat at the tangents and
+        then turns hard, so it jumps up to 4px per row where it meets the
+        straight edge. Antialiasing cannot hide a 4px jump: the sides stay
+        crisp and the corner reads as stepped. A circular arc spreads its
+        curvature evenly and advances ~1px per row nearly the whole way.
+
+   So: a plain circular arc, which is also literally what was asked for. This
+   removes the radius/shape calibration coupling and the Chrome-139
+   `corner-shape` dependency along with it.
+
+   16px is both the literal and the apparent size. It is deliberately NOT
+   scaled by devicePixelRatio: CSS px are already density-independent, so this
+   is 20 physical px at 125% and the apparent size holds across displays.
+
+   NOT AN ALIASING PROBLEM. The arc is antialiased in every configuration
+   tested - `overflow: hidden`, `clip-path`, mask, `contain: paint`, and with
+   the subtree layer-promoted - at 36-40 partial-alpha px, and 13/13 arc
+   scanlines carry 3-5 intermediate values in a true-resolution desktop
+   capture. If a corner ever looks rough, measure the per-row step size before
+   suspecting antialiasing.
+
+   The radius only bites because body also CLIPS: the launcher's root div
+   carries its own opaque background and would otherwise paint straight over
+   the corners. The `overflow: hidden` below is a redundant restatement — the
+   global `html, body, #root` rule near the top of this file already supplies
+   it, and tests/css/launcher-corner-radius.check.mjs still passes with this
+   copy deleted. It is kept as a local guard so the two rules would have to be
+   broken together, not as the thing doing the work.
+
+   The radius is theme-independent by construction: it clips whatever the
+   surface underneath happens to be, so light and dark get the same silhouette.
    ─────────────────────────────────────────────────────────────────────────── */
 html[data-platform="win32"] body,
 html[data-platform="linux"] body {
-  border-radius: 8px !important;
+  border-radius: 16px !important;
   overflow: hidden;
+}
+
+/* Make the clip reach POSITION: FIXED children too.
+
+   `overflow: hidden` above only clips descendants for which body is a
+   containing block — and a `position: fixed` element's containing block is the
+   viewport, not body. So every full-screen fixed overlay painted straight over
+   the rounded corners and squared the window off. The startup splash
+   (StartupSequence.tsx: `fixed inset-0 ... bg-[#000000]`) is the visible case —
+   the window had hard corners for the whole boot animation — but the same was
+   true of any fixed backdrop.
+
+   `contain: paint` fixes it by making body a containing block for fixed
+   descendants AND clipping to its border box, radius included. Measured
+   alternatives in this Electron:
+
+     · overflow: hidden alone   → fixed child NOT clipped (the bug)
+     · contain: paint           → clipped, corner profile preserved
+     · transform: translateZ(0) → clipped, but forces layer promotion for the
+                                  whole window to buy nothing extra
+     · clip-path: inset(round)  → clipped, but it also ignores `corner-shape`,
+                                  so it would silently undo any non-circular
+                                  corner. Measured: always a circular profile.
+
+   Launcher-scoped: it is the only window with an opaque body, and this makes
+   body a containing block + stacking context, which is a behavior change worth
+   confining. Body is `width/height: 100%` with no margin, so its box is
+   identical to the viewport and fixed elements do not move. */
+html[data-window="launcher"][data-platform="win32"] body,
+html[data-window="launcher"][data-platform="linux"] body {
+  contain: paint;
+}
+
+/* Opaque backing INSIDE the clip, so the window is never see-through.
+
+   The launcher's native BrowserWindow backgroundColor used to be opaque black
+   on Windows, and that black was what filled the window during the moment
+   between the startup splash unmounting and the launcher mounting: the
+   sequence read splash -> black -> launcher. Rounding the corners required
+   that native colour to become fully transparent (an opaque one paints square
+   wedges outside the radius - see the note on LAUNCHER_TRANSPARENT_BG in
+   electron/WindowHelper.ts), which turned that black beat into a see-through
+   hole onto the desktop.
+
+   The fix is to move the black from the NATIVE layer to the DOM, where body's
+   rounded clip applies to it: the window keeps an opaque rounded surface at
+   all times, and only the corners fall through to the desktop.
+
+   It goes on #root and NOT on body on purpose. A background set on body while
+   html is transparent normally PROPAGATES TO THE CANVAS, painting the whole
+   viewport free of body's border-radius - which would fill the corners back in
+   and square the window off. The `contain: paint` above happens to suppress
+   that propagation today, so body would in fact work right now (verified: the
+   check still passes with the selector moved to body). #root is used anyway so
+   this does not silently depend on paint containment staying on body; #root is
+   an ordinary element and is clipped normally either way.
+
+   Black rather than a theme colour: this only shows in the gap around the
+   black logo splash, so matching the splash is what keeps the transition
+   invisible. Once the launcher mounts, its own root div covers this entirely.
+
+   `!important` is required to beat the global `html, body, #root` transparent
+   rule near the top of this file, which is itself `!important`. */
+html[data-window="launcher"][data-platform="win32"] #root,
+html[data-window="launcher"][data-platform="linux"] #root {
+  background: #000000 !important;
+}
+
+/* Maximized → square. A maximized window is flush with the work area on all
+   four sides, so the radius would not read as a rounded window at all: it
+   would cut four transparent notches through to the desktop at the screen
+   corners. `data-window-maximized` is set in src/main.tsx from the same
+   main-process maximize signal WindowControls consumes. */
+html[data-platform="win32"][data-window-maximized="true"] body,
+html[data-platform="linux"][data-window-maximized="true"] body {
+  border-radius: 0 !important;
+}
+
+/* Hairline edge on the curve itself.
+
+   Scoped to `[data-window="launcher"]` (set in src/main.tsx), NOT just to the
+   platform. The body radius above can be platform-wide because it is inert on
+   every other win32 renderer — those windows are `transparent: true` with a
+   see-through body, so there is nothing for a radius to clip. A box-shadow has
+   no such escape hatch: it PAINTS whether or not anything is behind it, so an
+   unscoped ring would draw a 1px rounded outline around the full window rect
+   of the settings, model-selector, cropper, overlay and aux-panel windows —
+   a ghost rectangle on the desktop with no relation to the panel inside it.
+   At 16px the arc is wide enough that a bare opaque fill reads soft against a
+   busy or light desktop — the eye loses the silhouette. This paints a 1px ring
+   on exactly the same geometry (`border-radius: inherit` means the ring can
+   never drift out of register with the clip).
+
+   It has to be an overlay rather than an inset `box-shadow` on body: an inset
+   shadow paints above body's own background but BELOW its content, and the
+   launcher's root div is a full-bleed opaque child that would cover it.
+
+   `position: fixed` + `inset: 0` tracks the viewport, so it follows every
+   resize with no JS. `pointer-events: none` keeps it out of hit-testing —
+   including the drag regions and the resize edges. */
+html[data-window="launcher"][data-platform="win32"] body::after,
+html[data-window="launcher"][data-platform="linux"] body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 2147483647;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.45);
+}
+
+/* Light theme: the dark half of the pair would read as a grimy outline against
+   a light surface, so light gets a single soft dark hairline instead. */
+html[data-window="launcher"][data-platform="win32"][data-theme="light"] body::after,
+html[data-window="launcher"][data-platform="linux"][data-theme="light"] body::after {
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.10);
+}
+
+/* Maximized → no ring. The window edge is the screen edge; a 1px outline
+   around the whole display is framing nothing. */
+html[data-window="launcher"][data-platform="win32"][data-window-maximized="true"] body::after,
+html[data-window="launcher"][data-platform="linux"][data-window-maximized="true"] body::after {
+  box-shadow: none;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   WINDOWS LAUNCHER ↔ MEETING-OVERLAY SWAP — the visible half
+   ═══════════════════════════════════════════════════════════════════════════
+
+   The main process decides WHEN each surface moves (electron/WindowHelper.ts,
+   "WINDOWS MEETING-SWAP CHOREOGRAPHY"); these rules are WHAT MOVES. The split
+   exists because native window opacity and bounds are stepped from a Node
+   timer, which is not vsync-locked — so everything the user actually watches
+   lives here, on the compositor, and setOpacity stays a binary content-
+   protection shield rather than an effect.
+
+   The attributes are set in src/lib/windowTransitions.ts, installed from
+   src/main.tsx before React mounts.
+
+   ONE CURVE FOR THE WHOLE SWAP. cubic-bezier(0.32, 0.72, 0, 1) is the iOS
+   sheet curve: hard ease-out, zero overshoot. Everything that moves during
+   the swap uses it, in both directions, so the two windows read as one motion
+   system rather than two animations that happen to overlap. Nothing here uses
+   ease-in — a swap that starts slow reads as lag at exactly the moment the
+   user is watching hardest.
+
+   WINDOWS ONLY, deliberately. macOS has no opacity shield to hide a
+   pre-entrance state behind and re-presents a hidden window's last composited
+   frame on show(), so arming an invisible state there risks a flash that
+   cannot be verified from a Windows machine. Widening these selectors to
+   [data-platform="darwin"] is the whole change, once somebody can watch it on
+   a Mac. src/lib/windowTransitions.ts gates the same way.
+
+   KEEP DURATIONS IN SYNC with LAUNCHER_RECEDE_MS / OVERLAY_SHIELD_MS /
+   LAUNCHER_RECEDE_LEAD_MS in electron/WindowHelper.ts and the mirrors in
+   src/lib/windowTransitions.ts. Pinned by
+   electron/services/__tests__/WindowsMeetingSwapChoreography2026_08_26.test.mjs.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+/* ── Departing launcher ─────────────────────────────────────────────────────
+   The transform goes on BODY, not #root. Body is the launcher's rounded clip
+   (border-radius + overflow + contain: paint) AND the containing block for the
+   fixed-position hairline ring in body::after — so scaling body carries the
+   black backing, the corner radius and the ring as one rigid object. Scaling
+   #root instead would shrink the card out from under a ring that stayed at
+   full size, and expose #root's square corners inside body's rounded clip.
+
+   0.965, not something more dramatic: this is a window stepping back to let
+   another one through, not a dismissal. Anything deeper starts to read as the
+   app closing. */
+html[data-platform="win32"][data-window="launcher"][data-launcher-transition="receding"] body {
+  opacity: 0;
+  transform: scale(0.965);
+  transform-origin: center center;
+  will-change: opacity, transform;
+  pointer-events: none;
+  transition:
+    opacity 260ms cubic-bezier(0.32, 0.72, 0, 1),
+    transform 260ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* There is deliberately NO rule for the rest state. The transition lives only
+   on the receding selector, so dropping the attribute snaps back in a single
+   frame. That is required, not a shortcut: the restore normally lands while
+   the window is hidden or one frame before it is shown, and an animated
+   un-recede would play as a zoom-in on a launcher the user believes has been
+   sitting there the whole time. */
+
+/* ── Arriving overlay group ─────────────────────────────────────────────────
+   The shell, the pill and the resize toggle are three separate always-on-top
+   HWNDs but ONE object to the eye, so they share ONE timeline — same curve,
+   same duration, no stagger. A stagger was considered and rejected: the pill
+   is welded chrome, not a discrete control, and the surrounding main-process
+   code (applyOverlayAuxVisibility, switchToOverlay) goes to real lengths to
+   land pill and shell on a single compositor commit. Re-introducing an offset
+   here would undo that on purpose.
+
+   The origins differ so the group scales as one rigid piece even though each
+   window can only scale about itself. The pill sits directly ABOVE the shell,
+   so it grows from its BOTTOM edge while the shell grows from its TOP edge —
+   their shared seam is the group's real anchor and stays put. Scaling both
+   from their own top would open a visible gap between them at 0.96. */
+html[data-platform="win32"][data-window="overlay"][data-overlay-enter] body,
+html[data-platform="win32"][data-window="overlay-toggle"][data-overlay-enter] body {
+  transform-origin: top center;
+}
+
+html[data-platform="win32"][data-window="overlay-pill"][data-overlay-enter] body {
+  transform-origin: bottom center;
+}
+
+html[data-platform="win32"][data-overlay-enter="armed"] body {
+  opacity: 0;
+  transform: scale(0.96);
+  will-change: opacity, transform;
+  /* No transition on the way IN to this state — it is a starting position
+     being set behind a shielded window, not something to animate to. */
+  transition: none;
+}
+
+/* Opacity finishes well before the transform (200ms of 300ms). The surface is
+   fully present while its shape is still settling, which is what makes an
+   entrance feel like an object arriving rather than a layer fading up. Both
+   are ease-out from the same curve, so the fast half never looks detached
+   from the slow one. */
+html[data-platform="win32"][data-overlay-enter="entering"] body {
+  opacity: 1;
+  transform: scale(1);
+  will-change: opacity, transform;
+  transition:
+    opacity 200ms cubic-bezier(0.32, 0.72, 0, 1),
+    transform 300ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* Reduced motion means less movement, not no feedback: the swap still needs a
+   transition or the blank-gap fix regresses into a hard cut. Keep the fades,
+   drop every transform, and shorten. */
+@media (prefers-reduced-motion: reduce) {
+  html[data-platform="win32"][data-window="launcher"][data-launcher-transition="receding"] body {
+    transform: none;
+    transition: opacity 140ms cubic-bezier(0.32, 0.72, 0, 1);
+  }
+
+  html[data-platform="win32"][data-overlay-enter="armed"] body {
+    transform: none;
+  }
+
+  html[data-platform="win32"][data-overlay-enter="entering"] body {
+    transform: none;
+    transition: opacity 140ms cubic-bezier(0.32, 0.72, 0, 1);
+  }
 }
 
 /* ───────────────────────────────────────────────────────────────────────
