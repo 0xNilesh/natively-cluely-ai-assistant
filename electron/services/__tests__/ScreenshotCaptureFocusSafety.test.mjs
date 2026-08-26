@@ -180,3 +180,76 @@ describe('Screenshot capture focus safety — production source anchors', () => 
     );
   });
 });
+
+// ── Stealth typing must survive a screenshot ────────────────────────────────
+// hideWindowsForScreenshot -> hideMainWindow() -> WindowHelper.stopStealthTyping()
+// tears the keyboard hook down on the way INTO a capture. Only the WINDOW was
+// ever restored, so the overlay came back looking identical with the hook gone
+// and the user's next keystrokes went to the foreground meeting app — a silent
+// stealth-typing outage with no visible indicator.
+describe('Screenshot capture — stealth typing is re-engaged after restore', () => {
+  test('the capture session records whether stealth typing was engaged', () => {
+    assert.match(
+      mainSrc,
+      /wasStealthTypingActive: boolean;/,
+      'BUG: ScreenshotCaptureSession must carry the stealth-typing flag — without it the ' +
+      'restore cannot know whether the hook was torn down.',
+    );
+    assert.match(
+      mainSrc,
+      /wasStealthTypingActive: this\.isStealthTypingActive\(\)/,
+      'BUG: the session snapshot must sample stealth-typing state BEFORE the capture hides windows.',
+    );
+  });
+
+  test('probing and restoring stealth typing can never break a capture', () => {
+    // Capture is the priority; the restore is best-effort. A missing or stale
+    // StealthKeyboardManager module must not propagate out of either helper.
+    const probeIdx = mainSrc.indexOf('private isStealthTypingActive()');
+    const restoreIdx = mainSrc.indexOf('private restoreStealthTypingAfterScreenshot()');
+    assert.ok(probeIdx !== -1, 'isStealthTypingActive() must exist');
+    assert.ok(restoreIdx !== -1, 'restoreStealthTypingAfterScreenshot() must exist');
+
+    const probe = mainSrc.slice(probeIdx, probeIdx + 400);
+    assert.match(probe, /try \{[\s\S]*\} catch \{[\s\S]*return false;/,
+      'BUG: the stealth-typing probe must swallow errors and default to false.');
+
+    const restore = mainSrc.slice(restoreIdx, restoreIdx + 400);
+    assert.match(restore, /try \{[\s\S]*\} catch \(e\) \{/,
+      'BUG: the stealth-typing restore must not throw into the capture teardown path.');
+  });
+
+  test('the re-engage runs LAST — after the main window AND the aux windows', () => {
+    const start = mainSrc.indexOf('private restoreWindowsAfterScreenshot');
+    assert.ok(start !== -1, 'restoreWindowsAfterScreenshot must exist');
+    const body = mainSrc.slice(start, mainSrc.indexOf('private async withScreenshotCaptureSession'));
+
+    const mainWinIdx = body.indexOf('shouldRestoreMainWindow');
+    const settingsIdx = body.indexOf('this.settingsWindowHelper.showWindow');
+    const modelIdx = body.indexOf('this.modelSelectorWindowHelper.showWindow');
+    const stealthIdx = body.indexOf('this.restoreStealthTypingAfterScreenshot()');
+
+    assert.ok(stealthIdx !== -1, 'BUG: the restore must re-engage stealth typing.');
+    assert.match(body, /if \(session\.wasStealthTypingActive\) \{/,
+      'BUG: only re-engage when it was actually engaged before the capture — a screenshot ' +
+      'must never spontaneously turn stealth typing ON.');
+
+    // Ordering is forced in BOTH directions:
+    //   - start() refuses on win32 unless the overlay is already visible, so the
+    //     re-engage cannot precede the main-window restore;
+    //   - start() calls hideAuxWindowsForStealth(), so re-engaging before the
+    //     Settings / ModelSelector restores would find them already hidden, do
+    //     nothing, and they would be re-shown UNDER an engaged hook — visible
+    //     windows whose input is dead because every keystroke routes to the overlay.
+    assert.ok(
+      mainWinIdx < stealthIdx,
+      'BUG: start() refuses on win32 unless the overlay is visible — re-engaging before the ' +
+      'main-window restore is a silent no-op.',
+    );
+    assert.ok(
+      settingsIdx < stealthIdx && modelIdx < stealthIdx,
+      'BUG: start() calls hideAuxWindowsForStealth(). Re-engaging before the aux restores ' +
+      'leaves Settings / ModelSelector visible with dead input.',
+    );
+  });
+});

@@ -526,3 +526,94 @@ test('preflight: the new Windows check ids are still selected by nativeOk', () =
   assert.match(line, /startsWith\('sharp '\)/);
   assert.match(line, /startsWith\('sqlite-vec '\)/);
 });
+
+// ── 5. A dead key vanished entirely while stealth typing was engaged ─────────
+// unicode_for_key treated every non-positive ToUnicodeEx result as "no
+// character". For n == 0 that is correct: nothing was written and the buffer
+// holds stale data. For n < 0 it is not — that is a DEAD KEY, and where the
+// layout allows it the OS has ALREADY written the SPACING form of the accent to
+// the buffer (U+00B4 ACUTE ACCENT, not U+0301 COMBINING ACUTE ACCENT).
+//
+// Returning "" lost the key outright. The only empty-chars escape hatch in the
+// hook proc is AltGr-gated:
+//
+//     if altgr && key_code == 0 && chars.is_empty() { return pass(); }
+//
+// A plain dead key is not AltGr, so it skipped that guard, reached send_payload
+// with chars: "", and fell through to LRESULT(1) — "Swallow: the foreground
+// meeting app never sees this keystroke." The key therefore reached NEITHER the
+// overlay NOR the foreground app, silently killing every accent key on German
+// T1, AZERTY, Spanish, Nordic and US-International layouts.
+
+test('deadkey: n == 0 and n < 0 are separate branches, and the dead key is not swallowed', () => {
+  const rust = read('native-module/src/keyboard_hook_windows.rs');
+  const start = rust.indexOf('fn unicode_for_key(');
+  assert.ok(start !== -1, 'unicode_for_key() not found');
+  const fn = rust.slice(start, rust.indexOf('fn ', rust.indexOf('String::from_utf16_lossy(&buf[..n])')));
+
+  assert.doesNotMatch(
+    fn,
+    /if n <= 0 \{/,
+    'BUG: the collapsed `n <= 0` branch treats a DEAD KEY as "no character" and returns "". ' +
+      'A plain dead key is not AltGr, so it misses the only empty-chars pass() guard and is ' +
+      'swallowed — reaching neither the overlay nor the foreground app.',
+  );
+  assert.match(
+    fn,
+    /if n == 0 \{/,
+    'BUG: n == 0 (no translation, buffer stale and unreadable) must be its own branch.',
+  );
+  assert.match(
+    fn,
+    /if n < 0 \{/,
+    'BUG: n < 0 (dead key) must be handled separately from n == 0.',
+  );
+});
+
+test('deadkey: only buf[0] is read, and a layout that writes nothing still yields ""', () => {
+  const rust = read('native-module/src/keyboard_hook_windows.rs');
+  const start = rust.indexOf('if n < 0 {');
+  assert.ok(start !== -1, 'the dead-key branch not found');
+  const branch = rust.slice(start, rust.indexOf('let n = (n as usize).min(buf.len());'));
+
+  // ToUnicodeEx writes ONLY the spacing accent for a dead key; the rest of the
+  // buffer is stale, so the multi-unit `&buf[..n]` read must not be used here.
+  assert.match(
+    branch,
+    /buf\.first\(\)/,
+    'BUG: only buf[0] is meaningful for a dead key — reading further is stale data.',
+  );
+  // "If possible" in the Win32 docs is load-bearing: a layout may write nothing
+  // at all, in which case there is genuinely no character to emit.
+  assert.match(
+    branch,
+    /None \| Some\(&0\) => String::new\(\)/,
+    'BUG: a layout that writes no dead-key character must still yield "" rather than U+0000.',
+  );
+  assert.match(
+    branch,
+    /Some\(&unit\) => String::from_utf16_lossy\(&\[unit\]\)/,
+    'BUG: the spacing form of the accent must be emitted so the key reaches the overlay.',
+  );
+});
+
+test('deadkey: the AltGr pass-through guard stays NARROW (a real Ctrl+Alt chord still reaches the OS)', () => {
+  const rust = read('native-module/src/keyboard_hook_windows.rs');
+  // A genuine AltGr shortcut produces NO character (n == 0 → ""), so it still
+  // hits this guard and passes to the foreground app. Widening this to cover any
+  // no-text printable key is a separate change with its own test.
+  assert.match(
+    rust,
+    /if altgr && key_code == 0 && chars\.is_empty\(\) \{\s*\n\s*return pass\(\);/,
+    'BUG: the AltGr escape hatch must stay exactly this narrow — it is what lets a real ' +
+      'Ctrl+Alt shortcut through while stealth typing is engaged.',
+  );
+  // wFlags = 0x4 must remain: it stops the kernel accumulating the dead key.
+  // Composing properly would corrupt what every OTHER app on the machine sees.
+  assert.match(
+    rust,
+    /ToUnicodeEx\(vk, scan, &key_state, &mut buf, 0x4, hkl\)/,
+    'BUG: wFlags must stay 0x4 (do not alter kernel keyboard state) — dropping it makes the ' +
+      'hook corrupt dead-key composition system-wide.',
+  );
+});
