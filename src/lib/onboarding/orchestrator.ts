@@ -80,7 +80,29 @@ export interface UserState {
   extensionConnected: boolean;
   extensionSupported: boolean;
   permsShown: boolean;
+  /**
+   * macOS-only TCC revocation signal. Retained under its original name because
+   * the stage-catalog tests pin it; new code should prefer the two
+   * platform-neutral fields below, which macTCCBlocked is now a special case of.
+   */
   macTCCBlocked: boolean;
+  /**
+   * True when THIS platform has a permission the user can actually act on right
+   * now (macOS: mic or Screen Recording denied; Windows: mic blocked by the
+   * per-app or device privacy toggle, which ms-settings:privacy-microphone
+   * fixes). Platform-neutral so a Windows mic denial re-raises the card without
+   * borrowing a mac-named flag.
+   */
+  permissionsNeedAttention: boolean;
+  /**
+   * True when this platform's permission model justifies showing the card on a
+   * FIRST launch, before anything is known to be blocked. macOS does (TCC must
+   * be granted up front, out-of-band, in System Settings). Windows does not:
+   * screen capture has no gate at all and the mic is granted by default, so an
+   * unprompted card there is pure noise. Defaults true so existing behaviour
+   * and the stage-catalog tests are unchanged unless a caller opts out.
+   */
+  permissionsFirstRunEligible: boolean;
   seenProfileOnboarding: boolean;
   seenModesOnboarding: boolean;
   activeModeSet: boolean;
@@ -157,6 +179,8 @@ export const DEFAULT_USER_STATE: UserState = {
   extensionSupported: true,
   permsShown: false,
   macTCCBlocked: false,
+  permissionsNeedAttention: false,
+  permissionsFirstRunEligible: true,
   seenProfileOnboarding: false,
   seenModesOnboarding: false,
   activeModeSet: false,

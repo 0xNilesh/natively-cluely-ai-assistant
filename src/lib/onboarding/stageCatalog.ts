@@ -59,10 +59,30 @@ export const STAGES: StageConfig[] = [
       requiresForeground: true,
       requiresMeetingInactive: true,
     },
+    // Show when EITHER (a) something actionable is genuinely blocked, or
+    // (b) this is a first launch on a platform whose permission model needs an
+    // up-front walkthrough. Windows satisfies neither in the normal case: it has
+    // no screen-capture gate and grants the mic by default, so setting
+    // permissionsFirstRunEligible=false there stops the card from appearing at
+    // startup on a machine with nothing to fix. A Windows mic denial still
+    // raises it, via permissionsNeedAttention.
     skipWhen: (s) =>
-      // Skip if fully resolved
-      (s.permsShown && !s.macTCCBlocked),
-    reEligibility: (s) => s.macTCCBlocked,
+      !s.macTCCBlocked &&
+      !s.permissionsNeedAttention &&
+      (s.permsShown || s.permissionsFirstRunEligible === false),
+    reEligibility: (s) => s.macTCCBlocked || s.permissionsNeedAttention,
+    // macOS keeps its every-launch prompt for a revoked TCC grant: capture is
+    // dead until the user re-grants, and that is the platform's designed
+    // behaviour. Off darwin the card is raised by permissionsNeedAttention,
+    // which stays true for as long as the mic is denied — so without a cooldown
+    // a Windows user who deliberately runs mic-off (screen and text only) would
+    // be met by a full-viewport modal at EVERY startup with no way to stop it.
+    // A week is long enough to stop being a nag and short enough that a genuine
+    // misconfiguration still resurfaces.
+    cooldownMs: (s) =>
+      s.macTCCBlocked ? 0
+      : s.permissionsNeedAttention ? 7 * 24 * 60 * 60 * 1000
+      : 0,
   },
 
   // ──────────────────────────────────────────────────────────────

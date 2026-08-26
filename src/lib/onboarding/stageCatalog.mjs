@@ -41,8 +41,16 @@ export const STAGES = [
       requiresForeground: true,
       requiresMeetingInactive: true,
     },
-    skipWhen: (s) => (s.permsShown && !s.macTCCBlocked),
-    reEligibility: (s) => s.macTCCBlocked,
+    skipWhen: (s) =>
+      !s.macTCCBlocked &&
+      !s.permissionsNeedAttention &&
+      (s.permsShown || s.permissionsFirstRunEligible === false),
+    reEligibility: (s) => s.macTCCBlocked || s.permissionsNeedAttention,
+    // See stageCatalog.ts for why darwin is exempt from this cooldown.
+    cooldownMs: (s) =>
+      s.macTCCBlocked ? 0
+      : s.permissionsNeedAttention ? 7 * 24 * 60 * 60 * 1000
+      : 0,
   },
   {
     id: 'browser_extension',

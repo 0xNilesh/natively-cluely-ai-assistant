@@ -329,7 +329,8 @@ import {
 import { NegotiationCoachingCard } from '../premium';
 import type { DynamicActionPayload } from '../types/electron';
 import { getCodexCliModelDisplayName, litellmModelLabel } from '../utils/modelUtils';
-import { getModifierSymbol, isMac, isWindows } from '../utils/platformUtils';
+import { getModifierSymbol, isMac, isWindows, currentPlatform } from '../utils/platformUtils';
+import { permissionPaneUri } from '../lib/micPermissionPolicy.mjs';
 import { DynamicActionBar } from './dynamic-actions/DynamicActionBar';
 import GlassEffectLayer from './ui/GlassEffectLayer';
 import { OverlayBanner, OverlayBannerButton } from './ui/OverlayBanner';
@@ -8274,13 +8275,32 @@ Provide only the answer, nothing else.`;
                   (reasonIsScreenRecording ||
                     systemAudioWarning.kind === 'screen-recording-permission' ||
                     systemAudioWarning.channel === 'system');
-                const deepLinkUrl = !isMac
-                  ? null
-                  : wantsMicrophonePane
-                  ? 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone'
-                  : wantsScreenCapturePane
-                  ? 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'
-                  : null;
+                /*
+                  The pane deep link. This used to be `!isMac ? null : …`, so on
+                  Windows EVERY reason fell through to the internal-Settings
+                  fallback — including the two microphone faults whose own body
+                  text says "Enable Natively under Settings → Privacy →
+                  Microphone". The banner therefore told the user to open a
+                  Windows privacy panel and then handed them Natively's own
+                  Settings window, which has nothing to grant. Both mic reasons
+                  DO reach Windows (mic-zero-fill's peak-to-peak detector is not
+                  platform-gated, and mic-denied comes from the startup
+                  getMediaAccessStatus('microphone') check, queryable on win32
+                  since F-706), so this was not a theoretical branch.
+
+                  permissionPaneUri (lib/micPermissionPolicy) owns the
+                  per-platform mapping and shares micSettingsUri with
+                  permissions:open-mic-settings, so the overlay and the
+                  onboarding card cannot disagree about where a blocked mic is
+                  fixed. It returns null where a platform has no such panel —
+                  Linux for either pane, and Windows for screen capture, which
+                  has no permission gate at all — and null correctly falls back
+                  to the internal-Settings action below.
+                */
+                const deepLinkUrl = permissionPaneUri(
+                  currentPlatform,
+                  wantsMicrophonePane ? 'microphone' : wantsScreenCapturePane ? 'screen' : null,
+                );
 
                 // Identity of THIS warning, so visiting a pane for one problem
                 // does not promote the button on a different problem that
@@ -8348,22 +8368,48 @@ Provide only the answer, nothing else.`;
                           <OverlayBannerButton
                             variant="primary"
                             onClick={() => {
-                              if (deepLinkUrl) {
-                                window.electronAPI.openExternal(deepLinkUrl);
+                              if (deepLinkUrl && wantsMicrophonePane) {
+                                // The microphone pane goes through its own IPC,
+                                // NOT open-external. That handler's allowlist
+                                // accepts only https: and (on darwin)
+                                // x-apple.systempreferences: — deliberately
+                                // tight since issue #252, when an unknown
+                                // scheme reached Windows shell and raised a
+                                // Microsoft Store popup. 'ms-settings:' is not
+                                // on it, so routing the Windows mic link there
+                                // would be silently DROPPED and the button
+                                // would do nothing at all — worse than the
+                                // wrong-window behaviour this fix replaces.
+                                // permissions:open-mic-settings resolves the
+                                // URI in main via the same micPermissionPolicy
+                                // helper and opens it directly, and it serves
+                                // BOTH platforms, so the mic case needs no
+                                // platform branch here.
+                                window.electronAPI?.openMicSettings?.();
                                 // Sending the user to the pane is what makes a
                                 // restart meaningful, so that click is what
                                 // promotes the button.
                                 setPermissionPaneVisited(warningIdentity);
+                              } else if (deepLinkUrl) {
+                                // Screen Recording: macOS-only by construction
+                                // (permissionPaneUri returns null off darwin),
+                                // and x-apple.systempreferences IS allowlisted
+                                // there.
+                                window.electronAPI.openExternal(deepLinkUrl);
+                                setPermissionPaneVisited(warningIdentity);
                               } else {
-                                // Windows / unknown channel / device-config
-                                // faults: fall back to internal Settings.
+                                // No pane fixes this (device-config faults,
+                                // Windows screen capture, Linux): fall back to
+                                // internal Settings.
                                 window.electronAPI?.toggleSettingsWindow?.();
                               }
                             }}
                             title={
                               deepLinkUrl
                                 ? wantsMicrophonePane
-                                  ? t('Open macOS Microphone privacy settings')
+                                  ? isMac
+                                    ? t('Open macOS Microphone privacy settings')
+                                    : t('Open Windows microphone privacy settings')
                                   : t('Open macOS Screen Recording privacy settings')
                                 : t('Open Natively Settings')
                             }

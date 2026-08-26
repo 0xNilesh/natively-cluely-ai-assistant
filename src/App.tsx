@@ -34,6 +34,7 @@ import { clampOverlayOpacity, OVERLAY_OPACITY_DEFAULT, getDefaultOverlayOpacity 
 import { getMeetingInterfaceTheme, type MeetingInterfaceTheme } from './lib/meetingInterfaceTheme'
 import { isMac } from "./utils/platformUtils"
 import { trackAppOpen } from "./lib/toasterGating"
+import { permissionsNeedAttention as derivePermissionsNeedAttention } from "./lib/micPermissionPolicy.mjs"
 import {
   JDAwarenessToaster,
   ProfileFeatureToaster,
@@ -618,25 +619,55 @@ const App: React.FC = () => {
       const seenModes = localStorage.getItem('natively_seen_modes_onboarding_v5') === 'true';
       const seenProfile = localStorage.getItem('natively_seen_profile_onboarding_v1') === 'true';
 
+      // SEED SYNCHRONOUSLY FIRST. permissionsFirstRunEligible defaults to TRUE
+      // (macOS semantics) and stageCatalog suppresses only on a strict
+      // `=== false`, so until the real value lands the orchestrator treats this
+      // renderer as first-run-eligible. checkPermissions is an async IPC round
+      // trip; if the main process is busy (native module load, window creation)
+      // it can resolve LATER than the permissions stage's 2s
+      // requiresHomepageDuration, and the drain would raise the macOS TCC
+      // walkthrough on Windows — the exact bug this platform gate exists to
+      // remove. isMac is a synchronous, module-load-time fact, so seeding from
+      // it closes the pending window entirely; the .then below only refines
+      // what is already correct.
+      setOrchestratorUserState({
+        permsShown,
+        permissionsFirstRunEligible: isMac,
+        seenModesOnboarding: seenModes,
+        seenProfileOnboarding: seenProfile,
+      });
+
       const maybeCheck = window.electronAPI?.checkPermissions;
       if (maybeCheck) {
         maybeCheck()
           .then((p) => {
             const blocked = (s?: string) => s === 'denied' || s === 'restricted';
             const macTCCBlocked = p?.platform === 'darwin' && (blocked(p.microphone) || blocked(p.screen));
+            // Shared with the tests via micPermissionPolicy — see that module
+            // for why 'not-determined' must NOT count as needing attention.
+            const permissionsNeedAttention = derivePermissionsNeedAttention(
+              p?.platform, p?.microphone, p?.screen,
+            );
+            // Windows needs no up-front permission walkthrough: screen capture
+            // has no gate and the mic is granted by default, so the card must
+            // only appear when something is actually blocked. macOS keeps the
+            // first-launch card, where TCC genuinely must be granted out-of-band.
+            const permissionsFirstRunEligible = p?.platform === 'darwin';
             setOrchestratorUserState({
               permsShown,
               macTCCBlocked,
+              permissionsNeedAttention,
+              permissionsFirstRunEligible,
               seenModesOnboarding: seenModes,
               seenProfileOnboarding: seenProfile,
               extensionSupported: true, // updated by phoneMirrorGetInfo below
             });
           })
           .catch(() => {
-            setOrchestratorUserState({ permsShown, seenModesOnboarding: seenModes, seenProfileOnboarding: seenProfile });
+            // Nothing to do: the synchronous pre-seed above already carries the
+            // correct platform gate, so a failed check leaves the card
+            // suppressed on Windows rather than resurrecting it.
           });
-      } else {
-        setOrchestratorUserState({ permsShown, seenModesOnboarding: seenModes, seenProfileOnboarding: seenProfile });
       }
 
       // Donation status (support toaster gate)
@@ -873,9 +904,11 @@ const App: React.FC = () => {
         // deep-links to System Settings. This is the recoverable surface for
         // the "I press Start Natively and nothing happens" report.
         if (result.code === 'mic-permission-denied') {
-          // Route through the orchestrator: mark mac TCC as blocked so the
-          // permissions stage becomes re-eligible.
-          setOrchestratorUserState({ macTCCBlocked: true });
+          // Route through the orchestrator: mark the permission as needing
+          // attention so the stage becomes re-eligible. Platform-neutral — a
+          // Windows mic denial is just as actionable (ms-settings:privacy-
+          // microphone), and must not be filed under a mac-named flag.
+          setOrchestratorUserState({ permissionsNeedAttention: true });
         }
       }
     } catch (err) {
@@ -886,7 +919,7 @@ const App: React.FC = () => {
       // serialized error .code across ipcRenderer.invoke — keep the recovery
       // working so the denial never regresses to a silent failure.
       if ((err as { code?: string })?.code === 'mic-permission-denied') {
-        setOrchestratorUserState({ macTCCBlocked: true });
+        setOrchestratorUserState({ permissionsNeedAttention: true });
       }
     }
   };

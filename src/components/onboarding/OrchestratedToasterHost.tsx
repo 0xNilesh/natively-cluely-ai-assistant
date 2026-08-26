@@ -97,16 +97,24 @@ export const OrchestratedToasterHost: React.FC = () => {
           isOpen={true}
           onDismiss={() => {
             // Write the legacy flag so future launches don't re-show on first
-            // launch. Mac TCC revocation is still detected via checkPermissions
-            // and re-triggers via macTCCBlocked user-state.
+            // launch. A genuinely-blocked permission is still detected via
+            // checkPermissions and re-triggers the stage — on macOS through
+            // macTCCBlocked, and on any platform through the platform-neutral
+            // permissionsNeedAttention (a Windows mic block reaches it too).
             try { localStorage.setItem('natively_perms_shown_v1', '1'); } catch {}
             window.electronAPI?.onboardingSetFlag?.('permsShown', true).catch(() => {});
             // Reflect permsShown in the live orchestrator user-state *now*.
             // Without this, `permsShown` stays false in-session (it is only
             // re-read from localStorage on the next App.tsx effect / relaunch),
-            // so stageCatalog's `skipWhen: permsShown && !macTCCBlocked` never
-            // becomes true and the RAF drain loop re-raises this toaster on the
-            // very next frame — making the X button appear to do nothing.
+            // so the permsShown half of stageCatalog's skipWhen never becomes
+            // true and the RAF drain loop re-raises this toaster on the very
+            // next frame — making the X button appear to do nothing.
+            // NOTE: permsShown alone no longer settles it. When something is
+            // actually blocked, skipWhen stays false by design (that is what
+            // re-raises the card on the next launch), so within THIS session
+            // the dismiss is held solely by markDismissed's dismissedThisSession
+            // set — see orchestratorClass.test.mjs 'markDismissed keeps the
+            // toaster dismissed for the rest of the session'.
             orch.setUserState({ permsShown: true });
             onDismiss('permissions')();
           }}

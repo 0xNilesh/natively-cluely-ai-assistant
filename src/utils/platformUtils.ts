@@ -9,6 +9,15 @@ const platform = normalizePlatform(
   window.electronAPI?.platform ?? navigator.platform?.toLowerCase() ?? ''
 );
 
+/**
+ * The normalized NodeJS.Platform-style string for this renderer ('darwin' |
+ * 'win32' | 'linux' | raw). Exported so callers that must pass a platform to a
+ * shared policy helper (e.g. micSettingsUri in lib/micPermissionPolicy) use the
+ * SAME detection as isMac/isWindows instead of re-deriving it from those
+ * booleans with their own ternary — two spellings of one fact drift.
+ */
+export const currentPlatform = platform;
+
 export const isMac = platform === 'darwin';
 export const isWindows = platform === 'win32';
 export const isLinux = platform === 'linux';

@@ -5,7 +5,12 @@
 // Split-view permissions onboarding card.
 // Shows once on first launch, after the launcher UI is visible.
 // macOS: requests mic via system dialog, opens System Preferences for screen recording.
-// Windows: shows a simple instruction notice (OS handles permissions at first use).
+// Windows: Natively needs NO up-front grant — screen capture has no OS gate and the
+// mic is granted by default — so the orchestrator no longer raises this card at
+// startup there (stageCatalog `permissionsFirstRunEligible`). It appears on Windows
+// only when the mic is genuinely blocked by the per-app or device privacy toggle, and
+// every string, the guide artwork, and the primary button switch to that remedy:
+// ms-settings:privacy-microphone. Nothing macOS-specific is rendered off darwin.
 //
 
 import React, { useState, useEffect, useCallback } from 'react';
@@ -13,7 +18,8 @@ import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import { X, Monitor, Mic, Settings } from 'lucide-react';
 import nativelyIcon from '../../../assets/icon.png';
 import { useResolvedTheme } from '../../hooks/useResolvedTheme';
-import { classifyMicStatus } from '../../lib/micPermissionPolicy.mjs';
+import { classifyMicStatus, micSettingsUri } from '../../lib/micPermissionPolicy.mjs';
+import { currentPlatform } from '../../utils/platformUtils';
 
 const STORAGE_KEY  = 'natively_perms_shown_v1';
 
@@ -44,7 +50,10 @@ const FADE = { enter: { opacity: 0, y: 12, filter: 'blur(4px)' }, in: { opacity:
 
 export const PermissionsToaster: React.FC<Props> = ({ isOpen, onDismiss }) => {
   const [visible,    setVisible]    = useState(false);
-  const [platform,   setPlatform]   = useState<string>('darwin');
+  // Seeded from the statically-known platform, NOT a hardcoded 'darwin': if
+  // checkPermissions fails, the old default rendered the whole macOS TCC
+  // walkthrough on Windows.
+  const [platform,   setPlatform]   = useState<string>(currentPlatform);
   const [micStatus,  setMicStatus]  = useState<PermStatus>('loading');
   const [scrStatus,  setScrStatus]  = useState<PermStatus>('loading');
   const [requesting, setRequesting] = useState(false);
@@ -60,6 +69,16 @@ export const PermissionsToaster: React.FC<Props> = ({ isOpen, onDismiss }) => {
 
   const theme = useResolvedTheme();
   const isLight = theme === 'light';
+  const isMac = platform === 'darwin';
+  // Every platform-specific string below branches on isMac/isWin, never on
+  // `!isMac` — an else-branch that says "Windows is blocking the microphone"
+  // renders that literal text on Linux, which is the same wrong-platform-copy
+  // bug in the other direction.
+  const isWin = platform === 'win32';
+  // Is there actually an OS panel to send this user to? null on Linux, where
+  // the primary button would otherwise call an IPC that returns
+  // {ok:false,'no-settings-panel'} and silently do nothing.
+  const micPanelUri = micSettingsUri(platform);
 
   // Dynamic style tokens based on light/dark mode
   const colors = {
@@ -183,14 +202,33 @@ export const PermissionsToaster: React.FC<Props> = ({ isOpen, onDismiss }) => {
     window.electronAPI?.openExternal?.('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');
   };
 
+  // Off darwin the primary button used to just dismiss while still reading
+  // "Open Settings" — a label that did nothing. The only reason this card is
+  // raised on Windows now is a blocked mic, so send the user to the one panel
+  // that fixes it and re-read the status when they come back.
+  const openMicSettings = async () => {
+    await window.electronAPI?.openMicSettings?.();
+    await refreshStatus();
+  };
+
   const handleDismiss = () => {
     localStorage.setItem(STORAGE_KEY, '1');
     onDismiss();
   };
 
-  const allGranted = platform === 'darwin'
-    ? micStatus === 'granted' && scrStatus === 'granted'
-    : micStatus === 'granted';
+  // Ported from the now-deleted PermissionsOnboardingFull, which had this right:
+  // gate on classifyMicStatus's `usable`, NOT on a literal 'granted'. 'unknown'
+  // means the OS could not resolve the state, not that it is denied — the win32
+  // API fails OPEN (see micPermissionPolicy) — and treating it as blocked
+  // stranded such a machine in onboarding forever, the lockout F-706 said must
+  // never happen.
+  const micPlan = classifyMicStatus(platform, micStatus);
+  // 'policy' = MDM or parental controls. No panel can change it, so offering one
+  // is a dead end — the same false promise CR-03 removed on the Windows side.
+  const micBlockedByPolicy = micPlan.remedy === 'policy';
+  const allGranted = isMac
+    ? micPlan.usable && scrStatus === 'granted'
+    : micPlan.usable;
 
   return (
     <AnimatePresence>
@@ -245,10 +283,24 @@ export const PermissionsToaster: React.FC<Props> = ({ isOpen, onDismiss }) => {
                   style={{ marginBottom: '28px' }}
                 >
                   <h2 style={{ fontSize: '24px', fontWeight: 700, letterSpacing: '-0.03em', color: t1, margin: '0 0 8px', lineHeight: 1.2 }}>
-                    Let's get you set up
+                    {isMac
+                      ? "Let's get you set up"
+                      : allGranted
+                      ? 'You’re all set'
+                      : micBlockedByPolicy
+                      ? 'Microphone blocked by policy'
+                      : 'Microphone access is off'}
                   </h2>
                   <p style={{ fontSize: '13px', lineHeight: 1.65, color: t3, margin: 0 }}>
-                    Natively needs a few permissions to capture meetings and transcribe speech.
+                    {isMac
+                      ? 'Natively needs a few permissions to capture meetings and transcribe speech.'
+                      : allGranted
+                      ? 'Microphone access is on. Natively can transcribe speech — you can close this.'
+                      : micBlockedByPolicy
+                      ? 'Your organization blocks microphone access for this device. Privacy settings cannot override it — ask your administrator to allow Natively.'
+                      : isWin
+                      ? 'Windows is blocking the microphone, so speech cannot be transcribed. Turn it back on in Privacy settings — nothing else is needed.'
+                      : 'The microphone is blocked, so speech cannot be transcribed. Enable it for Natively in your system settings.'}
                   </p>
                 </motion.div>
 
@@ -274,7 +326,11 @@ export const PermissionsToaster: React.FC<Props> = ({ isOpen, onDismiss }) => {
                   <PermItem
                     icon={Mic}
                     label="Microphone"
-                    description="Required for speech transcription"
+                    description={isMac
+                      ? 'Required for speech transcription'
+                      : isWin
+                      ? 'Turn on Microphone access for Natively'
+                      : 'Enable microphone access for Natively'}
                     status={micStatus}
                     platform={platform}
                     onToggle={handleMicToggle}
@@ -289,7 +345,20 @@ export const PermissionsToaster: React.FC<Props> = ({ isOpen, onDismiss }) => {
                   transition={{ ...SPRING.smooth, delay: 0.2 }}
                 >
                   <motion.button
-                    onClick={platform === 'darwin' ? openScreenSettings : handleDismiss}
+                    onClick={
+                      // Administrator policy: no control here can change it, so
+                      // the button dismisses rather than promising a fix.
+                      micBlockedByPolicy
+                        ? handleDismiss
+                        : isMac
+                        ? openScreenSettings
+                        : micPanelUri
+                        ? openMicSettings
+                        // No OS panel on this platform (Linux): the IPC would
+                        // resolve {ok:false,'no-settings-panel'} and the button
+                        // would do nothing at all. Dismiss instead of pretending.
+                        : handleDismiss
+                    }
                     whileHover={{ scale: 1.01 }}
                     whileTap={{ scale: 0.98 }}
                     style={{
@@ -310,7 +379,13 @@ export const PermissionsToaster: React.FC<Props> = ({ isOpen, onDismiss }) => {
                     
                     <span style={{ position: 'relative', zIndex: 2, display: 'flex', alignItems: 'center', gap: '8px' }}>
                       <Settings size={14} strokeWidth={2} />
-                      Open Settings
+                      {micBlockedByPolicy
+                        ? 'Blocked by your organization'
+                        : isMac
+                        ? 'Open Settings'
+                        : micPanelUri
+                        ? 'Open Privacy Settings'
+                        : 'Got It'}
                     </span>
                   </motion.button>
 
@@ -368,7 +443,10 @@ export const PermissionsToaster: React.FC<Props> = ({ isOpen, onDismiss }) => {
                     whileHover={{ scale: 1.015 }}
                     transition={{ type: 'spring', stiffness: 300, damping: 25 }}
                   >
-                    {/* Step 1: macOS System Dialog Prompt Mockup */}
+                    {/* Step 1: OS mockup — macOS consent dialog, or the Windows
+                        "Microphone access" master switch. Windows never shows a
+                        per-app consent dialog, so rendering one there taught the
+                        user to look for something that does not exist. */}
                     <motion.div 
                       initial={{ opacity: 0, y: 12 }}
                       animate={{ opacity: 1, y: 0 }}
@@ -401,28 +479,41 @@ export const PermissionsToaster: React.FC<Props> = ({ isOpen, onDismiss }) => {
                         {/* Prompt Text */}
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
                           <div style={{ fontSize: '10px', fontWeight: 600, color: colors.step1TextPrimary, lineHeight: 1.3, letterSpacing: '-0.01em' }}>
-                            "Natively" wants to record the screen.
+                            {isMac
+                              ? '"Natively" wants to record the screen.'
+                              : 'Microphone access'}
                           </div>
                           <div style={{ fontSize: '8.5px', color: colors.step1TextMuted, lineHeight: 1.25 }}>
-                            Enable access in Privacy & Security settings.
+                            {isMac
+                              ? 'Enable access in Privacy & Security settings.'
+                              : 'Let apps access your microphone — turn this on first.'}
                           </div>
                         </div>
                       </div>
                       
-                      {/* Buttons */}
-                      <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end', marginTop: '4px' }}>
-                        {/* Pulsing button mockup */}
-                        <motion.div 
-                          animate={{ scale: [1, 1.04, 1] }}
-                          transition={{ repeat: Infinity, duration: 2.2, ease: "easeInOut", repeatDelay: 0.5 }}
-                          style={{ padding: '4px 8px', borderRadius: '5px', background: colors.step1BtnBg, border: colors.step1BtnBorder, fontSize: '8px', fontWeight: 600, color: colors.step1BtnText, letterSpacing: '-0.01em' }}
-                        >
-                          Open Settings
-                        </motion.div>
-                        <div style={{ padding: '4px 8px', borderRadius: '5px', background: '#007AFF', fontSize: '8px', fontWeight: 600, color: '#FFFFFF', letterSpacing: '-0.01em', boxShadow: '0 2px 6px rgba(0,122,255,0.3)' }}>
-                          Deny
+                      {/* Footer: macOS dialog buttons, or the Windows master switch */}
+                      {isMac ? (
+                        <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end', marginTop: '4px' }}>
+                          {/* Pulsing button mockup */}
+                          <motion.div 
+                            animate={{ scale: [1, 1.04, 1] }}
+                            transition={{ repeat: Infinity, duration: 2.2, ease: "easeInOut", repeatDelay: 0.5 }}
+                            style={{ padding: '4px 8px', borderRadius: '5px', background: colors.step1BtnBg, border: colors.step1BtnBorder, fontSize: '8px', fontWeight: 600, color: colors.step1BtnText, letterSpacing: '-0.01em' }}
+                          >
+                            Open Settings
+                          </motion.div>
+                          <div style={{ padding: '4px 8px', borderRadius: '5px', background: '#007AFF', fontSize: '8px', fontWeight: 600, color: '#FFFFFF', letterSpacing: '-0.01em', boxShadow: '0 2px 6px rgba(0,122,255,0.3)' }}>
+                            Deny
+                          </div>
                         </div>
-                      </div>
+                      ) : (
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '6px', marginTop: '4px' }}>
+                          <span style={{ fontSize: '8px', fontWeight: 600, color: colors.step1TextMuted, letterSpacing: '-0.01em' }}>On</span>
+                          <div style={{ width: '24px', height: '14px', borderRadius: '7px', padding: '1.5px', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', background: 'linear-gradient(160deg, #34D399 0%, #10B981 100%)', boxShadow: '0 0 10px rgba(52,211,153,0.35)' }}>
+                            <div style={{ width: '11px', height: '11px', borderRadius: '50%', background: '#fff', boxShadow: '0 1px 3px rgba(0,0,0,0.3)' }} />
+                          </div>
+                        </div>
+                      )}
                     </motion.div>
 
                     {/* Connecting Arrow */}
@@ -450,13 +541,19 @@ export const PermissionsToaster: React.FC<Props> = ({ isOpen, onDismiss }) => {
                         textAlign: 'left',
                       }}
                     >
-                      {/* Left app icon well */}
-                      <div style={{ width: '22px', height: '22px', borderRadius: '5px', background: colors.step2IconBg, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, border: colors.step2IconBorder }}>
-                        <img src={nativelyIcon} alt="Natively" style={{ width: '14px', height: '14px', borderRadius: '3px' }} />
-                      </div>
+                      {/* Left app icon well — macOS only. Windows 11 governs
+                          non-packaged desktop apps through a single switch; the
+                          app list under it is informational, so drawing a
+                          Natively row with a flippable toggle sends the user
+                          hunting for a control that is not there. */}
+                      {isMac && (
+                        <div style={{ width: '22px', height: '22px', borderRadius: '5px', background: colors.step2IconBg, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, border: colors.step2IconBorder }}>
+                          <img src={nativelyIcon} alt="Natively" style={{ width: '14px', height: '14px', borderRadius: '3px' }} />
+                        </div>
+                      )}
                       {/* Label */}
-                      <span style={{ fontSize: '10px', fontWeight: 550, color: colors.step2Text, flex: 1, letterSpacing: '-0.01em' }}>
-                        Natively
+                      <span style={{ fontSize: '10px', fontWeight: 550, color: colors.step2Text, flex: 1, letterSpacing: '-0.01em', lineHeight: 1.3 }}>
+                        {isMac ? 'Natively' : 'Let desktop apps access your microphone'}
                       </span>
                       {/* Active Toggle Switch with premium gradient, looping animation, and manual tap override */}
                       <motion.div 
@@ -491,7 +588,9 @@ export const PermissionsToaster: React.FC<Props> = ({ isOpen, onDismiss }) => {
 
                   {/* Breadcrumb Info text */}
                   <p style={{ fontSize: '9.5px', fontWeight: 500, color: t3, lineHeight: 1.4, margin: '4px 0 0', textAlign: 'center', opacity: 0.8, letterSpacing: '0.02em', textTransform: 'uppercase' }}>
-                    System Settings → Privacy & Security
+                    {isMac
+                      ? 'System Settings → Privacy & Security'
+                      : 'Settings → Privacy & security → Microphone'}
                   </p>
                 </div>
               </motion.div>
@@ -524,7 +623,7 @@ function PermItem({
   // macOS reads the Screen Recording grant at process launch: re-enabling it in
   // System Settings does NOT apply to the running app, so a previously-denied
   // user must relaunch. The mic grant DOES take effect live, so no hint there.
-  const deniedHint = relaunchHintWhenDenied
+  const deniedHint = relaunchHintWhenDenied && platform === 'darwin'
     ? 'Re-enable in Settings, then restart'
     : 'Re-enable in Settings';
 
@@ -562,7 +661,16 @@ function PermItem({
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: '13.5px', fontWeight: 580, color: t1, letterSpacing: '-0.01em' }}>{label}</div>
         <div style={{ fontSize: '11.5px', color: t3, marginTop: '2px' }}>
-          {platform !== 'darwin' ? description : isGranted ? 'Access granted' : isDenied ? deniedHint : description}
+          {/*
+            Status text is NOT macOS-only. It used to be gated to darwin, so a
+            Windows user who flipped the privacy toggle and came back saw the
+            row still reading "Turn on Microphone access" with no confirmation
+            they had succeeded. getMediaAccessStatus('microphone') is real on
+            win32 since F-706 and the focus listener re-reads it, so show the
+            resolved state on every platform. Only the "restart" wording stays
+            macOS-specific — see deniedHint.
+          */}
+          {isGranted ? 'Access granted' : isDenied ? deniedHint : description}
         </div>
       </div>
 

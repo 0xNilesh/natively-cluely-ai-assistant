@@ -87,3 +87,98 @@ export function micSettingsUri(platform) {
       return null;
   }
 }
+
+/**
+ * Deep link for the OS panel that fixes a capture fault, or null when this
+ * platform has no such panel and the caller should fall back to Natively's own
+ * Settings window.
+ *
+ * Lives beside micSettingsUri so the meeting overlay's audio/permission banner
+ * and the onboarding permissions card cannot disagree about where a blocked
+ * microphone is fixed.
+ *
+ * WHY 'screen' IS macOS-ONLY. Windows has no screen-capture permission gate at
+ * all (ipcHandlers' permissions:check returns a constant screen:'granted'
+ * there), so there is no pane to send a Windows user to. main.ts already
+ * degrades every mac-screen-recording reason to the audio-routing copy off
+ * darwin; returning null here keeps the button consistent with that copy
+ * instead of opening a panel that cannot help.
+ *
+ * @param {string|undefined|null} platform
+ * @param {'microphone'|'screen'|null|undefined} pane
+ * @returns {string|null}
+ */
+export function permissionPaneUri(platform, pane) {
+  if (pane === 'microphone') return micSettingsUri(platform);
+  if (pane === 'screen') {
+    return platform === 'darwin'
+      ? 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'
+      : null;
+  }
+  return null;
+}
+
+/**
+ * Does THIS platform have a capture permission the user can act on right now?
+ *
+ * Drives the onboarding permissions stage (permissionsNeedAttention). Lives
+ * here, not inline in App.tsx, so the shipped derivation and its tests are one
+ * implementation — a hand-copied twin in a test file passes forever after the
+ * real one drifts.
+ *
+ * Only 'denied' and 'restricted' count. Deliberately NOT classifyMicStatus's
+ * `usable`, which is also false for 'not-determined': on win32 that is what an
+ * unresolved get_CurrentStatus leaves behind (see the note on classifyMicStatus
+ * above — the API fails OPEN), so treating it as a denial would raise a
+ * full-screen modal accusing Windows of blocking a microphone that is not
+ * blocked. `usable` answers "can capture proceed"; this answers "is there
+ * something to interrupt the user about". Two different questions.
+ *
+ * Screen Recording is a macOS-only gate — Windows has no screen-capture
+ * permission at all (permissions:check returns a constant 'granted' there) —
+ * so it contributes only on darwin.
+ *
+ * @param {string|undefined|null} platform
+ * @param {string|undefined|null} microphone
+ * @param {string|undefined|null} screen
+ * @returns {boolean}
+ */
+export function permissionsNeedAttention(platform, microphone, screen) {
+  const blocked = (s) => s === 'denied' || s === 'restricted';
+  if (platform === 'darwin') return blocked(microphone) || blocked(screen);
+  return blocked(microphone);
+}
+
+/**
+ * The `open-external` IPC allowlist, as a pure predicate.
+ *
+ * Extracted from ipcHandlers so the boundary has exactly ONE definition. It
+ * previously lived only inline there, which meant any test asserting "the
+ * banner must not hand openExternal a scheme this rejects" had to hand-copy it
+ * — and a hand-copy keeps passing after the real allowlist changes, which is
+ * precisely the drift such a test exists to catch.
+ *
+ * Deliberately tight (issue #252): an unknown scheme reaching Windows shell
+ * raised a Microsoft Store popup. x-apple.systempreferences is a macOS-only
+ * scheme and is gated on the platform so a renderer regression cannot leak it
+ * to Windows. NOTE 'ms-settings:' is intentionally NOT here — the Windows
+ * microphone panel is opened through permissions:open-mic-settings, which
+ * resolves via micSettingsUri and calls shell.openExternal directly. Widening
+ * this allowlist to a whole scheme would let any renderer regression open
+ * arbitrary Windows settings pages.
+ *
+ * @param {string|undefined|null} platform
+ * @param {unknown} url
+ * @returns {boolean}
+ */
+export function openExternalAllows(platform, url) {
+  if (typeof url !== 'string') return false;
+  let protocol;
+  try {
+    protocol = new URL(url).protocol;
+  } catch {
+    return false;
+  }
+  if (protocol === 'https:') return true;
+  return protocol === 'x-apple.systempreferences:' && platform === 'darwin';
+}

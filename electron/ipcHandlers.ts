@@ -2,7 +2,7 @@
 
 import * as crypto from 'crypto';
 import { app, BrowserWindow, dialog, desktopCapturer, ipcMain, shell, systemPreferences } from 'electron';
-import { micSettingsUri } from '../src/lib/micPermissionPolicy.mjs';
+import { micSettingsUri, openExternalAllows } from '../src/lib/micPermissionPolicy.mjs';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -9803,15 +9803,14 @@ export function initializeIpcHandlers(appState: AppState): void {
       }
 
       const parsed = new URL(url);
-      const allowedWebUrl = parsed.protocol === 'https:';
-      // x-apple.systempreferences is a macOS-only URI scheme. Allowing it on
-      // Windows let renderer regressions hand Windows shell an unknown
-      // protocol → Microsoft Store popup (issue #252). Gate the allowlist on
-      // the actual platform so the IPC layer is the last line of defense.
-      const allowedSystemSettingsUrl =
-        parsed.protocol === 'x-apple.systempreferences:' && process.platform === 'darwin';
-
-      if (allowedWebUrl || allowedSystemSettingsUrl) {
+      // The allowlist itself lives in src/lib/micPermissionPolicy
+      // (openExternalAllows) so it has exactly one definition that tests can
+      // import rather than hand-copy. Behaviour is unchanged: https: always,
+      // and x-apple.systempreferences: only on darwin — a macOS-only scheme
+      // that, allowed on Windows, let renderer regressions hand Windows shell
+      // an unknown protocol → Microsoft Store popup (issue #252). This IPC
+      // layer remains the last line of defense.
+      if (openExternalAllows(process.platform, url)) {
         await shell.openExternal(url);
       } else {
         console.warn('[IPC] Blocked open-external request', {

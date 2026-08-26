@@ -7,24 +7,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { shouldShowToaster } from '../orchestrator.mjs';
+import { shouldShowToaster, DEFAULT_USER_STATE } from '../orchestrator.mjs';
 import { STAGES } from '../stageCatalog.mjs';
 
-const DEFAULT_USER_STATE = {
-  isPremium: false,
-  hasProfile: false,
-  hasNativelyKey: false,
-  hasTrialToken: false,
-  extensionConnected: false,
-  extensionSupported: true,
-  permsShown: false,
-  macTCCBlocked: false,
-  seenProfileOnboarding: false,
-  seenModesOnboarding: false,
-  activeModeSet: false,
-  donationShouldShow: false,
-  isV2_8_OrNewer: true,
-};
+// Imported, NOT hand-copied: this local twin had already drifted — it was
+// missing permissionsFirstRunEligible/permissionsNeedAttention, so every case
+// below silently exercised `undefined` instead of the shipped defaults and
+// passed only because `!undefined` is truthy and `undefined === false` is false.
 
 function makeCtx(overrides = {}) {
   return {

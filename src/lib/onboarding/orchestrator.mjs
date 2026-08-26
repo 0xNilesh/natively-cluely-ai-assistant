@@ -82,6 +82,8 @@ export const DEFAULT_USER_STATE = {
   extensionSupported: true,
   permsShown: false,
   macTCCBlocked: false,
+  permissionsNeedAttention: false,
+  permissionsFirstRunEligible: true,
   seenProfileOnboarding: false,
   seenModesOnboarding: false,
   activeModeSet: false,

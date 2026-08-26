@@ -413,3 +413,112 @@ test('deadline scheduler re-evaluates completed cooldown stages in an otherwise 
     'the elapsed-cooldown stage must dispatch without waiting for an unrelated event',
   );
 });
+
+// ── Windows: the same X-button guard must hold for the platform-neutral flag ──
+//
+// On Windows the card is raised by `permissionsNeedAttention` (a mic blocked by
+// the per-app or device privacy toggle), never by first-run eligibility. That
+// flag stays TRUE while the mic is still blocked — which is deliberate, it is
+// what re-raises the card on the next launch — so skipWhen cannot go true and
+// setting permsShown on dismiss does NOT settle it. Within the session the
+// dismiss is therefore held solely by dismissedThisSession. If that guard ever
+// stopped covering this flag, the X button would appear to do nothing on
+// Windows exactly as it once did on macOS. Pin it.
+test('win32 mic-blocked: markDismissed holds for the session even though permissionsNeedAttention stays true', () => {
+  localStorage.clear();
+  timerQueue = [];
+  mockNow = 0;
+
+  const orch = new OnboardingOrchestrator();
+  orch.start(STAGES);
+  orch.emit({ type: 'launcher:mounted' });
+  orch.emit({ type: 'foreground:change', isForeground: true });
+  orch.emit({
+    type: 'user-state:change',
+    patch: {
+      // Windows: no first-run walkthrough, already dismissed on a past launch,
+      // and the mic is blocked right now.
+      permsShown: true,
+      macTCCBlocked: false,
+      permissionsFirstRunEligible: false,
+      permissionsNeedAttention: true,
+      extensionConnected: true, // keep browser_extension out of the slot
+    },
+  });
+  mockNow += 3_000;
+  flushOneFrame();
+
+  assert.equal(
+    orch.getSnapshot().activeToasterId,
+    'permissions',
+    'a blocked Windows mic must raise the card even with permsShown already true',
+  );
+
+  orch.markDismissed('permissions');
+  assert.equal(orch.getSnapshot().activeToasterId, null, 'dismiss must clear the slot');
+
+  // Drain again with the flag still true — the guard, not skipWhen, must hold.
+  for (let i = 0; i < 5; i += 1) {
+    mockNow += 1_000;
+    flushOneFrame();
+    assert.notEqual(
+      orch.getSnapshot().activeToasterId,
+      'permissions',
+      'permissions must not be re-raised in-session after an explicit dismiss',
+    );
+  }
+});
+
+// ── The PRODUCER half of the requiresStages contract on win32 ────────────────
+//
+// Suppressing `permissions` on Windows is only safe because the class AUTO-SKIPS
+// a skipWhen-suppressed stage into `skipped`, which is what unblocks
+// browser_extension (requiresStages: ['permissions']) and, through it, every
+// later stage. If that ever regressed, a Windows user would silently lose the
+// entire onboarding chain — a far worse bug than the spurious card the platform
+// gate removed. The sibling pure-predicate test can only hand-seed `skipped`;
+// this asserts the class puts it there itself.
+test('win32 healthy: the suppressed permissions stage is auto-skipped and the chain advances', () => {
+  localStorage.clear();
+  timerQueue = [];
+  mockNow = 0;
+
+  const orch = new OnboardingOrchestrator();
+  orch.start(STAGES);
+  orch.emit({ type: 'launcher:mounted' });
+  orch.emit({ type: 'foreground:change', isForeground: true });
+  orch.emit({
+    type: 'user-state:change',
+    patch: {
+      // Windows with nothing blocked — the normal case.
+      permsShown: false,
+      macTCCBlocked: false,
+      permissionsFirstRunEligible: false,
+      permissionsNeedAttention: false,
+      extensionConnected: false, // let browser_extension actually become eligible
+    },
+  });
+  mockNow += 6_000; // past browser_extension's 5s requiresHomepageDuration
+
+  let guard = 0;
+  while (guard < 6 && orch.getSnapshot().activeToasterId !== 'browser_extension') {
+    flushOneFrame();
+    guard += 1;
+  }
+
+  const snap = orch.getSnapshot();
+  assert.ok(
+    snap.skipped.has('permissions'),
+    'the class must record the suppressed stage as skipped, not merely ineligible',
+  );
+  assert.notEqual(
+    snap.activeToasterId,
+    'permissions',
+    'the macOS permissions card must never be raised on a healthy Windows machine',
+  );
+  assert.equal(
+    snap.activeToasterId,
+    'browser_extension',
+    'the dependent stage must still be reachable — suppression must not strand the chain',
+  );
+});

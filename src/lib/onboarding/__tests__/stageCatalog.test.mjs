@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { shouldShowToaster } from '../orchestrator.mjs';
+import { shouldShowToaster, DEFAULT_USER_STATE } from '../orchestrator.mjs';
 import {
   STAGES,
   QUIET_WINDOW_STAGE,
@@ -54,21 +54,8 @@ test('INVARIANT: every gate-only stage is onceEver — stageCatalog.ts (producti
 
 // ─── Fixtures ──────────────────────────────────────────────────────
 
-const DEFAULT_USER_STATE = {
-  isPremium: false,
-  hasProfile: false,
-  hasNativelyKey: false,
-  hasTrialToken: false,
-  extensionConnected: false,
-  extensionSupported: true,
-  permsShown: false,
-  macTCCBlocked: false,
-  seenProfileOnboarding: false,
-  seenModesOnboarding: false,
-  activeModeSet: false,
-  donationShouldShow: false,
-  isV2_8_OrNewer: true,
-};
+// Imported, NOT hand-copied — a local twin silently drifts from the shipped
+// defaults (this one was already missing the two permissions* fields).
 
 function makeCtx(overrides = {}) {
   return {
