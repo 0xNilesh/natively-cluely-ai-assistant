@@ -68,6 +68,7 @@ import { promisify } from 'util';
 import axios from 'axios';
 import { createProviderRateLimiters, RateLimiter } from './services/RateLimiter';
 import { CodexCliConfig, CodexCliService, DEFAULT_CODEX_CLI_CONFIG } from './services/CodexCliService';
+import { ClaudeCliConfig, ClaudeCliService, DEFAULT_CLAUDE_CLI_CONFIG } from './services/ClaudeCliService';
 import { GROQ_PRIMARY_MODEL, groqFallbackFor, isGroqModelGone } from './llm/groqModels';
 const execAsync = promisify(exec);
 const NATIVELY_API_URL = (process.env.NATIVELY_API_URL || 'https://api.natively.software').replace(/\/+$/, '');
@@ -457,6 +458,7 @@ export class LLMHelper {
   private activeCurlProvider: CurlProvider | null = null;
   private groqFastTextMode: boolean = false;
   private codexCliConfig: CodexCliConfig = DEFAULT_CODEX_CLI_CONFIG;
+  private claudeCliConfig: ClaudeCliConfig = DEFAULT_CLAUDE_CLI_CONFIG;
   private knowledgeOrchestrator: any = null;
   private negotiationCoachingHandler: ((payload: unknown) => void) | null = null;
   private aiResponseLanguage: string = 'auto';
@@ -729,6 +731,12 @@ export class LLMHelper {
   private static readonly PROVIDER_LABEL_FAMILY: Readonly<Record<string, string>> = {
     gemini: 'gemini', groq: 'groq', natively: 'natively', openai: 'openai',
     claude: 'claude', deepseek: 'deepseek', litellm: 'litellm', codex: 'codex-cli',
+    // Distinct from `claude`: the CLI carries its own credentials, so switching
+    // the Anthropic API key off must not also switch the CLI off. 'claude-cli'
+    // is intentionally absent from DISABLED_PROVIDER_FAMILY_MAP, which puts
+    // isProviderFamilyDisabled() on its exact-match branch — the right
+    // behaviour for a family with no router-side provider id.
+    claude_cli: 'claude-cli',
     custom_curl: 'custom', custom_provider: 'custom',
   };
 
@@ -1338,6 +1346,31 @@ export class LLMHelper {
     return this.codexCliConfig;
   }
 
+  /**
+   * Install a new Claude CLI config and re-prime the warm-process pool.
+   *
+   * The pool is torn down unconditionally first: a path or model change makes
+   * every parked process wrong (they were spawned with the OLD argv), and
+   * disabling the provider must not leave idle `claude` processes behind.
+   * Mirrors setCodexCliConfig, plus the subprocess lifecycle Codex no longer has.
+   */
+  public setClaudeCliConfig(config: Partial<ClaudeCliConfig>) {
+    this.claudeCliConfig = ClaudeCliService.normalizeConfig(config);
+    try {
+      ClaudeCliService.disposeWarmPool();
+      if (this.claudeCliConfig.enabled) ClaudeCliService.prewarm(this.claudeCliConfig);
+    } catch (e: any) {
+      // Prewarming is an optimisation; a failure here must never block the
+      // config write. The next real request spawns cold and reports properly.
+      console.warn('[LLMHelper] Claude CLI prewarm failed:', e?.message);
+    }
+    console.log(`[LLMHelper] Claude CLI ${this.claudeCliConfig.enabled ? 'enabled' : 'disabled'} with model: ${this.claudeCliConfig.model}`);
+  }
+
+  public getClaudeCliConfig(): ClaudeCliConfig {
+    return this.claudeCliConfig;
+  }
+
   public getAiResponseLanguage(): string {
     return this.aiResponseLanguage;
   }
@@ -1354,6 +1387,11 @@ export class LLMHelper {
   }
 
   private isClaudeModel(modelId: string): boolean {
+    // MUST exclude the CLI ids first: 'claude-cli' and 'claude-cli:<model>'
+    // both satisfy startsWith("claude-"), so without this guard selecting the
+    // local CLI would route to the Anthropic HTTP client instead — and fail
+    // with "no API key" for a provider that deliberately needs none.
+    if (this.isClaudeCliModel(modelId)) return false;
     return modelId.startsWith("claude-");
   }
 
@@ -1496,6 +1534,29 @@ export class LLMHelper {
     } catch {
       return false;
     }
+  }
+
+  private isClaudeCliModel(modelId: string): boolean {
+    return modelId === "claude-cli" || modelId.startsWith("claude-cli:");
+  }
+
+  /**
+   * Sibling of isCodexAvailable(). Two differences, both structural:
+   *
+   *  - There is no OAuth service to ask "is the user signed in": the `claude`
+   *    binary owns its own credentials. The nearest equivalent probe is "does
+   *    the binary resolve", which autoDetectPath() answers from the filesystem
+   *    without shelling out, so this stays cheap enough for a per-request gate.
+   *  - 'claude-cli' is deliberately NOT in DISABLED_PROVIDER_FAMILY_MAP, so
+   *    isProviderFamilyDisabled() falls into its exact-match branch. That is
+   *    the correct behaviour here: mapping it onto the router's 'claude' would
+   *    make switching the Anthropic API key off also kill the CLI, which is a
+   *    separate provider with separate credentials.
+   */
+  private isClaudeCliAvailable(): boolean {
+    if (this.isProviderDisabled('claude-cli')) return false;
+    if (!this.claudeCliConfig.enabled) return false;
+    return ClaudeCliService.binaryLooksAvailable(this.claudeCliConfig.path);
   }
   // ---------------------------
 
@@ -1695,6 +1756,54 @@ export class LLMHelper {
       sandboxMode: this.codexCliConfig.sandboxMode,
       serviceTier: this.codexCliConfig.serviceTier,
       modelReasoningEffort: this.codexCliConfig.modelReasoningEffort,
+      signal,
+    });
+  }
+
+  private getSelectedClaudeCliModel(fastMode: boolean): string {
+    if (fastMode) return this.claudeCliConfig.fastModel;
+    if (this.currentModelId.startsWith("claude-cli:")) {
+      return this.currentModelId.slice("claude-cli:".length) || this.claudeCliConfig.model;
+    }
+    return this.claudeCliConfig.model;
+  }
+
+  private async generateWithClaudeCli(userContent: string, systemPrompt?: string, fastMode = false, imagePaths?: string[], signal?: AbortSignal): Promise<string> {
+    if (!this.isClaudeCliAvailable()) throw new Error('Claude Code CLI transport is disabled or the binary was not found.');
+    // The `claude` binary is local, but it talks to api.anthropic.com — so this
+    // is a CLOUD provider and needs the same local-only boundary every other
+    // cloud provider has. Exactly the Codex situation: visionPolicy.ts keeps
+    // Codex out of isLocalVisionProvider() because "no API key" is a routing
+    // hint, not a statement about where the pixels go. Same is true here.
+    if (this.isLocalOnlyMode) throw new Error("Cloud providers disabled in local-only mode");
+    this.assertOutboundScopes('claude_cli', userContent, imagePaths);
+    const model = this.getSelectedClaudeCliModel(fastMode);
+    return ClaudeCliService.run(this.claudeCliConfig.path, {
+      prompt: userContent,
+      instructions: systemPrompt,
+      model,
+      timeoutMs: this.claudeCliConfig.timeoutMs,
+      imagePaths,
+      maxWarmProcesses: this.claudeCliConfig.maxWarmProcesses,
+      signal,
+    });
+  }
+
+  private async *streamWithClaudeCli(userContent: string, systemPrompt?: string, fastMode = false, imagePaths?: string[], signal?: AbortSignal): AsyncGenerator<string, void, unknown> {
+    if (!this.isClaudeCliAvailable()) throw new Error('Claude Code CLI transport is disabled or the binary was not found.');
+    if (this.isLocalOnlyMode) throw new Error("Cloud providers disabled in local-only mode");
+    // See generateWithClaudeCli. This is a generator, so the check runs on the
+    // first next() rather than at call time — still strictly before any byte
+    // reaches ClaudeCliService.stream, which is the property that matters.
+    this.assertOutboundScopes('claude_cli', userContent, imagePaths);
+    const model = this.getSelectedClaudeCliModel(fastMode);
+    yield* ClaudeCliService.stream(this.claudeCliConfig.path, {
+      prompt: userContent,
+      instructions: systemPrompt,
+      model,
+      timeoutMs: this.claudeCliConfig.timeoutMs,
+      imagePaths,
+      maxWarmProcesses: this.claudeCliConfig.maxWarmProcesses,
       signal,
     });
   }
@@ -3174,7 +3283,7 @@ let isMultimodal = !!(imagePaths?.length);
         this.isCodexAvailable() ||
         this.isGroqModel(this.currentModelId) ||
         this.currentModelId === 'natively'
-      ) && !this.isCodexCliModel(this.currentModelId);
+      ) && !this.isCodexCliModel(this.currentModelId) && !this.isClaudeCliModel(this.currentModelId);
       if (fastModeAppliesNS && this.isCodexAvailable()) {
         console.log(`[LLMHelper] ⚡️ Fast Text Mode Active. Routing to Codex CLI...`);
         try {
@@ -3206,6 +3315,10 @@ let isMultimodal = !!(imagePaths?.length);
 
       if (this.isCodexCliModel(this.currentModelId) && this.isCodexAvailable()) {
         return await this.generateWithCodexCli(cloudUserContent, openaiSystemPrompt, false, cloudImagePaths);
+      }
+
+      if (this.isClaudeCliModel(this.currentModelId) && this.isClaudeCliAvailable()) {
+        return await this.generateWithClaudeCli(cloudUserContent, claudeSystemPrompt, false, cloudImagePaths);
       }
 
       // `custom` is the family id the Providers panel's "Disable custom
@@ -4786,6 +4899,24 @@ let isMultimodal = !!(imagePaths?.length);
     // extractProblemFromImages, generateSolution) honors the user's pick.
     // On failure we fall back to the cloud tier rotation below.
     // ──────────────────────────────────────────────────────────────────
+    // Claude Code runs FIRST when the user picked it explicitly. Unlike Codex
+    // it is NOT seated on every request: a process spawn per call is too
+    // expensive to put ahead of the cloud tiers for a user who merely has the
+    // CLI installed and never chose it.
+    if (this.isClaudeCliModel(this.currentModelId) && this.isClaudeCliAvailable()) {
+      try {
+        console.log(`[LLMHelper] 🚀 [Claude Code] Attempting (${this.claudeCliConfig.model}, ${isMultimodal ? imagePaths.length + ' image(s)' : 'text-only'})...`);
+        const text = await this.generateWithClaudeCli(userPrompt, systemPrompt, false, isMultimodal ? imagePaths : undefined);
+        if (text && text.trim().length > 0) {
+          console.log(`[LLMHelper] ✅ [Claude Code] succeeded.`);
+          return text;
+        }
+        console.warn(`[LLMHelper] ⚠️ [Claude Code] returned empty response, falling back to cloud tiers.`);
+      } catch (e: any) {
+        console.warn(`[LLMHelper] ⚠️ [Claude Code] failed: ${e.message}. Falling back to cloud tiers.`);
+      }
+    }
+
     if (this.isCodexAvailable()) {
       try {
         console.log(`[LLMHelper] 🚀 [Codex CLI] Attempting (${this.codexCliConfig.model}, ${isMultimodal ? imagePaths.length + ' image(s)' : 'text-only'})...`);
@@ -5072,6 +5203,9 @@ let isMultimodal = !!(imagePaths?.length);
       if (this.isCodexAvailable()) {
         providers.push({ name: `Codex CLI (${this.codexCliConfig.model})`, execute: () => this.streamWithCodexCli(userContent, openaiSystemPrompt, false, imagePaths, abortSignal) });
       }
+      if (this.isClaudeCliAvailable()) {
+        providers.push({ name: `Claude Code (${this.claudeCliConfig.model})`, execute: () => this.streamWithClaudeCli(userContent, claudeSystemPrompt, false, imagePaths, abortSignal) });
+      }
       if (this.openaiClient) {
         providers.push({ name: `OpenAI (${textOpenAI})`, execute: () => this.streamWithOpenaiMultimodal(userContent, imagePaths!, openaiSystemPrompt, textOpenAI, abortSignal) });
       }
@@ -5102,6 +5236,9 @@ let isMultimodal = !!(imagePaths?.length);
       }
       if (this.isCodexAvailable()) {
         providers.push({ name: `Codex CLI (${this.codexCliConfig.model})`, execute: () => this.streamWithCodexCli(userContent, openaiSystemPrompt, false, undefined, abortSignal) });
+      }
+      if (this.isClaudeCliAvailable()) {
+        providers.push({ name: `Claude Code (${this.claudeCliConfig.model})`, execute: () => this.streamWithClaudeCli(userContent, claudeSystemPrompt, false, undefined, abortSignal) });
       }
       if (this.openaiClient) {
         providers.push({ name: `OpenAI (${textOpenAI})`, execute: () => this.streamWithOpenai(userContent, openaiSystemPrompt, textOpenAI, abortSignal) });
@@ -5364,6 +5501,15 @@ let isMultimodal = !!(imagePaths?.length);
         cloud.push({ id: 'codex-cli', name: `Codex CLI (${this.codexCliConfig.model})`, isLocal: false, priority: prio++, ttftTimeoutMs: PRO_TTFT_MS,
           open: (sig) => this.streamWithCodexCli(userContent, systemPrompt, false, imagePaths, sig) });
       }
+      // isLocal:false for the same reason Codex is false — the binary is local
+      // but the pixels go to api.anthropic.com, so counting it as local would
+      // ship a screenshot off-device while telling the user it stayed. It also
+      // gets the PRO TTFT budget rather than the flash one: a process spawn
+      // sits in front of the model, so even the warm path starts ~0.55s behind.
+      if (this.isClaudeCliAvailable()) {
+        cloud.push({ id: 'claude-cli', name: `Claude Code (${this.claudeCliConfig.model})`, isLocal: false, priority: prio++, ttftTimeoutMs: PRO_TTFT_MS,
+          open: (sig) => this.streamWithClaudeCli(userContent, systemPrompt, false, imagePaths, sig) });
+      }
     }
 
     // Local providers (always available, including in local-only mode).
@@ -5405,6 +5551,7 @@ let isMultimodal = !!(imagePaths?.length);
       if (this.useOllama) { const o = local.find(p => p.id === 'ollama'); if (o) front.push(o); }
       if (this.customProvider) { const c = local.find(p => p.id === 'custom'); if (c) front.push(c); }
       if (this.isCodexCliModel(this.currentModelId)) { const cdx = cloud.find(p => p.id === 'codex-cli'); if (cdx) front.push(cdx); }
+      if (this.isClaudeCliModel(this.currentModelId)) { const ccli = cloud.find(p => p.id === 'claude-cli'); if (ccli) front.push(ccli); }
       const backLocal = local.filter(p => !front.includes(p));
       const backCloud = cloud.filter(p => !front.includes(p));
       ordered = [...front, ...orderVisionByHealth(backCloud, this.visionHealth, nowMs), ...backLocal];
@@ -6977,7 +7124,7 @@ let isMultimodal = !!(imagePaths?.length);
       this.isCodexAvailable() ||
       this.isGroqModel(this.currentModelId) ||
       this.currentModelId === 'natively'
-    ) && !this.isCodexCliModel(this.currentModelId);
+    ) && !this.isCodexCliModel(this.currentModelId) && !this.isClaudeCliModel(this.currentModelId);
     if (fastModeApplies) {
       if (this.isCodexAvailable()) {
         console.log(`[LLMHelper] ⚡️ Fast Text Mode Active (Streaming). Routing to Codex CLI...`);
@@ -7051,6 +7198,11 @@ let isMultimodal = !!(imagePaths?.length);
 
     if (this.isCodexCliModel(this.currentModelId) && this.isCodexAvailable()) {
       yield* this.streamWithCodexCli(userContent, finalSystemPrompt, false, imagePaths, abortSignal);
+      return;
+    }
+
+    if (this.isClaudeCliModel(this.currentModelId) && this.isClaudeCliAvailable()) {
+      yield* this.streamWithClaudeCli(userContent, finalSystemPrompt, false, imagePaths, abortSignal);
       return;
     }
 
@@ -8788,6 +8940,18 @@ let isMultimodal = !!(imagePaths?.length);
   }
 
   /**
+   * Claude Code IS the subprocess transport the isUsingCodexCli() comment above
+   * describes (Codex stopped being one when it moved to HTTPS). A spawn sits in
+   * front of every request — ~0.55s warm, ~1.4s cold — so racing it against the
+   * 7s cloud first-useful cap aborts healthy turns into the canned fallback
+   * ("Let me come back to that in just a moment."). Callers use this to pick the
+   * local 30s budget instead. Mirrors isUsingOllama()/isUsingCodexCli().
+   */
+  public isUsingClaudeCli(): boolean {
+    return this.isClaudeCliAvailable() && this.isClaudeCliModel(this.currentModelId);
+  }
+
+  /**
    * True when this turn routes through natively-api's SEQUENTIAL server-side
    * provider cascade (`${NATIVELY_API_URL}/v1/chat`) rather than straight to a
    * provider.
@@ -9012,9 +9176,10 @@ let isMultimodal = !!(imagePaths?.length);
     }
   }
 
-  public getCurrentProvider(): "ollama" | "gemini" | "custom" | "codex-cli" {
+  public getCurrentProvider(): "ollama" | "gemini" | "custom" | "codex-cli" | "claude-cli" {
     if (this.customProvider) return "custom";
     if (this.isCodexCliModel(this.currentModelId)) return "codex-cli";
+    if (this.isClaudeCliModel(this.currentModelId)) return "claude-cli";
     return this.useOllama ? "ollama" : "gemini";
   }
 

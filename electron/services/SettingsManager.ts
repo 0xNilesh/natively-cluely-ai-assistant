@@ -45,6 +45,23 @@ export interface AppSettings {
     // xhigh on gpt-5.3-codex is silently downgraded). 'none' means "don't pass
     // -c model_reasoning_effort at all" — distinct from omitting the setting.
     codexCliModelReasoningEffort?: 'none' | 'low' | 'medium' | 'high' | 'xhigh';
+    // Claude Code / `claude` CLI provider. Sibling of the codex keys above, with
+    // one real difference: this one IS a local subprocess, so `claudeCliPath` is
+    // the binary that gets spawned rather than a deprecated leftover. 'claude'
+    // means "resolve on PATH, then fall back to ClaudeCliService.autoDetectPath()"
+    // — which matters because an app launched from Finder inherits a minimal PATH.
+    claudeCliEnabled?: boolean;
+    claudeCliPath?: string;
+    // Aliases ('sonnet' / 'opus' / 'haiku' / 'fable') rather than pinned model
+    // ids: `claude --model` resolves an alias to the current release, so the
+    // setting cannot go stale the way a hard-coded claude-sonnet-4-6 would.
+    claudeCliModel?: string;
+    claudeCliFastModel?: string;
+    claudeCliTimeoutMs?: number;
+    // Prewarmed idle `claude` processes kept parked to hide the CLI's ~1.4s
+    // cold boot. 0 disables prewarming. See ClaudeCliService's header for the
+    // measurements behind the default.
+    claudeCliMaxWarmProcesses?: number;
     // Hindsight long-term memory server (optional, user-provisioned sidecar — Cloud OR
     // local). baseUrl empty by default → feature off. Env (HINDSIGHT_BASE_URL) overrides
     // these for dev. apiKey only for Hindsight Cloud. autoStart/serverCommand reserved for

@@ -15,6 +15,17 @@ interface DomCaptureMeta {
 }
 
 // Types for the exposed Electron API
+/** Shape of the Claude Code CLI provider config crossing the IPC boundary.
+ *  Mirrors ClaudeCliConfig in electron/services/ClaudeCliService.ts. */
+interface ClaudeCliConfigShape {
+  enabled: boolean;
+  path: string;
+  model: string;
+  fastModel: string;
+  timeoutMs: number;
+  maxWarmProcesses: number;
+}
+
 interface ElectronAPI {
   updateContentDimensions: (dimensions: { width: number; height: number }) => Promise<void>;
   updateContentDimensionsCentered: (dimensions: { width: number; height: number }) => Promise<void>;
@@ -66,7 +77,7 @@ interface ElectronAPI {
 
   // LLM Model Management
   getCurrentLlmConfig: () => Promise<{
-    provider: 'ollama' | 'gemini' | 'custom' | 'codex-cli';
+    provider: 'ollama' | 'gemini' | 'custom' | 'codex-cli' | 'claude-cli';
     /**
      * @deprecated Use `modelId` for selection comparisons and `displayName`
      * for UI labels. Kept as an alias of `modelId` for back-compat.
@@ -614,6 +625,19 @@ interface ElectronAPI {
   codexStartLogin: () => Promise<{ success: boolean; email?: string; expiresAt?: number; error?: string }>;
   codexSignOut: () => Promise<{ success: boolean; error?: string }>;
   codexRefreshTokens: () => Promise<{ success: boolean; email?: string; expiresAt?: number; error?: string }>;
+
+  // Claude Code / `claude` CLI. Unlike codex-cli this provider really does
+  // spawn a binary, so `path` is load-bearing and `testClaudeCli` runs it.
+  getClaudeCliConfig: () => Promise<ClaudeCliConfigShape>;
+  setClaudeCliConfig: (config: Partial<ClaudeCliConfigShape>) => Promise<{ success: boolean; error?: string; config?: ClaudeCliConfigShape }>;
+  testClaudeCli: (config?: Partial<ClaudeCliConfigShape>) => Promise<{
+    success: boolean;
+    error?: string;
+    resolvedPath?: string;
+    version?: string;
+    config?: ClaudeCliConfigShape;
+  }>;
+  detectClaudeCliPath: () => Promise<{ success: boolean; path?: string | null; candidates?: string[]; error?: string }>;
 
   // Demo
   seedDemo: () => Promise<{ success: boolean }>;
@@ -2177,6 +2201,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   codexStartLogin: () => ipcRenderer.invoke('codex:start-login'),
   codexSignOut: () => ipcRenderer.invoke('codex:sign-out'),
   codexRefreshTokens: () => ipcRenderer.invoke('codex:refresh-tokens'),
+  // Claude Code / `claude` CLI.
+  getClaudeCliConfig: () => ipcRenderer.invoke('get-claude-cli-config'),
+  setClaudeCliConfig: (config: Partial<ClaudeCliConfigShape>) => ipcRenderer.invoke('set-claude-cli-config', config),
+  testClaudeCli: (config?: Partial<ClaudeCliConfigShape>) => ipcRenderer.invoke('test-claude-cli', config),
+  detectClaudeCliPath: () => ipcRenderer.invoke('claude-cli:detect-path'),
   onCodexLoginComplete: (callback: (info: { email?: string }) => void) => {
     const subscription = (_: any, info: any) => callback(info || {});
     ipcRenderer.on('codex:login:complete', subscription);

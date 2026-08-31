@@ -95,6 +95,36 @@ export const getCodexCliModelDisplayName = (id: string): string | null => {
     return preset?.name || prettifyModelId(modelId);
 };
 
+export const CLAUDE_CLI_MODEL = {
+    id: 'claude-cli',
+    name: 'Claude Code',
+    desc: 'Local CLI transport',
+};
+
+/**
+ * Model ALIASES, not pinned ids. `claude --model sonnet` resolves to whatever
+ * the current Sonnet release is, so this list does not go stale the way the
+ * pinned ids in STANDARD_CLOUD_MODELS.claude do — and a user on an older or
+ * newer CLI gets a model that actually exists for them.
+ */
+export const CLAUDE_CLI_MODEL_PRESETS = [
+    { id: 'sonnet', name: 'Sonnet' },
+    { id: 'opus', name: 'Opus' },
+    { id: 'haiku', name: 'Haiku' },
+    { id: 'fable', name: 'Fable' },
+];
+
+export const claudeCliSelectorId = (modelId: string): string => `claude-cli:${modelId}`;
+
+export const getClaudeCliModelDisplayName = (id: string): string | null => {
+    if (id === CLAUDE_CLI_MODEL.id) return CLAUDE_CLI_MODEL.name;
+    if (!id.startsWith('claude-cli:')) return null;
+
+    const modelId = id.slice('claude-cli:'.length);
+    const preset = CLAUDE_CLI_MODEL_PRESETS.find(model => model.id === modelId);
+    return preset ? `${CLAUDE_CLI_MODEL.name}: ${preset.name}` : prettifyModelId(modelId);
+};
+
 export const prettifyModelId = (id: string): string => {
     if (!id) return '';
     return id.replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());

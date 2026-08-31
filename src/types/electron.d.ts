@@ -1,3 +1,15 @@
+/** Claude Code CLI provider config as it crosses IPC. Mirrors ClaudeCliConfig
+ *  in electron/services/ClaudeCliService.ts and ClaudeCliConfigShape in
+ *  electron/preload.ts — the three must stay in step. */
+export interface ClaudeCliConfigShape {
+  enabled: boolean
+  path: string
+  model: string
+  fastModel: string
+  timeoutMs: number
+  maxWarmProcesses: number
+}
+
 // Phase 3 — DynamicActionPayload mirrors electron/services/dynamic-actions/DynamicAction.ts.
 // Kept as a structural interface (not a class import) to preserve the strict main↔renderer
 // type boundary — the renderer never imports from electron/* directly.
@@ -144,7 +156,7 @@ export interface ElectronAPI {
   onOpenSettingsTab: (callback: (tab: string) => void) => () => void
 
   // LLM Model Management
-  getCurrentLlmConfig: () => Promise<{ provider: "ollama" | "gemini" | "custom" | "codex-cli"; /** @deprecated use `modelId` for selection, `displayName` for UI */ model: string; modelId: string; displayName: string; isOllama: boolean }>
+  getCurrentLlmConfig: () => Promise<{ provider: "ollama" | "gemini" | "custom" | "codex-cli" | "claude-cli"; /** @deprecated use `modelId` for selection, `displayName` for UI */ model: string; modelId: string; displayName: string; isOllama: boolean }>
   getAvailableOllamaModels: () => Promise<string[]>
   /** Whether a denied data scope would actually be handled on-device. */
   getLocalFallbackStatus: () => Promise<{ text: boolean; vision: boolean }>
@@ -471,6 +483,13 @@ export interface ElectronAPI {
   codexStartLogin: () => Promise<{ success: boolean; email?: string; expiresAt?: number; error?: string }>;
   codexSignOut: () => Promise<{ success: boolean; error?: string }>;
   codexRefreshTokens: () => Promise<{ success: boolean; email?: string; expiresAt?: number; error?: string }>;
+  // Claude Code / `claude` CLI. Mirrors ClaudeCliConfig in
+  // electron/services/ClaudeCliService.ts. `path` is load-bearing here (unlike
+  // codex-cli's deprecated field) because this provider really spawns a binary.
+  getClaudeCliConfig: () => Promise<ClaudeCliConfigShape>;
+  setClaudeCliConfig: (config: Partial<ClaudeCliConfigShape>) => Promise<{ success: boolean; error?: string; config?: ClaudeCliConfigShape }>;
+  testClaudeCli: (config?: Partial<ClaudeCliConfigShape>) => Promise<{ success: boolean; error?: string; resolvedPath?: string; version?: string; config?: ClaudeCliConfigShape }>;
+  detectClaudeCliPath: () => Promise<{ success: boolean; path?: string | null; candidates?: string[]; error?: string }>;
   onCodexLoginComplete: (callback: (info: { email?: string }) => void) => () => void;
   onCodexLoginFailed: (callback: (info: { message: string }) => void) => () => void;
   onCodexSignedOut: (callback: () => void) => () => void;

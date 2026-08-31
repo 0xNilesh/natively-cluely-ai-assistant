@@ -2081,6 +2081,17 @@ export class AppState {
         serviceTier: settingsManager.get('codexCliServiceTier') || 'default',
         modelReasoningEffort: settingsManager.get('codexCliModelReasoningEffort'),
       });
+      // Also primes the warm-process pool when enabled — see
+      // LLMHelper.setClaudeCliConfig. Doing it here rather than lazily means the
+      // FIRST Auto Answer of a session is warm too, not just the second.
+      llmHelper.setClaudeCliConfig({
+        enabled: !!settingsManager.get('claudeCliEnabled'),
+        path: settingsManager.get('claudeCliPath') || 'claude',
+        model: settingsManager.get('claudeCliModel') || 'sonnet',
+        fastModel: settingsManager.get('claudeCliFastModel') || 'haiku',
+        timeoutMs: settingsManager.get('claudeCliTimeoutMs') || 60_000,
+        maxWarmProcesses: settingsManager.get('claudeCliMaxWarmProcesses'),
+      });
     }
 
     // Initialize RAGManager (requires database to be ready)
@@ -9031,6 +9042,13 @@ if (process.env.THINKING_MATRIX === '1') {
     appState.stopNativeOomTraceSampling();
     nativeOomTrace.stop('will-quit');
     stopAppManagedHindsight('will-quit');
+    // Prewarmed `claude` processes are idle children of this process, so a
+    // graceful quit must reap them explicitly — otherwise they survive as
+    // orphans until their own idle TTL fires, minutes later.
+    try {
+      const { ClaudeCliService } = require('./services/ClaudeCliService');
+      ClaudeCliService.disposeWarmPool();
+    } catch { /* never block a quit */ }
     checkpointDatabase('will-quit');
   });
 

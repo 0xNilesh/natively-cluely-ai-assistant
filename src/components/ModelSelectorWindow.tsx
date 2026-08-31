@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { Check, Loader2 } from 'lucide-react';
-import { CODEX_CLI_MODEL, CODEX_CLI_MODEL_PRESETS, codexCliSelectorId, getCodexCliModelDisplayName, isModelAllowed, litellmModelLabel, STANDARD_CLOUD_MODELS, prettifyModelId } from '../utils/modelUtils';
+import { CLAUDE_CLI_MODEL, CLAUDE_CLI_MODEL_PRESETS, claudeCliSelectorId, CODEX_CLI_MODEL, CODEX_CLI_MODEL_PRESETS, codexCliSelectorId, getClaudeCliModelDisplayName, getCodexCliModelDisplayName, isModelAllowed, litellmModelLabel, STANDARD_CLOUD_MODELS, prettifyModelId } from '../utils/modelUtils';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
 import { getMeetingInterfaceTheme, type MeetingInterfaceTheme } from '../lib/meetingInterfaceTheme';
 import {
@@ -15,7 +15,7 @@ import {
 interface ModelOption {
     id: string;
     name: string;
-    type: 'cloud' | 'local' | 'custom' | 'ollama' | 'codex-cli';
+    type: 'cloud' | 'local' | 'custom' | 'ollama' | 'codex-cli' | 'claude-cli';
     provider?: string;
 }
 
@@ -119,6 +119,9 @@ const ModelSelectorWindow = () => {
                 // 3. Codex CLI
                 const codexCliConfig = await window.electronAPI?.getCodexCliConfig?.();
 
+                // 3b. Claude Code CLI
+                const claudeCliConfig = await window.electronAPI?.getClaudeCliConfig?.();
+
                 // 4. Ollama
                 let ollamaModels: string[] = [];
                 try {
@@ -183,6 +186,15 @@ const ModelSelectorWindow = () => {
                     CODEX_CLI_MODEL_PRESETS.forEach(model => {
                         const id = codexCliSelectorId(model.id);
                         models.push({ id, name: getCodexCliModelDisplayName(id) || model.name, type: 'codex-cli', provider: 'codex-cli' });
+                    });
+                }
+
+                // Claude Code CLI
+                if (claudeCliConfig?.enabled) {
+                    models.push({ id: CLAUDE_CLI_MODEL.id, name: `${CLAUDE_CLI_MODEL.name} (${prettifyModelId(claudeCliConfig.model)})`, type: 'claude-cli', provider: 'claude-cli' });
+                    CLAUDE_CLI_MODEL_PRESETS.forEach(model => {
+                        const id = claudeCliSelectorId(model.id);
+                        models.push({ id, name: getClaudeCliModelDisplayName(id) || model.name, type: 'claude-cli', provider: 'claude-cli' });
                     });
                 }
 

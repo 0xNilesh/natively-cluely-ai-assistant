@@ -51,6 +51,9 @@ export const AI_PROVIDER_BRANDS: Record<string, { mono: string; brand: string }>
     // still drives the tile wash. Hex is NVIDIA green as shipped in the mark.
     nvidia_nim: { mono: 'NV', brand: '#76B900' },
     codex:    { mono: 'CX', brand: '#10A37F' },
+    // Same Anthropic brand as `claude`; a separate key because the two are
+    // separate providers with separate credentials in this app.
+    claude_cli: { mono: 'CC', brand: '#D97757' },
     litellm:  { mono: 'LL', brand: '#8B5CF6' },
     ollama:   { mono: 'OL', brand: '#9CA3AF' },
     natively: { mono: 'NA', brand: '#7C9CF5' },
@@ -67,7 +70,8 @@ export const AI_PROVIDER_MARK_IMAGES: Record<string, string> = {
  * AI_PROVIDER_MARK_IMAGES, then to a monogram (tiled renderer) or the caller's
  * fallback glyph (tile-less renderer). Custom providers are user-defined
  * endpoints with no brand, so they always land on the fallback.
- * `codex` maps to the OpenAI mark and `anthropic` to Claude's — same brands.
+ * `codex` maps to the OpenAI mark, and `anthropic` / `claude_cli` to Claude's
+ * — same brands, different providers.
  */
 export const AI_PROVIDER_MARKS: Record<string, string> = {
     gemini: geminiMark,
@@ -77,6 +81,7 @@ export const AI_PROVIDER_MARKS: Record<string, string> = {
     groq: groqMark,
     openai: openaiMark,
     codex: openaiMark,
+    claude_cli: claudeMark,
     ollama: ollamaMark,
     nvidia_nim: nvidiaMark,
 };
