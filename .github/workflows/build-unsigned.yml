@@ -25,6 +25,24 @@ name: Build (macOS, unsigned)
 #   ditto --rsrc --extattr Natively.app /Applications/Natively.app
 #   xattr -cr /Applications/Natively.app
 #
+# ── WHY ZIP ONLY, NO DMG ───────────────────────────────────────────────────
+# electron-builder's DMG target cannot run on a hosted runner. Measured in run
+# 33381648959: both DMGs failed after the zips had already built fine, with
+#
+#   hdiutil: create failed - Device not configured
+#   plistlib.InvalidFileException: Invalid file
+#
+# `hdiutil create` needs to attach a disk image, which the runner's environment
+# does not allow, and dmgbuild then chokes parsing the empty hdiutil output. It
+# burned ~9 of the run's 20 minutes before failing.
+#
+# The repo already treats electron-builder's DMG step as unusable for a
+# different reason — release-macos.yml's header records that it corrupts the
+# embedded app signature, so the signed path also builds the zip target only and
+# creates its DMGs separately through create-dmg in
+# scripts/afterAllArtifactBuild.cjs. A zip is the better artifact here anyway:
+# install is `ditto` into /Applications plus `xattr -cr`, with no mount step.
+#
 # ad-hoc-sign.js explicitly skips itself when CSC_LINK / CSC_NAME /
 # NATIVELY_SIGN_IDENTITY are set, so the job below deliberately sets none of
 # them (and pins CSC_IDENTITY_AUTO_DISCOVERY=false so electron-builder cannot
@@ -70,14 +88,14 @@ jobs:
   build-macos-unsigned:
     name: Unsigned macOS build (${{ inputs.arch || 'arm64' }})
     runs-on: macos-14 # Apple Silicon + a clang new enough for Electron 43's headers
-    # Cold-cache budget. Measured components, worst case: `npm ci` postinstall
-    # (patch-package, sharp rebuild, better-sqlite3 + keytar rebuilt against the
-    # Electron 43 ABI, ~360 MB of ONNX model downloads) ~15-25 min; renderer +
-    # electron builds ~5 min; the Rust native-module build ~8-15 min (TWO darwin
-    # targets — see NATIVELY_BUILD_ALL_MAC_ARCHES below); electron-builder
-    # ~10 min per packed arch. 120 leaves headroom for the `both` path on a
-    # completely cold cache without letting a hung run burn hours.
-    timeout-minutes: 120
+    # Measured on run 33381648959, every cache cold: checkout + toolchain 18s,
+    # `npm ci` including the whole postinstall (patch-package, sharp rebuild,
+    # better-sqlite3 + keytar against the Electron 43 ABI, ~360 MB of ONNX
+    # downloads) 95s, and the build 18m29s — of which electron-builder was
+    # 14m05s for two arches and ~9m of that was the two DMGs that could not be
+    # created at all. Zip-only and arm64-only remove nearly all of it; the
+    # `both` path on a cold cache is the ceiling this budget is set for.
+    timeout-minutes: 60
 
     env:
       # Belt-and-braces for the unsigned path: electron-builder scans the login
@@ -86,14 +104,27 @@ jobs:
       # into a half-signed build that cannot be notarized. Note this var is NOT
       # one of the three ad-hoc-sign.js checks, so ad-hoc signing still runs.
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-      # arm64-only is the default because the artifact exists for local testing
-      # on the (Apple Silicon) runner-matching arch, and packing one arch instead
-      # of two removes a full electron-builder pass plus a DMG creation.
-      # 'both' passes no arch flag, which leaves package.json's
-      # build.mac.target[].arch (["x64","arm64"]) in charge.
-      # These flags reach electron-builder via the `--` forwarding in the build
-      # step below; see the comment there.
-      BUILD_ARCH_FLAGS: ${{ (inputs.arch == 'both') && '--mac' || '--mac --arm64' }}
+      # arm64-only is the default: the artifact exists for local testing on the
+      # (Apple Silicon) runner-matching arch, and one arch instead of two drops a
+      # whole electron-builder pack, a beforePack native rebuild and a Rust
+      # cross-compile.
+      #
+      # These flags are only obeyed when the packaging command ALSO names its
+      # targets on the CLI (`--mac zip`, in the build step below).
+      # electron-builder's computeArchToTargetNamesMap() returns the CLI's
+      # arch→targets map as-is ONLY when it carries target names; when the CLI
+      # names no target it falls back to package.json build.mac.target[].arch,
+      # which is ["x64","arm64"] for both the zip and dmg entries. That is
+      # exactly why run 33381648959 built BOTH arches (and both DMGs) from
+      # `--mac --arm64`: the arch flag was silently outranked by the config.
+      BUILD_ARCH_FLAGS: ${{ (inputs.arch == 'both') && '--x64 --arm64' || '--arm64' }}
+      # Read by scripts/build-native.js: '1' cross-compiles BOTH darwin Rust
+      # targets, anything else builds the host arch only. `app:build` hardcodes
+      # '1' via cross-env — which SETS rather than reads it — so the only way to
+      # honour an arm64-only request here is to run the stages ourselves with
+      # this in the job environment. Also read by nothing else in the repo
+      # (verified: scripts/build-native.js is the sole consumer).
+      NATIVELY_BUILD_ALL_MAC_ARCHES: ${{ (inputs.arch == 'both') && '1' || '0' }}
 
     steps:
       - name: Checkout
@@ -248,13 +279,10 @@ jobs:
           # package-lock.json, which is exactly right for `npm ci`.
           cache: npm
 
-      # The Rust toolchain is needed unconditionally, even for an arm64-only
-      # package: `app:build` runs `cross-env NATIVELY_BUILD_ALL_MAC_ARCHES=1 npm
-      # run build:native`, and cross-env SETS that variable rather than reading
-      # it, so it cannot be overridden from the outside. scripts/build-native.js
-      # therefore always builds BOTH darwin targets and verifyArtifacts() fails
-      # unless both index.darwin-{x64,arm64}.node exist. (That is also why the
-      # arch input only narrows the electron-builder pass, not the Rust pass.)
+      # native-module is Rust (napi). Both darwin targets are installed even
+      # though the default run only compiles aarch64, because the `both` input
+      # needs x86_64-apple-darwin and `rustup target add` on an already-present
+      # target is a no-op — cheaper than making the toolchain step conditional.
       - name: Setup Rust (native-module)
         id: rust
         uses: dtolnay/rust-toolchain@stable
@@ -331,42 +359,81 @@ jobs:
       - name: Verify native module architecture
         run: node scripts/verify-native-arch.js
 
+      # These are exactly `npm run app:build`'s stages, expanded. The unsigned
+      # PATH is unchanged — same scripts, same order, same electron-builder
+      # config (package.json's, with mac.identity: null) — but two things cannot
+      # be expressed through the packed script, and run 33381648959 failed on
+      # both:
+      #
+      #   1. app:build wraps build:native in `cross-env
+      #      NATIVELY_BUILD_ALL_MAC_ARCHES=1`. cross-env SETS the variable, so an
+      #      arm64-only request still cross-compiled the x64 Rust target and
+      #      electron-builder still ran a second beforePack native rebuild for
+      #      x64. Run the stage directly and the job-level env decides.
+      #   2. The packaging args must reach electron-builder as
+      #      `--mac zip <arch flags>`: a CLI target list is what makes the CLI's
+      #      arch flags authoritative (see BUILD_ARCH_FLAGS above), and it is
+      #      also how the unbuildable DMG target is dropped. `npm run app:build
+      #      -- …` can only append flags, never replace the config's target list.
+      #
+      # release-macos.yml sets the precedent for expanding the chain in CI
+      # ("Explicit stages (NOT `npm run dist:signed`)"), for its own reasons.
+      #
+      # NOTE: typecheck:electron is a real gate here, as it is inside app:build —
+      # a type error in electron/ stops the build before packaging, by design.
       - name: Build unsigned macOS app
         shell: bash
         run: |
           set -euo pipefail
           LOG_DIR="$RUNNER_TEMP/build-logs"; mkdir -p "$LOG_DIR"
-          # `npm run app:build` is package.json's UNSIGNED entry point. In order:
-          #   npm run build                  (clean + tsc -p tsconfig.json + vite)
-          #   npm run typecheck:electron     (TypeScript 7 gate — see note below)
-          #   npm run build:electron         (esbuild → dist-electron)
-          #   NATIVELY_BUILD_ALL_MAC_ARCHES=1 npm run build:native   (Rust, both arches)
-          #   ensure-sharp-mac-deps / ensure-napi-canvas-mac-deps / ensure-sqlite-vec
-          #   npm run verify:packaged-local-assets
-          #   node scripts/package-app.js    (electron-builder)
-          #
-          # NOTE: typecheck:electron is a hard gate inside this chain — a type
-          # error anywhere in electron/ stops the build before packaging (that
-          # is by design; CHANGELOG records it blocking app:build before).
-          #
-          # The `--` args are forwarded by npm to the END of the script string,
-          # which is the LAST command in the `&&` chain — i.e. they land on
-          # `node scripts/package-app.js`, which passes its argv straight
-          # through to electron-builder. Verified against npm 10. Unquoted on
-          # purpose so "--mac --arm64" splits into two arguments.
-          npm run app:build -- $BUILD_ARCH_FLAGS 2>&1 | tee "$LOG_DIR/app-build.log"
+
+          # Each stage folds in the console log and is teed to the log file that
+          # the failure path uploads.
+          stage() {
+            local label="$1"; shift
+            echo "::group::$label"
+            "$@" 2>&1 | tee -a "$LOG_DIR/app-build.log"
+            echo "::endgroup::"
+          }
+
+          stage 'renderer: tsc (TS7) + vite'          npm run build
+          stage 'typecheck electron (TS7)'            npm run typecheck:electron
+          stage 'electron main: esbuild'              npm run build:electron
+          # Honours NATIVELY_BUILD_ALL_MAC_ARCHES from the job env: host arch
+          # only by default, both darwin targets when arch=both.
+          stage 'native-module: napi/Rust'            npm run build:native
+          # Kept even for an arm64-only pack: postinstall already installed the
+          # x64 members of these per-arch families, so this costs nothing, and
+          # ad-hoc-sign.js's verifyPackedArchFamilies() hard-fails a pack whose
+          # target-arch member is missing.
+          stage 'ensure sharp mac deps'               node scripts/ensure-sharp-mac-deps.js
+          stage 'ensure @napi-rs/canvas mac deps'     node scripts/ensure-napi-canvas-mac-deps.js
+          stage 'ensure sqlite-vec'                   node scripts/ensure-sqlite-vec.js
+          # Source mode (no --app): checks the bundled models, the dependency
+          # dirs and the asarUnpack/extraResources config. Its packaged mode
+          # would additionally require BOTH native-module/index.darwin-*.node,
+          # so do not add `--app` here without also forcing arch=both.
+          stage 'verify local fallback assets'        npm run verify:packaged-local-assets
+          # `--publish never`: electron-builder detects CI and would otherwise
+          # implicitly publish to package.json's build.publish target (the
+          # UPSTREAM repo). It warned about exactly this on run 33381648959 and
+          # only stayed inert because no token was in the environment.
+          # $BUILD_ARCH_FLAGS is unquoted on purpose so it word-splits.
+          # shellcheck disable=SC2086
+          stage 'package: electron-builder (zip only)' \
+            node scripts/package-app.js --publish never --mac zip $BUILD_ARCH_FLAGS
 
       - name: Summarize artifacts
         shell: bash
         run: |
           set -euo pipefail
-          ls -lh release/*.dmg release/*.zip 2>/dev/null || true
+          ls -lh release/*.zip 2>/dev/null || true
           {
             echo "### Unsigned macOS build"
             echo
             echo "| file | size |"
             echo "| --- | --- |"
-            for f in release/*.dmg release/*.zip; do
+            for f in release/*.zip; do
               [ -e "$f" ] || continue
               echo "| \`$(basename "$f")\` | $(du -h "$f" | cut -f1) |"
             done
@@ -384,9 +451,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: natively-macos-unsigned
-          path: |
-            release/*.dmg
-            release/*.zip
+          # zip only — the DMG target cannot be built on a hosted runner (see
+          # the "WHY ZIP ONLY" note in the header).
+          path: release/*.zip
           # A green job with no artifact is the failure mode this whole workflow
           # exists to prevent.
           if-no-files-found: error
