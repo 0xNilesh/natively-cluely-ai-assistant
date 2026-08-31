@@ -102,7 +102,7 @@ const carriesPixels = (payload) => {
 /** A helper whose provider clients are capture stubs. */
 function helper() {
   const h = Object.create(LLMHelper.prototype);
-  const seen = { gemini: [], claude: [], groq: [], ollama: [], codex: [] };
+  const seen = { gemini: [], claude: [], groq: [], ollama: [], codex: [], claudeCli: [] };
 
   h.currentModelId = 'gpt-test';
   h.geminiModel = 'gemini-test';
@@ -128,6 +128,8 @@ function helper() {
   };
   h.isCodexAvailable = () => false;
   h.codexCliConfig = { path: '/nonexistent/codex', model: 'm', fastModel: 'fm', timeoutMs: 1000 };
+  h.isClaudeCliAvailable = () => false;
+  h.claudeCliConfig = { path: '/nonexistent/claude', model: 'sonnet', fastModel: 'haiku', timeoutMs: 1000, maxWarmProcesses: 0 };
   h.customProvider = null;
   h.activeCurlProvider = null;
 
@@ -722,5 +724,115 @@ describe('ALSO — a policy refusal reaches the user instead of "All AI provider
       () => LLMHelper.prototype.generateWithVisionFallback.call(h, 'sys', 'q', []),
       (e) => /All AI providers failed/.test(e?.message ?? ''),
     );
+  });
+});
+
+// ── Claude Code CLI — enumerated here for the same reason Codex is ──────────
+//
+// The file header's warning applies verbatim: "A NEW provider method is covered
+// only when it is added here". generateWithClaudeCli / streamWithClaudeCli are
+// image-bearing provider methods, and the `claude` binary is local while the
+// bytes it sends are not — they go to api.anthropic.com. visionPolicy.ts keeps
+// isLocalVisionProvider() to Ollama alone precisely so this cannot be mistaken
+// for an on-device send.
+describe('Claude Code CLI — the same boundary, for the same reason', () => {
+  // Same observable as the Codex block: ClaudeCliService.stream spawns a
+  // process, so what is asserted is whether execution reached transport SETUP.
+  // getSelectedClaudeCliModel is the first statement past the boundary.
+  function claudeCliHelper() {
+    const { h, seen } = helper();
+    h.isClaudeCliAvailable = () => true;
+    h.getSelectedClaudeCliModel = () => {
+      seen.claudeCli.push('reached-transport');
+      throw new Error('SENTINEL_REACHED_TRANSPORT');
+    };
+    return { h, seen };
+  }
+
+  test('BASELINE: vision_first gets past the boundary into transport setup', async () => {
+    setMode('vision_first');
+    const { h, seen } = claudeCliHelper();
+    await assert.rejects(
+      () => LLMHelper.prototype.generateWithClaudeCli.call(h, 'q', 'sys', false, [IMG]),
+      (e) => /SENTINEL_REACHED_TRANSPORT/.test(e?.message ?? ''),
+    );
+    assert.equal(seen.claudeCli.length, 1, 'baseline must reach transport, else the negatives below prove nothing');
+  });
+
+  test('private_vision: generateWithClaudeCli stops BEFORE transport', async () => {
+    setMode('private_vision');
+    const { h, seen } = claudeCliHelper();
+    await assert.rejects(
+      () => LLMHelper.prototype.generateWithClaudeCli.call(h, 'q', 'sys', false, [IMG]),
+      (e) => e?.name === 'VisionPolicyError',
+    );
+    assert.deepEqual(seen.claudeCli, [],
+      'LEAK: the `claude` binary is local but its payload goes to api.anthropic.com — a CLOUD send under private_vision');
+  });
+
+  test('private_vision: streamWithClaudeCli stops BEFORE transport (generator, so iterate)', async () => {
+    // A generator body does not run until the first next(); merely CALLING it
+    // would pass with no gate at all.
+    setMode('vision_first');
+    const base = claudeCliHelper();
+    await assert.rejects(
+      () => base.h.streamWithClaudeCli('q', 'sys', false, [IMG]).next(),
+      (e) => /SENTINEL_REACHED_TRANSPORT/.test(e?.message ?? ''),
+    );
+    assert.equal(base.seen.claudeCli.length, 1, 'baseline must reach transport');
+
+    setMode('private_vision');
+    const { h, seen } = claudeCliHelper();
+    await assert.rejects(
+      () => h.streamWithClaudeCli('q', 'sys', false, [IMG]).next(),
+      (e) => e?.name === 'VisionPolicyError',
+    );
+    assert.deepEqual(seen.claudeCli, []);
+  });
+
+  test('local-only mode: the CLI is refused like any other cloud provider', async () => {
+    setMode('vision_first');
+    const { h, seen } = claudeCliHelper();
+    h.isLocalOnlyMode = true;
+    await assert.rejects(
+      () => LLMHelper.prototype.generateWithClaudeCli.call(h, 'q', 'sys', false, undefined),
+      (e) => /local-only/i.test(e?.message ?? ''),
+    );
+    assert.deepEqual(seen.claudeCli, []);
+  });
+
+  test("switching 'claude-cli' off blocks it — and switching 'claude' off does NOT", async () => {
+    // 'claude-cli' is deliberately absent from DISABLED_PROVIDER_FAMILY_MAP, so
+    // isProviderFamilyDisabled() falls to its exact-match branch. That is the
+    // whole point: the CLI carries its own credentials, so it must not share a
+    // kill switch with the Anthropic API key.
+    setMode('vision_first');
+    setCreds({ disabled: ['claude-cli'] });
+    const off = claudeCliHelper();
+    await assert.rejects(
+      () => LLMHelper.prototype.generateWithClaudeCli.call(off.h, 'q', 'sys', false, undefined),
+      (e) => e?.name === 'ProviderDisabledError',
+    );
+    assert.deepEqual(off.seen.claudeCli, []);
+
+    setCreds({ disabled: ['claude'] });
+    const on = claudeCliHelper();
+    await assert.rejects(
+      () => LLMHelper.prototype.generateWithClaudeCli.call(on.h, 'q', 'sys', false, undefined),
+      (e) => /SENTINEL_REACHED_TRANSPORT/.test(e?.message ?? ''),
+      'disabling the Anthropic API family must not disable the separately-credentialed CLI',
+    );
+    assert.equal(on.seen.claudeCli.length, 1);
+  });
+
+  test('a denied screenshots data-scope blocks it too', async () => {
+    setMode('vision_first');
+    setScopes({ screenshots: false });
+    const { h, seen } = claudeCliHelper();
+    await assert.rejects(
+      () => LLMHelper.prototype.generateWithClaudeCli.call(h, 'q', 'sys', false, [IMG]),
+      (e) => e?.name === 'ProviderScopeError' || e?.name === 'VisionPolicyError',
+    );
+    assert.deepEqual(seen.claudeCli, []);
   });
 });

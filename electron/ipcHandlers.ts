@@ -16,6 +16,7 @@ import {
 import { DatabaseManager } from './db/DatabaseManager'; // Import Database Manager
 import { AppState } from './main';
 import { CodexCliService, isCodexAuthError } from './services/CodexCliService';
+import { ClaudeCliService } from './services/ClaudeCliService';
 import { describeServiceAccountRejection } from './services/googleServiceAccount';
 import { PhoneMirrorService } from './services/PhoneMirrorService';
 import { sanitizeContextEnvelope } from './services/browser-context/sanitize';
@@ -158,6 +159,11 @@ export function initializeIpcHandlers(appState: AppState): void {
         const { CodexOAuthService } = require('./services/CodexOAuthService');
         codexSignedIn = CodexOAuthService.getInstance().getStatus().signedIn === true;
       } catch { /* optional */ }
+      const claudeCliConfig = llmHelper.getClaudeCliConfig();
+      let claudeCliBinaryFound = false;
+      try {
+        claudeCliBinaryFound = ClaudeCliService.binaryLooksAvailable(claudeCliConfig.path);
+      } catch { /* optional */ }
 
       const has = (value?: string) => !!(value && value.trim().length > 0);
       // THE shared predicate (groqModels.ts) — the three hand-synced copies
@@ -181,6 +187,10 @@ export function initializeIpcHandlers(appState: AppState): void {
       const providerFamily = (modelId: string): string => {
         if (modelId === 'natively') return 'natively';
         if (modelId.startsWith('codex-cli')) return 'codex-cli';
+        // BEFORE the `claude-` arm below: 'claude-cli' satisfies startsWith('claude-'),
+        // so the order here is what keeps the local CLI from being classified as
+        // the Anthropic API family (and hidden whenever that key is absent).
+        if (modelId.startsWith('claude-cli')) return 'claude-cli';
         if (modelId.startsWith('litellm/')) return 'litellm';
         if (modelId.startsWith('nvidia_nim/')) return 'nvidia_nim';
         if (modelId.startsWith('ollama-')) return 'ollama';
@@ -233,6 +243,10 @@ export function initializeIpcHandlers(appState: AppState): void {
 
         if (modelId === 'natively') return has(cm.getNativelyApiKey());
         if (modelId.startsWith('codex-cli')) return codexConfig.enabled === true && codexSignedIn;
+        // Same ordering constraint as providerFamily above. No key check: the
+        // `claude` binary carries its own credentials, so availability is
+        // "enabled + the binary resolves".
+        if (modelId.startsWith('claude-cli')) return claudeCliConfig.enabled === true && claudeCliBinaryFound;
         if (modelId.startsWith('litellm/')) return has(cm.getLitellmBaseURL());
         if (modelId.startsWith('nvidia_nim/')) return has(cm.getNvidiaNimApiKey());
         if (modelId.startsWith('ollama-')) return true; // live Ollama probe happens at execution time
@@ -292,6 +306,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         : modelAvailable('qwen/qwen3.6-27b') ? 'qwen/qwen3.6-27b'
         : modelAvailable('deepseek-v4-flash') ? 'deepseek-v4-flash'
         : (codexConfig.enabled === true && codexSignedIn && modelAvailable('codex-cli')) ? 'codex-cli'
+        : (claudeCliConfig.enabled === true && claudeCliBinaryFound && modelAvailable('claude-cli')) ? 'claude-cli'
         : (litellmFallbackModel && modelAvailable(litellmFallbackModel)) ? litellmFallbackModel
         : allProviders.find((p: any) => modelAvailable(p?.id))?.id
           || null;
@@ -3649,7 +3664,7 @@ export function initializeIpcHandlers(appState: AppState): void {
           // local generation aborted to zero tokens and the user saw the canned
           // fallback line below. Codex CLI shares the cold-load profile
           // (subprocess spawn → codex CLI loads the model → first delta).
-          const usingLocalLlm = llmHelper.isUsingOllama() || llmHelper.isUsingCodexCli();
+          const usingLocalLlm = llmHelper.isUsingOllama() || llmHelper.isUsingCodexCli() || llmHelper.isUsingClaudeCli();
           // F-301: on the natively-api route the server rotates providers at
           // 10s; give it room to rescue the turn instead of aborting at 7s.
           const viaServerCascade = llmHelper.isUsingNativelyServerCascade?.() === true;
@@ -9261,6 +9276,81 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
+  // ── Claude Code / `claude` CLI ─────────────────────────────────────────
+  // Mirrors the three codex handlers above. The difference is that this
+  // provider really does shell out, so `test-claude-cli` runs the binary
+  // (`claude --version`) instead of reading an OAuth token, and a successful
+  // test PERSISTS the path it resolved — the recovery that turns "bare
+  // `claude` is not on a packaged app's PATH" from a dead end into one click.
+  safeHandle('get-claude-cli-config', () => {
+    try {
+      return appState.processingHelper.getLLMHelper().getClaudeCliConfig();
+    } catch {
+      return ClaudeCliService.normalizeConfig({});
+    }
+  });
+
+  safeHandle('set-claude-cli-config', (_, config: any) => {
+    try {
+      const normalized = ClaudeCliService.normalizeConfig(config || {});
+      const sm = SettingsManager.getInstance();
+      if (!sm.set('claudeCliEnabled', normalized.enabled)) {
+        // Same R-24 guard as set-codex-cli-config: a refused write on a
+        // degraded settings store must not report success, or the value
+        // silently reverts on the next launch.
+        return { success: false, error: 'settings_store_degraded' };
+      }
+      sm.set('claudeCliPath', normalized.path);
+      sm.set('claudeCliModel', normalized.model);
+      sm.set('claudeCliFastModel', normalized.fastModel);
+      sm.set('claudeCliTimeoutMs', normalized.timeoutMs);
+      sm.set('claudeCliMaxWarmProcesses', normalized.maxWarmProcesses);
+      appState.processingHelper.getLLMHelper().setClaudeCliConfig(normalized);
+      return { success: true, config: normalized };
+    } catch (error: any) {
+      return { success: false, error: error.message };
+    }
+  });
+
+  safeHandle('test-claude-cli', async (_, config?: any) => {
+    try {
+      const current = appState.processingHelper.getLLMHelper().getClaudeCliConfig();
+      const normalized = ClaudeCliService.normalizeConfig({ ...current, ...(config || {}) });
+      const result = await ClaudeCliService.validateExecutable(normalized.path);
+      if (!result.success) {
+        return { success: false, error: result.error, config: normalized };
+      }
+      // Persist the working path when auto-detection found a different one, so
+      // the next launch spawns it directly instead of re-detecting.
+      const resolvedPath = result.resolvedPath || normalized.path;
+      const persisted = ClaudeCliService.normalizeConfig({ ...normalized, path: resolvedPath });
+      if (resolvedPath !== normalized.path) {
+        const sm = SettingsManager.getInstance();
+        if (!sm.set('claudeCliPath', resolvedPath)) {
+          // R-24: the binary really does work, but the repaired path did not
+          // reach disk. Reporting a plain "Passed" here would show the user a
+          // green tick on a setting that silently reverts at next launch —
+          // exactly the class of bug the degraded-store guard exists for.
+          return { success: false, error: 'settings_store_degraded', resolvedPath, version: result.version, config: persisted };
+        }
+        appState.processingHelper.getLLMHelper().setClaudeCliConfig(persisted);
+      }
+      return { success: true, resolvedPath, version: result.version, config: persisted };
+    } catch (error: any) {
+      return { success: false, error: error.message };
+    }
+  });
+
+  // Filesystem-only probe for the Settings panel's "Detect" affordance. Never
+  // shells out, so it is safe to call while the user types in the path field.
+  safeHandle('claude-cli:detect-path', () => {
+    try {
+      return { success: true, path: ClaudeCliService.autoDetectPath(), candidates: ClaudeCliService.getCandidatePaths() };
+    } catch (error: any) {
+      return { success: false, error: error.message };
+    }
+  });
+
   const runCodexAuthAction = async (action: 'status' | 'logout' | 'login' | 'doctor', config?: any) => {
     // Legacy wrapper. The OAuth-direct implementation does not use
     // CLI subprocesses for auth, so the old action map is reimplemented
@@ -13681,7 +13771,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         //   • isLocal — a local model cold-loads its weights (8-12s for a 7-9B)
         //     before the first token, so 7s aborted every cold local generation
         //     on the phone path to zero tokens.
-        const phoneUsingLocalLlm = llmHelper.isUsingOllama() || llmHelper.isUsingCodexCli();
+        const phoneUsingLocalLlm = llmHelper.isUsingOllama() || llmHelper.isUsingCodexCli() || llmHelper.isUsingClaudeCli();
         const phoneViaServerCascade = llmHelper.isUsingNativelyServerCascade?.() === true;
         await raceStreamWithDeadline({
           stream: stream as AsyncGenerator<string>,

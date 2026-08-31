@@ -328,7 +328,7 @@ import {
 } from '../lib/overlayAppearance';
 import { NegotiationCoachingCard } from '../premium';
 import type { DynamicActionPayload } from '../types/electron';
-import { getCodexCliModelDisplayName, litellmModelLabel } from '../utils/modelUtils';
+import { getClaudeCliModelDisplayName, getCodexCliModelDisplayName, litellmModelLabel } from '../utils/modelUtils';
 import { getModifierSymbol, isMac, isWindows } from '../utils/platformUtils';
 import { DynamicActionBar } from './dynamic-actions/DynamicActionBar';
 import GlassEffectLayer from './ui/GlassEffectLayer';
@@ -774,8 +774,16 @@ interface MessageRowProps {
   onCopy: (text: string) => void;
   renderMessageText: (msg: Message) => React.ReactNode;
 }
+/** Ids whose generic title-casing reads wrong ("Claude Cli"). Only names that
+ *  actually appear in the UI belong here; everything else title-cases fine. */
+const PROVIDER_LABEL_OVERRIDES: Record<string, string> = {
+  'claude-cli': 'Claude Code',
+};
+
 const formatProviderLabel = (provider?: string | null): string => {
   if (!provider) return 'not set';
+  const override = PROVIDER_LABEL_OVERRIDES[provider];
+  if (override) return override;
   return provider
     .split(/[-_\s]+/)
     .filter(Boolean)
@@ -1753,6 +1761,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       if (!mounted || !config) return;
       setLlmProviderLabel(formatProviderLabel(config.provider));
       setLlmPrivacyLabel(
+        // 'claude-cli' is deliberately NOT in this list. The binary is local,
+        // but every turn goes to api.anthropic.com — labelling that
+        // "Local/private route" would tell the user their transcript stayed on
+        // the machine when it did not. Same reasoning visionPolicy.ts uses to
+        // keep Codex out of isLocalVisionProvider().
         config.provider === 'ollama' || config.provider === 'codex-cli'
           ? 'Local/private route'
           : config.provider === 'custom'
@@ -9134,6 +9147,8 @@ Provide only the answer, nothing else.`;
                           const m = currentModel;
                           const codexCliName = getCodexCliModelDisplayName(m);
                           if (codexCliName) return codexCliName;
+                          const claudeCliName = getClaudeCliModelDisplayName(m);
+                          if (claudeCliName) return claudeCliName;
                           if (m.startsWith('ollama-')) return m.replace('ollama-', '');
                           // LiteLLM ids carry two prefixes — ours and the proxy's
                           // upstream — so the raw id reads `litellm/openai/gpt-4o`.

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useT } from '../../i18n';
 import { Plus, Trash2, Edit2, AlertCircle, Save, ChevronDown, Check, RefreshCw, ExternalLink, Loader2, LogOut, Cloud, Server, Eye, Info, MessageSquare, Image, FileText, User, Boxes, ClipboardList, Laptop } from 'lucide-react';
-import { CODEX_CLI_MODEL, CODEX_CLI_MODEL_PRESETS, codexCliSelectorId, isModelAllowed, isOptInModelProvider, litellmModelLabel, STANDARD_CLOUD_MODELS, prettifyModelId } from '../../utils/modelUtils';
+import { CLAUDE_CLI_MODEL, CLAUDE_CLI_MODEL_PRESETS, claudeCliSelectorId, CODEX_CLI_MODEL, CODEX_CLI_MODEL_PRESETS, codexCliSelectorId, isModelAllowed, isOptInModelProvider, litellmModelLabel, STANDARD_CLOUD_MODELS, prettifyModelId } from '../../utils/modelUtils';
 import { validateCurl } from '../../lib/curl-validator';
 import { ProviderCard } from './ProviderCard';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
@@ -1844,6 +1844,33 @@ const CodexCliModelField: React.FC<{
     );
 };
 
+/**
+ * Claude Code model picker. Same shape and same deliberate trade-off as
+ * CodexCliModelField above: the dropdown is the whole control, and an id that
+ * came from a previous build stays selectable rather than being silently
+ * dropped. New ids go in CLAUDE_CLI_MODEL_PRESETS (src/utils/modelUtils.ts).
+ */
+const ClaudeCliModelField: React.FC<{
+    label: string;
+    value: string;
+    onSelect: (value: string) => void;
+}> = ({ label, value, onSelect }) => {
+    const t = useT();
+    return (
+    <label className="space-y-1 block min-w-0">
+        <span className="aip-label">{label}</span>
+        <ModelSelect
+            value={value}
+            options={value && !CLAUDE_CLI_MODEL_PRESETS.some(option => option.id === value)
+                ? [{ id: value, name: prettifyModelId(value) }, ...CLAUDE_CLI_MODEL_PRESETS]
+                : CLAUDE_CLI_MODEL_PRESETS}
+            onChange={onSelect}
+            placeholder={t("Select a model")}
+        />
+    </label>
+    );
+};
+
 interface AIProvidersSettingsProps {
     aiResponseLanguage: string;
     availableAiLanguages: any[];
@@ -2098,6 +2125,15 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
     const [codexAuthStatus, setCodexAuthStatus] = useState<'idle' | 'success' | 'error'>('idle');
     const [codexAuthMessage, setCodexAuthMessage] = useState('');
 
+    // --- Local (Claude Code CLI) ---
+    // Defaults mirror DEFAULT_CLAUDE_CLI_CONFIG; the real values arrive from
+    // getClaudeCliConfig() on mount.
+    const [claudeCliConfig, setClaudeCliConfig] = useState({ enabled: false, path: 'claude', model: 'sonnet', fastModel: 'haiku', timeoutMs: 60000, maxWarmProcesses: 2 });
+    const [claudeCliStatus, setClaudeCliStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
+    const [claudeCliError, setClaudeCliError] = useState('');
+    const [claudeCliVersion, setClaudeCliVersion] = useState('');
+    const [claudeCliDetecting, setClaudeCliDetecting] = useState(false);
+
     // --- ChatGPT OAuth (new — replaces `codex login` CLI subprocess) ---
     // The OAuth flow runs entirely in the main process; the renderer just
     // kicks it off and listens for IPC events. We keep the auth state
@@ -2270,6 +2306,9 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
                 const cliConfig = await window.electronAPI?.getCodexCliConfig?.();
                 if (cliConfig) setCodexCliConfig(cliConfig as typeof codexCliConfig);
 
+                const claudeCli = await window.electronAPI?.getClaudeCliConfig?.();
+                if (claudeCli) setClaudeCliConfig(claudeCli as typeof claudeCliConfig);
+
                 // Codex OAuth status — read once on mount so the Settings UI
                 // shows the right state without waiting for a user click.
                 // @ts-ignore
@@ -2411,6 +2450,15 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
                 }
             });
         }
+        if (claudeCliConfig.enabled && isProviderEnabled('claude-cli')) {
+            opts.push({ id: CLAUDE_CLI_MODEL.id, name: `${CLAUDE_CLI_MODEL.name} (${prettifyModelId(claudeCliConfig.model)})` });
+            CLAUDE_CLI_MODEL_PRESETS.forEach(model => {
+                const id = claudeCliSelectorId(model.id);
+                if (!opts.find(o => o.id === id)) {
+                    opts.push({ id, name: `${CLAUDE_CLI_MODEL.name}: ${model.name}` });
+                }
+            });
+        }
         if (hasStoredKey.litellm && isProviderEnabled('litellm')) {
             // Same allow-list gate the cloud providers get above. Without it the proxy's
             // full catalogue reaches the picker while modelAvailable() filters it, and
@@ -2441,7 +2489,7 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
         const next = opts[0].id;
         setDefaultModel(next);
         window.electronAPI?.setDefaultModel?.(next).catch(console.error);
-    }, [credentialsLoaded, defaultModel, hasStoredKey, preferredModels, isCodexReady, codexCliConfig.model, customProviders, ollamaModels, litellmModels, disabledProviders, cloudEnabledModels]);
+    }, [credentialsLoaded, defaultModel, hasStoredKey, preferredModels, isCodexReady, codexCliConfig.model, claudeCliConfig.enabled, claudeCliConfig.model, customProviders, ollamaModels, litellmModels, disabledProviders, cloudEnabledModels]);
 
     // Load LiteLLM model IDs only when the proxy is configured. The active-model
     // selector should not expose stale `litellm/...` choices after the proxy is
@@ -2862,6 +2910,69 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
         const result = await window.electronAPI?.setCodexCliConfig?.(normalized);
         if (result?.config) setCodexCliConfig(result.config as typeof codexCliConfig);
         return result;
+    };
+
+    /** The main process returns this sentinel when the settings store refused a
+     *  write (see the R-24 guard in ipcHandlers). Shown raw it reads like a
+     *  crash; the user needs to know the setting will not survive a restart. */
+    const claudeCliErrorText = (error?: string) =>
+        (error === 'settings_store_degraded'
+            ? t('Claude Code works, but the setting could not be saved — Natively cannot write its settings file right now.')
+            : error) || t('Claude Code CLI test failed');
+
+    const saveClaudeCliConfig = async (next = claudeCliConfig) => {
+        const normalized = { ...next, timeoutMs: Number(next.timeoutMs) || 60000 };
+        setClaudeCliConfig(normalized);
+        const result = await window.electronAPI?.setClaudeCliConfig?.(normalized);
+        if (result?.config) setClaudeCliConfig(result.config as typeof claudeCliConfig);
+        return result;
+    };
+
+    /** Filesystem-only probe. Never spawns the binary, so it is safe to run
+     *  while the user is still editing the path field. */
+    const handleDetectClaudeCliPath = async () => {
+        setClaudeCliDetecting(true);
+        setClaudeCliError('');
+        try {
+            const result = await window.electronAPI?.detectClaudeCliPath?.();
+            if (result?.success && result.path) {
+                await saveClaudeCliConfig({ ...claudeCliConfig, path: result.path });
+            } else {
+                setClaudeCliStatus('error');
+                setClaudeCliError(t('Could not find the claude binary. Install Claude Code, or enter the full path.'));
+            }
+        } catch (e: any) {
+            setClaudeCliStatus('error');
+            setClaudeCliError(e?.message || t('Detection failed'));
+        } finally {
+            setClaudeCliDetecting(false);
+        }
+    };
+
+    /** Runs `claude --version`. On success the main process persists whatever
+     *  path actually worked, so a bare `claude` that only resolves via
+     *  auto-detection is repaired here rather than failing on every answer. */
+    const handleTestClaudeCli = async () => {
+        setClaudeCliStatus('testing');
+        setClaudeCliError('');
+        setClaudeCliVersion('');
+        try {
+            const saveResult = await saveClaudeCliConfig();
+            const configToTest = saveResult?.config || claudeCliConfig;
+            const result = await window.electronAPI?.testClaudeCli?.(configToTest);
+            if (result?.success) {
+                if (result.config) setClaudeCliConfig(result.config as typeof claudeCliConfig);
+                if (result.version) setClaudeCliVersion(result.version);
+                setClaudeCliStatus('success');
+                setTimeout(() => setClaudeCliStatus('idle'), 3000);
+            } else {
+                setClaudeCliStatus('error');
+                setClaudeCliError(claudeCliErrorText(result?.error));
+            }
+        } catch (e: any) {
+            setClaudeCliStatus('error');
+            setClaudeCliError(claudeCliErrorText(e?.message));
+        }
     };
 
     const handleTestCodexCli = async () => {
@@ -3700,6 +3811,150 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
                                 </button>
                             </div>
                         </>
+                    )}
+                </div>
+            </div>
+
+            {/* Claude Code — local `claude` CLI, uses the user's own subscription */}
+            <div className="space-y-5">
+                <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-start gap-2.5 min-w-0">
+                        <AipProviderMark provider="claude_cli" name="Claude Code" className="mt-0.5" />
+                        <div className="min-w-0">
+                        <h3 className="text-sm font-bold aip-hero mb-1">Claude Code</h3>
+                        <p className="text-xs aip-muted">{t('Answer through your locally installed `claude` CLI — no API key needed.')}</p>
+                        </div>
+                    </div>
+                    <AipSwitch
+                        checked={!disabledProviders.includes('claude-cli')}
+                        onChange={() => handleToggleProvider('claude-cli', disabledProviders.includes('claude-cli'))}
+                        label={`${disabledProviders.includes('claude-cli') ? t('Enable') : t('Disable')} Claude Code`}
+                        title={disabledProviders.includes('claude-cli') ? t('Enable provider') : t('Disable provider')}
+                    />
+                </div>
+
+                <div className="aip-card p-5 space-y-4">
+                    <div className="flex items-center justify-between gap-3 mb-2">
+                        <label className="flex items-center gap-2 text-xs font-medium uppercase tracking-wide aip-hero">
+                            {t('Claude Code CLI')}
+                        </label>
+                        <AipSwitch
+                            checked={claudeCliConfig.enabled}
+                            onChange={() => saveClaudeCliConfig({ ...claudeCliConfig, enabled: !claudeCliConfig.enabled })}
+                            label={`${claudeCliConfig.enabled ? t('Disable') : t('Enable')} Claude Code CLI`}
+                            title={claudeCliConfig.enabled ? t('Stop routing answers through the claude binary') : t('Route answers through the claude binary')}
+                        />
+                    </div>
+
+                    {/* Binary path + detect. Detect is filesystem-only; Test
+                        actually runs `claude --version`. */}
+                    <label className="space-y-1 block min-w-0">
+                        <span className="aip-label">{t('Binary Path')}</span>
+                        <div className="flex gap-2">
+                            <input
+                                type="text"
+                                value={claudeCliConfig.path}
+                                onChange={e => setClaudeCliConfig(prev => ({ ...prev, path: e.target.value }))}
+                                onBlur={() => saveClaudeCliConfig()}
+                                data-mono="true"
+                                className="aip-input flex-1 min-w-0"
+                                placeholder="claude"
+                                spellCheck={false}
+                            />
+                            <button
+                                type="button"
+                                onClick={handleDetectClaudeCliPath}
+                                disabled={claudeCliDetecting}
+                                className="aip-btn shrink-0"
+                                data-size="sm"
+                                data-variant="ghost"
+                                title={t('Search the usual install locations for the claude binary')}
+                            >
+                                {claudeCliDetecting
+                                    ? <Loader2 size={12} strokeWidth={1.75} className="aip-spinner" />
+                                    : <RefreshCw size={12} strokeWidth={1.75} />}
+                                <span className="uppercase tracking-wide">{t('Detect')}</span>
+                            </button>
+                        </div>
+                        <p className="aip-meta aip-muted">
+                            {t('Leave as `claude` to resolve it on PATH. A packaged app inherits a minimal PATH, so Detect finds the real install.')}
+                        </p>
+                    </label>
+
+                    {claudeCliConfig.enabled && (
+                        <>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                <ClaudeCliModelField
+                                    label={t("Model")}
+                                    value={claudeCliConfig.model}
+                                    onSelect={(model) => saveClaudeCliConfig({ ...claudeCliConfig, model })}
+                                />
+                                <ClaudeCliModelField
+                                    label={t("Fast Mode Model")}
+                                    value={claudeCliConfig.fastModel}
+                                    onSelect={(fastModel) => saveClaudeCliConfig({ ...claudeCliConfig, fastModel })}
+                                />
+                            </div>
+                            <div className="flex items-end justify-between gap-4 mt-1">
+                                <div className="flex gap-3 min-w-0">
+                                    <label className="space-y-1 block min-w-0">
+                                        <span className="aip-label">{t('Timeout (ms)')}</span>
+                                        <input
+                                            type="number"
+                                            value={claudeCliConfig.timeoutMs}
+                                            onChange={e => setClaudeCliConfig(prev => ({ ...prev, timeoutMs: Number(e.target.value) }))}
+                                            onBlur={() => saveClaudeCliConfig()}
+                                            data-mono="true"
+                                            className="aip-input"
+                                            min={1000}
+                                        />
+                                    </label>
+                                    <label className="space-y-1 block min-w-0">
+                                        <span className="aip-label">{t('Warm Processes')}</span>
+                                        <input
+                                            type="number"
+                                            value={claudeCliConfig.maxWarmProcesses}
+                                            onChange={e => setClaudeCliConfig(prev => ({ ...prev, maxWarmProcesses: Number(e.target.value) }))}
+                                            onBlur={() => saveClaudeCliConfig()}
+                                            data-mono="true"
+                                            className="aip-input"
+                                            min={0}
+                                            max={8}
+                                        />
+                                    </label>
+                                </div>
+                                {/* Fixed min-width so the label change
+                                    ("Test Connection" -> "Testing...") does not
+                                    reflow the row. Matches the Codex button. */}
+                                <button
+                                    type="button"
+                                    onClick={handleTestClaudeCli}
+                                    disabled={claudeCliStatus === 'testing'}
+                                    className="aip-btn shrink-0 min-w-[124px]"
+                                    data-tone={claudeCliStatus === 'success' ? 'ok' : claudeCliStatus === 'error' ? 'danger' : undefined}
+                                >
+                                    {claudeCliStatus === 'testing' ? (
+                                        <><Loader2 size={12} strokeWidth={1.75} className="aip-spinner" /> {t('Testing…')}</>
+                                    ) : claudeCliStatus === 'success' ? (
+                                        <><Check size={12} strokeWidth={2} className="aip-check" /> {t('Passed')}</>
+                                    ) : claudeCliStatus === 'error' ? (
+                                        <><AlertCircle size={12} strokeWidth={1.75} /> {t('Failed')}</>
+                                    ) : (
+                                        t('Test Connection')
+                                    )}
+                                </button>
+                            </div>
+                            <p className="aip-meta aip-muted">
+                                {t('Prewarmed idle `claude` processes hide the CLI\'s multi-second startup. Set to 0 to spawn only on demand.')}
+                            </p>
+                        </>
+                    )}
+
+                    {claudeCliStatus === 'error' && claudeCliError && (
+                        <p className="text-[10px] aip-danger-fg mt-1">{claudeCliError}</p>
+                    )}
+                    {claudeCliStatus === 'success' && claudeCliVersion && (
+                        <p className="text-[10px] aip-ok-fg mt-1">{claudeCliVersion}</p>
                     )}
                 </div>
             </div>
