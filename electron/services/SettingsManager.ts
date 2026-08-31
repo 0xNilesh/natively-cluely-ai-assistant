@@ -1,6 +1,11 @@
 import { app } from 'electron';
 import fs from 'fs';
 import path from 'path';
+import {
+    SYSTEM_AUDIO_BACKEND_SETTINGS,
+    normalizeSystemAudioBackendSetting,
+} from '../audio/systemAudioBackend.mjs';
+import type { SystemAudioBackendSetting } from '../audio/systemAudioBackend.mjs';
 
 export interface AppSettings {
     // Only boot-critical or non-encrypted settings should live here.
@@ -173,6 +178,26 @@ export interface AppSettings {
     sttMaxSampleRate?: number;
     sttMaxChannels?: number;
     sttAllowDualStream?: boolean;
+
+    // ── System-audio backend (macOS) ───────────────────────────────────────
+    // Which capture backend the Rust speaker module uses for system audio: the
+    // CoreAudio process tap or ScreenCaptureKit. macOS-only — Windows runs
+    // WASAPI loopback and ignores this entirely.
+    //
+    // Lived in renderer localStorage as `useExperimentalSckBackend` until
+    // 2026-08-31. Chromium flushes localStorage lazily and this app takes
+    // `render-process-gone` often enough that any unclean exit could lose the
+    // user's choice — silently, because the CoreAudio tap then returns
+    // zero-filled buffers on Bluetooth A2DP output and on the built-in speaker
+    // device, so capture looks healthy and transcribes nothing. Here it is
+    // written with write+fsync+rename and survives a crash.
+    //
+    // 'auto' (default) resolves to ScreenCaptureKit on macOS 13+ and CoreAudio
+    // everywhere else. The full precedence table lives in
+    // audio/systemAudioBackend.mjs — this store only persists the choice. The
+    // key's PRESENCE is also the one-shot marker for the localStorage
+    // migration, so nothing may write it speculatively.
+    systemAudioBackend?: 'auto' | 'sck' | 'coreaudio';
 }
 
 export const VALID_CONTEXT_DEBUG_LEVELS = ['off', 'standard', 'verbose'] as const;
@@ -180,6 +205,11 @@ export type ContextDebugLevelSetting = typeof VALID_CONTEXT_DEBUG_LEVELS[number]
 
 export const VALID_SCREEN_UNDERSTANDING_MODES = ['vision_first', 'vision_only', 'private_vision'] as const;
 export type ScreenUnderstandingMode = typeof VALID_SCREEN_UNDERSTANDING_MODES[number];
+
+// Re-exported (not re-declared) so the validated list and the resolver that
+// consumes it cannot drift. audio/systemAudioBackend.mjs owns both.
+export const VALID_SYSTEM_AUDIO_BACKENDS = SYSTEM_AUDIO_BACKEND_SETTINGS;
+export type { SystemAudioBackendSetting };
 
 // LEGACY values kept ONLY for migration of existing settings.json files written by older builds.
 // New code MUST NOT branch on these — they are normalized to a VALID_SCREEN_UNDERSTANDING_MODES value on load.
@@ -308,6 +338,41 @@ export class SettingsManager {
 
     public getTechnicalInterviewVisionFirst(): boolean {
         return this.settings.technicalInterviewVisionFirst !== false;
+    }
+
+    // ── System-audio backend (macOS) ───────────────────────────────────────
+    // Resolved persisted CHOICE only. What that choice means for a given
+    // machine — the macOS 13 gate, the SCK sentinel device id — belongs to
+    // resolveSystemAudioBackend() in audio/systemAudioBackend.mjs, exactly as
+    // getContextDebugLevel() persists a level and leaves env precedence to
+    // debug-config.
+
+    /** Persisted choice, defaulting to 'auto'. Never throws on a junk value. */
+    public getSystemAudioBackend(): SystemAudioBackendSetting {
+        return normalizeSystemAudioBackendSetting(this.settings.systemAudioBackend);
+    }
+
+    /**
+     * Raw persisted value WITHOUT the default applied. The only caller that
+     * needs this is the one-shot localStorage migration, which must tell
+     * "never written" (undefined) apart from "explicitly 'auto'" — the key's
+     * presence is what makes that migration idempotent.
+     */
+    public getRawSystemAudioBackend(): AppSettings['systemAudioBackend'] {
+        return this.settings.systemAudioBackend;
+    }
+
+    /**
+     * @returns false when the write was refused (degraded settings store).
+     * Callers that report success to the renderer MUST check this — a silently
+     * refused write is the exact failure mode this whole setting was moved out
+     * of localStorage to escape.
+     */
+    public setSystemAudioBackend(backend: SystemAudioBackendSetting): boolean {
+        if (!(SYSTEM_AUDIO_BACKEND_SETTINGS as readonly string[]).includes(backend)) {
+            throw new Error(`[SettingsManager] Invalid systemAudioBackend: ${backend}`);
+        }
+        return this.set('systemAudioBackend', backend);
     }
 
     // ── Smart Browser Context v2 — resolved settings (single default source) ──

@@ -1181,7 +1181,18 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
     // granted, no loopback device, tap init refused).
     const [systemAudioLevel, setSystemAudioLevel] = useState(0);
     const [systemAudioError, setSystemAudioError] = useState<string | null>(null);
-    const [useExperimentalSck, setUseExperimentalSck] = useState(false);
+    // System-audio backend (macOS). Persisted in settings.json via IPC, NOT in
+    // localStorage — Chromium's lazy flush lost the old `useExperimentalSckBackend`
+    // key on every crash, and the fallback to the CoreAudio tap is silent
+    // (zero-filled buffers on Bluetooth and built-in-speaker output). `null`
+    // means "not loaded yet", so the toggle never flashes a wrong state.
+    const [systemAudioBackend, setSystemAudioBackend] = useState<'sck' | 'coreaudio' | null>(null);
+    const [systemAudioBackendError, setSystemAudioBackendError] = useState<string | null>(null);
+    // False below macOS 13, where ScreenCaptureKit audio capture does not exist
+    // (no SCStreamConfiguration.capturesAudio). The toggle is hidden there for
+    // the same reason it is hidden on Windows: switching it on could not do
+    // anything, and the switch would silently snap back on the next read.
+    const [sckSupported, setSckSupported] = useState(true);
     // Most-recent device fallback notice. Populated by main process via
     // 'device-selection-applied' IPC when the saved device couldn't be opened
     // and the audio pipeline silently fell back to the system default.
@@ -1680,9 +1691,27 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
             };
             loadDevices();
 
-            // Load Experimental SCK pref
-            const savedSck = localStorage.getItem('useExperimentalSckBackend') === 'true';
-            setUseExperimentalSck(savedSck);
+            // Load the system-audio backend from settings.json. `resolved` is
+            // what the persisted choice actually means on THIS machine (an
+            // 'auto' install on macOS 13+ resolves to ScreenCaptureKit), so the
+            // toggle shows the backend that will really be used rather than a
+            // raw setting value the user would have to interpret.
+            if (window.electronAPI?.getSystemAudioBackend) {
+                window.electronAPI.getSystemAudioBackend()
+                    .then(({ resolved, supported }) => {
+                        setSystemAudioBackend(resolved);
+                        setSckSupported(supported);
+                        setSystemAudioBackendError(null);
+                    })
+                    .catch(err => {
+                        // Show the card in its safe state rather than hiding it:
+                        // an unreachable read must not make the control vanish.
+                        console.error('[Settings] Failed to read the system audio backend:', err);
+                        setSystemAudioBackend('coreaudio');
+                    });
+            } else {
+                setSystemAudioBackend('coreaudio');
+            }
 
             // Load Calendar Status
             if (window.electronAPI?.getCalendarStatus) {
@@ -3515,7 +3544,12 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                 Windows audio runs via WASAPI loopback so the toggle
                                                 has no meaning there and routing "sck" as a device id
                                                 silently breaks system audio (issue #252 audit / F-003). */}
-                                            {isMac && (
+                                            {/* Rendered only once the persisted value has been read, so
+                                                the switch never paints an OFF state a frame before
+                                                flipping ON — this setting's entire history is the UI
+                                                showing one backend while the app used another. Hidden
+                                                below macOS 13, where SCK audio capture does not exist. */}
+                                            {isMac && sckSupported && systemAudioBackend !== null && (
                                                 /* Standard panel card, matching the Speech Provider cards above. This
                                                    was an amber wash with a FlaskConical icon — the visual grammar this
                                                    panel uses for warnings — which oversold a supported alternative
@@ -3532,19 +3566,53 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                             <div className="min-w-0">
                                                                 <h3 className="text-sm font-bold text-text-primary">{t('SCK Backend')}</h3>
                                                                 <p className="text-xs text-text-secondary mt-0.5">
-                                                                    {t('Use the ScreenCaptureKit backend. An optimized alternative to CoreAudio if you experience any capture issues.')}
+                                                                    {t('Capture system audio with ScreenCaptureKit. The default on macOS 13 and later. Turn it off for the CoreAudio tap, which can target one specific output device but returns silence on some Bluetooth and built-in speaker routes.')}
                                                                 </p>
+                                                                {systemAudioBackendError && (
+                                                                    <p className="text-xs text-red-500 mt-1">{systemAudioBackendError}</p>
+                                                                )}
                                                             </div>
                                                         </div>
                                                         <SettingsToggle
-                                                            checked={useExperimentalSck}
+                                                            checked={systemAudioBackend === 'sck'}
                                                             label={t('Use ScreenCaptureKit backend')}
                                                             onChange={() => {
-                                                                const newState = !useExperimentalSck;
-                                                                setUseExperimentalSck(newState);
-                                                                window.localStorage.setItem('useExperimentalSckBackend', newState ? 'true' : 'false');
+                                                                // Write an EXPLICIT backend, never 'auto': the user touching this
+                                                                // toggle is a decision, and a stored 'auto' would silently move
+                                                                // under them the next time the resolution rules change.
+                                                                const next = systemAudioBackend === 'sck' ? 'coreaudio' : 'sck';
+                                                                const previous = systemAudioBackend;
+                                                                // Never optional-CALL this: `?.()` yields undefined when the
+                                                                // bridge is missing, and the .then() below would throw on it.
+                                                                // No bridge means no way to persist — say so instead of
+                                                                // moving the switch over a write that cannot happen.
+                                                                const save = window.electronAPI?.setSystemAudioBackend;
+                                                                if (!save) {
+                                                                    setSystemAudioBackendError(t("Couldn't save the audio backend setting."));
+                                                                    return;
+                                                                }
+                                                                setSystemAudioBackend(next);
+                                                                setSystemAudioBackendError(null);
+                                                                // Roll the switch back if the write was refused. Showing an "on"
+                                                                // toggle over a setting disk never received is exactly the silent
+                                                                // revert this setting was moved out of localStorage to end.
+                                                                save(next)
+                                                                    .then(result => {
+                                                                        if (result?.success) return;
+                                                                        setSystemAudioBackend(previous);
+                                                                        setSystemAudioBackendError(
+                                                                            result?.error === 'settings_store_degraded'
+                                                                                ? t("Couldn't save — the settings file is unreadable. Restart Natively and try again.")
+                                                                                : t("Couldn't save the audio backend setting."),
+                                                                        );
+                                                                    })
+                                                                    .catch(err => {
+                                                                        console.error('[Settings] Failed to save the system audio backend:', err);
+                                                                        setSystemAudioBackend(previous);
+                                                                        setSystemAudioBackendError(t("Couldn't save the audio backend setting."));
+                                                                    });
                                                             }}
-                                                            className={useExperimentalSck ? 'bg-accent-primary border border-transparent' : 'bg-bg-toggle-switch border border-border-muted'}
+                                                            className={systemAudioBackend === 'sck' ? 'bg-accent-primary border border-transparent' : 'bg-bg-toggle-switch border border-border-muted'}
                                                         />
                                                     </div>
                                                 </div>
