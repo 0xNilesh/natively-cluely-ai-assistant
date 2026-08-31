@@ -37,8 +37,9 @@
 //     rather than a data race — and the consumer detects and discards any
 //     region that was overwritten while it was being copied.
 //   * The producer path performs no allocation, no locking, no syscalls and no
-//     branching on consumer state: one relaxed load, N relaxed stores, one
-//     release store. It cannot be made to wait by a slow consumer.
+//     branching on consumer state: one relaxed load, one relaxed store, one
+//     release fence, N relaxed stores, one release store. It never reads the
+//     consumer's position, so it cannot be made to wait by a slow consumer.
 //   * No panics. The slot array is a power of two and every index is masked, so
 //     each access is provably in bounds; all index arithmetic is wrapping.
 //
@@ -52,7 +53,7 @@
 //
 //     samples_received + dropped_samples == samples_pushed
 
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{fence, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// Smallest ring we will build. Two slots keeps the power-of-two masking valid.
@@ -98,8 +99,22 @@ struct Ring {
     /// `capacity - 1`. Every index is `pos & mask`, hence always in bounds.
     mask: usize,
     capacity: usize,
-    /// Monotonic count of samples ever written. Producer-only writer.
+    /// Monotonic count of samples the producer has PUBLISHED — everything below
+    /// this index is fully written and safe to read. Producer-only writer.
     write: AtomicUsize,
+    /// Monotonic upper bound on how far the producer has physically written
+    /// into `slots`, published BEFORE the writes rather than after.
+    ///
+    /// `write` alone is not enough to police the consumer's copy. The producer
+    /// stores a whole callback's worth of samples and only then publishes
+    /// `write`, so between those two points it has already clobbered slots the
+    /// consumer may be reading while `write` still reads low. Trimming against
+    /// `write` therefore under-counts the damage and can hand a torn,
+    /// out-of-order sample to STT (caught by
+    /// `producer_never_blocks_on_a_slower_consumer`). `claimed` is raised first
+    /// and is never below the physical frontier, so trimming against it is
+    /// conservative by construction. Producer-only writer.
+    claimed: AtomicUsize,
     /// Monotonic count of samples ever consumed (including skipped ones).
     /// Consumer-only writer.
     read: AtomicUsize,
@@ -147,6 +162,7 @@ pub fn audio_ring(capacity: usize) -> (AudioProducer, AudioConsumer) {
         mask: capacity - 1,
         capacity,
         write: AtomicUsize::new(0),
+        claimed: AtomicUsize::new(0),
         read: AtomicUsize::new(0),
         dropped_samples: AtomicU64::new(0),
         overflow_events: AtomicU64::new(0),
@@ -200,18 +216,29 @@ impl AudioProducer {
         // consumer's loss accounting stays exact.
         let skip = n.saturating_sub(ring.capacity);
 
-        // Relaxed: the producer is the only writer of `write`.
+        // Relaxed: the producer is the only writer of `write` and `claimed`.
         let w = ring.write.load(Ordering::Relaxed);
-        let mut pos = w.wrapping_add(skip);
+        let end = w.wrapping_add(n);
 
+        // Announce how far we are about to reach BEFORE touching a single slot,
+        // so a consumer copying concurrently can tell which of the samples it
+        // just read were inside our reach. The release fence is what makes the
+        // announcement stick: it forbids the slot stores below from becoming
+        // visible ahead of it. Two stores and one fence per callback — the
+        // producer still never reads the consumer's position and still cannot
+        // be made to wait.
+        ring.claimed.store(end, Ordering::Relaxed);
+        fence(Ordering::Release);
+
+        let mut pos = w.wrapping_add(skip);
         for sample in iter.skip(skip) {
             ring.slots[pos & ring.mask].store(sample.to_bits(), Ordering::Relaxed);
             pos = pos.wrapping_add(1);
         }
 
         // Release: publishes the slot stores above to the consumer's Acquire
-        // load. This is the only point at which the new audio becomes visible.
-        ring.write.store(w.wrapping_add(n), Ordering::Release);
+        // load. This is the only point at which the new audio becomes readable.
+        ring.write.store(end, Ordering::Release);
         n
     }
 
@@ -276,10 +303,17 @@ impl AudioConsumer {
         }
 
         // The producer may have wrapped around and overwritten the front of the
-        // region while we were copying it. Anything older than `w2 - cap` is
-        // torn now; discard it rather than feeding garbage samples to STT.
-        let w2 = ring.write.load(Ordering::Acquire);
-        let clobbered = w2.wrapping_sub(r).saturating_sub(cap).min(avail);
+        // region while we were copying it. `claimed` is the conservative bound
+        // on how far it has physically reached (see the field docs — `write`
+        // lags it by up to a whole callback, which is exactly how torn samples
+        // used to slip through). Anything older than `claimed - cap` is
+        // unreliable now; discard it rather than feeding it to STT.
+        //
+        // The acquire fence keeps this load from being hoisted above the copy
+        // above, so the bound really does cover the window we just read.
+        fence(Ordering::Acquire);
+        let claimed = ring.claimed.load(Ordering::Relaxed);
+        let clobbered = claimed.wrapping_sub(r).saturating_sub(cap).min(avail);
 
         // Release: tells the producer (via `len()`/diagnostics) how far we got.
         ring.read.store(r.wrapping_add(avail), Ordering::Release);
@@ -297,27 +331,45 @@ impl AudioConsumer {
     }
 
     /// Pop a single sample. Convenience for tests and non-hot callers;
-    /// production code should use [`AudioConsumer::drain_into`], which also
-    /// revalidates against a concurrent overwrite.
+    /// production code should use [`AudioConsumer::drain_into`], which moves a
+    /// whole callback's worth per call.
+    ///
+    /// Applies the same `claimed` safety rule as `drain_into`: a sample the
+    /// producer was inside the reach of is counted as lost and skipped rather
+    /// than returned. The loop always advances `read`, so it terminates.
     pub fn try_pop(&mut self) -> Option<f32> {
         let ring = &*self.ring;
         let cap = ring.capacity;
 
-        let w = ring.write.load(Ordering::Acquire);
-        let mut r = ring.read.load(Ordering::Relaxed);
+        loop {
+            let w = ring.write.load(Ordering::Acquire);
+            let mut r = ring.read.load(Ordering::Relaxed);
 
-        let avail = w.wrapping_sub(r);
-        if avail == 0 {
-            return None;
-        }
-        if avail > cap {
-            ring.record_loss(avail - cap);
-            r = w.wrapping_sub(cap);
-        }
+            let avail = w.wrapping_sub(r);
+            if avail == 0 {
+                return None;
+            }
 
-        let sample = f32::from_bits(ring.slots[r & ring.mask].load(Ordering::Relaxed));
-        ring.read.store(r.wrapping_add(1), Ordering::Release);
-        Some(sample)
+            let mut lost = 0usize;
+            if avail > cap {
+                lost = avail - cap;
+                r = w.wrapping_sub(cap);
+            }
+
+            let sample = f32::from_bits(ring.slots[r & ring.mask].load(Ordering::Relaxed));
+
+            fence(Ordering::Acquire);
+            let claimed = ring.claimed.load(Ordering::Relaxed);
+            ring.read.store(r.wrapping_add(1), Ordering::Release);
+
+            if claimed.wrapping_sub(r) > cap {
+                // The producer reached this slot while we were reading it.
+                ring.record_loss(lost + 1);
+                continue;
+            }
+            ring.record_loss(lost);
+            return Some(sample);
+        }
     }
 
     /// Samples currently readable, saturated at the ring capacity.
@@ -591,72 +643,98 @@ mod tests {
         );
     }
 
+    /// Real threads, real contention. The producer must complete a fixed
+    /// workload however slowly the consumer drains, every sample the consumer
+    /// is handed must be a real sample in order, and nothing may be lost
+    /// without being counted.
+    ///
+    /// The ordering assertion is the load-bearing one: it is what caught the
+    /// producer clobbering slots the consumer was mid-copy on. `write` is
+    /// published only after a whole callback has been stored, so trimming the
+    /// copy against `write` let torn samples through and delivered audio went
+    /// backwards. The `claimed` index exists to close exactly this window, and
+    /// the geometries below are chosen to hold it wide open: block sizes at and
+    /// beyond the ring capacity, and a consumer that barely yields.
     #[test]
     fn producer_never_blocks_on_a_slower_consumer() {
-        // Real threads, real contention: the producer must complete a fixed
-        // workload regardless of how slowly the consumer drains, and the
-        // delivered samples must remain strictly increasing (no reordering, no
-        // duplication, no torn values reaching the caller).
-        const BLOCKS: usize = 4_000;
-        const BLOCK: usize = 256;
+        // (capacity, block, blocks, consumer sleep in microseconds)
+        let geometries = [
+            (1024usize, 256usize, 4_000usize, 200u64),
+            // Block close to a whole ring: every push covers most of the slot
+            // array, so the pre-publish window is at its widest.
+            (512, 480, 4_000, 20),
+            // Block LARGER than the ring: exercises the `skip` path under
+            // contention too.
+            (256, 1_024, 2_000, 0),
+        ];
 
-        let (mut producer, mut consumer) = audio_ring(1024);
-        let done = Arc::new(AtomicBool::new(false));
-        let done_writer = done.clone();
-        // Pre-built so the producer loop itself does nothing but push — the
-        // property under test is that a slow consumer cannot stall it.
-        let source = ramp(0, BLOCKS * BLOCK);
+        for (cap, block, blocks, sleep_us) in geometries {
+            let label = format!("cap={} block={} blocks={}", cap, block, blocks);
+            let (mut producer, mut consumer) = audio_ring(cap);
+            let done = Arc::new(AtomicBool::new(false));
+            let done_writer = done.clone();
+            // Pre-built so the producer loop itself does nothing but push — the
+            // property under test is that a slow consumer cannot stall it.
+            let source = ramp(0, blocks * block);
 
-        let writer = thread::spawn(move || {
-            for block in 0..BLOCKS {
-                producer.push_slice(&source[block * BLOCK..(block + 1) * BLOCK]);
+            let writer = thread::spawn(move || {
+                for b in 0..blocks {
+                    producer.push_slice(&source[b * block..(b + 1) * block]);
+                }
+                done_writer.store(true, Ordering::Release);
+                blocks * block
+            });
+
+            let mut received: Vec<f32> = Vec::new();
+            let mut buf: Vec<f32> = Vec::new();
+            loop {
+                // Sampled BEFORE the drain: if the writer had already finished,
+                // the release/acquire pair guarantees this drain sees its final
+                // write index, so one more sweep is unnecessary.
+                let finished = done.load(Ordering::Acquire);
+                buf.clear();
+                consumer.drain_into(&mut buf);
+                received.extend_from_slice(&buf);
+                if finished {
+                    break;
+                }
+                if sleep_us == 0 {
+                    thread::yield_now();
+                } else {
+                    thread::sleep(Duration::from_micros(sleep_us));
+                }
             }
-            done_writer.store(true, Ordering::Release);
-            BLOCKS * BLOCK
-        });
 
-        let mut received: Vec<f32> = Vec::new();
-        let mut buf: Vec<f32> = Vec::new();
-        loop {
-            // Sampled BEFORE the drain: if the writer had already finished, the
-            // release/acquire pair guarantees this drain sees its final write
-            // index, so one more sweep is unnecessary.
-            let finished = done.load(Ordering::Acquire);
-            buf.clear();
-            consumer.drain_into(&mut buf);
-            received.extend_from_slice(&buf);
-            if finished {
-                break;
+            let pushed = writer.join().expect("producer thread must not panic");
+
+            // Strictly increasing: every delivered sample is a real sample, in
+            // order, with nothing torn or duplicated.
+            for (i, pair) in received.windows(2).enumerate() {
+                assert!(
+                    pair[1] > pair[0],
+                    "{}: delivered audio must stay ordered, saw {} then {} at index {}",
+                    label,
+                    pair[0],
+                    pair[1],
+                    i
+                );
             }
-            thread::sleep(Duration::from_micros(200));
-        }
+            for &sample in &received {
+                assert!(
+                    sample.is_finite() && sample >= 0.0 && sample < pushed as f32,
+                    "{}: sample {} is outside the produced range",
+                    label,
+                    sample
+                );
+            }
 
-        let pushed = writer.join().expect("producer thread must not panic");
-
-        // Strictly increasing: every delivered sample is a real sample, in
-        // order, and nothing torn slipped through.
-        for pair in received.windows(2) {
-            assert!(
-                pair[1] > pair[0],
-                "delivered audio must stay ordered, saw {} then {}",
-                pair[0],
-                pair[1]
+            let stats = consumer.overflow();
+            assert_eq!(
+                received.len() as u64 + stats.dropped_samples,
+                pushed as u64,
+                "{}: every produced sample must be either delivered or accounted as dropped",
+                label
             );
         }
-        for (i, &s) in received.iter().enumerate() {
-            assert!(
-                s.is_finite() && s >= 0.0 && s < pushed as f32,
-                "sample {} at index {} is outside the produced range",
-                s,
-                i
-            );
-        }
-
-        let stats = consumer.overflow();
-        assert_eq!(
-            received.len() as u64 + stats.dropped_samples,
-            pushed as u64,
-            "every produced sample must be either delivered or accounted as dropped"
-        );
     }
 }

@@ -5,7 +5,15 @@ use super::CaptureErrSignal;
 use crate::audio_config::SYSTEM_AUDIO_RING_SAMPLES;
 use crate::audio_ring::{audio_ring, AudioConsumer, AudioProducer};
 use anyhow::Result;
-use cidre::sc::StreamOutput;
+// Both protocol traits must be IN SCOPE, not just named by path. `#[objc::optional]`
+// generates the `sel_*` selector getters as associated fns on the BASE trait
+// (sc::stream::Output / sc::stream::Delegate), and the `cls_add_methods` body that
+// `#[objc::add_methods]` synthesises calls `Self::sel_*()` on our concrete type — which
+// only resolves while the defining trait is imported. `StreamOutput` has always been
+// here for AudioHandler; `StreamDelegate` is its counterpart for AudioStreamDelegate.
+// (cidre re-exports them as `sc::StreamOutput` / `sc::StreamDelegate`; we name our own
+// class AudioStreamDelegate so these imports do not collide.)
+use cidre::sc::{StreamDelegate, StreamOutput};
 use cidre::{api, arc, cm, define_obj_type, dispatch, ns, objc, sc};
 use std::sync::{Arc, Mutex};
 
@@ -130,11 +138,11 @@ impl sc::stream::OutputImpl for AudioHandler {
 /// The delegate parks the reason in a shared slot; the DSP thread picks it up
 /// and calls the napi callback with an Err, which surfaces in JS as a
 /// `SystemAudioCapture` 'error' event and drives the existing recovery path.
-pub struct StreamDelegateInner {
+pub struct AudioStreamDelegateInner {
     err_signal: CaptureErrSignal,
 }
 
-impl StreamDelegateInner {
+impl AudioStreamDelegateInner {
     fn report(&self, reason: String) {
         eprintln!("[SystemAudio-SCK] {}", reason);
         // First-error-wins. `lock()` here is on a slot only ever held for a
@@ -157,15 +165,15 @@ impl StreamDelegateInner {
 }
 
 define_obj_type!(
-    StreamDelegate + sc::stream::DelegateImpl,
-    StreamDelegateInner,
-    STREAM_DELEGATE_CLS
+    AudioStreamDelegate + sc::stream::DelegateImpl,
+    AudioStreamDelegateInner,
+    AUDIO_STREAM_DELEGATE_CLS
 );
 
-impl sc::stream::Delegate for StreamDelegate {}
+impl sc::stream::Delegate for AudioStreamDelegate {}
 
 #[objc::add_methods]
-impl sc::stream::DelegateImpl for StreamDelegate {
+impl sc::stream::DelegateImpl for AudioStreamDelegate {
     extern "C" fn impl_stream_did_stop_with_err(
         &mut self,
         _cmd: Option<&objc::Sel>,
@@ -178,9 +186,14 @@ impl sc::stream::DelegateImpl for StreamDelegate {
         ));
     }
 
-    extern "C" fn impl_user_did_stop_stream(&mut self, _cmd: Option<&objc::Sel>, _stream: &sc::Stream) {
-        self.inner_mut()
-            .report("ScreenCaptureKit audio stream was stopped by the user (screen-sharing UI)".to_string());
+    extern "C" fn impl_user_did_stop_stream(
+        &mut self,
+        _cmd: Option<&objc::Sel>,
+        _stream: &sc::Stream,
+    ) {
+        self.inner_mut().report(
+            "ScreenCaptureKit audio stream was stopped by the user (screen-sharing UI)".to_string(),
+        );
     }
 }
 
@@ -315,7 +328,7 @@ impl SpeakerInput {
         // A live delegate is what turns an SCK stream death from silent into
         // reportable. It must outlive the stream, so SpeakerStream keeps it.
         let err_signal: CaptureErrSignal = Arc::new(Mutex::new(None));
-        let delegate = StreamDelegate::with(StreamDelegateInner {
+        let delegate = AudioStreamDelegate::with(AudioStreamDelegateInner {
             err_signal: err_signal.clone(),
         });
         let stream = sc::Stream::with_delegate(&self.filter, &self.cfg, delegate.as_ref());
@@ -395,7 +408,7 @@ pub struct SpeakerStream {
     err_signal: CaptureErrSignal,
     stream: arc::R<sc::Stream>,
     _handler: arc::R<AudioHandler>,
-    _delegate: arc::R<StreamDelegate>,
+    _delegate: arc::R<AudioStreamDelegate>,
     _filter: arc::R<sc::ContentFilter>,
     _cfg: arc::R<sc::StreamCfg>,
 }
