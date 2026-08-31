@@ -45,37 +45,24 @@ const { modelPreloader } = await import(
   pathToFileURL(path.join(distRoot, 'modelPreloader.js')).href
 );
 
-// We can't easily spawn a real whisper worker (no model files), so we
-// drive the preloader directly: replace the private `warmWorker` and
-// `warmModelId` slots via the `preload()` path is too heavy (it tries to
-// spawn a Worker). Instead, we use the internal `takeWarmWorker` method
-// with a hand-rolled EventEmitter that stands in for a Worker.
+// We can't easily spawn a real whisper worker (no model files), and the
+// `preload()` path is too heavy for this assertion (it tries to spawn a
+// Worker). Instead we seed the internal `warmWorkers` map with a hand-rolled
+// EventEmitter that stands in for a Worker and call `takeWarmWorker` on it.
+// (ModelPreloaderWarmWorkers.test.mjs drives the real preload() path with a
+// stubbed worker_threads module.)
 
 test('takeWarmWorker removes preload listeners so transient errors do not poison the cooldown', () => {
   // Build a fake "warm" worker that's just an EventEmitter.
   const fakeWorker = new EventEmitter();
-  // Mark it as "warm" by reaching into the private fields. The preloader
-  // exposes `isWarm(modelId)` which checks both fields; we set them via
-  // direct mutation since the public surface doesn't otherwise let us
-  // mark a worker as warm without spawning.
-  // We do this by abusing the fact that the preloader is a singleton
-  // module export: the private fields aren't on the prototype, so we
-  // can't reach them externally. Instead, drive the preloader with a
-  // REAL Worker stub via the preload() call and intercept new Worker.
-  //
-  // Easiest: replace the global `Worker` constructor with one that
-  // returns our EventEmitter. The preloader uses `new Worker(workerPath)`
-  // (via the `worker_threads` module). Monkey-patching `worker_threads`
-  // before the call lets us inject.
-  //
-  // Since we can't easily patch worker_threads in ESM, we instead
-  // directly test the takeWarmWorker cleanup by stubbing the worker
-  // before the call. We achieve this by mutating the internal
-  // warmWorker/warmModelId via cast-as-any.
+  // Mark it as "warm" by reaching into the private state. The preloader
+  // exposes `isWarm(modelId)` but the public surface doesn't let us mark a
+  // worker as warm without spawning one, and TS `private` is erased at
+  // runtime, so the singleton's `warmWorkers` map is directly writable here.
   const internal = modelPreloader;
   // Reset state in case the singleton is dirty from another test.
-  internal.warmWorker = null;
-  internal.warmModelId = null;
+  internal.warmWorkers = new Map();
+  internal.loadingWorkers = new Map();
   internal.recentFailures = new Map();
 
   // Seed recent-failures for a DIFFERENT modelId so we can verify the
@@ -84,9 +71,8 @@ test('takeWarmWorker removes preload listeners so transient errors do not poison
   const UNRELATED_MODEL = 'Xenova/whisper-tiny';
   internal.recentFailures.set(UNRELATED_MODEL, Date.now() + 60_000);
 
-  // Place our fake worker into the "warm" slot.
-  internal.warmWorker = fakeWorker;
-  internal.warmModelId = 'Xenova/whisper-tiny.en';
+  // Place our fake worker into the "warm" slot for this model id.
+  internal.warmWorkers.set('Xenova/whisper-tiny.en', fakeWorker);
 
   // Now exercise the actual fix: takeWarmWorker must remove the
   // preloader's listeners before returning the worker.
@@ -125,8 +111,8 @@ test('after handoff, a transient worker error does NOT poison the recent-failure
   // With the fix in place, the preloader is decoupled from the worker
   // after handoff, so the unrelated cooldown stays clean.
   const internal = modelPreloader;
-  internal.warmWorker = null;
-  internal.warmModelId = null;
+  internal.warmWorkers = new Map();
+  internal.loadingWorkers = new Map();
   internal.recentFailures = new Map();
 
   const UNRELATED = 'Xenova/whisper-tiny';
@@ -139,8 +125,7 @@ test('after handoff, a transient worker error does NOT poison the recent-failure
 
   // Hand off a fake worker for tiny.en.
   const fakeWorker = new EventEmitter();
-  internal.warmWorker = fakeWorker;
-  internal.warmModelId = 'Xenova/whisper-tiny.en';
+  internal.warmWorkers.set('Xenova/whisper-tiny.en', fakeWorker);
   const handed = modelPreloader.takeWarmWorker('Xenova/whisper-tiny.en');
   assert.ok(handed, 'handoff should succeed');
 

@@ -1646,22 +1646,28 @@ export class AppState {
             if (sys && MODEL_CATALOG_IDS.has(sys)) modelIds.add(sys);
           }
 
-          // Which model to warm: mic-channel > global (mic is the user's own
-          // voice — most latency-critical). The preloader is single-slot so we
-          // pick the highest-priority cached candidate.
-          const micOverride = settingsManager.get('localWhisperPerChannelEnabled')
-            ? (settingsManager.get('localWhisperModelMic') ?? '')
-            : '';
-          const preloadPriority = [
-            micOverride && MODEL_CATALOG_IDS.has(micOverride) ? micOverride : '',
-            modelId,
-          ].filter(Boolean);
-          const primaryPreloadId = preloadPriority.find(id => isModelCached(id, dtype)) ?? '';
+          // Which models to warm. With per-channel transcription on there are
+          // TWO independent consumers — the mic LocalWhisperSTT and the
+          // interviewer one — and each needs its own warm worker. This used to
+          // pick a single winner (mic > global) because the preloader was
+          // single-slot: the mic always won, the interviewer was left to
+          // cold-start, and a cold-started worker never reaches `ready`, so the
+          // interviewer channel never transcribed at all. modelPreloader now
+          // keys warm workers by model id, so every selected model is warmed.
+          //
+          // `modelIds` only picks up the per-channel ids when
+          // localWhisperPerChannelEnabled is set, but the flag is re-checked
+          // here so the single-channel guarantee — exactly one warm worker —
+          // is stated where the preloading happens rather than being implied by
+          // how the Set was built twenty lines up.
+          const preloadIds = settingsManager.get('localWhisperPerChannelEnabled')
+            ? new Set(modelIds)
+            : new Set([modelId]);
 
           const { LocalModelDownloadService, resolveLocalModelProviderName } = require('./services/LocalModelDownloadService');
           for (const id of modelIds) {
             if (isModelCached(id, dtype)) {
-              if (id === primaryPreloadId) {
+              if (preloadIds.has(id)) {
                 console.log(`[AppState] Preloading local Whisper model: ${id}`);
                 modelPreloader.preload(id);
               }

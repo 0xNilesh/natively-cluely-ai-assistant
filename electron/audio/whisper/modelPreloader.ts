@@ -1,7 +1,7 @@
 /**
- * ModelPreloader — keeps one warm Whisper worker alive in the background
- * so the first recording session starts instantly instead of waiting 2–5s
- * for the model to load off disk into ONNX Runtime.
+ * ModelPreloader — keeps warm Whisper workers alive in the background so the
+ * first recording session starts instantly instead of waiting 2–5s for the
+ * model to load off disk into ONNX Runtime.
  *
  * Usage pattern:
  *   1. Call preload(modelId) when the app launches or when local-whisper is selected.
@@ -9,10 +9,19 @@
  *      If a warm worker exists it is handed off (no startup delay).
  *      If not, LocalWhisperSTT falls back to spawning its own worker normally.
  *
- * Only one warm worker is kept alive at a time. The second audio channel
- * (interviewer vs user) will spawn a fresh worker, which is acceptable because
- * the ONNX model weights file is already in the OS disk-cache after the first
- * worker loaded it, making the cold-start much faster than the first load.
+ * One warm worker is kept PER MODEL ID. This was a single slot until
+ * per-channel transcription shipped a second consumer: mic and interviewer are
+ * independent LocalWhisperSTT instances, the mic always asked first and took
+ * the only warm worker, and the interviewer was left to cold-start. That is not
+ * the graceful degradation the comment here used to claim — a cold-started
+ * worker logs "Loading" and then sits at 0% CPU without ever reporting `ready`,
+ * so the interviewer channel never transcribed at all and everything
+ * downstream of it (interviewer segments, Auto Answer) stayed silent. Keying
+ * the warm slot by model id lets every selected model be handed off ready.
+ *
+ * The cost is one worker per distinct selected model — two Moonshine workers
+ * measured ~150MB and ~0.4% CPU combined — and the map is capped at
+ * MAX_WARM_WORKERS so it cannot grow past what the app can actually select.
  */
 
 import { Worker } from 'worker_threads';
@@ -41,6 +50,15 @@ import {
 // re-attempted across restarts. TTL is short (5 min) — the recovery path is
 // the new local-whisper-reset-to-default IPC.
 const RECENT_FAILURE_TTL_MS = 5 * 60 * 1000;
+
+// Ceiling on simultaneously warm workers. The app can only ever have three
+// distinct models selected at once — the global `localWhisperModel` plus the
+// `localWhisperModelMic` / `localWhisperModelSystem` per-channel overrides — so
+// three is the natural bound and the cap does not bite in normal use. It exists
+// so that a caller looping over more ids than that (or a future third audio
+// channel) evicts instead of accumulating workers forever. Map iteration is
+// insertion order, so the entry dropped is the least recently warmed.
+const MAX_WARM_WORKERS = 3;
 
 // Cross-launch disk sentinel: re-exports of the generalized module keyed on
 // the 'whisper' family. The original `WhisperLoadSentinel` type is preserved
@@ -105,8 +123,15 @@ export function clearLoadSentinel(modelId?: string): void {
 }
 
 class ModelPreloader {
-    private warmWorker: Worker | null = null;
-    private warmModelId: string | null = null;
+    // modelId -> worker that has reported `ready` and is waiting to be claimed
+    // by takeWarmWorker(). Replaces the old warmWorker/warmModelId pair; see
+    // the file header for why a single slot starved the interviewer channel.
+    private warmWorkers: Map<string, Worker> = new Map();
+    // modelId -> worker that has been spawned but has not reported `ready` yet.
+    // Replaces loadingWorker/pendingModelId/loading. A Map rather than the Set
+    // of ids the duplicate-preload guard alone would need, because terminate()
+    // still has to be able to tear in-flight loads down.
+    private loadingWorkers: Map<string, Worker> = new Map();
     // Nemotron only. Not a Worker: the registry owns that. This is just the
     // refcount hold that keeps its shared worker (and the three loaded ONNX
     // sessions) alive between meetings, so mic/system JOIN instead of cold
@@ -114,20 +139,22 @@ class ModelPreloader {
     private nemotronWarmRelease: (() => void) | null = null;
     private nemotronWarmModelId: string | null = null;
     private nemotronWarmLoading = false;
-    private loadingWorker: Worker | null = null;
-    private pendingModelId: string | null = null;
-    private loading = false;
+    // The Nemotron build we intend to keep warm — set when the registry acquire
+    // starts and held for the lifetime of the hold. The acquire's .then()
+    // compares against it to notice a selection change that landed while it was
+    // still loading; that check used to read the single `pendingModelId` slot,
+    // which no longer exists.
+    private nemotronWarmPendingId: string | null = null;
+    // Ids passed to preload() since the last reconcile, plus the one-shot
+    // microtask flag that drains them. See noteWarmRequest().
+    private requestedThisBatch: Set<string> = new Set();
+    private reconcileScheduled = false;
     // modelId -> epoch ms expiry. A preload for a modelId whose entry is still
     // in the future is a no-op (avoids the same crash firing repeatedly during
     // a session that touches the same bad model). Persisted via the
     // recentFailuresPath() helper above.
     private recentFailures: Map<string, number> = loadRecentFailures();
 
-    /**
-     * Warm up a worker for the given model ID.
-     * Safe to call multiple times — no-ops if already warm or loading for the same model.
-     * Cancels an in-progress load if a different model is requested.
-     */
     /**
      * Warms Nemotron by taking a long-lived registry channel. The registry
      * remains the sole owner of the worker — this only contributes a refcount
@@ -162,6 +189,7 @@ class ModelPreloader {
         }
         const initMsg = buildWorkerInitMessage(modelId);
         this.nemotronWarmLoading = true;
+        this.nemotronWarmPendingId = modelId;
         console.log(`[ModelPreloader] Warming Nemotron via sharedWorkerRegistry for ${modelId}...`);
         const startedAt = Date.now();
         // Same crash sentinel every other preloaded model gets: a NATIVE abort
@@ -173,8 +201,10 @@ class ModelPreloader {
                 clearLoadSentinel(modelId);
                 this.nemotronWarmLoading = false;
                 // Model changed while we were loading — don't strand a hold on
-                // a worker nobody wants.
-                if (this.pendingModelId && this.pendingModelId !== modelId) { release(); return; }
+                // a worker nobody wants. reconcileWarmHolds() clears
+                // nemotronWarmPendingId when the selection moves off Nemotron,
+                // which is what makes this comparison fail.
+                if (this.nemotronWarmPendingId !== modelId) { release(); return; }
                 this.nemotronWarmRelease = release;
                 this.nemotronWarmModelId = modelId;
                 console.log(`[ModelPreloader] Nemotron warm for ${modelId} (${Date.now() - startedAt}ms) — channels will join, not cold start`);
@@ -194,15 +224,120 @@ class ModelPreloader {
         try { this.nemotronWarmRelease(); } catch { /* registry already torn down */ }
         this.nemotronWarmRelease = null;
         this.nemotronWarmModelId = null;
+        this.nemotronWarmPendingId = null;
     }
 
+    /**
+     * Detach and terminate a worker this class still owns.
+     *
+     * Listeners come off BEFORE terminate() for the same reason
+     * takeWarmWorker() strips them before handoff: terminate() makes the worker
+     * exit with a non-zero code, and the `exit` handler installed in preload()
+     * reads a non-zero code as "this model failed to load" and writes a
+     * 5-minute recentFailures cooldown for it. Disposing a perfectly healthy
+     * worker — cap eviction, app teardown — must not poison the model it was
+     * warming. Dropping the `exit` listener also drops the `__slotRelease()`
+     * call it would have made, so the ONNX slot is released explicitly here.
+     */
+    private disposeWorker(worker: Worker, modelId: string, reason: string): void {
+        console.log(`[ModelPreloader] Disposing ${reason} for ${modelId}`);
+        worker.removeAllListeners('message');
+        worker.removeAllListeners('error');
+        worker.removeAllListeners('exit');
+        try { (worker as any).__slotRelease?.(); } catch { /* slot already released */ }
+        worker.terminate();
+    }
+
+    /**
+     * Drop a worker from whichever map still points at it. Identity-checked so
+     * a late `exit` / `error` from a superseded worker cannot evict the
+     * replacement that has since taken its modelId.
+     */
+    private forgetWorker(modelId: string, worker: Worker): void {
+        if (this.loadingWorkers.get(modelId) === worker) this.loadingWorkers.delete(modelId);
+        if (this.warmWorkers.get(modelId) === worker) this.warmWorkers.delete(modelId);
+    }
+
+    /** Evict least-recently-warmed workers until the map is back under the cap. */
+    private enforceWarmCap(): void {
+        while (this.warmWorkers.size > MAX_WARM_WORKERS) {
+            const oldestId = this.warmWorkers.keys().next().value;
+            if (oldestId === undefined) return;
+            const oldest = this.warmWorkers.get(oldestId);
+            this.warmWorkers.delete(oldestId);
+            if (oldest) this.disposeWorker(oldest, oldestId, `warm worker over the ${MAX_WARM_WORKERS}-model cap`);
+        }
+    }
+
+    /**
+     * Note that `modelId` belongs to the selection the app wants warm, and
+     * schedule the end-of-batch reconcile.
+     *
+     * preload() is called once per selected model, back to back, from a single
+     * synchronous block (main.ts's app-launch loop). Deferring by a microtask
+     * makes the reconcile run exactly once, after every call in that batch has
+     * been seen — which is what makes "does anything still want Nemotron?"
+     * answerable now that more than one model can be selected at a time. It
+     * does not touch preload()'s own fire-and-forget synchronous contract.
+     */
+    private noteWarmRequest(modelId: string): void {
+        this.requestedThisBatch.add(modelId);
+        if (this.reconcileScheduled) return;
+        this.reconcileScheduled = true;
+        queueMicrotask(() => {
+            this.reconcileScheduled = false;
+            const requested = this.requestedThisBatch;
+            this.requestedThisBatch = new Set();
+            this.reconcileWarmHolds(requested);
+        });
+    }
+
+    /**
+     * Drop the Nemotron warm hold when nothing in the latest batch of preload()
+     * calls wants it — the "switching AWAY from Nemotron" case that used to sit
+     * inline at the top of preload().
+     *
+     * It cannot sit there any more: a non-Nemotron preload no longer implies
+     * the user moved off Nemotron, because the OTHER channel may still be on it
+     * (mic on Nemotron, system on Moonshine is a legal per-channel selection).
+     * Releasing on the Moonshine call would tear down the three ONNX sessions
+     * the mic channel is about to join and put the ~7s cold start back at
+     * meeting start — the exact cost preloadNemotronViaRegistry() exists to
+     * avoid.
+     *
+     * Ordinary warm workers are deliberately NOT evicted here. preload() is an
+     * additive public API — the local-whisper-preload IPC calls it with a
+     * single id — so a lone call must not throw away another channel's warm
+     * worker. Their bound is MAX_WARM_WORKERS instead.
+     */
+    private reconcileWarmHolds(requested: Set<string>): void {
+        // Fall back to the pending id so a selection change that lands while
+        // the registry acquire is still in flight is not forgotten; clearing it
+        // is what makes that acquire release itself when it resolves.
+        const held = this.nemotronWarmModelId ?? this.nemotronWarmPendingId;
+        if (!held || requested.has(held)) return;
+        this.nemotronWarmPendingId = null;
+        this.releaseNemotronWarmHold();
+    }
+
+    /**
+     * Warm up a worker for the given model ID.
+     * Safe to call multiple times — no-ops if this model is already warm or
+     * already loading. Preloading a DIFFERENT model no longer cancels the
+     * first: both stay warm, keyed by model id, up to MAX_WARM_WORKERS.
+     */
     preload(modelId: string): void {
+        // Record the request BEFORE any early return below. An id that
+        // short-circuits (already warm, still loading, in failure cooldown) is
+        // every bit as "wanted" as one that spawns a worker, and
+        // reconcileWarmHolds() decides what to tear down from exactly this set.
+        this.noteWarmRequest(modelId);
+
         // Dual-channel Nemotron routes worker acquisition entirely through
         // sharedWorkerRegistry.ts, so it must NOT go through this class's
-        // "one warm worker, hand it to whichever channel asks first" scheme —
-        // that would create a second, competing concept of who owns the
-        // worker. This used to return outright, leaving LocalWhisperSTT to pay
-        // the cold start on first use.
+        // warm-worker scheme — that would create a second, competing concept
+        // of who owns the worker. This used to return outright, leaving
+        // LocalWhisperSTT to pay the cold start on first use.
         //
         // That cold start is not cheap and not hidden: loading the three ONNX
         // sessions takes ~7s, and it happened at MEETING START. VAD banks a
@@ -212,21 +347,29 @@ class ModelPreloader {
         // behind that one oversized request. A short meeting ended before any
         // result came back and produced an empty transcript.
         //
-        // Fixed by warming through the REGISTRY rather than through
-        // warmWorker: acquire a long-lived channel here and hold its release.
-        // The registry stays the single owner (no competing lifecycle), the
-        // sessions load at app start, and mic/system then JOIN a ready worker
-        // — their NemotronEngine.create() reuses nemotronSharedResources and
-        // returns without loading anything.
+        // Fixed by warming through the REGISTRY rather than through the
+        // warmWorkers map: acquire a long-lived channel here and hold its
+        // release. The registry stays the single owner (no competing
+        // lifecycle), the sessions load at app start, and mic/system then JOIN
+        // a ready worker — their NemotronEngine.create() reuses
+        // nemotronSharedResources and returns without loading anything.
         if (modelId.toLowerCase().includes('nemotron')) {
             this.preloadNemotronViaRegistry(modelId);
             return;
         }
-        // Switching AWAY from Nemotron — drop the warm hold so the registry can
-        // tear its worker down and free the ONNX slot for the incoming model.
-        this.releaseNemotronWarmHold();
-        if (this.warmModelId === modelId && this.warmWorker) return;
-        if (this.pendingModelId === modelId && this.loading) return;
+        // "Switching AWAY from Nemotron — drop the warm hold so the registry
+        // can tear its worker down and free the ONNX slot for the incoming
+        // model" used to happen right here. It moved to reconcileWarmHolds():
+        // with per-channel models a non-Nemotron preload no longer implies the
+        // user left Nemotron, because the other channel may still be on it.
+        //
+        // Both guards below are per-model now, so preloading a SECOND model
+        // warms it alongside the first instead of being mistaken for a repeat
+        // of the first. Repeats of the same id are still free no-ops, which is
+        // what keeps a caller that preloads on every settings toggle from
+        // spawning duplicate workers.
+        if (this.warmWorkers.has(modelId)) return;
+        if (this.loadingWorkers.has(modelId)) return;
 
         // Skip if this modelId recently failed — the user has the
         // local-whisper-reset-to-default IPC for the clean recovery path,
@@ -251,21 +394,10 @@ class ModelPreloader {
             return;
         }
 
-        // Cancel any in-progress load for a different model
-        if (this.loadingWorker) {
-            this.loadingWorker.terminate();
-            this.loadingWorker = null;
-        }
-        // Tear down warm worker for a different model
-        if (this.warmWorker) {
-            this.warmWorker.terminate();
-            this.warmWorker = null;
-            this.warmModelId = null;
-        }
-
-        this.loading = true;
-        this.pendingModelId = modelId;
-
+        // There is no "cancel the in-progress load / tear down the warm worker
+        // for a different model" step any more: coexisting models are the whole
+        // point of the maps. Nothing is evicted until a worker reports ready
+        // and enforceWarmCap() finds the map over MAX_WARM_WORKERS.
         console.log(`[ModelPreloader] Warming worker for ${modelId}...`);
 
         const workerPath = resolveWhisperWorkerPath();
@@ -275,8 +407,6 @@ class ModelPreloader {
         if (!workerPath || !fs.existsSync(workerPath)) {
             console.error(`[ModelPreloader] Worker path missing or invalid: ${workerPath}`);
             this.recordFailure(modelId);
-            this.loading = false;
-            this.pendingModelId = null;
             return;
         }
         // Acquire the shared ONNX slot BEFORE spawning the worker. The release
@@ -296,7 +426,7 @@ class ModelPreloader {
 
         writeLoadSentinel(modelId);
         const w = new Worker(workerPath);
-        this.loadingWorker = w;
+        this.loadingWorkers.set(modelId, w);
         // Stash release on the worker object so takeWarmWorker() can hand it
         // off cleanly when LocalWhisperSTT picks up this warm worker.
         (w as any).__slotRelease = () => {
@@ -308,41 +438,48 @@ class ModelPreloader {
             } else {
                 this.recordFailure(modelId);
             }
-            if (this.loadingWorker === w) {
-                this.loadingWorker = null;
-                this.pendingModelId = null;
-                this.loading = false;
-            }
+            // forgetWorker() also drops a WARM entry, which the old
+            // `if (this.loadingWorker === w)` check could not: a warm worker
+            // that died on its own left a dead Worker in the slot, and the next
+            // takeWarmWorker() handed that corpse to LocalWhisperSTT.
+            this.forgetWorker(modelId, w);
             (w as any).__slotRelease?.();
         });
-        w.on('error', () => { (w as any).__slotRelease?.(); });
 
         w.on('message', (msg: any) => {
             if (msg.type === 'ready') {
                 clearLoadSentinel(modelId);
                 console.log(`[ModelPreloader] Worker warm for ${modelId}`);
-                this.warmWorker = w;
-                this.loadingWorker = null;
-                this.warmModelId = modelId;
-                this.pendingModelId = null;
-                this.loading = false;
+                this.loadingWorkers.delete(modelId);
+                // Defensive: a warm entry for this id should be impossible (the
+                // guard at the top of preload() would have returned early), but
+                // overwriting one would drop the only reference to a live
+                // worker — leaking it past terminate() and past the cap.
+                const superseded = this.warmWorkers.get(modelId);
+                if (superseded && superseded !== w) {
+                    this.disposeWorker(superseded, modelId, 'superseded warm worker');
+                }
+                this.warmWorkers.set(modelId, w);
+                this.enforceWarmCap();
             } else if (msg.type === 'error') {
                 console.warn(`[ModelPreloader] Worker init failed: ${msg.message}`);
                 this.recordFailure(modelId);
                 clearLoadSentinel(modelId);
+                this.loadingWorkers.delete(modelId);
                 w.terminate();
-                this.loadingWorker = null;
-                this.pendingModelId = null;
-                this.loading = false;
             }
         });
 
+        // One 'error' handler, not the two the single-slot version registered
+        // (a slot-release-only one beside the 'exit' handler, plus this one).
+        // Node fires every registered listener, so both always ran; folding
+        // them together keeps the slot release on the error path without the
+        // duplicate registration.
         w.on('error', (err) => {
             console.warn('[ModelPreloader] Worker error:', err.message);
             this.recordFailure(modelId);
-            this.loadingWorker = null;
-            this.pendingModelId = null;
-            this.loading = false;
+            this.forgetWorker(modelId, w);
+            (w as any).__slotRelease?.();
         });
 
         w.postMessage(buildWorkerInitMessage(modelId));
@@ -381,8 +518,10 @@ class ModelPreloader {
     }
 
     /**
-     * Hand off the warm worker to a caller and clear the cache.
-     * Returns null if no warm worker is available for that model ID.
+     * Hand off the warm worker for `modelId` to a caller and drop it from the
+     * warm map. Returns null if no warm worker is available for that model ID —
+     * including the ordinary case where the caller's model was never preloaded,
+     * which LocalWhisperSTT handles by cold-starting its own worker.
      *
      * IMPORTANT: removes ALL of the preloader's listeners (`message`,
      * `error`, `exit`) before handoff — not just `message`. Node's
@@ -390,13 +529,13 @@ class ModelPreloader {
      * the most recently added one, so leaving the preloader's `error`/`exit`
      * handlers attached means BOTH the preloader's AND the consumer's
      * handler fire on a live-worker error. The preloader's `error`/`exit`
-     * handlers call `recordFailure(modelId)` (modelPreloader.ts ~199-232) —
-     * so a transient error on the worker AFTER handoff (while
-     * LocalWhisperSTT is actively driving it during a live recording)
-     * would silently poison the 5-minute recent-failure cooldown for a
+     * handlers call `recordFailure(modelId)` (the `exit` / `error` listeners
+     * installed in preload()) — so a transient error on the worker AFTER
+     * handoff (while LocalWhisperSTT is actively driving it during a live
+     * recording) would silently poison the 5-minute recent-failure cooldown for a
      * model that is demonstrably fine (it's mid-session, not failing to
      * load). The NEXT meeting's pre-warm would then silently skip for up
-     * to 5 minutes (preload()'s cooldown check at ~133-137), manifesting as
+     * to 5 minutes (preload()'s recentFailures cooldown check), manifesting as
      * "transcription is slow to start" with no visible error. The consumer
      * (LocalWhisperSTT.attachWorkerListeners) installs its own complete
      * message/error/exit handlers immediately after taking the worker, so
@@ -408,31 +547,28 @@ class ModelPreloader {
      * LocalWhisperSTT.beginWorkerTermination.
      */
     takeWarmWorker(modelId: string): Worker | null {
-        if (this.warmModelId === modelId && this.warmWorker) {
-            const w = this.warmWorker;
-            w.removeAllListeners('message');
-            w.removeAllListeners('error');
-            w.removeAllListeners('exit');
-            this.warmWorker = null;
-            this.warmModelId = null;
-            console.log(`[ModelPreloader] Handing off warm worker for ${modelId}`);
-            return w;
-        }
-        return null;
+        const w = this.warmWorkers.get(modelId);
+        if (!w) return null;
+        w.removeAllListeners('message');
+        w.removeAllListeners('error');
+        w.removeAllListeners('exit');
+        this.warmWorkers.delete(modelId);
+        console.log(`[ModelPreloader] Handing off warm worker for ${modelId}`);
+        return w;
     }
 
     isWarm(modelId: string): boolean {
-        return this.warmModelId === modelId && this.warmWorker !== null;
+        return this.warmWorkers.has(modelId);
     }
 
     terminate(): void {
-        this.loadingWorker?.terminate();
-        this.loadingWorker = null;
-        this.warmWorker?.terminate();
-        this.warmWorker = null;
-        this.warmModelId = null;
-        this.pendingModelId = null;
-        this.loading = false;
+        // disposeWorker() rather than a bare terminate(): a non-zero exit code
+        // from an intentional teardown would otherwise be recorded as a load
+        // failure and persist a 5-minute cooldown for a model that never failed.
+        for (const [id, w] of this.loadingWorkers) this.disposeWorker(w, id, 'in-flight load');
+        this.loadingWorkers.clear();
+        for (const [id, w] of this.warmWorkers) this.disposeWorker(w, id, 'warm worker');
+        this.warmWorkers.clear();
     }
 }
 
