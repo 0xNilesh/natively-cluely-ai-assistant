@@ -1,10 +1,8 @@
 // Ported logic
-use crate::audio_config::RING_BUFFER_SAMPLES;
+use super::CaptureErrSignal;
+use crate::audio_config::SYSTEM_AUDIO_RING_SAMPLES;
+use crate::audio_ring::{audio_ring, AudioConsumer, AudioProducer};
 use anyhow::Result;
-use ringbuf::{
-    traits::{Producer, Split},
-    HeapCons, HeapProd, HeapRb,
-};
 use std::collections::VecDeque;
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
@@ -21,7 +19,7 @@ pub struct SpeakerInput {
 }
 
 pub struct SpeakerStream {
-    consumer: Option<HeapCons<f32>>,
+    consumer: Option<AudioConsumer>,
     waker_state: Arc<Mutex<WakerState>>,
     capture_thread: Option<thread::JoinHandle<()>>,
     actual_sample_rate: u32,
@@ -33,8 +31,16 @@ impl SpeakerStream {
         self.actual_sample_rate
     }
 
-    pub fn take_consumer(&mut self) -> Option<HeapCons<f32>> {
+    pub fn take_consumer(&mut self) -> Option<AudioConsumer> {
         self.consumer.take()
+    }
+
+    /// WASAPI loopback has no asynchronous "your stream died" callback — init
+    /// failures are returned synchronously from `stream()` and per-read errors
+    /// are retried in the capture loop — so there is nothing to poll here.
+    /// Present only so the DSP thread in lib.rs has one shape across platforms.
+    pub fn err_signal(&self) -> Option<CaptureErrSignal> {
+        None
     }
 
     pub fn data_ready_signal(&self) -> Arc<(Mutex<bool>, Condvar)> {
@@ -128,8 +134,7 @@ impl SpeakerInput {
     /// surface the failure to JS instead of silently degrading to a fake
     /// stream that produces zero samples.
     pub fn stream(self) -> Result<SpeakerStream> {
-        let rb = HeapRb::<f32>::new(RING_BUFFER_SAMPLES);
-        let (producer, consumer) = rb.split();
+        let (producer, consumer) = audio_ring(SYSTEM_AUDIO_RING_SAMPLES);
 
         let waker_state = Arc::new(Mutex::new(WakerState { shutdown: false }));
         let data_ready = Arc::new((Mutex::new(false), Condvar::new()));
@@ -184,7 +189,7 @@ impl SpeakerInput {
     }
 
     fn capture_audio_loop(
-        mut producer: HeapProd<f32>,
+        mut producer: AudioProducer,
         waker_state: Arc<Mutex<WakerState>>,
         data_ready: Arc<(Mutex<bool>, Condvar)>,
         init_tx: mpsc::Sender<Result<u32>>,
@@ -289,7 +294,10 @@ impl SpeakerInput {
                     }
 
                     if !samples.is_empty() {
-                        let _ = producer.push_slice(&samples);
+                        // Drop-oldest: a starved DSP thread costs us the oldest
+                        // samples, never the stream. Loss is counted on the
+                        // consumer side and reported.
+                        producer.push_slice(&samples);
 
                         // Signal data ready
                         let (lock, cvar) = &*data_ready;

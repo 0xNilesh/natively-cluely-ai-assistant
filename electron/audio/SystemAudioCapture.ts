@@ -77,6 +77,30 @@ export class SystemAudioCapture extends EventEmitter {
     }
 
     /**
+     * Native capture-ring overflow counters — how much interviewer audio the
+     * Rust ring had to overwrite because this process did not drain it fast
+     * enough. Cumulative for the life of the current native start(); returns
+     * null when the native monitor is absent or too old to expose them.
+     *
+     * This is the signal that did not exist when the interviewer channel could
+     * die mid-meeting: the drop happened inside Rust and nothing above it ever
+     * found out. main.ts folds it into SystemAudioHealthClassifier on each
+     * chunk so a starved consumer shows up in the log instead of as a silently
+     * truncated transcript.
+     */
+    public getOverflowStats(): { droppedSamples: number; overflowEvents: number; droppedMs: number } | null {
+        if (!this.monitor) return null;
+        try {
+            if (typeof this.monitor.getOverflowStats === 'function') {
+                return this.monitor.getOverflowStats();
+            }
+        } catch (e) {
+            console.warn('[SystemAudioCapture] getOverflowStats failed:', e);
+        }
+        return null;
+    }
+
+    /**
      * Start capturing audio
      */
     public start(): void {

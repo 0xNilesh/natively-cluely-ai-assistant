@@ -1,16 +1,28 @@
 // ScreenCaptureKit-based system audio capture
 // Uses cidre 0.11.10 API with correct class registration and inner state
 
+use super::CaptureErrSignal;
+use crate::audio_config::SYSTEM_AUDIO_RING_SAMPLES;
+use crate::audio_ring::{audio_ring, AudioConsumer, AudioProducer};
 use anyhow::Result;
 use cidre::sc::StreamOutput;
 use cidre::{api, arc, cm, define_obj_type, dispatch, ns, objc, sc};
-use ringbuf::{
-    traits::{Producer, Split},
-    HeapCons, HeapProd, HeapRb,
-};
+use std::sync::{Arc, Mutex};
 
 // keep for compatibility
 use cidre::core_audio as ca;
+
+/// SCStreamConfiguration.queueDepth.
+///
+/// Apple's header: "If not set the default value is 3 frames. Specifying more
+/// frames uses more memory, but may allow you to process frame data without
+/// stalling the display stream and should not exceed 8 frames." 8 is therefore
+/// the documented ceiling, not a knob we can turn up for more headroom. The
+/// real backpressure fix is the drop-oldest ring the output handler writes into
+/// (`audio_ring`), which makes this depth irrelevant to whether we survive a
+/// stalled consumer: the handler returns in ~1us regardless of what the DSP
+/// thread is doing, so SCK's queue never backs up in the first place.
+const SCK_QUEUE_DEPTH: isize = 8;
 
 pub fn list_output_devices() -> Result<Vec<(String, String)>> {
     let all_devices = ca::System::devices()?;
@@ -42,7 +54,7 @@ pub fn default_output_device_uid() -> String {
 }
 
 pub struct AudioHandlerInner {
-    producer: HeapProd<f32>,
+    producer: AudioProducer,
 }
 
 define_obj_type!(
@@ -87,8 +99,12 @@ impl sc::stream::OutputImpl for AudioHandler {
                     if float_count > 0 && !data_ptr.is_null() {
                         unsafe {
                             let slice = std::slice::from_raw_parts(data_ptr, float_count);
-                            // Push audio to ring buffer
-                            let _pushed = inner.producer.push_slice(slice);
+                            // Wait-free: overwrites the oldest samples if the DSP
+                            // thread is starved rather than discarding what we just
+                            // captured, and never inspects the consumer's position,
+                            // so this handler cannot be delayed by downstream work.
+                            // Loss is counted on the consumer side and reported.
+                            inner.producer.push_slice(slice);
                         }
                     }
                 }
@@ -97,6 +113,74 @@ impl sc::stream::OutputImpl for AudioHandler {
                 println!("[SystemAudio-SCK] Failed to get audio buffer: {:?}", e);
             }
         }
+    }
+}
+
+/// SCStreamDelegate.
+///
+/// ScreenCaptureKit reports a stream that has died — permission revoked
+/// mid-meeting, the display it was bound to going away, the client being
+/// judged too slow — through `stream:didStopWithError:`. Until this existed the
+/// stream was created with a nil delegate, so that message went nowhere: SCK
+/// stopped delivering buffers and NOTHING in the process knew. That is exactly
+/// the silent-death signature from the field report (system-audio chunks froze
+/// at #2500 and never resumed, with no error and no log, recoverable only by
+/// restarting the meeting).
+///
+/// The delegate parks the reason in a shared slot; the DSP thread picks it up
+/// and calls the napi callback with an Err, which surfaces in JS as a
+/// `SystemAudioCapture` 'error' event and drives the existing recovery path.
+pub struct StreamDelegateInner {
+    err_signal: CaptureErrSignal,
+}
+
+impl StreamDelegateInner {
+    fn report(&self, reason: String) {
+        eprintln!("[SystemAudio-SCK] {}", reason);
+        // First-error-wins. `lock()` here is on a slot only ever held for a
+        // couple of instructions, and this is a delegate callback, not the
+        // audio output handler — the real-time path never touches it.
+        match self.err_signal.lock() {
+            Ok(mut slot) => {
+                if slot.is_none() {
+                    *slot = Some(reason);
+                }
+            }
+            Err(poisoned) => {
+                let mut slot = poisoned.into_inner();
+                if slot.is_none() {
+                    *slot = Some(reason);
+                }
+            }
+        }
+    }
+}
+
+define_obj_type!(
+    StreamDelegate + sc::stream::DelegateImpl,
+    StreamDelegateInner,
+    STREAM_DELEGATE_CLS
+);
+
+impl sc::stream::Delegate for StreamDelegate {}
+
+#[objc::add_methods]
+impl sc::stream::DelegateImpl for StreamDelegate {
+    extern "C" fn impl_stream_did_stop_with_err(
+        &mut self,
+        _cmd: Option<&objc::Sel>,
+        _stream: &sc::Stream,
+        error: &ns::Error,
+    ) {
+        self.inner_mut().report(format!(
+            "ScreenCaptureKit stopped the audio stream: {:?}",
+            error
+        ));
+    }
+
+    extern "C" fn impl_user_did_stop_stream(&mut self, _cmd: Option<&objc::Sel>, _stream: &sc::Stream) {
+        self.inner_mut()
+            .report("ScreenCaptureKit audio stream was stopped by the user (screen-sharing UI)".to_string());
     }
 }
 
@@ -141,7 +225,7 @@ impl SpeakerInput {
         // 100ms × 100 iterations; on a cold TCC dialog the user-perceived
         // hang was up to 10s with no UI feedback. Condvar wakes the instant
         // the callback fires.
-        use std::sync::{Arc, Condvar, Mutex};
+        use std::sync::Condvar;
 
         type WaitSlot = Mutex<Option<Result<arc::R<sc::ShareableContent>>>>;
         let pair: Arc<(WaitSlot, Condvar)> = Arc::new((Mutex::new(None), Condvar::new()));
@@ -205,14 +289,17 @@ impl SpeakerInput {
         cfg.set_sample_rate(48000);
         cfg.set_channel_count(1); // Mono - SCK doesn't affect system audio output quality
         cfg.set_excludes_current_process_audio(true);
-        cfg.set_queue_depth(8);
+        cfg.set_queue_depth(SCK_QUEUE_DEPTH);
 
         // Minimize video overhead
         cfg.set_width(2);
         cfg.set_height(2);
         cfg.set_minimum_frame_interval(cm::Time::new(1, 1)); // 1 FPS
 
-        println!("[SpeakerInput] Config: 48kHz mono, queue_depth=8");
+        println!(
+            "[SpeakerInput] Config: 48kHz mono, queue_depth={} (Apple's documented max), ring={} samples drop-oldest",
+            SCK_QUEUE_DEPTH, SYSTEM_AUDIO_RING_SAMPLES
+        );
 
         Ok(Self { cfg, filter })
     }
@@ -223,11 +310,15 @@ impl SpeakerInput {
     }
 
     pub fn stream(self) -> Result<SpeakerStream> {
-        let buffer_size = 1024 * 128;
-        let rb = HeapRb::<f32>::new(buffer_size);
-        let (producer, consumer) = rb.split();
+        let (producer, consumer) = audio_ring(SYSTEM_AUDIO_RING_SAMPLES);
 
-        let stream = sc::Stream::new(&self.filter, &self.cfg);
+        // A live delegate is what turns an SCK stream death from silent into
+        // reportable. It must outlive the stream, so SpeakerStream keeps it.
+        let err_signal: CaptureErrSignal = Arc::new(Mutex::new(None));
+        let delegate = StreamDelegate::with(StreamDelegateInner {
+            err_signal: err_signal.clone(),
+        });
+        let stream = sc::Stream::with_delegate(&self.filter, &self.cfg, delegate.as_ref());
 
         // Initialize handler
         let inner = AudioHandlerInner { producer };
@@ -248,11 +339,11 @@ impl SpeakerInput {
 
         println!("[SpeakerInput] Starting ScreenCaptureKit stream...");
 
-        use std::sync::{Condvar, Mutex};
+        use std::sync::Condvar;
 
         // Wait on a Condvar instead of polling so we wake the instant the
         // start callback fires (was: 100 × 10ms polls + a stale "2s" log).
-        let pair = std::sync::Arc::new((Mutex::new(None::<Result<()>>), Condvar::new()));
+        let pair = Arc::new((Mutex::new(None::<Result<()>>), Condvar::new()));
         let pair_clone = pair.clone();
 
         stream.start_with_ch(move |err| {
@@ -289,8 +380,10 @@ impl SpeakerInput {
 
         Ok(SpeakerStream {
             consumer: Some(consumer),
+            err_signal,
             stream,
             _handler: handler,
+            _delegate: delegate,
             _filter: self.filter,
             _cfg: self.cfg,
         })
@@ -298,9 +391,11 @@ impl SpeakerInput {
 }
 
 pub struct SpeakerStream {
-    consumer: Option<HeapCons<f32>>,
+    consumer: Option<AudioConsumer>,
+    err_signal: CaptureErrSignal,
     stream: arc::R<sc::Stream>,
     _handler: arc::R<AudioHandler>,
+    _delegate: arc::R<StreamDelegate>,
     _filter: arc::R<sc::ContentFilter>,
     _cfg: arc::R<sc::StreamCfg>,
 }
@@ -310,14 +405,20 @@ impl SpeakerStream {
         48000
     }
 
-    pub fn take_consumer(&mut self) -> Option<HeapCons<f32>> {
+    pub fn take_consumer(&mut self) -> Option<AudioConsumer> {
         self.consumer.take()
+    }
+
+    /// Clone of the SCStreamDelegate error slot, for the DSP thread to poll and
+    /// forward to JS. See [`CaptureErrSignal`].
+    pub fn err_signal(&self) -> CaptureErrSignal {
+        self.err_signal.clone()
     }
 }
 
 impl Drop for SpeakerStream {
     fn drop(&mut self) {
-        use std::sync::{Arc, Condvar, Mutex};
+        use std::sync::Condvar;
 
         println!("[SpeakerStream] Stopping ScreenCaptureKit stream...");
 

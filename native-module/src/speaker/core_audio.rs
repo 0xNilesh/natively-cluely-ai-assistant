@@ -1,10 +1,8 @@
+use crate::audio_config::SYSTEM_AUDIO_RING_SAMPLES;
+use crate::audio_ring::{audio_ring, AudioConsumer, AudioProducer};
 use anyhow::Result;
 use ca::aggregate_device_keys as agg_keys;
 use cidre::{api, arc, av, cat, cf, core_audio as ca, ns, os};
-use ringbuf::{
-    traits::{Producer, Split},
-    HeapCons, HeapProd, HeapRb,
-};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -16,7 +14,7 @@ fn strip_audio_suffix(s: &str) -> &str {
 
 struct Ctx {
     format: arc::R<av::AudioFormat>,
-    producer: HeapProd<f32>,
+    producer: AudioProducer,
     channels: u32,
     current_sample_rate: Arc<AtomicU32>,
 }
@@ -25,7 +23,7 @@ pub struct SpeakerInput {
     tap: ca::TapGuard,
     device: Option<ca::hardware::StartedDevice<ca::AggregateDevice>>,
     _ctx: Box<Ctx>,
-    consumer: Option<HeapCons<f32>>,
+    consumer: Option<AudioConsumer>,
     current_sample_rate: Arc<AtomicU32>,
 }
 
@@ -144,9 +142,7 @@ impl SpeakerInput {
             asbd.sample_rate, channels
         );
 
-        let buffer_size = 1024 * 128;
-        let rb = HeapRb::<f32>::new(buffer_size);
-        let (producer, consumer) = rb.split();
+        let (producer, consumer) = audio_ring(SYSTEM_AUDIO_RING_SAMPLES);
 
         let current_sample_rate = Arc::new(AtomicU32::new(asbd.sample_rate as u32));
 
@@ -231,27 +227,32 @@ extern "C" fn proc(
     os::Status::NO_ERR
 }
 
+/// Hand one IO-proc buffer to the drop-oldest ring.
+///
+/// REAL-TIME PATH. `push_slice`/`push_iter` are wait-free: no allocation, no
+/// locking, and no read of the consumer's position, so a starved DSP thread
+/// cannot delay this IO proc. If the consumer has fallen behind, the oldest
+/// samples are overwritten and the loss is counted for reporting rather than
+/// the freshly captured audio being thrown away.
 #[inline(always)]
 fn push_audio(ctx: &mut Ctx, data: &[f32], channels: u32) {
     if channels <= 1 {
-        let _pushed = ctx.producer.push_slice(data);
+        ctx.producer.push_slice(data);
     } else {
+        // Downmix straight into the ring — `push_iter` takes the interleaved
+        // frames lazily, so this needs no scratch buffer and still accounts for
+        // overflow once per callback rather than once per sample.
         let ch = channels as usize;
-        let frame_count = data.len() / ch;
-        for i in 0..frame_count {
-            let base = i * ch;
-            let mut sum: f32 = 0.0;
-            for c in 0..ch {
-                sum += data[base + c];
-            }
-            let mono = sum / channels as f32;
-            let _ = ctx.producer.try_push(mono);
-        }
+        let inv = 1.0 / channels as f32;
+        ctx.producer.push_iter(
+            data.chunks_exact(ch)
+                .map(|frame| frame.iter().sum::<f32>() * inv),
+        );
     }
 }
 
 pub struct SpeakerStream {
-    consumer: Option<HeapCons<f32>>,
+    consumer: Option<AudioConsumer>,
     _device: Option<ca::hardware::StartedDevice<ca::AggregateDevice>>,
     _ctx: Box<Ctx>,
     _tap: ca::TapGuard,
@@ -263,7 +264,7 @@ impl SpeakerStream {
         self.current_sample_rate.load(Ordering::Acquire)
     }
 
-    pub fn take_consumer(&mut self) -> Option<HeapCons<f32>> {
+    pub fn take_consumer(&mut self) -> Option<AudioConsumer> {
         self.consumer.take()
     }
 

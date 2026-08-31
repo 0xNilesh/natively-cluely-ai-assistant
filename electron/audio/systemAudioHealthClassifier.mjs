@@ -2,6 +2,7 @@ const DEFAULT_WATCHDOG_MS = 12_000;
 const DEFAULT_ZERO_OBSERVATION_MS = 12_000;
 const DEFAULT_MEANINGFUL_PEAK_TO_PEAK = 100;
 const DEFAULT_INTER_CHUNK_GAP_LOG_MS = 2_000;
+const DEFAULT_OVERFLOW_LOG_INTERVAL_MS = 10_000;
 
 function peakToPeakInt16LE(chunk) {
   if (!Buffer.isBuffer(chunk) || chunk.length < 2) return 0;
@@ -31,6 +32,7 @@ export class SystemAudioHealthClassifier {
     this.zeroObservationMs = options.zeroObservationMs ?? DEFAULT_ZERO_OBSERVATION_MS;
     this.meaningfulPeakToPeak = options.meaningfulPeakToPeak ?? DEFAULT_MEANINGFUL_PEAK_TO_PEAK;
     this.interChunkGapLogMs = options.interChunkGapLogMs ?? DEFAULT_INTER_CHUNK_GAP_LOG_MS;
+    this.overflowLogIntervalMs = options.overflowLogIntervalMs ?? DEFAULT_OVERFLOW_LOG_INTERVAL_MS;
     this.reset();
   }
 
@@ -44,6 +46,9 @@ export class SystemAudioHealthClassifier {
     this.sameDeviceWarningEmitted = false;
     this.noChunkLogEmitted = false;
     this.zeroValuedLogEmitted = false;
+    this.droppedSamples = 0;
+    this.overflowEvents = 0;
+    this.lastOverflowLogAtMs = null;
   }
 
   handle(event) {
@@ -100,6 +105,13 @@ export class SystemAudioHealthClassifier {
     if (this.firstChunkAtMs == null) this.firstChunkAtMs = event.nowMs;
     this.lastChunkAtMs = event.nowMs;
 
+    // Capture-ring overflow outranks every other explanation on this chunk: it
+    // says the native side kept capturing but WE could not keep up, so a gap or
+    // a quiet chunk is a symptom, not the cause. Pre-fix this had no signal at
+    // all — the audio was dropped inside Rust and nothing above it ever knew.
+    const overflowDecision = this.observeOverflow(event);
+    if (overflowDecision) return overflowDecision;
+
     const peakToPeak = peakToPeakInt16LE(event.chunk);
     if (peakToPeak > this.meaningfulPeakToPeak) {
       this.hasMeaningfulSignal = true;
@@ -118,6 +130,43 @@ export class SystemAudioHealthClassifier {
     }
 
     return this.maybeInterChunkGapLog(previousChunkAtMs, event.nowMs);
+  }
+
+  /**
+   * Fold the native capture-ring counters (SystemAudioCapture.getOverflowStats)
+   * into the health picture. Returns a decision when NEW audio has been dropped
+   * since the last report and the log interval has elapsed, otherwise null.
+   */
+  observeOverflow(event) {
+    const overflow = event.overflow;
+    if (!overflow) return null;
+
+    const droppedSamples = Number(overflow.droppedSamples ?? 0);
+    const overflowEvents = Number(overflow.overflowEvents ?? 0);
+    if (!Number.isFinite(droppedSamples) || droppedSamples <= this.droppedSamples) return null;
+
+    const newlyDropped = droppedSamples - this.droppedSamples;
+    const droppedMs = Number(overflow.droppedMs ?? 0);
+    this.droppedSamples = droppedSamples;
+    this.overflowEvents = Number.isFinite(overflowEvents) ? overflowEvents : this.overflowEvents;
+
+    if (
+      this.lastOverflowLogAtMs != null
+      && event.nowMs - this.lastOverflowLogAtMs < this.overflowLogIntervalMs
+    ) {
+      return null;
+    }
+    this.lastOverflowLogAtMs = event.nowMs;
+
+    return {
+      type: 'log',
+      level: 'warn',
+      reason: 'capture-ring-overflow',
+      droppedSamples: this.droppedSamples,
+      overflowEvents: this.overflowEvents,
+      newlyDropped,
+      message: `SystemAudio capture ring overwrote ${newlyDropped} unread samples (${Math.round(droppedMs)}ms dropped in total across ${this.overflowEvents} episodes) — the capture stream is healthy but the main process is not draining it fast enough. Expect gaps in the interviewer transcript.`,
+    };
   }
 
   maybeInterChunkGapLog(previousChunkAtMs, nowMs) {

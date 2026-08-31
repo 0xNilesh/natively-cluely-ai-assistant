@@ -3891,7 +3891,17 @@ export class AppState {
     capture.on('stop', disarmStuckWatchdog);
     capture.on('data', (chunk: Buffer) => {
       const now = Date.now();
-      handleSystemAudioHealthDecision(systemAudioHealth.handle({ kind: 'chunk', nowMs: now, chunk }));
+      // Carry the native capture-ring counters with every chunk. A non-zero
+      // droppedSamples means the Rust ring overwrote audio this process never
+      // collected — capture is alive and current, we are the bottleneck. That
+      // used to be invisible: the drop happened inside Rust with no counter and
+      // no log, so a starved consumer looked identical to a dead stream.
+      handleSystemAudioHealthDecision(systemAudioHealth.handle({
+        kind: 'chunk',
+        nowMs: now,
+        chunk,
+        overflow: capture.getOverflowStats?.() ?? null,
+      }));
       chunkCount++;
       if (chunkCount === 1 && stuckTimer) {
         clearTimeout(stuckTimer);
