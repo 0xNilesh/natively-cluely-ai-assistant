@@ -1214,6 +1214,8 @@ import { SystemAudioCapture } from "./audio/SystemAudioCapture"
 import { MicrophoneCapture } from "./audio/MicrophoneCapture"
 import { AudioDevices } from "./audio/AudioDevices"
 import { resolveRequestedInputDevice } from "./audio/audioDeviceSelection.mjs"
+import { SCK_DEVICE_ID, describeSystemAudioBackend, resolveSystemAudioBackend } from "./audio/systemAudioBackend.mjs"
+import type { SystemAudioBackendDecision, SystemAudioBackendSetting } from "./audio/systemAudioBackend.mjs"
 import { loadNativeModule } from "./audio/nativeModuleLoader"
 import { GoogleSTT } from "./audio/GoogleSTT"
 import { RestSTT } from "./audio/RestSTT"
@@ -4178,7 +4180,11 @@ export class AppState {
         // STT WS connected, the user saw "Listening for audio…" forever, and
         // no banner ever surfaced.
         try {
-          this.systemAudioCapture = new SystemAudioCapture();
+          // Same backend decision as reconfigureAudio. This is the no-metadata
+          // lazy-init path; without it, which backend a meeting got would
+          // depend on whether the caller happened to pass audio metadata.
+          const backendDecision = this.decideSystemAudioBackend(null, 'setupSystemAudioPipeline');
+          this.systemAudioCapture = new SystemAudioCapture(backendDecision.outputDeviceId);
           this.wireSystemCapture(this.systemAudioCapture);
           // Transparency: tell the renderer which device is actually being captured
           // even on the no-metadata default path. Previously only reconfigureAudio
@@ -4188,7 +4194,7 @@ export class AppState {
           this.broadcastDeviceSelection({
             kind: 'output',
             requested: null,
-            actual: 'default',
+            actual: backendDecision.outputDeviceId ?? 'default',
             fellBack: false,
           });
         } catch (capErr) {
@@ -4548,6 +4554,50 @@ export class AppState {
   }
 
   /**
+   * Resolve the system-audio backend for one capture AND say so in the MAIN
+   * process log.
+   *
+   * The decision used to be made in the renderer off a localStorage flag, and
+   * announced with two renderer-side console.log lines that never reach stdout
+   * — so anyone debugging a live session could not see which backend was
+   * running. That mattered because the failure is invisible: the CoreAudio tap
+   * returns zero-filled buffers on Bluetooth A2DP output and on the built-in
+   * speaker device (macOS 14.7.4), and capture looks perfectly healthy while
+   * transcribing nothing. `[SpeakerInput] SCK backend explicitly requested.` in
+   * native-module/src/speaker/macos.rs is the other half of this trail.
+   *
+   * Logged on darwin only: on Windows there is no choice to report (WASAPI
+   * loopback), and a per-meeting line saying so is noise.
+   */
+  private decideSystemAudioBackend(
+    outputDeviceId: string | null | undefined,
+    context: string,
+  ): SystemAudioBackendDecision {
+    const requestedOutputDeviceId = this.normalizeDeviceId(outputDeviceId);
+    let setting: SystemAudioBackendSetting = 'auto';
+    try {
+      setting = SettingsManager.getInstance().getSystemAudioBackend();
+    } catch (e) {
+      // A degraded/unavailable settings store must not take audio down with it:
+      // 'auto' is the same value an untouched install resolves to.
+      console.warn('[Main] Could not read systemAudioBackend from settings — using "auto":', e);
+    }
+    const decision = resolveSystemAudioBackend({
+      setting,
+      platform: process.platform,
+      osRelease: os.release(),
+      requestedOutputDeviceId,
+    });
+    if (process.platform === 'darwin') {
+      console.log(
+        `[Main] System audio backend: ${describeSystemAudioBackend(decision)} `
+        + `[setting=${setting} output=${requestedOutputDeviceId ?? 'default'} via=${context}]`,
+      );
+    }
+    return decision;
+  }
+
+  /**
    * Detect the case where the requested input and output devices are the same
    * physical hardware (typically AirPods on both sides). Input IDs come from
    * cpal (device name), output IDs come from CoreAudio (UID with optional
@@ -4714,7 +4764,15 @@ export class AppState {
     // WASAPI device contention, CPAL stream open). The common case — user
     // starts a second meeting with the same mic/speakers — hits this path.
     let wantedInput = this.normalizeDeviceId(inputDeviceId);
-    const wantedOutput = this.normalizeDeviceId(outputDeviceId);
+    // The system-audio backend is resolved HERE, in main, from settings.json —
+    // not in the renderer from localStorage, which lost the choice on every
+    // unclean exit. Substituting the SCK sentinel at the same point the
+    // renderer used to keeps every downstream consumer (I/O-conflict check,
+    // HFP avoidance, the default-output watcher's "user picked a device" guard,
+    // device-selection broadcasts, _lastRequestedOutputDeviceId) on exactly the
+    // path the old toggle-on flow took.
+    const backendDecision = this.decideSystemAudioBackend(outputDeviceId, 'reconfigureAudio');
+    const wantedOutput = backendDecision.outputDeviceId;
 
     // Auto-fallback for the "same device on both sides" conflict (most common
     // with AirPods used for both listening and the meeting mic). macOS won't
@@ -5343,6 +5401,11 @@ export class AppState {
       if (!this.isMeetingActive) return;
       // Only watch when we're on the default route. If the user explicitly
       // picked an output device, respect that choice.
+      //
+      // This also — correctly — skips every ScreenCaptureKit capture, whose
+      // resolved id is the "sck" sentinel: SCK captures global system audio and
+      // follows an output-route change on its own, so there is no per-device tap
+      // to rebind. The rebind below is a CoreAudio-tap repair, not a general one.
       if (this._lastRequestedOutputDeviceId) return;
       if (this._defaultOutputSwitchInProgress) return;
       if (!this.systemAudioCapture) return;
@@ -5909,7 +5972,13 @@ export class AppState {
             return;
           }
           try {
-            this.audioTestSystemCapture = new SystemAudioCapture();
+            // The Settings "System Audio Level" meter has to measure the SAME
+            // backend a meeting would use, or it answers the wrong question:
+            // on Bluetooth/built-in-speaker output the CoreAudio tap reads
+            // flat-zero while an SCK meeting captures fine, and the user
+            // concludes system audio is broken when it is not.
+            const backendDecision = this.decideSystemAudioBackend(null, 'audioTest');
+            this.audioTestSystemCapture = new SystemAudioCapture(backendDecision.outputDeviceId);
             attachSystemTestListeners(this.audioTestSystemCapture);
             // INVARIANT: SystemAudioCapture.start() MUST remain synchronous (its
             // native CoreAudio init runs on a background thread and start()
@@ -6345,7 +6414,10 @@ export class AppState {
         if (this._verboseLogging) {
           const requestedInput = metadata?.audio?.inputDeviceId || 'default';
           const requestedOutput = metadata?.audio?.outputDeviceId || 'default';
-          const backend = requestedOutput === 'sck' ? 'sck' : 'coreaudio';
+          // Read the RESOLVED id, not the renderer's request: the backend is
+          // decided in main now, so metadata never carries the 'sck' sentinel
+          // and this line would have reported 'coreaudio' for every meeting.
+          const backend = this._lastRequestedOutputDeviceId === SCK_DEVICE_ID ? 'sck' : 'coreaudio';
           const sysRate = this.systemAudioCapture?.getSampleRate() || 48000;
           const micRate = this.microphoneCapture?.getSampleRate() || 48000;
           console.log(`[Main][debug] Audio pipeline: input=${requestedInput} output=${requestedOutput} backend=${backend} sysRate=${sysRate}Hz micRate=${micRate}Hz`);

@@ -56,6 +56,26 @@ export interface ElectronAPI {
   dismissOverlayPopovers?: (opts?: { settings?: boolean; model?: boolean }) => Promise<void>
   onToggleExpand: (callback: () => void) => () => void
   getRecognitionLanguages: () => Promise<Record<string, any>>
+  // System-audio backend (macOS): the ScreenCaptureKit/CoreAudio choice, moved
+  // out of localStorage into settings.json on 2026-08-31 because a lazily
+  // flushed localStorage lost it on every crash — see
+  // electron/audio/systemAudioBackend.mjs for the full reasoning.
+  getSystemAudioBackend?: () => Promise<{
+    setting: 'auto' | 'sck' | 'coreaudio'
+    resolved: 'sck' | 'coreaudio'
+    supported: boolean
+  }>
+  setSystemAudioBackend?: (
+    backend: 'auto' | 'sck' | 'coreaudio'
+  ) => Promise<{ success: boolean; error?: string }>
+  migrateLegacySckFlag?: (legacyValue: string | null) => Promise<{
+    success: boolean
+    migrated: boolean
+    setting?: 'sck' | 'coreaudio'
+    reason?: string
+    clearLegacyKey: boolean
+    error?: string
+  }>
   // Local Whisper model info — used by SettingsOverlay to restrict the
   // Language / Accent selects to what the active local model accepts
   // (models[] entries carry a `languageSupport` from modelLanguageSupport.ts).

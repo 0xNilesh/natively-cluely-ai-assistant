@@ -7,6 +7,12 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { AudioDevices } from './audio/AudioDevices';
+import {
+  LEGACY_SCK_LOCAL_STORAGE_KEY,
+  isSckSupported,
+  planLegacySckFlagMigration,
+  resolveSystemAudioBackend,
+} from './audio/systemAudioBackend.mjs';
 import { DatabaseManager } from './db/DatabaseManager'; // Import Database Manager
 import { AppState } from './main';
 import { CodexCliService, isCodexAuthError } from './services/CodexCliService';
@@ -16,7 +22,8 @@ import { sanitizeContextEnvelope } from './services/browser-context/sanitize';
 import { formatEnvelopeForPrompt } from './services/browser-context/formatEnvelopeForPrompt';
 import { BrowserMetadataClassifierService } from './services/browser-context/BrowserMetadataClassifierService';
 import type { BrowserContextCategory, SafeWebsiteMetadata } from './services/browser-context/types';
-import { SettingsManager } from './services/SettingsManager';
+import { SettingsManager, VALID_SYSTEM_AUDIO_BACKENDS } from './services/SettingsManager';
+import type { SystemAudioBackendSetting } from './services/SettingsManager';
 import { ProviderStatusRegistry } from './services/ProviderStatusRegistry';
 import { SkillsManager } from './services/SkillsManager';
 import { SAFE_DOCUMENT_EXTENSIONS } from './services/SafeDocumentTextExtractor';
@@ -9487,6 +9494,76 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle('get-output-devices', async () => {
     return AudioDevices.getOutputDevices();
+  });
+
+  // ── System-audio backend (macOS: CoreAudio process tap vs ScreenCaptureKit) ──
+  // This setting used to live in renderer localStorage as
+  // `useExperimentalSckBackend`. Chromium flushes localStorage lazily and this
+  // app takes `render-process-gone` often enough that an unclean exit lost the
+  // user's choice — silently, because the CoreAudio tap then returns zero-filled
+  // buffers on Bluetooth A2DP output and on the built-in speaker device, so
+  // capture looks healthy and transcribes nothing. settings.json is written
+  // write+fsync+rename and survives a crash.
+  safeHandle('get-system-audio-backend', async () => {
+    const sm = SettingsManager.getInstance();
+    const setting = sm.getSystemAudioBackend();
+    return {
+      setting,
+      // The backend 'auto' actually resolves to on THIS machine for the default
+      // output route, so the toggle can reflect reality instead of guessing.
+      resolved: resolveSystemAudioBackend({
+        setting,
+        platform: process.platform,
+        osRelease: os.release(),
+        requestedOutputDeviceId: undefined,
+      }).backend,
+      supported: isSckSupported({ platform: process.platform, osRelease: os.release() }),
+    };
+  });
+
+  safeHandle('set-system-audio-backend', async (_, backend: SystemAudioBackendSetting) => {
+    if (!(VALID_SYSTEM_AUDIO_BACKENDS as readonly string[]).includes(backend)) {
+      return { success: false, error: 'invalid_system_audio_backend' };
+    }
+    if (!SettingsManager.getInstance().setSystemAudioBackend(backend)) {
+      // R-24: the write was refused (degraded settings store). Reporting success
+      // would leave the UI showing a backend disk never received — the exact
+      // silent revert this setting was moved out of localStorage to stop.
+      return { success: false, error: 'settings_store_degraded' };
+    }
+    console.log(`[Main] System audio backend setting changed to "${backend}". Applies to the next capture.`);
+    return { success: true };
+  });
+
+  // One-shot carry-over of the legacy renderer flag. The renderer passes what it
+  // finds in localStorage (or null); main decides whether it counts. Idempotent
+  // by construction — the presence of `systemAudioBackend` in settings.json is
+  // the marker, so a localStorage value that outlives this call (the renderer's
+  // removeItem is subject to the same lazy flush) can never resurrect a stale
+  // choice over one the user has since made.
+  safeHandle('migrate-legacy-sck-flag', async (_, legacyValue: string | null) => {
+    try {
+      const sm = SettingsManager.getInstance();
+      const plan = planLegacySckFlagMigration(sm.getRawSystemAudioBackend(), legacyValue);
+      if (plan.action === 'skip') {
+        // 'already-migrated': settings.json owns the value now. 'no-legacy-value':
+        // there was nothing to carry over. Either way no second source of truth
+        // is left, so the renderer may drop its copy.
+        return { success: true, migrated: false, reason: plan.reason, clearLegacyKey: true };
+      }
+      if (!sm.setSystemAudioBackend(plan.setting)) {
+        // Degraded store: do NOT tell the renderer to clear localStorage, or the
+        // user's choice would be gone from both places at once.
+        return { success: false, error: 'settings_store_degraded', migrated: false, clearLegacyKey: false };
+      }
+      console.log(
+        `[Main] Migrated legacy "${LEGACY_SCK_LOCAL_STORAGE_KEY}" localStorage flag (${legacyValue}) `
+        + `to settings.json as systemAudioBackend="${plan.setting}".`,
+      );
+      return { success: true, migrated: true, setting: plan.setting, clearLegacyKey: true };
+    } catch (e: any) {
+      return { success: false, error: e?.message, migrated: false, clearLegacyKey: false };
+    }
   });
 
   safeHandle('start-audio-test', async (event, deviceId?: string) => {

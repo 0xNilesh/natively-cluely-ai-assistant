@@ -30,10 +30,10 @@ import ReviewPromptHost from "./components/ReviewPromptHost"
 // the extension.
 import { getOrchestrator } from "./lib/onboarding/orchestrator.ts"
 import { isInternalCaptureDevice } from "../electron/audio/audioDeviceSelection.mjs"
+import { LEGACY_SCK_LOCAL_STORAGE_KEY } from "../electron/audio/systemAudioBackend.mjs"
 import { AlertCircle, RefreshCw } from "lucide-react"
 import { clampOverlayOpacity, OVERLAY_OPACITY_DEFAULT, getDefaultOverlayOpacity } from "./lib/overlayAppearance"
 import { getMeetingInterfaceTheme, type MeetingInterfaceTheme } from './lib/meetingInterfaceTheme'
-import { isMac } from "./utils/platformUtils"
 import { trackAppOpen } from "./lib/toasterGating"
 import {
   JDAwarenessToaster,
@@ -77,6 +77,13 @@ function shouldMountDevReviewHost(): boolean {
 
 const queryClient = new QueryClient()
 const CropperWindow = React.lazy(() => import('./components/Cropper'))
+
+// Renderer-process latch for the one-shot legacy-SCK-flag migration. Module
+// scope, not a ref: App mounts once per window but React StrictMode double-
+// invokes effects in dev, and the migration is an IPC round-trip we only want
+// to make once per renderer. Main is idempotent regardless — this just keeps
+// the log quiet.
+let legacySckMigrationStarted = false
 
 type LauncherIsolation = 'onboarding' | 'global-surfaces' | 'permissions-toaster' | 'no-modals' | null
 type ManagerPanel = 'modes' | 'profile' | null
@@ -170,6 +177,43 @@ const App: React.FC = () => {
       window.removeEventListener('beforeunload', handleUnload);
     };
   }, [isLauncherWindow, isOverlayWindow, isDefault]);
+
+  // One-shot carry-over of the legacy SCK flag from localStorage into
+  // settings.json. Runs in whichever renderer mounts first (module-scope latch
+  // above), unconditional on window type so the Settings window can never open
+  // the toggle before the user's old choice has been carried over.
+  //
+  // Main owns the idempotency — the presence of `systemAudioBackend` in
+  // settings.json is the marker — so re-running this is a cheap no-op, and a
+  // removeItem that fails to flush (the very defect being fixed) cannot
+  // resurrect a stale value over a choice the user has since made.
+  useEffect(() => {
+    if (legacySckMigrationStarted) return;
+    legacySckMigrationStarted = true;
+    const migrate = window.electronAPI?.migrateLegacySckFlag;
+    if (!migrate) return;
+    let legacyValue: string | null = null;
+    try {
+      legacyValue = window.localStorage.getItem(LEGACY_SCK_LOCAL_STORAGE_KEY);
+    } catch {
+      // Storage unavailable (private mode / disabled). Nothing to migrate.
+      return;
+    }
+    migrate(legacyValue)
+      .then((result) => {
+        if (result?.migrated) {
+          console.log(`[App] Carried the SCK backend preference over to settings.json as "${result.setting}".`);
+        }
+        // Only drop the renderer copy once main confirms the value is safely
+        // persisted (or that there was nothing to persist). On a degraded
+        // settings store clearLegacyKey is false, so the old value survives
+        // for the next attempt instead of being lost from both places.
+        if (result?.clearLegacyKey && legacyValue !== null) {
+          try { window.localStorage.removeItem(LEGACY_SCK_LOCAL_STORAGE_KEY); } catch { /* best effort */ }
+        }
+      })
+      .catch((err) => console.warn('[App] SCK backend preference migration failed:', err));
+  }, []);
 
   // State
   const [showStartup, setShowStartup] = useState(true);
@@ -849,24 +893,27 @@ const App: React.FC = () => {
         localStorage.removeItem('preferredInputDeviceId');
         inputDeviceId = null;
       }
-      let outputDeviceId = localStorage.getItem('preferredOutputDeviceId');
-      // SCK is a macOS-only backend (ScreenCaptureKit + CoreAudio Process Tap
-      // live in the Rust speaker module under #[cfg(target_os = "macos")]).
-      // F-003 hid the toggle UI on Windows, but the localStorage key can be
-      // present on a Windows machine via cross-OS sync or restored backup —
-      // routing "sck" as an outputDeviceId then hands the Windows speaker
-      // module an unknown WASAPI device id and silently breaks system audio.
-      // Defense-in-depth: also require isMac at the consumer.
-      const useExperimentalSck = isMac && localStorage.getItem('useExperimentalSckBackend') === 'true';
-
-      // Override output device ID to force SCK if experimental mode is enabled
-      // Default to CoreAudio unless experimental is enabled
-      if (useExperimentalSck) {
-        console.log("[App] Using ScreenCaptureKit backend (Experimental).");
-        outputDeviceId = "sck";
-      } else if (isMac) {
-        console.log("[App] Using CoreAudio backend (Default).");
-      }
+      // The output device is the user's choice and nothing more. The
+      // system-audio BACKEND (CoreAudio process tap vs ScreenCaptureKit) used
+      // to be decided here — `isMac && localStorage.getItem(
+      // 'useExperimentalSckBackend') === 'true'` then overwrote this id with
+      // the "sck" sentinel — and that was wrong twice over:
+      //
+      //   - localStorage is flushed lazily by Chromium, and this app takes
+      //     `render-process-gone` often enough that an unclean exit silently
+      //     reverted the flag. The CoreAudio tap then returns zero-filled
+      //     buffers on Bluetooth A2DP output and on the built-in speaker
+      //     device, so capture looks healthy and transcribes nothing.
+      //   - the two console.log lines announcing the choice were renderer-side,
+      //     so the main-process log never said which backend was running.
+      //
+      // Main now reads it from settings.json and logs the decision — see
+      // decideSystemAudioBackend() in electron/main.ts and the precedence table
+      // in electron/audio/systemAudioBackend.mjs. That also removes the
+      // `isMac` dependency from this path: main gates on process.platform,
+      // which cannot be wrong, where `isMac` here is derived at module load
+      // from window.electronAPI?.platform with a navigator.platform fallback.
+      const outputDeviceId = localStorage.getItem('preferredOutputDeviceId');
 
       const meetingRetention = await window.electronAPI.getMeetingRetention?.().catch(() => 'forever');
       const result = await window.electronAPI.startMeeting({

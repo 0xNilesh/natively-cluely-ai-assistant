@@ -363,6 +363,28 @@ interface ElectronAPI {
   generateSuggestion: (context: string, lastQuestion: string) => Promise<{ suggestion: string }>;
   getInputDevices: () => Promise<Array<{ id: string; name: string }>>;
   getOutputDevices: () => Promise<Array<{ id: string; name: string }>>;
+  // System-audio backend (macOS). `setting` is the persisted choice, `resolved`
+  // is what 'auto' means on this machine's default output route, `supported`
+  // is false below macOS 13 (and on Windows) where SCK does not exist.
+  getSystemAudioBackend: () => Promise<{
+    setting: 'auto' | 'sck' | 'coreaudio';
+    resolved: 'sck' | 'coreaudio';
+    supported: boolean;
+  }>;
+  setSystemAudioBackend: (
+    backend: 'auto' | 'sck' | 'coreaudio',
+  ) => Promise<{ success: boolean; error?: string }>;
+  // One-shot carry-over of the legacy `useExperimentalSckBackend` localStorage
+  // flag. Main owns the idempotency; the renderer only reports what it found and
+  // clears its copy when told the value is safely persisted.
+  migrateLegacySckFlag: (legacyValue: string | null) => Promise<{
+    success: boolean;
+    migrated: boolean;
+    setting?: 'sck' | 'coreaudio';
+    reason?: string;
+    clearLegacyKey: boolean;
+    error?: string;
+  }>;
   setRecognitionLanguage: (key: string) => Promise<{ success: boolean; error?: string }>;
   getAiResponseLanguages: () => Promise<Array<{ label: string; code: string }>>;
   setAiResponseLanguage: (language: string) => Promise<{ success: boolean; error?: string }>;
@@ -1733,6 +1755,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getNativeAudioStatus: () => ipcRenderer.invoke('native-audio-status'),
   getInputDevices: () => ipcRenderer.invoke('get-input-devices'),
   getOutputDevices: () => ipcRenderer.invoke('get-output-devices'),
+  getSystemAudioBackend: () => ipcRenderer.invoke('get-system-audio-backend'),
+  setSystemAudioBackend: (backend: 'auto' | 'sck' | 'coreaudio') =>
+    ipcRenderer.invoke('set-system-audio-backend', backend),
+  migrateLegacySckFlag: (legacyValue: string | null) =>
+    ipcRenderer.invoke('migrate-legacy-sck-flag', legacyValue),
   setRecognitionLanguage: (key: string) => ipcRenderer.invoke('set-recognition-language', key),
   getAiResponseLanguages: () => ipcRenderer.invoke('get-ai-response-languages'),
   setAiResponseLanguage: (language: string) =>
