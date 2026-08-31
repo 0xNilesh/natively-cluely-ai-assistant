@@ -38,6 +38,30 @@ pub const DSP_POLL_MS: u64 = 5;
 /// At 48kHz = ~680ms buffer (plenty of headroom)
 pub const RING_BUFFER_SAMPLES: usize = 32768;
 
+/// System-audio ring capacity in f32 samples (512 KiB, ~2.7s at 48kHz mono).
+///
+/// Deeper than the microphone ring on purpose: the interviewer channel is the
+/// one whose consumer shares a process with the intelligence pipeline (answer
+/// prefetch, the local intent classifier, Temporal RAG, a streaming LLM call),
+/// so it is the one that gets starved. The ring is drop-OLDEST
+/// (`audio_ring::audio_ring`), so this depth is not a backlog we must work off
+/// — it is how much recent audio survives a stall. Anything older is discarded
+/// and counted, never replayed late.
+pub const SYSTEM_AUDIO_RING_SAMPLES: usize = 1024 * 128;
+
+/// Minimum gap between ring-overflow log lines, so a sustained stall reports a
+/// running total roughly once a second instead of once per 5ms DSP poll.
+pub const OVERFLOW_LOG_INTERVAL_MS: u128 = 1_000;
+
+/// How long the DSP thread will see an empty ring before it logs that the OS
+/// has stopped handing us audio.
+///
+/// Generous on purpose: WASAPI loopback legitimately delivers nothing while the
+/// machine is silent (see speaker/windows.rs), so this is a diagnostic log, not
+/// an error. On macOS both backends deliver continuously — digital silence
+/// included — so a gap this long there means capture really has stopped.
+pub const INPUT_STARVATION_LOG_MS: u128 = 5_000;
+
 /// Number of 20ms DSP frames coalesced into a single tsfn (V8 boundary)
 /// callback. Each tsfn.call traverses the JS bridge, allocates a Buffer
 /// wrapper, and routes through the napi event loop — non-trivial overhead

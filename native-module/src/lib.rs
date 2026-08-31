@@ -3,16 +3,16 @@
 #[macro_use]
 extern crate napi_derive;
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
-use ringbuf::traits::Consumer;
 
 pub mod audio_config;
+pub mod audio_ring;
 pub mod channel_state;
 pub mod license;
 pub mod microphone;
@@ -40,7 +40,11 @@ pub mod app_chord;
 #[cfg(target_os = "windows")]
 pub mod keyboard_hook_windows;
 
-use crate::audio_config::{CHUNK_BATCH_COUNT, CHUNK_BATCH_TIMEOUT_MS, DSP_POLL_MS};
+use crate::audio_config::{
+    CHUNK_BATCH_COUNT, CHUNK_BATCH_TIMEOUT_MS, DSP_POLL_MS, INPUT_STARVATION_LOG_MS,
+    OVERFLOW_LOG_INTERVAL_MS,
+};
+use crate::audio_ring::{samples_to_ms, AudioConsumer, OverflowSnapshot};
 use crate::resampler::Resampler;
 use crate::silence_suppression::{FrameAction, SilenceSuppressionConfig, SilenceSuppressor, SpeechEdge};
 use std::time::Instant;
@@ -133,6 +137,147 @@ impl BatchEmitter {
 }
 
 // ============================================================================
+// CAPTURE HEALTH — ring overflow + input starvation reporting
+// ============================================================================
+
+/// Ring-overflow counters for one capture channel, readable from JS.
+///
+/// A non-zero `droppedSamples` means the capture ring overwrote audio the
+/// DSP/STT consumer had not taken yet: the stream is alive and carrying the
+/// NEWEST audio, but downstream work is starving it. This is the signal that
+/// did not exist before — the same condition used to discard the audio it had
+/// just captured with `let _pushed = producer.push_slice(..)`, leaving the
+/// interviewer channel permanently behind (or, on the ScreenCaptureKit path,
+/// simply gone) with no error, no log and no counter anywhere.
+#[napi(object)]
+pub struct AudioOverflowStats {
+    /// Cumulative samples lost since this capture started.
+    pub dropped_samples: f64,
+    /// Cumulative number of distinct overflow episodes.
+    pub overflow_events: f64,
+    /// `dropped_samples` as milliseconds of audio at the native capture rate.
+    pub dropped_ms: f64,
+}
+
+fn overflow_stats(
+    dropped_samples: &AtomicU64,
+    overflow_events: &AtomicU64,
+    native_rate: &AtomicU32,
+) -> AudioOverflowStats {
+    let snapshot = OverflowSnapshot {
+        dropped_samples: dropped_samples.load(Ordering::Acquire),
+        overflow_events: overflow_events.load(Ordering::Acquire),
+    };
+    AudioOverflowStats {
+        dropped_samples: snapshot.dropped_samples as f64,
+        overflow_events: snapshot.overflow_events as f64,
+        dropped_ms: snapshot.dropped_ms(native_rate.load(Ordering::Acquire)),
+    }
+}
+
+/// Publishes ring overflow and input starvation from a DSP thread.
+///
+/// Owned by each DSP loop and driven once per poll. Two jobs:
+///
+///   1. Copy the ring's counters into the atomics `getOverflowStats()` reads,
+///      so JS can fold capture starvation into the systemAudioHealth
+///      classifier alongside chunk gaps and zero-fill.
+///   2. Log, rate-limited, so a sustained stall reports a running total roughly
+///      once a second instead of once per 5ms poll — and so the failure is
+///      visible in a support log without a debugger attached.
+struct CaptureHealth {
+    label: &'static str,
+    native_rate: u32,
+    dropped_samples: Arc<AtomicU64>,
+    overflow_events: Arc<AtomicU64>,
+    /// Last snapshot pushed to the shared atomics.
+    published: OverflowSnapshot,
+    /// Last snapshot mentioned in a log line.
+    logged: OverflowSnapshot,
+    last_log_at: Option<Instant>,
+    last_input_at: Instant,
+    starvation_logged: bool,
+}
+
+impl CaptureHealth {
+    fn new(
+        label: &'static str,
+        native_rate: u32,
+        dropped_samples: Arc<AtomicU64>,
+        overflow_events: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            label,
+            native_rate,
+            dropped_samples,
+            overflow_events,
+            published: OverflowSnapshot::default(),
+            logged: OverflowSnapshot::default(),
+            last_log_at: None,
+            last_input_at: Instant::now(),
+            starvation_logged: false,
+        }
+    }
+
+    /// Drive once per DSP poll, immediately after draining the ring.
+    fn observe(&mut self, consumer: &AudioConsumer, drained: usize) {
+        let now = Instant::now();
+
+        if drained > 0 {
+            self.last_input_at = now;
+            if self.starvation_logged {
+                self.starvation_logged = false;
+                println!("[{}] Capture input resumed.", self.label);
+            }
+        } else if !self.starvation_logged
+            && now.duration_since(self.last_input_at).as_millis() >= INPUT_STARVATION_LOG_MS
+        {
+            self.starvation_logged = true;
+            // Logged once per starvation episode. On macOS both backends
+            // deliver continuously (digital silence included), so a gap this
+            // long means capture really has stopped — the exact condition that
+            // used to be invisible. On Windows, WASAPI loopback legitimately
+            // delivers nothing while the machine is silent, so treat it as a
+            // diagnostic there rather than a fault.
+            eprintln!(
+                "[{}] No audio from the capture backend for {}ms — downstream chunks have stopped.",
+                self.label, INPUT_STARVATION_LOG_MS
+            );
+        }
+
+        let snapshot = consumer.overflow();
+        if snapshot == self.published {
+            return;
+        }
+        self.dropped_samples
+            .store(snapshot.dropped_samples, Ordering::Release);
+        self.overflow_events
+            .store(snapshot.overflow_events, Ordering::Release);
+        self.published = snapshot;
+
+        let due = self
+            .last_log_at
+            .map(|t| now.duration_since(t).as_millis() >= OVERFLOW_LOG_INTERVAL_MS)
+            .unwrap_or(true);
+        if !due {
+            return;
+        }
+
+        let since_last_log = snapshot.dropped_samples - self.logged.dropped_samples;
+        eprintln!(
+            "[{}] OVERFLOW: capture ring overwrote {} samples ({:.0}ms of audio) the DSP thread had not taken. Totals since start: {} samples over {} episodes. The ring is drop-oldest, so the stream is intact and now carries the NEWEST audio — but the consumer is not keeping up.",
+            self.label,
+            since_last_log,
+            samples_to_ms(since_last_log, self.native_rate),
+            snapshot.dropped_samples,
+            snapshot.overflow_events,
+        );
+        self.logged = snapshot;
+        self.last_log_at = Some(now);
+    }
+}
+
+// ============================================================================
 // SYSTEM AUDIO CAPTURE (CoreAudio Tap / ScreenCaptureKit on macOS)
 // ============================================================================
 
@@ -194,6 +339,12 @@ pub struct SystemAudioCapture {
     /// Shared atomic NATIVE hardware rate (e.g. 48000). Kept for diagnostics and
     /// HFP/Bluetooth-degradation detection — distinct from the emitted rate above.
     native_sample_rate: Arc<AtomicU32>,
+    /// Cumulative samples the capture ring overwrote because the DSP/STT
+    /// consumer fell behind, published by the DSP thread and read from JS via
+    /// `getOverflowStats()`. See [`AudioOverflowStats`].
+    dropped_samples: Arc<AtomicU64>,
+    /// Cumulative distinct overflow episodes.
+    overflow_events: Arc<AtomicU64>,
     device_id: Option<String>,
 }
 
@@ -211,6 +362,8 @@ impl SystemAudioCapture {
             // Native default 48kHz (standard macOS CoreAudio rate) until the
             // background thread reports the real hardware rate.
             native_sample_rate: Arc::new(AtomicU32::new(48000)),
+            dropped_samples: Arc::new(AtomicU64::new(0)),
+            overflow_events: Arc::new(AtomicU64::new(0)),
             device_id,
         })
     }
@@ -229,6 +382,18 @@ impl SystemAudioCapture {
         self.native_sample_rate.load(Ordering::Acquire)
     }
 
+    /// Ring-overflow counters for the interviewer channel — how much audio the
+    /// capture ring had to overwrite because the DSP/STT consumer fell behind.
+    /// Cumulative for the life of the current `start()`; reset on restart.
+    #[napi]
+    pub fn get_overflow_stats(&self) -> AudioOverflowStats {
+        overflow_stats(
+            &self.dropped_samples,
+            &self.overflow_events,
+            &self.native_sample_rate,
+        )
+    }
+
     #[napi]
     pub fn start(
         &mut self,
@@ -241,6 +406,10 @@ impl SystemAudioCapture {
             return Err(napi::Error::from_reason("Capture already running"));
         }
 
+        // Fresh stream means a fresh ring; the counters describe this run only.
+        self.dropped_samples.store(0, Ordering::Release);
+        self.overflow_events.store(0, Ordering::Release);
+
         let tsfn = callback;
         let speech_ended_tsfn = on_speech_ended;
         let speech_edge_tsfn = on_speech_edge;
@@ -251,6 +420,8 @@ impl SystemAudioCapture {
         let stop_signal = self.stop_signal.clone();
         let sample_rate_shared = self.sample_rate.clone();
         let native_rate_shared = self.native_sample_rate.clone();
+        let dropped_shared = self.dropped_samples.clone();
+        let overflow_events_shared = self.overflow_events.clone();
         let device_id = self.device_id.clone();
 
         // ALL init + DSP runs in background thread — start() returns INSTANTLY
@@ -308,6 +479,12 @@ impl SystemAudioCapture {
                 }
             };
 
+            // ScreenCaptureKit reports a dead stream asynchronously through
+            // SCStreamDelegate; poll that slot from the DSP loop so the failure
+            // reaches JS instead of capture simply going quiet. None on the
+            // CoreAudio-tap and WASAPI backends, which have no such channel.
+            let capture_err_signal = stream.err_signal();
+
             let native_rate = stream.sample_rate();
             // Publish the real native hardware rate for diagnostics / HFP detection.
             native_rate_shared.store(native_rate, Ordering::Release);
@@ -343,6 +520,16 @@ impl SystemAudioCapture {
                 ..SilenceSuppressionConfig::for_system_audio()
             });
 
+            // Ring overflow and input starvation are counted at the native rate
+            // — that is the rate the ring itself runs at, upstream of the
+            // resampler.
+            let mut health = CaptureHealth::new(
+                "SystemAudioCapture",
+                native_rate,
+                dropped_shared,
+                overflow_events_shared,
+            );
+
             // 20ms chunks at the EMITTED rate (320 samples at 16kHz).
             let chunk_size = (emitted_rate as usize / 1000) * 20;
             let mut frame_buffer: Vec<i16> = Vec::with_capacity(chunk_size * 4);
@@ -358,10 +545,34 @@ impl SystemAudioCapture {
                     break;
                 }
 
-                // Drain ALL available samples from ring buffer (lock-free)
-                while let Some(sample) = consumer.try_pop() {
-                    raw_batch.push(sample);
+                // Surface a backend-reported stream death to JS exactly once.
+                // Pre-fix this had nowhere to go: ScreenCaptureKit would stop
+                // the stream mid-meeting and the only symptom was the chunk
+                // counter freezing. Keep looping afterwards (as the microphone
+                // DSP loop does) — main.ts destroys and recreates the capture
+                // on the 'error' event, and that teardown is what stops us.
+                if let Some(ref err_signal) = capture_err_signal {
+                    let taken = match err_signal.lock() {
+                        Ok(mut slot) => slot.take(),
+                        Err(poisoned) => poisoned.into_inner().take(),
+                    };
+                    if let Some(msg) = taken {
+                        let full = format!("[SystemAudioCapture] {}", msg);
+                        eprintln!("{}", full);
+                        emitter.flush(&tsfn);
+                        tsfn.call(
+                            Err(napi::Error::from_reason(full)),
+                            ThreadsafeFunctionCallMode::NonBlocking,
+                        );
+                    }
                 }
+
+                // Drain ALL readable samples from the ring (lock-free). The ring
+                // is drop-oldest, so after a stall this returns the NEWEST audio
+                // and reports what it had to discard, instead of handing STT a
+                // backlog it can never work off.
+                let drained = consumer.drain_into(&mut raw_batch);
+                health.observe(&consumer, drained);
 
                 // Resample (anti-aliased) to 16kHz then convert to i16, OR convert
                 // f32 -> i16 directly when passthrough. The resampler already
@@ -471,6 +682,12 @@ pub struct MicrophoneCapture {
     sample_rate: Arc<AtomicU32>,
     /// Shared atomic NATIVE hardware rate — diagnostics / HFP detection only.
     native_sample_rate: Arc<AtomicU32>,
+    /// Ring-overflow counters — see [`AudioOverflowStats`]. The mic path has
+    /// never shown this failure in the field (its consumer is not the one that
+    /// shares a thread with inference), but it runs the same ring and the same
+    /// accounting so a future starvation here cannot be silent either.
+    dropped_samples: Arc<AtomicU64>,
+    overflow_events: Arc<AtomicU64>,
     /// Stores the requested device ID for recreation on restart.
     device_id: Option<String>,
     /// Holds the live CPAL stream. Recreated on each start().
@@ -502,6 +719,8 @@ impl MicrophoneCapture {
             capture_thread: None,
             sample_rate: Arc::new(AtomicU32::new(emitted_rate)),
             native_sample_rate: Arc::new(AtomicU32::new(native_rate)),
+            dropped_samples: Arc::new(AtomicU64::new(0)),
+            overflow_events: Arc::new(AtomicU64::new(0)),
             device_id,
             input: Some(input),
         })
@@ -521,6 +740,17 @@ impl MicrophoneCapture {
         self.native_sample_rate.load(Ordering::Acquire)
     }
 
+    /// Ring-overflow counters for the user channel. Cumulative for the life of
+    /// the current `start()`; reset on restart.
+    #[napi]
+    pub fn get_overflow_stats(&self) -> AudioOverflowStats {
+        overflow_stats(
+            &self.dropped_samples,
+            &self.overflow_events,
+            &self.native_sample_rate,
+        )
+    }
+
     #[napi]
     pub fn start(
         &mut self,
@@ -535,6 +765,11 @@ impl MicrophoneCapture {
 
         self.stop_signal.store(false, Ordering::SeqCst);
         let stop_signal = self.stop_signal.clone();
+        // Fresh CPAL stream means a fresh ring; the counters describe this run.
+        self.dropped_samples.store(0, Ordering::Release);
+        self.overflow_events.store(0, Ordering::Release);
+        let dropped_shared = self.dropped_samples.clone();
+        let overflow_events_shared = self.overflow_events.clone();
 
         // If the stream was consumed by a previous start() cycle, recreate it.
         // This is the fix for the one-shot take_consumer() bug.
@@ -601,6 +836,15 @@ impl MicrophoneCapture {
                 ..SilenceSuppressionConfig::for_microphone()
             });
 
+            // Counted at the native rate — the rate the ring runs at, upstream
+            // of the resampler.
+            let mut health = CaptureHealth::new(
+                "MicrophoneCapture",
+                native_rate,
+                dropped_shared,
+                overflow_events_shared,
+            );
+
             // 20ms chunks at the EMITTED rate (320 samples at 16kHz).
             let chunk_size = (emitted_rate as usize / 1000) * 20;
             let mut frame_buffer: Vec<i16> = Vec::with_capacity(chunk_size * 4);
@@ -620,7 +864,7 @@ impl MicrophoneCapture {
                 // Surface any callback-thread error to JS exactly once. After
                 // reporting, we keep looping so a subsequent device recovery
                 // (e.g. user re-plugged the USB mic) is still observed via the
-                // ringbuf — but main.ts will typically destroy + recreate this
+                // capture ring — but main.ts will typically destroy + recreate this
                 // capture on receiving the error. Flush any batched audio first
                 // so partial trailing speech reaches STT before the error event.
                 if let Ok(mut slot) = err_signal.lock() {
@@ -635,10 +879,11 @@ impl MicrophoneCapture {
                     }
                 }
 
-                // 1. Drain ALL available samples from ring buffer (lock-free)
-                while let Some(sample) = consumer.try_pop() {
-                    raw_batch.push(sample);
-                }
+                // 1. Drain ALL readable samples from the ring (lock-free).
+                // Drop-oldest: an overrun costs us the oldest samples and is
+                // counted, never the stream.
+                let drained = consumer.drain_into(&mut raw_batch);
+                health.observe(&consumer, drained);
 
                 // 2. Resample (anti-aliased) to 16kHz then i16, OR convert
                 // f32 -> i16 directly when passthrough.

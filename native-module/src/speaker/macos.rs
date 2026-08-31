@@ -1,7 +1,7 @@
 use super::core_audio;
 use super::sck;
+use crate::audio_ring::AudioConsumer;
 use anyhow::Result;
-use ringbuf::HeapCons;
 
 pub use super::sck::list_output_devices;
 
@@ -78,10 +78,26 @@ impl SpeakerStream {
         }
     }
 
-    pub fn take_consumer(&mut self) -> Option<HeapCons<f32>> {
+    pub fn take_consumer(&mut self) -> Option<AudioConsumer> {
         match &mut self.backend {
             BackendStream::CoreAudio(s) => s.take_consumer(),
             BackendStream::Sck(s) => s.take_consumer(),
+        }
+    }
+
+    /// Fatal-error slot for the backend, polled by the DSP thread and forwarded
+    /// to JS.
+    ///
+    /// Only ScreenCaptureKit has one: SCK reports a dead stream asynchronously
+    /// through SCStreamDelegate, and before that delegate existed the message
+    /// went nowhere — capture just stopped, silently, until the meeting was
+    /// restarted. The CoreAudio tap has no equivalent asynchronous failure
+    /// channel (its IO proc either runs or the aggregate device is torn down),
+    /// so it returns None and the DSP thread simply skips the poll.
+    pub fn err_signal(&self) -> Option<super::CaptureErrSignal> {
+        match &self.backend {
+            BackendStream::CoreAudio(_) => None,
+            BackendStream::Sck(s) => Some(s.err_signal()),
         }
     }
 

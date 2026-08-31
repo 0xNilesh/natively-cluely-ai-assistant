@@ -5,13 +5,10 @@
 // 2. No mutexes, allocations, or DSP in callback
 // 3. Background thread: drains buffer, resamples, emits to JS
 
+use crate::audio_ring::{audio_ring, AudioConsumer, AudioProducer};
 use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream};
-use ringbuf::{
-    traits::{Producer, Split},
-    HeapCons, HeapProd, HeapRb,
-};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::{Condvar, Mutex};
@@ -129,7 +126,7 @@ fn resolve_input_device(host: &cpal::Host, device_id: Option<&str>) -> Result<cp
 /// Consumer is polled by DSP thread.
 pub struct MicrophoneStream {
     stream: Option<Stream>,
-    consumer: Option<HeapCons<f32>>,
+    consumer: Option<AudioConsumer>,
     sample_rate: u32,
     is_running: Arc<AtomicBool>,
     /// Condvar for DSP thread to wait on audio data
@@ -230,9 +227,11 @@ impl MicrophoneStream {
             config.sample_format()
         );
 
-        // Create lock-free SPSC ring buffer
-        let rb = HeapRb::<f32>::new(RING_BUFFER_SAMPLES);
-        let (producer, consumer) = rb.split();
+        // Lock-free drop-oldest SPSC ring. The CPAL callback is a real-time
+        // thread: it must never block on the DSP thread, and if it ever does
+        // overrun we want the newest audio kept and the loss counted, not the
+        // freshly captured samples silently thrown away.
+        let (producer, consumer) = audio_ring(RING_BUFFER_SAMPLES);
 
         let is_running = Arc::new(AtomicBool::new(false));
         let is_running_clone = is_running.clone();
@@ -295,7 +294,7 @@ impl MicrophoneStream {
     }
 
     /// Take ownership of the consumer for the DSP thread
-    pub fn take_consumer(&mut self) -> Option<HeapCons<f32>> {
+    pub fn take_consumer(&mut self) -> Option<AudioConsumer> {
         self.consumer.take()
     }
 
@@ -323,7 +322,7 @@ impl MicrophoneStream {
 fn build_input_stream(
     device: &cpal::Device,
     config: &cpal::SupportedStreamConfig,
-    mut producer: HeapProd<f32>,
+    mut producer: AudioProducer,
     channels: usize,
     is_running: Arc<AtomicBool>,
     data_ready: Arc<(Mutex<bool>, Condvar)>,
@@ -350,13 +349,11 @@ fn build_input_stream(
                     if !is_running.load(Ordering::Relaxed) {
                         return;
                     }
-                    // REAL-TIME SAFE: Only lock-free push
+                    // REAL-TIME SAFE: wait-free push, drop-oldest on overrun.
                     if channels > 1 {
-                        for chunk in data.chunks(channels) {
-                            let _ = producer.try_push(chunk[0]);
-                        }
+                        producer.push_iter(data.chunks_exact(channels).map(|f| f[0]));
                     } else {
-                        let _ = producer.push_slice(data);
+                        producer.push_slice(data);
                     }
                     // Signal DSP thread
                     let (lock, cvar) = &*data_ready_f32;
@@ -377,16 +374,13 @@ fn build_input_stream(
                     if !is_running.load(Ordering::Relaxed) {
                         return;
                     }
-                    // REAL-TIME SAFE: Convert and push
+                    // REAL-TIME SAFE: convert on the way in, wait-free push.
                     if channels > 1 {
-                        for chunk in data.chunks(channels) {
-                            let sample = chunk[0] as f32 / 32768.0;
-                            let _ = producer.try_push(sample);
-                        }
+                        producer.push_iter(
+                            data.chunks_exact(channels).map(|f| f[0] as f32 / 32768.0),
+                        );
                     } else {
-                        for &sample in data {
-                            let _ = producer.try_push(sample as f32 / 32768.0);
-                        }
+                        producer.push_iter(data.iter().map(|&s| s as f32 / 32768.0));
                     }
                     // Signal DSP thread
                     let (lock, cvar) = &*data_ready_i16;
@@ -407,16 +401,13 @@ fn build_input_stream(
                     if !is_running.load(Ordering::Relaxed) {
                         return;
                     }
-                    // REAL-TIME SAFE: Convert and push
+                    // REAL-TIME SAFE: convert on the way in, wait-free push.
                     if channels > 1 {
-                        for chunk in data.chunks(channels) {
-                            let sample = chunk[0] as f32 / 2147483648.0;
-                            let _ = producer.try_push(sample);
-                        }
+                        producer.push_iter(
+                            data.chunks_exact(channels).map(|f| f[0] as f32 / 2147483648.0),
+                        );
                     } else {
-                        for &sample in data {
-                            let _ = producer.try_push(sample as f32 / 2147483648.0);
-                        }
+                        producer.push_iter(data.iter().map(|&s| s as f32 / 2147483648.0));
                     }
                     // Signal DSP thread
                     let (lock, cvar) = &*data_ready_i32;

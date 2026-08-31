@@ -12,6 +12,11 @@ export declare class MicrophoneCapture {
    * diagnostics and HFP/Bluetooth-degradation detection only.
    */
   getNativeSampleRate(): number
+  /**
+   * Ring-overflow counters for the user channel. Cumulative for the life of
+   * the current `start()`; reset on restart.
+   */
+  getOverflowStats(): AudioOverflowStats
   start(callback: ((err: Error | null, arg: Buffer) => any), onSpeechEnded?: (((err: Error | null, arg: boolean) => any)) | undefined | null, onSpeechEdge?: (((err: Error | null, arg: SpeechEdgeEvent) => any)) | undefined | null): void
   stop(): void
 }
@@ -69,6 +74,12 @@ export declare class SystemAudioCapture {
    * HFP/Bluetooth-degradation detection only. NOT the rate of emitted bytes.
    */
   getNativeSampleRate(): number
+  /**
+   * Ring-overflow counters for the interviewer channel — how much audio the
+   * capture ring had to overwrite because the DSP/STT consumer fell behind.
+   * Cumulative for the life of the current `start()`; reset on restart.
+   */
+  getOverflowStats(): AudioOverflowStats
   start(callback: ((err: Error | null, arg: Buffer) => any), onSpeechEnded?: (((err: Error | null, arg: boolean) => any)) | undefined | null, onSpeechEdge?: (((err: Error | null, arg: SpeechEdgeEvent) => any)) | undefined | null): void
   stop(): void
 }
@@ -104,6 +115,26 @@ export declare function applyStealthToWindow(handle: Buffer): void
 export interface AudioDeviceInfo {
   id: string
   name: string
+}
+
+/**
+ * Ring-overflow counters for one capture channel, readable from JS.
+ *
+ * A non-zero `droppedSamples` means the capture ring overwrote audio the
+ * DSP/STT consumer had not taken yet: the stream is alive and carrying the
+ * NEWEST audio, but downstream work is starving it. This is the signal that
+ * did not exist before — the same condition used to discard the audio it had
+ * just captured with `let _pushed = producer.push_slice(..)`, leaving the
+ * interviewer channel permanently behind (or, on the ScreenCaptureKit path,
+ * simply gone) with no error, no log and no counter anywhere.
+ */
+export interface AudioOverflowStats {
+  /** Cumulative samples lost since this capture started. */
+  droppedSamples: number
+  /** Cumulative number of distinct overflow episodes. */
+  overflowEvents: number
+  /** `dropped_samples` as milliseconds of audio at the native capture rate. */
+  droppedMs: number
 }
 
 /**
