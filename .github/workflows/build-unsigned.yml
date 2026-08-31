@@ -1,0 +1,500 @@
+name: Build (macOS, unsigned)
+
+# Produces an installable but UNSIGNED macOS build (a .zip of the .app) as a
+# workflow artifact, so the app can be tested from a fork without building
+# locally. Zip and not DMG for a reason — see "WHY ZIP ONLY" below.
+#
+# ── WHY THIS EXISTS ALONGSIDE release-macos.yml ────────────────────────────
+# release-macos.yml is the SHIPPING path: Developer ID signing + notarization +
+# stapling. It reads six repository secrets (MACOS_CERT_P12_BASE64,
+# MACOS_CERT_PASSWORD, KEYCHAIN_PASSWORD, APPLE_API_KEY_P8_BASE64,
+# APPLE_API_KEY_ID, APPLE_API_ISSUER) with NO conditional guards, so in a fork —
+# which has none of them — it dies in "Import Developer ID signing certificate"
+# before a single line is compiled. `security import` on an empty file fails, and
+# there is no `if:` to skip it.
+#
+# This workflow takes package.json's UNSIGNED path instead:
+#
+#   app:build         → scripts/package-app.js  (electron-builder, mac.identity: null)
+#   app:build:signed  → scripts/preflight-notary.cjs + electron-builder.signed.cjs
+#
+# `app:build` needs no Apple credentials at all. The .app is still AD-HOC signed
+# by scripts/ad-hoc-sign.js (the afterPack hook, `codesign --sign -`), which is
+# what lets it launch locally after the quarantine xattr is cleared:
+#
+#   unzip Natively-<version>-arm64-mac.zip
+#   ditto --rsrc --extattr Natively.app /Applications/Natively.app
+#   xattr -cr /Applications/Natively.app
+#
+# ── WHY ZIP ONLY, NO DMG ───────────────────────────────────────────────────
+# electron-builder's DMG target cannot run on a hosted runner. Measured in run
+# 33381648959: both DMGs failed after the zips had already built fine, with
+#
+#   hdiutil: create failed - Device not configured
+#   plistlib.InvalidFileException: Invalid file
+#
+# `hdiutil create` needs to attach a disk image, which the runner's environment
+# does not allow, and dmgbuild then chokes parsing the empty hdiutil output. It
+# burned ~9 of the run's 20 minutes before failing.
+#
+# The repo already treats electron-builder's DMG step as unusable for a
+# different reason — release-macos.yml's header records that it corrupts the
+# embedded app signature, so the signed path also builds the zip target only and
+# creates its DMGs separately through create-dmg in
+# scripts/afterAllArtifactBuild.cjs. A zip is the better artifact here anyway:
+# install is `ditto` into /Applications plus `xattr -cr`, with no mount step.
+#
+# ad-hoc-sign.js explicitly skips itself when CSC_LINK / CSC_NAME /
+# NATIVELY_SIGN_IDENTITY are set, so the job below deliberately sets none of
+# them (and pins CSC_IDENTITY_AUTO_DISCOVERY=false so electron-builder cannot
+# pick a stray identity out of the runner keychain either).
+#
+# ── WHY BUILD IN CI AT ALL ─────────────────────────────────────────────────
+# Electron 43's node headers include <source_location> (v8-source-location.h),
+# which requires a C++20-capable clang. Xcode CLT 14.3.1 (clang 14) does not
+# ship it, so `npm ci`'s postinstall native rebuild dies with
+#   .electron-gyp/43.1.0/include/node/v8-source-location.h:9:10:
+#   fatal error: 'source_location' file not found
+# on machines that have not taken the ~750 MB toolchain upgrade. The macos-14
+# runner image already has a modern toolchain, so CI sidesteps it entirely.
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: 'Which macOS architecture(s) to package'
+        type: choice
+        required: false
+        default: arm64
+        options:
+          # arm64: skips the x64 Rust cross-compile, the second beforePack
+          # native rebuild and a whole electron-builder pack.
+          - arm64
+          # both: also produces the Intel zip, at roughly double the build time.
+          - both
+  push:
+    branches:
+      - develop
+      - 'fix/**'
+      - 'feat/**'
+      - 'ci/**'
+
+permissions:
+  contents: read # nothing is published from here; the artifact is enough
+
+# A macOS build is long and expensive. Superseding pushes to the same branch
+# should cancel the run they superseded rather than queue behind it.
+concurrency:
+  group: build-unsigned-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-macos-unsigned:
+    name: Unsigned macOS build (${{ inputs.arch || 'arm64' }})
+    runs-on: macos-14 # Apple Silicon + a clang new enough for Electron 43's headers
+    # Measured on run 33381648959, every cache cold: checkout + toolchain 18s,
+    # `npm ci` including the whole postinstall (patch-package, sharp rebuild,
+    # better-sqlite3 + keytar against the Electron 43 ABI, ~360 MB of ONNX
+    # downloads) 95s, and the build 18m29s — of which electron-builder was
+    # 14m05s for two arches and ~9m of that was the two DMGs that could not be
+    # created at all. Zip-only and arm64-only remove nearly all of it; the
+    # `both` path on a cold cache is the ceiling this budget is set for.
+    timeout-minutes: 60
+
+    env:
+      # Belt-and-braces for the unsigned path: electron-builder scans the login
+      # keychain for a Developer ID identity by default. There is none on a
+      # hosted runner, but if one ever appeared, auto-discovery would flip this
+      # into a half-signed build that cannot be notarized. Note this var is NOT
+      # one of the three ad-hoc-sign.js checks, so ad-hoc signing still runs.
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      # arm64-only is the default: the artifact exists for local testing on the
+      # (Apple Silicon) runner-matching arch, and one arch instead of two drops a
+      # whole electron-builder pack, a beforePack native rebuild and a Rust
+      # cross-compile.
+      #
+      # These flags are only obeyed when the packaging command ALSO names its
+      # targets on the CLI (`--mac zip`, in the build step below).
+      # electron-builder's computeArchToTargetNamesMap() returns the CLI's
+      # arch→targets map as-is ONLY when it carries target names; when the CLI
+      # names no target it falls back to package.json build.mac.target[].arch,
+      # which is ["x64","arm64"] for both the zip and dmg entries. That is
+      # exactly why run 33381648959 built BOTH arches (and both DMGs) from
+      # `--mac --arm64`: the arch flag was silently outranked by the config.
+      BUILD_ARCH_FLAGS: ${{ (inputs.arch == 'both') && '--x64 --arm64' || '--arm64' }}
+      # Read by scripts/build-native.js: '1' cross-compiles BOTH darwin Rust
+      # targets, anything else builds the host arch only. `app:build` hardcodes
+      # '1' via cross-env — which SETS rather than reads it — so the only way to
+      # honour an arm64-only request here is to run the stages ourselves with
+      # this in the job environment. Also read by nothing else in the repo
+      # (verified: scripts/build-native.js is the sole consumer).
+      NATIVELY_BUILD_ALL_MAC_ARCHES: ${{ (inputs.arch == 'both') && '1' || '0' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # NOT `submodules: recursive` (what release-macos.yml uses). The tree
+          # carries two gitlinks, and .gitmodules points both at repositories
+          # that are inaccessible to a fork — verified 2026-08-31, both return
+          # HTTP 404 unauthenticated:
+          #
+          #   premium       → github.com/Natively-AI-assistant/natively-premium
+          #   natively-api  → github.com/evinjohnn/natively-api
+          #
+          # GITHUB_TOKEN is scoped to THIS repository, so it cannot read either
+          # one. `submodules: recursive` would therefore hard-fail the checkout
+          # ("fatal: could not read Username for 'https://github.com'") and the
+          # job would never reach a build step. Leaving submodules off is what
+          # makes this workflow runnable in a fork at all; the two steps below
+          # fetch `premium` when a token exists and shim it when one does not.
+          #
+          # persist-credentials keeps the checkout token in .git/config so the
+          # optional submodule fetch below can reuse the header rewrite.
+          persist-credentials: true
+
+      # `premium` is the only submodule the BUILD needs, and it needs it for
+      # exactly four modules. Measured by bundling electron/**/*.ts with esbuild
+      # against an empty premium/ (2026-08-31): of the 35 premium references in
+      # electron/, 33 are `require()` calls inside try/catch — esbuild leaves
+      # those as runtime requires by design, and the app is written to degrade
+      # when they throw (electron/premium/featureGate.ts literally probes for
+      # premium with a try/catch require). Only these hard-fail a build:
+      #
+      #   electron/services/resolveCompanySearchProvider.ts:20,28
+      #       unguarded require() of Tavily/NativelySearchProvider
+      #       → esbuild: "Could not resolve" = ERROR, `npm run build:electron` dies
+      #   electron/services/resolveCompanySearchProvider.ts:11  (import type SearchProvider)
+      #   electron/IntelligenceEngine.ts:65                     (import type PromptAssemblyResult)
+      #       → tsc: TS2307, `npm run typecheck:electron` dies (and app:build
+      #         runs typecheck:electron as its second stage)
+      #
+      # `natively-api` is NOT needed by any build stage — it is referenced only
+      # from test/benchmark scripts (test:e2e:screen-understanding) and comments.
+      #
+      # Two steps, because a step's own `env:` is not in scope for its own `if:`.
+      # This one publishes availability as an output so the secret itself never
+      # appears in a condition. Same shape as build-smoke.yml.
+      - name: Detect submodule token
+        id: submodule_token
+        env:
+          SUBMODULE_TOKEN: ${{ secrets.SUBMODULE_TOKEN || secrets.GH_APP_TOKEN }}
+        shell: bash
+        run: |
+          if [ -n "${SUBMODULE_TOKEN:-}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No SUBMODULE_TOKEN/GH_APP_TOKEN — building without the private premium submodule (see the stub step)."
+          fi
+
+      - name: Fetch premium submodule (best effort)
+        id: premium
+        if: steps.submodule_token.outputs.available == 'true'
+        env:
+          SUBMODULE_TOKEN: ${{ secrets.SUBMODULE_TOKEN || secrets.GH_APP_TOKEN }}
+        shell: bash
+        run: |
+          set -uo pipefail   # deliberately NOT -e: a failure here must not fail the job
+          # `git -c`, NOT `git config --local`: the submodule clone runs as a
+          # subprocess and a --local rewrite on the superproject does not reach
+          # it (build-smoke.yml hit exactly that and fell through to an
+          # interactive credential prompt). `-c` is exported via
+          # GIT_CONFIG_PARAMETERS, so the child git inherits it — and nothing is
+          # written to .git/config, so no credential is left on disk.
+          #
+          # Path-limited to `premium`: `natively-api` is equally private, is not
+          # needed by any build stage, and a recursive init would abort on it.
+          if git -c url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf="https://github.com/" \
+                 submodule update --init --force -- premium \
+             && [ -f premium/electron/knowledge/CompanyResearchEngine.ts ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "Fetched the premium submodule."
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::premium submodule fetch failed despite a token being present; falling back to compile-time stubs."
+          fi
+
+      # When premium is genuinely unavailable, the build still has to compile.
+      # This writes the MINIMUM set of modules that the two hard-failing call
+      # sites documented above need, and nothing else:
+      #
+      #   * two `export type X = any` aliases, which satisfy tsc's TS2307 without
+      #     introducing any new strict-mode errors (`any` absorbs every downstream
+      #     property access and both aliases are only used in positions that
+      #     accept it: `SearchProvider | null` and `Promise<PromptAssemblyResult | null>`)
+      #   * two provider classes that THROW on construction, which is what
+      #     resolveCompanySearchProvider() would already do here with a real
+      #     MODULE_NOT_FOUND — just with a message that says why. In practice
+      #     they are unreachable in a premium-less build: every caller of
+      #     resolveCompanySearchProvider() goes through
+      #     AppState.getKnowledgeOrchestrator(), which is null when premium's
+      #     KnowledgeOrchestrator require fails in main.ts.
+      #
+      # Verified: with these four files present, esbuild resolves electron/**
+      # with ZERO premium errors (2 before, 0 after).
+      #
+      # This is a CI-only shim written into an EMPTY submodule directory. It is
+      # never committed, and it is skipped entirely whenever the real submodule
+      # was fetched, so it cannot shadow the real code for anyone who has access.
+      - name: Stub premium submodule (unsigned fork build only)
+        if: steps.premium.outputs.available != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d premium/electron ]; then
+            echo "premium/electron exists — not stubbing."
+            exit 0
+          fi
+          mkdir -p premium/electron/knowledge
+          cat > premium/electron/knowledge/CompanyResearchEngine.ts <<'EOF'
+          // CI STUB — see .github/workflows/build-unsigned.yml. Not the real premium source.
+          export type SearchProvider = any;
+          EOF
+          cat > premium/electron/knowledge/ContextAssembler.ts <<'EOF'
+          // CI STUB — see .github/workflows/build-unsigned.yml. Not the real premium source.
+          export type PromptAssemblyResult = any;
+          EOF
+          cat > premium/electron/knowledge/TavilySearchProvider.ts <<'EOF'
+          // CI STUB — see .github/workflows/build-unsigned.yml. Not the real premium source.
+          export class TavilySearchProvider {
+            constructor(_apiKey?: string) {
+              throw new Error('[premium stub] TavilySearchProvider is unavailable in this unsigned build (premium submodule not checked out).');
+            }
+          }
+          EOF
+          cat > premium/electron/knowledge/NativelySearchProvider.ts <<'EOF'
+          // CI STUB — see .github/workflows/build-unsigned.yml. Not the real premium source.
+          export class NativelySearchProvider {
+            constructor(_apiKey?: string, _trialToken?: string) {
+              throw new Error('[premium stub] NativelySearchProvider is unavailable in this unsigned build (premium submodule not checked out).');
+            }
+          }
+          EOF
+          echo "::warning::Built WITHOUT the premium submodule — premium features (knowledge orchestrator, licensing, company research) are inert in this artifact."
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          # package.json engines: ">=22.6.0". Matches build-smoke.yml and
+          # release-macos.yml so all three run the same major.
+          node-version: 22
+          # This is the ~/.npm cache the task asks for — setup-node keys it on
+          # package-lock.json, which is exactly right for `npm ci`.
+          cache: npm
+
+      # native-module is Rust (napi). Both darwin targets are installed even
+      # though the default run only compiles aarch64, because the `both` input
+      # needs x86_64-apple-darwin and `rustup target add` on an already-present
+      # target is a no-op — cheaper than making the toolchain step conditional.
+      - name: Setup Rust (native-module)
+        id: rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      # ── Caches ────────────────────────────────────────────────────────────
+      # All three restore BEFORE `npm ci`, because postinstall is what populates
+      # two of them (electron headers via the native rebuild, models via
+      # scripts/download-models.js).
+
+      - name: Cache Electron + node-gyp downloads
+        uses: actions/cache@v4
+        with:
+          # ~/Library/Caches/electron        — the Electron dist zips
+          # ~/Library/Caches/electron-builder — app-builder + eb's own downloads
+          # ~/.electron-gyp                   — the Electron 43 node headers that
+          #                                     the better-sqlite3/keytar rebuild
+          #                                     compiles against
+          path: |
+            ~/Library/Caches/electron
+            ~/Library/Caches/electron-builder
+            ~/.electron-gyp
+          key: electron-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            electron-${{ runner.os }}-
+
+      - name: Cache local ONNX models
+        uses: actions/cache@v4
+        with:
+          # postinstall's scripts/download-models.js writes ~360 MB of ONNX
+          # weights into resources/models (MiniLM, MobileBERT, the 280 MB
+          # bge-reranker, Smart Turn v3.1). Both downloaders are idempotent —
+          # transformers.js reuses env.cacheDir and Smart Turn skips on a sha256
+          # match — so a restored cache turns that step into a no-op. The
+          # git-tracked config/tokenizer JSONs in the same tree are identical in
+          # cache and checkout, so overlaying is safe.
+          path: resources/models
+          key: models-${{ runner.os }}-${{ hashFiles('scripts/download-models.js', 'resources/models/pipecat-ai/smart-turn-v3/manifest.json') }}
+          restore-keys: |
+            models-${{ runner.os }}-
+
+      - name: Cache Cargo registry + native-module target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native-module/target
+          # steps.rust.outputs.cachekey is dtolnay/rust-toolchain's hash of the
+          # installed rustc — in the key so a toolchain bump cannot resurrect
+          # incompatible object files out of native-module/target.
+          key: cargo-${{ runner.os }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('native-module/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ steps.rust.outputs.cachekey }}-
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          # pipefail so `tee` cannot mask a failing npm — the default runner
+          # shell is `bash -e {0}`, which does NOT set it.
+          set -euo pipefail
+          LOG_DIR="$RUNNER_TEMP/build-logs"; mkdir -p "$LOG_DIR"
+          # postinstall is the heavy part: patch-package, sharp rebuild,
+          # scripts/rebuild-native-electron.js (better-sqlite3 + keytar against
+          # the Electron 43 ABI — the step that fails on clang 14 locally),
+          # download-models, ensure-sqlite-vec, ensure-napi-canvas-mac-deps,
+          # patch-electron-plist, verify-native-arch.
+          npm ci 2>&1 | tee "$LOG_DIR/npm-ci.log"
+
+      # Same check build-smoke.yml runs: the runner is arm64, so an x86_64
+      # binary here means the install itself was poisoned (Rosetta arch drift)
+      # and every downstream packaging guard would be validating garbage.
+      - name: Verify native module architecture
+        run: node scripts/verify-native-arch.js
+
+      # These are exactly `npm run app:build`'s stages, expanded. The unsigned
+      # PATH is unchanged — same scripts, same order, same electron-builder
+      # config (package.json's, with mac.identity: null) — but two things cannot
+      # be expressed through the packed script, and run 33381648959 failed on
+      # both:
+      #
+      #   1. app:build wraps build:native in `cross-env
+      #      NATIVELY_BUILD_ALL_MAC_ARCHES=1`. cross-env SETS the variable, so an
+      #      arm64-only request still cross-compiled the x64 Rust target and
+      #      electron-builder still ran a second beforePack native rebuild for
+      #      x64. Run the stage directly and the job-level env decides.
+      #   2. The packaging args must reach electron-builder as
+      #      `--mac zip <arch flags>`: a CLI target list is what makes the CLI's
+      #      arch flags authoritative (see BUILD_ARCH_FLAGS above), and it is
+      #      also how the unbuildable DMG target is dropped. `npm run app:build
+      #      -- …` can only append flags, never replace the config's target list.
+      #
+      # release-macos.yml sets the precedent for expanding the chain in CI
+      # ("Explicit stages (NOT `npm run dist:signed`)"), for its own reasons.
+      #
+      # NOTE: typecheck:electron is a real gate here, as it is inside app:build —
+      # a type error in electron/ stops the build before packaging, by design.
+      - name: Build unsigned macOS app
+        shell: bash
+        run: |
+          set -euo pipefail
+          LOG_DIR="$RUNNER_TEMP/build-logs"; mkdir -p "$LOG_DIR"
+
+          # Each stage folds in the console log and is teed to the log file that
+          # the failure path uploads.
+          stage() {
+            local label="$1"; shift
+            echo "::group::$label"
+            "$@" 2>&1 | tee -a "$LOG_DIR/app-build.log"
+            echo "::endgroup::"
+          }
+
+          stage 'renderer: tsc (TS7) + vite'          npm run build
+          stage 'typecheck electron (TS7)'            npm run typecheck:electron
+          stage 'electron main: esbuild'              npm run build:electron
+          # Honours NATIVELY_BUILD_ALL_MAC_ARCHES from the job env: host arch
+          # only by default, both darwin targets when arch=both.
+          stage 'native-module: napi/Rust'            npm run build:native
+          # Kept even for an arm64-only pack: postinstall already installed the
+          # x64 members of these per-arch families, so this costs nothing, and
+          # ad-hoc-sign.js's verifyPackedArchFamilies() hard-fails a pack whose
+          # target-arch member is missing.
+          stage 'ensure sharp mac deps'               node scripts/ensure-sharp-mac-deps.js
+          stage 'ensure @napi-rs/canvas mac deps'     node scripts/ensure-napi-canvas-mac-deps.js
+          stage 'ensure sqlite-vec'                   node scripts/ensure-sqlite-vec.js
+          # Source mode (no --app): checks the bundled models, the dependency
+          # dirs and the asarUnpack/extraResources config. Its packaged mode
+          # would additionally require BOTH native-module/index.darwin-*.node,
+          # so do not add `--app` here without also forcing arch=both.
+          stage 'verify local fallback assets'        npm run verify:packaged-local-assets
+          # `--publish never`: electron-builder detects CI and would otherwise
+          # implicitly publish to package.json's build.publish target (the
+          # UPSTREAM repo). It warned about exactly this on run 33381648959 and
+          # only stayed inert because no token was in the environment.
+          # $BUILD_ARCH_FLAGS is unquoted on purpose so it word-splits.
+          # shellcheck disable=SC2086
+          stage 'package: electron-builder (zip only)' \
+            node scripts/package-app.js --publish never --mac zip $BUILD_ARCH_FLAGS
+
+      - name: Summarize artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -lh release/*.zip 2>/dev/null || true
+          {
+            echo "### Unsigned macOS build"
+            echo
+            echo "| file | size |"
+            echo "| --- | --- |"
+            for f in release/*.zip; do
+              [ -e "$f" ] || continue
+              echo "| \`$(basename "$f")\` | $(du -h "$f" | cut -f1) |"
+            done
+            echo
+            echo "Unsigned + ad-hoc signed. To install:"
+            echo
+            echo '```bash'
+            echo 'unzip Natively-*-arm64-mac.zip'
+            echo 'ditto --rsrc --extattr Natively.app /Applications/Natively.app'
+            echo 'xattr -cr /Applications/Natively.app   # clear quarantine'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload unsigned build
+        uses: actions/upload-artifact@v4
+        with:
+          name: natively-macos-unsigned
+          # zip only — the DMG target cannot be built on a hosted runner (see
+          # the "WHY ZIP ONLY" note in the header).
+          path: release/*.zip
+          # A green job with no artifact is the failure mode this whole workflow
+          # exists to prevent.
+          if-no-files-found: error
+          retention-days: 14
+          # The .zip is already compressed; re-deflating it in the upload
+          # wrapper costs minutes and saves nothing.
+          compression-level: 0
+
+      # Diagnostics only run when something broke — the console log is truncated
+      # for long builds and electron-builder's useful output is usually in the
+      # middle of it.
+      - name: Collect failure diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          set -uo pipefail
+          LOG_DIR="$RUNNER_TEMP/build-logs"; mkdir -p "$LOG_DIR"
+          cp -R "$HOME/.npm/_logs" "$LOG_DIR/npm-debug-logs" 2>/dev/null || true
+          cp release/builder-effective-config.yaml "$LOG_DIR/" 2>/dev/null || true
+          {
+            echo "== toolchain =="
+            xcodebuild -version 2>&1 || true
+            clang --version 2>&1 || true
+            node --version; npm --version; rustc --version 2>&1 || true
+            echo "== premium submodule =="
+            ls -la premium 2>&1 || true
+            echo "== release/ =="
+            ls -laR release 2>&1 | head -200 || true
+            echo "== disk =="
+            df -h 2>&1 || true
+          } > "$LOG_DIR/environment.txt" 2>&1
+
+      - name: Upload build logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/build-logs
+          if-no-files-found: ignore
+          retention-days: 7
