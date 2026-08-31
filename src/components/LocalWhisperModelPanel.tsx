@@ -64,7 +64,7 @@ const electronAPI = (window as any).electronAPI;
    at these durations; this is the curve the rest of the panel already uses. */
 const EASE_OUT = [0.23, 1, 0.32, 1] as const;
 
-function PremiumSelect({ label, value, options, onChange, placeholder }: any) {
+function PremiumSelect({ label, value, options, onChange, placeholder, onOpenChange }: any) {
     const t = useT();
     const [isOpen, setIsOpen] = useState(false);
     const containerRef = useRef<HTMLDivElement>(null);
@@ -79,6 +79,27 @@ function PremiumSelect({ label, value, options, onChange, placeholder }: any) {
         document.addEventListener('mousedown', handleClickOutside);
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, []);
+
+    /* The menu below is ABSOLUTELY POSITIONED inside this container, and CSS
+       overflow clipping applies to every descendant whose containing block is
+       the clipping box OR a descendant of it. `.aip-select` is that containing
+       block, so an ancestor with `overflow: hidden` — the split column's width
+       animation needs exactly that — clips the whole menu away: it is in the
+       DOM, styled, focusable, and painted outside the clip rect, i.e. entirely
+       unreachable. Reporting the open state upward lets that ancestor un-clip
+       itself for as long as the menu is up.
+
+       Held in a ref, the same idiom as onModelConfigChangedRef below: a parent
+       passing an inline arrow would otherwise change the callback's identity on
+       every render and re-fire this effect on each parent re-render. */
+    const onOpenChangeRef = useRef(onOpenChange);
+    useEffect(() => { onOpenChangeRef.current = onOpenChange; });
+    useEffect(() => {
+        onOpenChangeRef.current?.(isOpen);
+        // Unmounting while the menu is up must not leave the parent holding a
+        // stale "open" — it would keep the column un-clipped for good.
+        return () => { if (isOpen) onOpenChangeRef.current?.(false); };
+    }, [isOpen]);
 
     const selectedLabel = options.find((o: any) => o.id === value)?.name || placeholder;
 
@@ -237,6 +258,12 @@ export function LocalWhisperModelPanel({ onModelConfigChanged }: LocalWhisperMod
     const [recoveryNotice, setRecoveryNotice] = useState<RecoveryNotice | null>(null);
     const [onnxNotices, setOnnxNotices] = useState<Partial<Record<OnnxRecoveryNotice['family'], OnnxRecoveryNotice>>>({});
     const [loading, setLoading] = useState(true);
+    /* Whether the SYSTEM select's menu is up. The split column has to clip
+       (it animates its width open and closed), and a permanently-clipping
+       column also clips that menu out of existence — see the note on the
+       column's `overflow` below. The two are never up at the same time, so
+       one flag can serve both. */
+    const [systemMenuOpen, setSystemMenuOpen] = useState(false);
 
     const loadData = useCallback(async () => {
         try {
@@ -435,6 +462,11 @@ export function LocalWhisperModelPanel({ onModelConfigChanged }: LocalWhisperMod
     // disagree about `enabled`. The parent is notified from the effect above,
     // which sees the committed value rather than a locally-computed guess.
     const toggleDualChannel = async (enabled: boolean) => {
+        // Closing the split with the system menu still flagged open would run
+        // the exit animation UN-clipped, so the menu spills across the mic
+        // column as the width collapses. The pointer path already closes it
+        // (mousedown outside the select); this covers keyboard/programmatic.
+        if (!enabled) setSystemMenuOpen(false);
         setConfig(prev => ({ ...prev, enabled }));
         await electronAPI?.localWhisperSetChannelConfig?.({ enabled });
     };
@@ -621,7 +653,25 @@ export function LocalWhisperModelPanel({ onModelConfigChanged }: LocalWhisperMod
                                 key="system"
                                 className="min-w-0"
                                 style={{
-                                    overflow: 'hidden',
+                                    // The column animates its WIDTH, so it has to clip — the
+                                    // select inside it does not shrink, and un-clipped it
+                                    // squashes out over the mic column for the length of the
+                                    // animation.
+                                    //
+                                    // But clipping UNCONDITIONALLY also clipped the select's
+                                    // own menu, which is absolutely positioned at `top: 100%`
+                                    // of a container inside this box: overflow clips any
+                                    // descendant whose containing block is a descendant of the
+                                    // clipping box, so the entire listbox painted outside the
+                                    // clip rect. It was in the DOM and correctly wired the
+                                    // whole time — just invisible and unhittable, which is why
+                                    // the system model could not be changed from this panel at
+                                    // all while the mic one (no clipping ancestor) was fine.
+                                    //
+                                    // Clip only while that menu is closed. The menu can only
+                                    // open from the settled column, and flipping Split closes
+                                    // it first, so the animation never runs un-clipped.
+                                    overflow: systemMenuOpen ? 'visible' : 'hidden',
                                     // flexBasis 0 is what makes the split exactly 50/50. The
                                     // sibling is `flex-1` — i.e. `flex: 1 1 0%` — so it sizes
                                     // purely from grow. Leaving this one at the default
@@ -681,6 +731,7 @@ export function LocalWhisperModelPanel({ onModelConfigChanged }: LocalWhisperMod
                                     onChange={setSystemModel}
                                     options={availableModels}
                                     placeholder={t('Select system model')}
+                                    onOpenChange={setSystemMenuOpen}
                                 />
                             </motion.div>
                         )}
