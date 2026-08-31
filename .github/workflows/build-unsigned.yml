@@ -1,7 +1,8 @@
 name: Build (macOS, unsigned)
 
-# Produces an installable but UNSIGNED macOS build (.dmg + .zip) as a workflow
-# artifact, so the app can be tested from a fork without building locally.
+# Produces an installable but UNSIGNED macOS build (a .zip of the .app) as a
+# workflow artifact, so the app can be tested from a fork without building
+# locally. Zip and not DMG for a reason — see "WHY ZIP ONLY" below.
 #
 # ── WHY THIS EXISTS ALONGSIDE release-macos.yml ────────────────────────────
 # release-macos.yml is the SHIPPING path: Developer ID signing + notarization +
@@ -66,8 +67,11 @@ on:
         required: false
         default: arm64
         options:
-          - arm64 # Apple Silicon only — roughly halves electron-builder time
-          - both # x64 + arm64, i.e. what package.json's mac targets declare
+          # arm64: skips the x64 Rust cross-compile, the second beforePack
+          # native rebuild and a whole electron-builder pack.
+          - arm64
+          # both: also produces the Intel zip, at roughly double the build time.
+          - both
   push:
     branches:
       - develop
@@ -458,8 +462,8 @@ jobs:
           # exists to prevent.
           if-no-files-found: error
           retention-days: 14
-          # .dmg and .zip are already compressed; re-deflating them in the
-          # upload wrapper costs minutes and saves nothing.
+          # The .zip is already compressed; re-deflating it in the upload
+          # wrapper costs minutes and saves nothing.
           compression-level: 0
 
       # Diagnostics only run when something broke — the console log is truncated
