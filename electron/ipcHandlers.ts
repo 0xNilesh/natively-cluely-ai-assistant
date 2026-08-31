@@ -8819,15 +8819,27 @@ export function initializeIpcHandlers(appState: AppState): void {
         if (typeof cfg?.systemModelId === 'string' && cfg.systemModelId && !MODEL_CATALOG_IDS.has(cfg.systemModelId)) {
           return { success: false, error: `Unknown local Whisper system model: ${cfg.systemModelId}` };
         }
-        if (typeof cfg?.enabled === 'boolean') sm.set('localWhisperPerChannelEnabled', cfg.enabled);
-        if (typeof cfg?.micModelId === 'string') sm.set('localWhisperModelMic', cfg.micModelId);
-        if (typeof cfg?.systemModelId === 'string')
-          if (!sm.set('localWhisperModelSystem', cfg.systemModelId)) {
-            // R-24: the write was refused (degraded settings store). Returning
-            // success — and broadcasting below — put every window on a value disk
-            // never received, which silently reverted on the next launch.
+        // R-24: every write is checked. `set` returns false when the store is
+        // degraded and the write was refused; reporting success then put every
+        // window on a value disk never received, which silently reverted on the
+        // next launch. Braces on all three: the systemModelId branch used to be
+        // a brace-less `if` wrapping another `if`, which reads as a dangling
+        // else waiting to happen the next time a line is added here.
+        if (typeof cfg?.enabled === 'boolean') {
+          if (!sm.set('localWhisperPerChannelEnabled', cfg.enabled)) {
             return { success: false, error: 'settings_store_degraded' };
           }
+        }
+        if (typeof cfg?.micModelId === 'string') {
+          if (!sm.set('localWhisperModelMic', cfg.micModelId)) {
+            return { success: false, error: 'settings_store_degraded' };
+          }
+        }
+        if (typeof cfg?.systemModelId === 'string') {
+          if (!sm.set('localWhisperModelSystem', cfg.systemModelId)) {
+            return { success: false, error: 'settings_store_degraded' };
+          }
+        }
         return { success: true };
       } catch (e: any) {
         return { success: false, error: e.message };
