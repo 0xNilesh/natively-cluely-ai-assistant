@@ -2100,6 +2100,10 @@ export class AppState {
         timeoutMs: settingsManager.get('claudeCliTimeoutMs') || 60_000,
         maxWarmProcesses: settingsManager.get('claudeCliMaxWarmProcesses'),
         sessionMode: settingsManager.get('claudeCliSessionMode') || 'isolated',
+        // No `|| default` on either: '' is the meaningful prep-session value
+        // (today's behaviour) and normalizeConfig owns the effort fallback.
+        prepSessionId: settingsManager.get('claudeCliSessionId') || '',
+        effort: settingsManager.get('claudeCliEffort') || 'default',
       });
     }
 

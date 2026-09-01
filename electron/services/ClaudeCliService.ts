@@ -64,6 +64,100 @@
  * anything here; the queueing option is the one that looks obvious and is
  * wrong for a live interview.
  *
+ * ── Prep session (`--resume` / `--fork-session`) ───────────────────────────
+ * The THIRD way turns can be linked, and the one a user actually configures.
+ * Before an interview you talk to `claude` normally — paste the JD, paste the
+ * CV, argue about tone — and hand Natively that session id
+ * (`claudeCliSessionId`). At the FIRST turn of a meeting the service runs
+ * `--resume <prep-id> --fork-session`, which replays that whole conversation as
+ * context and returns a NEW session id; every later turn resumes the FORKED id
+ * WITHOUT `--fork-session`, so the meeting accumulates and follow-ups work
+ * while the prep session itself is left pristine for the next interview.
+ *
+ * PRECEDENCE. This supersedes 'meeting' session mode above — both give
+ * per-meeting continuity, and running both at once is incoherent (a
+ * stdin-held process resuming a session on every turn double-counts the
+ * history). When a prep id is set, that is the mechanism for the meeting and
+ * beginSession() is a no-op; with a blank prep id, session mode behaves
+ * exactly as it does today. One mechanism per meeting, chosen by one setting.
+ *
+ * Four properties of this path are load-bearing:
+ *
+ *  - `--fork-session` requires session persistence, so `--no-session-persistence`
+ *    is DROPPED here and ONLY here. Meeting turns then land in the user's
+ *    ~/.claude — accepted deliberately, because it is also what makes the
+ *    forked id worth persisting: `claude --resume <id>` after the interview
+ *    puts you back in the exact conversation. A blank prep id keeps
+ *    `--no-session-persistence` and nothing about the turn is written.
+ *  - The system prompt supplied ON RESUME wins over the one the session was
+ *    created with (verified, `claude` 2.1.252). So Natively keeps passing its
+ *    own `--system-prompt`: the prep session supplies CONTEXT, this persona
+ *    still governs BEHAVIOUR. There is no conflict to design around — but it
+ *    does mean the prep conversation is replayed VERBATIM, tool calls and file
+ *    reads included, which is why the settings field tells the user to seed a
+ *    clean conversation rather than a working session.
+ *  - Resumed turns are NOT prewarmed. A parked process is booted before its
+ *    turn is written, so one parked with `--resume <forked-id>` could have
+ *    snapshotted the session before the PREVIOUS turn appended to it. Paying
+ *    the cold boot beats risking an answer against a stale conversation.
+ *  - The judge NEVER travels this path. See ClaudeCliRunOptions.isolated.
+ *
+ * Measured on `claude` 2.1.252 (2026-09-01), median of 4, against realistic
+ * prep conversations of ~9.7k and ~31.7k tokens:
+ *
+ *   no prep session (today)          TTFT 1.9s   total 8.3s
+ *   fork from 9.7k prep              TTFT 2.2s   total 5.2s
+ *   fork from 31.7k prep             TTFT 2.6s   total 5.6s
+ *   resume forked, 10.1k             TTFT 2.8s   total 3.9s
+ *   resume forked, 32.2k             TTFT 2.6s   total 3.9s
+ *
+ * So the replay costs ~0.3-0.9s of TTFT and is nearly flat in prep size — the
+ * whole conversation comes back as a prompt-cache read. A blank prep id opts
+ * out of even that.
+ *
+ * ── Where the per-turn scaffolding rides ───────────────────────────────────
+ * Natively composes a large per-turn system prompt (`<identity>`,
+ * `<instruction_boundary>`, mode/action blocks, the closing `<final_check>` —
+ * ~4.2k tokens). It reaches this service as `ClaudeCliRunOptions.instructions`,
+ * and there are two places to put it:
+ *
+ *   isolated path   PREPENDED TO THE USER TURN, as before. argv is the
+ *                   warm-pool key, so a per-turn value there would miss the
+ *                   pool on every request and give back the ~870ms it exists
+ *                   to save. Nothing accumulates: the process is fresh, one
+ *                   turn is written, and it is thrown away.
+ *   session paths   IN --system-prompt. A resumed conversation replays every
+ *                   earlier USER turn on every later turn, so a scaffolding
+ *                   sent there is paid again on every turn for the rest of the
+ *                   meeting. --system-prompt is supplied per invocation and is
+ *                   NOT written to the transcript (verified: a real session
+ *                   file has three `system` records, all `turn_duration`, and
+ *                   zero copies of the persona), so the model sees identical
+ *                   content per call at flat cost.
+ *
+ * The measurement that forced this, from a real meeting
+ * (8558f32d-8a01-4f87-9a5d-71c2928f3c2f): the scaffolding appeared in two user
+ * turns at 16,804 and 17,630 characters — ~8.6k tokens of duplicated prompt
+ * after two questions, ~42k by turn 10, ~100k at the SESSION_MAX_TURNS cap.
+ *
+ * One cost, stated plainly: the stdin session's process is spawned at meeting
+ * start, before any turn exists, so its argv cannot yet carry the scaffolding.
+ * The first real turn rebinds it (ClaudeCliSessionManager.claim), which spends
+ * a cold boot — ~0.9s, once per meeting, against ~4.2k tokens saved on every
+ * turn after the first.
+ *
+ * ── Effort ─────────────────────────────────────────────────────────────────
+ * `--effort low|medium|high|xhigh|max` is ORTHOGONAL to `--model`: it changes
+ * how much the model deliberates, not which model runs, so `opus` at `low` is
+ * a valid and useful combination and effort must never be implemented as a
+ * model downgrade. 'default' means "do not pass the flag at all", which is
+ * distinct from every level. Measured on this workload (2026-09-01): on a
+ * normal conversational interview question it changes nothing measurable (0
+ * thinking tokens at both low and high); on a genuinely hard design question
+ * `high` roughly doubles total answer time (~7.7s → ~14.8s) for ~3x the output
+ * and ~500-800 thinking tokens. Effort is in argv, so it is part of the
+ * warm-pool key — changing it mid-meeting costs one cold spawn.
+ *
  * ── Cancellation ───────────────────────────────────────────────────────────
  * In isolated mode, abort (barge-in), idle timeout, and early consumer `break`
  * all run the same teardown: SIGTERM to the child, SIGKILL after
@@ -149,14 +243,42 @@ export const CLAUDE_CLI_NOT_FOUND_MESSAGE =
   'Claude Code CLI not found. Install it, or set the binary path in Settings → AI Providers.';
 export const CLAUDE_CLI_NOT_SIGNED_IN_MESSAGE =
   'Claude Code is not signed in. Run `claude` in a terminal and complete login, then try again.';
+/**
+ * The prep session id in Settings does not resolve to a conversation.
+ *
+ * This one is deliberately LOUD rather than a silent degradation. The user
+ * configured a prep session precisely so answers would be grounded in it;
+ * quietly running without it returns confident, generic answers and nothing
+ * anywhere says the context was missing. Failing the turn is recoverable in
+ * seconds (fix the id, or clear it); a meeting's worth of ungrounded answers
+ * is not.
+ */
+export const CLAUDE_CLI_PREP_SESSION_MISSING_MESSAGE =
+  'The Claude Code prep session was not found. Check the session ID in '
+  + 'Settings → AI Providers, or clear it to answer without prep context.';
 
 /** True when `err` is one of the actionable Claude CLI failures above. */
 export function isClaudeCliError(err: unknown): boolean {
   const message = (err as { message?: unknown } | null | undefined)?.message;
   if (typeof message !== 'string') return false;
   return message.includes(CLAUDE_CLI_NOT_FOUND_MESSAGE)
-    || message.includes(CLAUDE_CLI_NOT_SIGNED_IN_MESSAGE);
+    || message.includes(CLAUDE_CLI_NOT_SIGNED_IN_MESSAGE)
+    || message.includes(CLAUDE_CLI_PREP_SESSION_MISSING_MESSAGE);
 }
+
+/**
+ * Per-turn deliberation, passed as `--effort`.
+ *
+ * 'default' is NOT a level — it means "omit the flag", which is distinct from
+ * asking for any particular amount and is how the setting stays inert for
+ * users who never touch it. Mirrors the `'none'` sentinel in
+ * `codexCliModelReasoningEffort`, renamed because `--effort` has no `none`
+ * level and "none" would read as "think as little as possible".
+ */
+export type ClaudeCliEffort = 'default' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+export const CLAUDE_CLI_EFFORT_LEVELS: readonly ClaudeCliEffort[] =
+  ['default', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 
 /**
  * How turns map onto `claude` processes.
@@ -188,6 +310,16 @@ export interface ClaudeCliConfig {
   maxWarmProcesses: number;
   /** See ClaudeCliSessionMode. Default 'isolated' — the pre-session behaviour. */
   sessionMode: ClaudeCliSessionMode;
+  /**
+   * Prep conversation to ground every answer in, resumed and forked at meeting
+   * start. See the header. BLANK (the default) MEANS EXACTLY TODAY'S BEHAVIOUR
+   * — no resume, no replay, `--no-session-persistence` retained, no latency
+   * cost — and that is the property that makes the replay cost a user choice
+   * rather than something imposed. Do not give this a non-empty default.
+   */
+  prepSessionId: string;
+  /** Per-turn deliberation. 'default' omits `--effort`. See ClaudeCliEffort. */
+  effort: ClaudeCliEffort;
 }
 
 export interface ClaudeCliRunOptions {
@@ -201,6 +333,25 @@ export interface ClaudeCliRunOptions {
   signal?: AbortSignal;
   /** Prewarm cap for this call. Defaults to DEFAULT_CLAUDE_CLI_CONFIG's value. */
   maxWarmProcesses?: number;
+  /** Per-turn deliberation for THIS call. Omitted/'default' passes no --effort. */
+  effort?: ClaudeCliEffort;
+  /**
+   * This turn must not touch ANY per-meeting continuity mechanism — no prep
+   * session, no stdin session, `--no-session-persistence` retained.
+   *
+   * Set by every caller that is not a live answer, and load-bearing for
+   * exactly one of them: Auto Answer's judge. The judge only classifies "is
+   * this a question worth answering", it does not need 20k tokens of prep
+   * context for a yes/no, and it is the ONLY caller that genuinely overlaps
+   * another turn — a session is strictly serial and its frames carry no
+   * request id, so keeping the judge out is what makes one per-meeting session
+   * safe at all. (It was NOT out before this flag existed: the judge falls
+   * through to `generateContentStructured`, which routes to this provider at
+   * Priority 0 whenever a claude-cli model is selected, and its argv matched
+   * the meeting session's signature exactly — so on a Gemini-less install
+   * every judge verdict was landing in the meeting conversation.)
+   */
+  isolated?: boolean;
 }
 
 export const DEFAULT_CLAUDE_CLI_CONFIG: ClaudeCliConfig = {
@@ -216,6 +367,10 @@ export const DEFAULT_CLAUDE_CLI_CONFIG: ClaudeCliConfig = {
   // Default 'isolated': the mode with no cross-turn coupling. Persistent
   // sessions are opt-in because they trade independence for continuity.
   sessionMode: 'isolated',
+  // Blank = today's behaviour, exactly. See ClaudeCliConfig.prepSessionId.
+  prepSessionId: '',
+  // 'default' = no --effort flag, i.e. whatever the CLI does on its own.
+  effort: 'default',
 };
 
 export const CLAUDE_CLI_MODEL_ALIASES: readonly string[] = ['sonnet', 'opus', 'haiku', 'fable'] as const;
@@ -233,6 +388,8 @@ export interface ClaudeStreamFrame {
   result?: unknown;
   message?: { content?: unknown; model?: unknown } | null;
   event?: { type?: string; delta?: { type?: string; text?: unknown } | null } | null;
+  /** Present on `system`/`init` and on `result`. See extractClaudeSessionId. */
+  session_id?: string;
   parent_tool_use_id?: string | null;
   error?: { message?: unknown } | null;
   [key: string]: unknown;
@@ -346,6 +503,18 @@ export function extractClaudeAssistantText(frame: ClaudeStreamFrame): string {
 }
 
 /**
+ * Placeholder for an `is_error` result frame that carries no message at all.
+ *
+ * Not cosmetic: `--resume` of a session that does not exist produces exactly
+ * that frame (`subtype: "error_during_execution"`, no `result` field) and puts
+ * the real sentence — "No conversation found with session ID: …" — on STDERR.
+ * stream() therefore treats this specific string as "the frame knows nothing",
+ * and lets describeClaudeCliFailure read stderr instead. Exported so that
+ * deference cannot silently stop matching after a reword.
+ */
+export const CLAUDE_CLI_UNEXPLAINED_ERROR = 'Claude Code reported an error but gave no message.';
+
+/**
  * Human-readable error from a terminal frame, or '' when the frame is not an
  * error. The CLI puts its message in `result` on an `is_error` result frame
  * (e.g. "There's an issue with the selected model (…)"), which is far more
@@ -355,7 +524,7 @@ export function extractClaudeStreamError(frame: ClaudeStreamFrame): string {
   if (!frame || typeof frame !== 'object') return '';
   if (frame.type === 'result' && frame.is_error === true) {
     if (typeof frame.result === 'string' && frame.result.trim()) return frame.result;
-    return 'Claude Code reported an error but gave no message.';
+    return CLAUDE_CLI_UNEXPLAINED_ERROR;
   }
   if (frame.type === 'error') {
     if (typeof frame.error?.message === 'string') return frame.error.message;
@@ -367,6 +536,42 @@ export function extractClaudeStreamError(frame: ClaudeStreamFrame): string {
 /** True for the frame that ends a turn. */
 export function isClaudeTerminalFrame(frame: ClaudeStreamFrame): boolean {
   return !!frame && frame.type === 'result';
+}
+
+/**
+ * The session id a frame reports, or ''.
+ *
+ * Both the `system`/`init` frame and the terminal `result` frame carry it, and
+ * with `--fork-session` both carry the NEW id rather than the one that was
+ * resumed — which is the whole mechanism by which a forked meeting session
+ * becomes knowable. `init` arrives first, so the id is available long before
+ * the answer finishes; the `result` frame is read too, so a CLI that ever
+ * stops emitting `init` cannot silently lose the capture.
+ *
+ * Only accepted from those two frame types. Subagent and tool frames can also
+ * carry a `session_id`, and adopting one of those as the meeting's id would
+ * point the persisted "resume your interview" link at the wrong conversation.
+ */
+export function extractClaudeSessionId(frame: ClaudeStreamFrame): string {
+  if (!frame || typeof frame !== 'object') return '';
+  if (frame.parent_tool_use_id) return '';
+  const isInit = frame.type === 'system' && frame.subtype === 'init';
+  if (!isInit && frame.type !== 'result') return '';
+  const id = (frame as { session_id?: unknown }).session_id;
+  return typeof id === 'string' && id.trim() ? id.trim() : '';
+}
+
+/**
+ * True when a CLI failure means "that session id does not exist".
+ *
+ * `claude --resume <unknown-uuid>` exits 1 with
+ * `No conversation found with session ID: <id>` (verified, 2.1.252). Matched
+ * on the stable half of the sentence so a reworded suffix still classifies.
+ */
+export function looksLikeMissingSessionError(text: string): boolean {
+  const lower = (text || '').toLowerCase();
+  return lower.includes('no conversation found')
+    || (lower.includes('session') && lower.includes('not found'));
 }
 
 /**
@@ -438,6 +643,12 @@ export function describeClaudeCliFailure(exitCode: number | null, stderr: string
   const lower = text.toLowerCase();
   if (lower.includes('enoent') || lower.includes('command not found') || lower.includes('is not recognized')) {
     return `${CLAUDE_CLI_NOT_FOUND_MESSAGE} (tried "${binPath}")`;
+  }
+  // Before the auth arm: a dead prep session id is a CONFIGURATION problem the
+  // user can fix in one field, and "not signed in" would send them to a
+  // terminal to re-login for no reason.
+  if (looksLikeMissingSessionError(text)) {
+    return `${CLAUDE_CLI_PREP_SESSION_MISSING_MESSAGE} (${truncate(text, 200)})`;
   }
   if (lower.includes('not logged in') || lower.includes('please run /login')
     || lower.includes('invalid api key') || lower.includes('authentication_error')
@@ -973,6 +1184,9 @@ class ClaudeCliSessionManager {
     this.session = this.spawnSession();
   }
 
+  /** True once a meeting session has been opened, whether or not it is live. */
+  public get armed(): boolean { return this.spec !== null; }
+
   private spawnSession(): ClaudeCliSession | null {
     const spec = this.spec;
     if (!spec) return null;
@@ -1023,9 +1237,29 @@ class ClaudeCliSessionManager {
    * context would poison every later turn. It is a real limitation for a
    * genuine back-to-back pair, and it is the price of a serial transport.
    */
-  public claim(signature: string): ClaudeCliSession | null {
+  public claim(binPath: string, args: readonly string[]): ClaudeCliSession | null {
     const session = this.session;
     if (!session) return null;
+    const signature = ClaudeCliProcessPool.signature(binPath, args);
+
+    // REBIND BEFORE ANYTHING ELSE, and only while the session is still unused.
+    //
+    // The process is spawned at meeting start, before any turn exists — so its
+    // argv cannot yet carry the per-turn scaffolding that now lives in
+    // --system-prompt (see composeSystemPrompt). The first real turn is the
+    // first time that text is known, and a held process cannot be given new
+    // argv, so the session is respawned once against it. Nothing is lost: no
+    // turn has been served. After that the signature is fixed for the meeting,
+    // and a later turn whose scaffolding differs (a mode switch, a coding
+    // contract appearing) falls through to the isolated path exactly as a
+    // different --model already does.
+    if (session.completedTurns === 0 && !session.isBusy && session.signature !== signature && this.spec) {
+      session.dispose('rebinding to the first turn\'s system prompt');
+      this.spec = { ...this.spec, binPath, args };
+      this.session = this.spawnSession();
+      if (!this.session) return null;
+      return this.session.tryClaim(signature) ? this.session : null;
+    }
 
     // Recycle FIRST, and only for the reasons that actually make a session
     // unusable: the turn/age caps, or a dead process. Getting this wrong is
@@ -1065,6 +1299,245 @@ class ClaudeCliSessionManager {
 }
 
 // =============================================================================
+// Prep session (--resume / --fork-session)
+// =============================================================================
+
+/** What the meeting detail page and the Settings panel need to show. */
+export interface ClaudeCliPrepSessionStatus {
+  meetingId: string;
+  /** The configured prep conversation this meeting was forked from. */
+  prepSessionId: string;
+  /** The forked, per-meeting id. null until the first turn has completed. */
+  forkedSessionId: string | null;
+  /** Turns served on the forked session. */
+  turns: number;
+  /** Sticky failure. Non-null means every later turn is refused, loudly. */
+  failure: string | null;
+  /**
+   * Prompt tokens the CLI reported reading back on the last completed turn —
+   * i.e. what the prep conversation actually costs per turn. Falls out of the
+   * `result` frame the capture already parses; nothing counts tokens for it.
+   */
+  lastContextTokens: number | null;
+}
+
+/**
+ * How one turn should be attached to the prep/meeting conversation.
+ *
+ * `capture` is true for exactly one turn per meeting — the fork — because the
+ * id that comes back from it IS the meeting. `owned` says whether this plan
+ * holds the serialisation slot, so release() knows whether it may clear it.
+ */
+interface ClaudeCliResumePlan {
+  resumeSessionId: string;
+  fork: boolean;
+  capture: boolean;
+  owned: boolean;
+}
+
+/**
+ * Owns the at-most-one armed prep session, for the same reason
+ * ClaudeCliSessionManager owns at most one live session: Natively runs one
+ * meeting at a time, and a map keyed by meeting id would add bookkeeping for a
+ * case that cannot happen while making "forget everything on quit" easier to
+ * get wrong.
+ *
+ * THE OVERLAP DECISION, again, and it lands somewhere different from
+ * ClaudeCliSessionManager.claim(). Two processes resuming the SAME id both
+ * append to it and fork its history unpredictably, so overlapping turns cannot
+ * share the meeting session either. But here the loser has a better option
+ * than running with no context at all: it resumes the PREP id with
+ * `--fork-session`, which is a pure read of the prep conversation (forking
+ * writes a new file, it does not mutate the source), so the overlapping turn
+ * keeps the full prep grounding. What it gives up is the meeting's own
+ * history, and its answer is not appended to the meeting session — the same
+ * gap session mode already accepts, and the right trade for a SPECULATIVE turn
+ * that is often discarded. Queueing was rejected for the reason it is always
+ * rejected here: a live interview cannot afford one turn waiting on another.
+ */
+class ClaudeCliPrepSessionManager {
+  private static instance: ClaudeCliPrepSessionManager | null = null;
+
+  private state: {
+    meetingId: string;
+    prepSessionId: string;
+    forkedSessionId: string | null;
+    turns: number;
+    inFlight: boolean;
+    failure: string | null;
+    lastContextTokens: number | null;
+  } | null = null;
+
+  /**
+   * The forked id of the meeting that just ended.
+   *
+   * Needed because the two events happen in the wrong order for a simple
+   * read-then-clear: endMeeting kills the session in its SYNCHRONOUS section
+   * (main.ts, so the process dies immediately and the model reset that follows
+   * cannot corrupt it), while the meeting row is written later, from
+   * MeetingPersistence.stopMeeting. Without this the id would always be gone by
+   * the time anything wanted to persist it.
+   *
+   * Cleared at every meeting start — including a meeting with no prep session
+   * at all, which is the case that would otherwise stamp the PREVIOUS
+   * interview's session id onto an unrelated meeting row.
+   */
+  private lastForkedSessionId: string | null = null;
+
+  public static getInstance(): ClaudeCliPrepSessionManager {
+    if (!this.instance) this.instance = new ClaudeCliPrepSessionManager();
+    return this.instance;
+  }
+
+  /** Arm the prep session for a meeting. A blank id disarms. */
+  public begin(meetingId: string, prepSessionId: string): void {
+    const trimmed = (prepSessionId || '').trim();
+    if (!trimmed) {
+      this.end('no prep session configured');
+      this.lastForkedSessionId = null;
+      return;
+    }
+    this.lastForkedSessionId = null;
+    this.state = {
+      meetingId,
+      prepSessionId: trimmed,
+      forkedSessionId: null,
+      turns: 0,
+      inFlight: false,
+      failure: null,
+      lastContextTokens: null,
+    };
+  }
+
+  public end(reason: string): void {
+    if (this.state && process.env.CLAUDE_CLI_DEBUG) {
+      console.log(`[ClaudeCliService] prep session released (${reason}) after ${this.state.turns} turn(s)`);
+    }
+    if (this.state?.forkedSessionId) this.lastForkedSessionId = this.state.forkedSessionId;
+    this.state = null;
+  }
+
+  /** Forget a finished meeting's forked id. See lastForkedSessionId. */
+  public forgetLastMeeting(): void {
+    this.lastForkedSessionId = null;
+  }
+
+  public get armed(): boolean { return this.state !== null; }
+
+  /** Sticky failure, or null. Read by stream() BEFORE it spawns anything. */
+  public get failure(): string | null { return this.state?.failure ?? null; }
+
+  /** The forked meeting session id — live, or the one the last meeting ended with. */
+  public get forkedSessionId(): string | null {
+    return this.state?.forkedSessionId ?? this.lastForkedSessionId;
+  }
+
+  public status(): ClaudeCliPrepSessionStatus | null {
+    const s = this.state;
+    if (!s) return null;
+    return {
+      meetingId: s.meetingId,
+      prepSessionId: s.prepSessionId,
+      forkedSessionId: s.forkedSessionId,
+      turns: s.turns,
+      failure: s.failure,
+      lastContextTokens: s.lastContextTokens,
+    };
+  }
+
+  /**
+   * Record a failure that must stop every later turn.
+   *
+   * Sticky ON PURPOSE. A bad prep id fails identically on every turn, so
+   * retrying it silently would spend the whole meeting spawning doomed
+   * processes while the user watches answers not arrive. One loud refusal that
+   * names the fix beats a hundred quiet ones.
+   */
+  public noteFailure(message: string): void {
+    if (this.state && !this.state.failure) this.state.failure = message;
+  }
+
+  /** The plan for one turn, or null when there is no prep session to use. */
+  public planTurn(): ClaudeCliResumePlan | null {
+    const s = this.state;
+    if (!s || s.failure) return null;
+
+    if (s.inFlight) {
+      // Overlap. Fork the prep conversation again rather than touching the
+      // meeting session concurrently — see the class comment.
+      return { resumeSessionId: s.prepSessionId, fork: true, capture: false, owned: false };
+    }
+
+    s.inFlight = true;
+    if (s.forkedSessionId) {
+      return { resumeSessionId: s.forkedSessionId, fork: false, capture: false, owned: true };
+    }
+    return { resumeSessionId: s.prepSessionId, fork: true, capture: true, owned: true };
+  }
+
+  /**
+   * End a turn.
+   *
+   * `sessionId` is adopted as the meeting's id only for a capturing turn that
+   * actually SUCCEEDED. A failed `--resume` still reports a session_id (the
+   * one it was asked for, which by then is known not to exist), so capturing
+   * unconditionally would persist a dead id onto the meeting row and hand the
+   * user a "resume your interview" link that resolves to nothing.
+   */
+  public release(plan: ClaudeCliResumePlan, outcome: { sessionId: string | null; failed: boolean; contextTokens?: number | null }): void {
+    const s = this.state;
+    if (!s) return;
+    if (plan.owned) s.inFlight = false;
+    if (outcome.failed) return;
+    if (plan.capture && outcome.sessionId) s.forkedSessionId = outcome.sessionId;
+    if (plan.owned) s.turns += 1;
+    if (typeof outcome.contextTokens === 'number' && outcome.contextTokens > 0) {
+      s.lastContextTokens = outcome.contextTokens;
+    }
+  }
+}
+
+/**
+ * The full `--system-prompt` value for one invocation.
+ *
+ * The base persona ALWAYS leads, and `perTurn` — Natively's v2 scaffolding
+ * (`<identity>`, `<instruction_boundary>`, the mode/action blocks, the closing
+ * `<final_check>`) — follows it. That order is not arbitrary: it is exactly
+ * where the model saw those two relative to each other when the scaffolding
+ * rode in the user turn, so moving it here changes the CONTENT the model sees
+ * for a turn by nothing at all.
+ *
+ * WHY IT MOVES. `--system-prompt` is supplied per invocation and is NOT written
+ * to the session transcript — verified against a real session file, which
+ * contains three `system` records (all `turn_duration` lifecycle) and zero
+ * copies of the persona. The user turn IS written. So in a one-shot process the
+ * two locations cost the same, but in a RESUMED conversation the user turn is
+ * replayed on every later turn: a measured meeting carried the scaffolding
+ * twice, 16,804 + 17,630 characters (~8.6k tokens), and grows by another ~4.2k
+ * tokens per turn — ~100k by the SESSION_MAX_TURNS cap, all of it duplicate.
+ */
+function composeSystemPrompt(perTurn?: string): string {
+  const extra = (perTurn || '').trim();
+  return extra ? `${CLAUDE_CLI_BASE_SYSTEM_PROMPT}\n\n${extra}` : CLAUDE_CLI_BASE_SYSTEM_PROMPT;
+}
+
+/**
+ * Prompt tokens a `result` frame says this turn actually read.
+ *
+ * Cache reads plus fresh input, because from the user's point of view the prep
+ * conversation costs the same whether it was cached or not — it is the size of
+ * what gets replayed. Returns null when the frame carries no usage.
+ */
+function extractClaudeContextTokens(frame: ClaudeStreamFrame): number | null {
+  if (!frame || frame.type !== 'result') return null;
+  const usage = (frame as { usage?: Record<string, unknown> }).usage;
+  if (!usage || typeof usage !== 'object') return null;
+  const sum = ['input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens']
+    .reduce((acc, key) => acc + (typeof usage[key] === 'number' ? usage[key] as number : 0), 0);
+  return sum > 0 ? sum : null;
+}
+
+// =============================================================================
 // ClaudeCliService — public static surface
 // =============================================================================
 
@@ -1092,9 +1565,34 @@ export class ClaudeCliService {
    * Deliberately does NOT include the per-turn system prompt — that would make
    * the argv (and so the warm-pool key) vary per request. See
    * CLAUDE_CLI_BASE_SYSTEM_PROMPT.
+   *
+   * The two OPTIONAL flags, both absent by default so that calling this with a
+   * model alone still produces byte-for-byte today's argv:
+   *
+   *   --effort <level>            per-turn deliberation, ORTHOGONAL to --model.
+   *                               Omitted entirely at 'default'.
+   *   --resume <id> [--fork-session]
+   *                               continue the prep/meeting conversation. This
+   *                               arm DROPS --no-session-persistence, because
+   *                               --fork-session cannot write a forked session
+   *                               without it — the one place a Natively turn is
+   *                               allowed to reach ~/.claude, and only when the
+   *                               user has configured a prep session.
+   *
+   * `systemPrompt` APPENDS Natively's per-turn scaffolding to the base persona
+   * in --system-prompt, instead of letting it ride in the user turn. Used on
+   * the session paths only; see composeSystemPrompt for why that matters and
+   * why the isolated path deliberately does not do it.
    */
-  public static buildArgs(model: string): string[] {
-    return [
+  public static buildArgs(
+    model: string,
+    options: {
+      effort?: ClaudeCliEffort;
+      resume?: { sessionId: string; fork: boolean };
+      systemPrompt?: string;
+    } = {},
+  ): string[] {
+    const args = [
       '-p',
       '--input-format', 'stream-json',
       '--output-format', 'stream-json',
@@ -1103,10 +1601,23 @@ export class ClaudeCliService {
       '--tools', '',
       '--strict-mcp-config',
       '--setting-sources', '',
-      '--no-session-persistence',
-      '--system-prompt', CLAUDE_CLI_BASE_SYSTEM_PROMPT,
-      '--model', model,
     ];
+
+    if (options.resume?.sessionId) {
+      args.push('--resume', options.resume.sessionId);
+      if (options.resume.fork) args.push('--fork-session');
+    } else {
+      args.push('--no-session-persistence');
+    }
+
+    args.push('--system-prompt', composeSystemPrompt(options.systemPrompt), '--model', model);
+
+    // After --model, so the ORDER states the relationship: effort is a
+    // separate axis applied on top of whatever model was chosen, never a
+    // substitute for choosing a smaller one.
+    if (options.effort && options.effort !== 'default') args.push('--effort', options.effort);
+
+    return args;
   }
 
   public static normalizeConfig(config: Partial<ClaudeCliConfig> = {}): ClaudeCliConfig {
@@ -1127,6 +1638,12 @@ export class ClaudeCliService {
       sessionMode: (CLAUDE_CLI_SESSION_MODES as readonly string[]).includes(config.sessionMode as string)
         ? config.sessionMode as ClaudeCliSessionMode
         : DEFAULT_CLAUDE_CLI_CONFIG.sessionMode,
+      // Trimmed, never defaulted: '' is the meaningful value (no prep session,
+      // today's behaviour) and must survive normalization untouched.
+      prepSessionId: typeof config.prepSessionId === 'string' ? config.prepSessionId.trim() : '',
+      effort: (CLAUDE_CLI_EFFORT_LEVELS as readonly string[]).includes(config.effort as string)
+        ? config.effort as ClaudeCliEffort
+        : DEFAULT_CLAUDE_CLI_CONFIG.effort,
     };
   }
 
@@ -1332,18 +1849,70 @@ export class ClaudeCliService {
     if (options.signal?.aborted) throw new Error('Claude Code request aborted before start.');
 
     const resolved = this.resolvePath(binPath);
-    const args = this.buildArgs(options.model);
     const pool = ClaudeCliProcessPool.getInstance();
+    const prep = ClaudeCliPrepSessionManager.getInstance();
 
-    const turn = await this.buildTurnMessage(options);
+    // Refuse BEFORE spawning anything. A prep session that has already failed
+    // once fails identically every time, and the whole point of configuring
+    // one is that answers are grounded in it — so this throws rather than
+    // quietly producing a generic answer nobody can tell is ungrounded.
+    if (!options.isolated && prep.failure) throw new Error(prep.failure);
+
+    // Isolated callers (Auto Answer's judge above all — see
+    // ClaudeCliRunOptions.isolated) never see a prep session and never claim
+    // the stdin session. Resolved once, here, so both mechanisms are gated by
+    // the same flag and neither can be exempted by accident later.
+    const plan = options.isolated ? null : prep.planTurn();
+    const sessions = ClaudeCliSessionManager.getInstance();
+
+    // WHERE THE PER-TURN SCAFFOLDING RIDES. On a SESSION path it goes in argv,
+    // via --system-prompt; on the isolated path it stays prepended to the user
+    // turn as before. The difference is whether the turn is ever replayed:
+    //
+    //  - Session paths (a resumed prep/meeting conversation, or a stdin-held
+    //    process) send every earlier user turn again on every later turn. A
+    //    ~4.2k-token scaffolding in the turn is therefore paid once per turn
+    //    FOREVER — measured at 16,804 + 17,630 characters across two turns of a
+    //    real meeting, and growing. In --system-prompt it is supplied per call
+    //    and never written to the transcript, so the cost is flat.
+    //  - The isolated path spawns a fresh process, writes ONE turn, and throws
+    //    it away, so nothing accumulates and there is nothing to fix. Moving it
+    //    to argv there would be strictly worse: argv is the warm-pool key, and
+    //    a per-turn value would miss the pool on every request and hand back
+    //    the ~870ms it exists to save.
+    const scaffoldingInArgv = !options.isolated && (!!plan || sessions.armed);
+
+    const args = this.buildArgs(options.model, {
+      effort: options.effort,
+      resume: plan ? { sessionId: plan.resumeSessionId, fork: plan.fork } : undefined,
+      systemPrompt: scaffoldingInArgv ? options.instructions : undefined,
+    });
+
+    // The turn is built AFTER the plan because argv depends on the plan, but it
+    // can throw (every attached image failed to encode) — and a plan taken and
+    // never released would hold the prep session's in-flight slot forever,
+    // sending every later turn of the meeting down the overlap path.
+    let turn: Record<string, unknown>;
+    try {
+      turn = await this.buildTurnMessage(options, { scaffoldingInArgv });
+    } catch (error) {
+      if (plan) prep.release(plan, { sessionId: null, failed: true });
+      throw error;
+    }
 
     // A live meeting session takes this turn when it is free. claim() returns
     // null for every other case — no session, busy with an overlapping turn,
     // caps exceeded, different model — and the one-off path below runs instead.
     // Built the turn FIRST so the claim is never held across an await.
-    const session = ClaudeCliSessionManager.getInstance().claim(
-      ClaudeCliProcessPool.signature(resolved, args),
-    );
+    //
+    // Skipped entirely on the prep path: the two mechanisms are alternatives,
+    // not layers, and a stdin-held process that also resumed a session on
+    // every turn would replay the conversation on top of the copy it is
+    // already holding. begin()/beginSession() keep them mutually exclusive at
+    // meeting start; this is the belt to that braces.
+    const session = (options.isolated || plan)
+      ? null
+      : sessions.claim(resolved, args);
     if (session) {
       yield* session.runTurn(turn, options.timeoutMs, options.signal);
       return;
@@ -1360,13 +1929,31 @@ export class ClaudeCliService {
     };
     const combined = combineSignals(options.signal, deadlineController.signal);
 
-    const acquired = pool.acquire(resolved, args);
+    // acquire() can throw synchronously (spawn ENOENT on a bad binary path).
+    // The plan's in-flight slot is taken by now, and the try/finally that
+    // normally releases it starts further down — so release here or every later
+    // turn of the meeting silently takes the overlap path.
+    let acquired: { child: ChildProcessWithoutNullStreams; warm: boolean; stderr: string };
+    try {
+      acquired = pool.acquire(resolved, args);
+    } catch (error) {
+      if (plan) prep.release(plan, { sessionId: null, failed: true });
+      clearTimeout(deadlineTimer);
+      combined.dispose();
+      throw error;
+    }
     const child = acquired.child;
 
     // Replace the process we just took, so the NEXT request is warm too. Done
     // after acquire() and before any awaiting, so the refill overlaps this
     // request's own model latency instead of adding to the next one's.
-    const maxWarm = options.maxWarmProcesses ?? DEFAULT_CLAUDE_CLI_CONFIG.maxWarmProcesses;
+    //
+    // NOT on the resume path. A parked process boots — and, resuming, reads the
+    // session — before its turn is ever written, so one parked now would hold a
+    // snapshot taken BEFORE this turn appends to the session, and would answer
+    // the next question against a conversation missing the last exchange. The
+    // ~0.9s cold boot is the price of a turn that sees what actually happened.
+    const maxWarm = plan ? 0 : (options.maxWarmProcesses ?? DEFAULT_CLAUDE_CLI_CONFIG.maxWarmProcesses);
     try { pool.prewarm(resolved, args, maxWarm); } catch { /* best effort */ }
 
     const parser = new ClaudeStreamJsonParser();
@@ -1378,6 +1965,11 @@ export class ClaudeCliService {
     let spawnError: Error | null = null;
     let exitCode: number | null = null;
     let exited = false;
+    // Captured from the init/result frames on the resume path. See
+    // extractClaudeSessionId — with --fork-session this is the NEW id, which
+    // becomes the meeting's session.
+    let observedSessionId: string | null = null;
+    let observedContextTokens: number | null = null;
 
     // Single-slot wakeup, same shape as the pre-rewrite Codex subprocess
     // reader: producers push and wake, the generator drains and sleeps.
@@ -1385,8 +1977,20 @@ export class ClaudeCliService {
     let notify: (() => void) | null = null;
     const wake = () => { const n = notify; notify = null; n?.(); };
 
+    // Only read on the resume path. Split out so both the streaming and the
+    // flush-on-exit decode go through the same capture, rather than the
+    // trailing frame quietly not counting.
+    const observeFrame = (frame: ClaudeStreamFrame) => {
+      if (!plan) return;
+      const id = extractClaudeSessionId(frame);
+      if (id) observedSessionId = id;
+      const tokens = extractClaudeContextTokens(frame);
+      if (tokens !== null) observedContextTokens = tokens;
+    };
+
     const onStdout = (chunk: Buffer) => {
       for (const frame of parser.push(chunk.toString('utf8'))) {
+        observeFrame(frame);
         for (const text of reducer.accept(frame)) queue.push(text);
       }
       wake();
@@ -1402,6 +2006,7 @@ export class ClaudeCliService {
       exited = true;
       // Anything left in the buffer without a trailing newline.
       for (const frame of parser.flush()) {
+        observeFrame(frame);
         for (const text of reducer.accept(frame)) queue.push(text);
       }
       wake();
@@ -1454,6 +2059,29 @@ export class ClaudeCliService {
       child.off('error', onError);
       child.off('exit', onExit);
       killChild(child);
+
+      if (plan) {
+        // "Failed" narrowly: the turn never attached to the session. A
+        // BARGE-IN is not a failure — the fork happened, the id is real, and
+        // the partial answer is genuinely in the conversation — so it still
+        // captures, which is what keeps a cancelled first question from
+        // orphaning the meeting's session id.
+        const failed = !!spawnError
+          || (!emittedAny && (!!reducer.error || (exitCode !== null && exitCode !== 0)));
+        prep.release(plan, {
+          sessionId: observedSessionId,
+          failed,
+          contextTokens: observedContextTokens,
+        });
+        // Sticky ONLY for the configuration failure. A transient error (a
+        // model hiccup, a dropped connection) must leave the prep session
+        // armed so the next turn retries; a prep id that does not resolve will
+        // never resolve, and retrying it silently for a whole meeting is the
+        // outcome this refuses.
+        if (failed && looksLikeMissingSessionError(stderr)) {
+          prep.noteFailure(describeClaudeCliFailure(exitCode, stderr, resolved));
+        }
+      }
     }
 
     if (options.signal?.aborted) {
@@ -1474,6 +2102,15 @@ export class ClaudeCliService {
       if (emittedAny) {
         console.warn('[ClaudeCliService] stream ended after partial output:', streamFailure.message);
         return;
+      }
+      // An is_error frame that carries no message says only THAT it failed —
+      // which is exactly the shape `--resume <missing-id>` produces, with the
+      // usable sentence on stderr. Defer to stderr in that one case so the
+      // user is told the prep session is missing instead of "Claude Code
+      // reported an error but gave no message." A frame that DID explain
+      // itself still wins, per extractClaudeStreamError.
+      if (streamFailure.message.includes(CLAUDE_CLI_UNEXPLAINED_ERROR) && stderr.trim()) {
+        throw new Error(describeClaudeCliFailure(exitCode, stderr, resolved));
       }
       throw streamFailure;
     }
@@ -1498,7 +2135,11 @@ export class ClaudeCliService {
     for (const model of new Set([config.model, config.fastModel])) {
       // Only one per model: parking the full cap for every model would double
       // the idle process count for a fast model that may never be used.
-      pool.prewarm(resolved, this.buildArgs(model), 1);
+      // Effort is part of argv, so it is part of the pool key — park for the
+      // CONFIGURED effort or the warm process is never the one a request asks
+      // for. (A mid-meeting effort change therefore costs one cold spawn; that
+      // is the price of a control the user can move between questions.)
+      pool.prewarm(resolved, this.buildArgs(model, { effort: config.effort }), 1);
     }
   }
 
@@ -1528,11 +2169,17 @@ export class ClaudeCliService {
    * `config.model`, so an explicitly picked model is what the session speaks.
    * The binding matters at meeting end too: the app resets the selected model
    * during teardown, so nothing here may re-read it later.
+   *
+   * A configured PREP SESSION supersedes this entirely — see beginPrepSession
+   * and the header. Both mechanisms give per-meeting continuity and running
+   * them together would replay the conversation on top of the copy the held
+   * process already has, so exactly one is armed per meeting.
    */
   public static beginSession(config: ClaudeCliConfig, meetingId: string, model?: string): void {
     // Defensive, per the RAGManager F-411 pattern: a crash or force-quit never
     // ran endSession(), so start is the reliable place to clear a stale one.
     this.endSession('stale session cleared at meeting start');
+    if (config.prepSessionId) return;
     if (config.sessionMode !== 'meeting') return;
     if (!config.enabled) return;
     if (!this.binaryLooksAvailable(config.path)) return;
@@ -1540,11 +2187,118 @@ export class ClaudeCliService {
     const chosen = (model || config.model).trim() || config.model;
     ClaudeCliSessionManager.getInstance().begin(
       resolved,
-      this.buildArgs(chosen),
+      this.buildArgs(chosen, { effort: config.effort }),
       chosen,
       meetingId,
       config.maxWarmProcesses,
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Prep session
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Arm the configured prep session for a meeting, or disarm if there is none.
+   *
+   * Called unconditionally at meeting start — including with a blank prep id,
+   * which is what clears a previous meeting's fork. A crash or force-quit never
+   * ran endPrepSession(), so start is the only reliable place to do it (the
+   * same RAGManager F-411 reasoning as beginSession).
+   *
+   * Returns the actionable error when the configured id does not resolve to a
+   * conversation on disk, so the caller can tell the user NOW rather than
+   * letting them find out one unanswered question at a time. The check is a
+   * filesystem lookup, never a subprocess: meeting start is latency-critical
+   * and a `claude --resume` probe would cost a full cold boot plus an API call.
+   */
+  public static beginPrepSession(config: ClaudeCliConfig, meetingId: string): string | null {
+    const manager = ClaudeCliPrepSessionManager.getInstance();
+    manager.end('stale prep session cleared at meeting start');
+    // Before every early return below. A meeting that uses no prep session must
+    // not inherit the previous interview's forked id and stamp it on its own
+    // row — the user would follow that link into someone else's conversation.
+    manager.forgetLastMeeting();
+    if (!config.enabled) return null;
+    const prepId = (config.prepSessionId || '').trim();
+    if (!prepId) return null;
+
+    manager.begin(meetingId, prepId);
+    const located = this.locateSessionTranscript(prepId);
+    // `checked: false` means ~/.claude could not be read at all (no such
+    // directory, a sandbox, a relocated HOME). That is NOT evidence the session
+    // is missing, and failing the meeting on it would be a false alarm the user
+    // cannot act on. Stay armed and let the turn-time `--resume` — which is
+    // authoritative — be the one to refuse.
+    if (!located.checked || located.path) return null;
+
+    // Arm-then-fail rather than never arm: the sticky failure is what makes
+    // every turn of this meeting refuse loudly. Arming and then falling back to
+    // ungrounded answers is the one outcome this must not produce.
+    const message = `${CLAUDE_CLI_PREP_SESSION_MISSING_MESSAGE} (id: ${prepId})`;
+    manager.noteFailure(message);
+    return message;
+  }
+
+  /** Release the prep session. Safe to call at any time. */
+  public static endPrepSession(reason = 'meeting ended'): void {
+    ClaudeCliPrepSessionManager.getInstance().end(reason);
+  }
+
+  /** Live prep-session state, or null. Diagnostics, tests, and persistence. */
+  public static prepSessionStatus(): ClaudeCliPrepSessionStatus | null {
+    return ClaudeCliPrepSessionManager.getInstance().status();
+  }
+
+  /**
+   * The forked, per-meeting session id, once the first turn has produced one.
+   *
+   * This is what gets persisted on the meeting row: paste it into
+   * `claude --resume <id>` after the interview and you are back in the exact
+   * conversation, every question and every answer.
+   */
+  public static meetingSessionId(): string | null {
+    return ClaudeCliPrepSessionManager.getInstance().forkedSessionId;
+  }
+
+  /**
+   * Look for a session id's transcript under `~/.claude`.
+   *
+   * Sessions are stored per PROJECT (`~/.claude/projects/<slug>/<uuid>.jsonl`)
+   * but `--resume <id>` resolves an explicit id from ANY working directory —
+   * verified 2026-09-01, resuming from /tmp a session created elsewhere — so
+   * this searches every project rather than deriving a slug from a cwd that
+   * would be wrong anyway (Natively spawns in os.tmpdir(); see spawnClaude).
+   *
+   * `checked` is the important half of the return. It separates "looked, and
+   * the session is not there" (worth failing on) from "could not look at all"
+   * (worth saying nothing about). Collapsing the two into a bare null is how a
+   * user with a relocated HOME would be told their perfectly good session id
+   * was invalid.
+   */
+  public static locateSessionTranscript(sessionId: string): { checked: boolean; path: string | null } {
+    const id = (sessionId || '').trim();
+    // Path-segment characters in a config field must never reach a join(): a
+    // value like '../../x' would walk out of ~/.claude entirely. A malformed id
+    // is genuinely not a session, so this counts as a completed check.
+    if (!id || id.includes('/') || id.includes('\\') || id.includes('..')) {
+      return { checked: true, path: null };
+    }
+    let entries: fs.Dirent[];
+    const projects = path.join(os.homedir(), '.claude', 'projects');
+    try {
+      entries = fs.readdirSync(projects, { withFileTypes: true });
+    } catch {
+      return { checked: false, path: null };
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const candidate = path.join(projects, entry.name, `${id}.jsonl`);
+      try {
+        if (fs.existsSync(candidate)) return { checked: true, path: candidate };
+      } catch { /* unreadable project dir — keep looking */ }
+    }
+    return { checked: true, path: null };
   }
 
   /** Close the meeting session and kill its process. Safe to call at any time. */
@@ -1559,17 +2313,34 @@ export class ClaudeCliService {
    * the warm pool down unconditionally when that happens. Without this the live
    * session would either be killed silently (feature off for the rest of the
    * meeting) or left bound to argv the user has just changed. Returns true when
-   * a session was carried over.
+   * per-meeting continuity is still active afterwards.
    */
   public static reapplyConfigToSession(config: ClaudeCliConfig): boolean {
+    const prep = ClaudeCliPrepSessionManager.getInstance().status();
     const current = ClaudeCliSessionManager.getInstance().status();
-    if (!current?.meetingId) return false;
+    const meetingId = prep?.meetingId ?? current?.meetingId ?? null;
+    if (!meetingId) return false;
+
+    // An armed prep session whose ID DID NOT CHANGE is left completely alone.
+    // Re-arming would drop the forked id, and the fork IS the interview — a
+    // user who saved an unrelated setting (effort, timeout, warm count) two
+    // questions into a meeting would silently lose every answer so far from the
+    // conversation, and the persisted "resume your interview" id with it. Only
+    // a genuine change of prep session justifies starting over.
+    if (prep && prep.prepSessionId === config.prepSessionId && config.enabled) {
+      return true;
+    }
+
+    // Prep changed (set, cleared, or replaced): re-arm from scratch. Ordered
+    // prep-first because beginSession() defers to a configured prep id.
+    this.beginPrepSession(config, meetingId);
     // History cannot survive an argv change — a different --model is a
     // different conversation — so the replacement starts empty. That is
     // strictly better than the alternatives: silently dropping the session, or
     // continuing to speak to a model the user just deselected.
-    this.beginSession(config, current.meetingId, current.model ?? undefined);
-    return config.sessionMode === 'meeting' && config.enabled;
+    this.beginSession(config, meetingId, current?.model ?? undefined);
+    if (!config.enabled) return false;
+    return !!config.prepSessionId || config.sessionMode === 'meeting';
   }
 
   /** Live session state, or null. Diagnostics, tests, and the Settings panel. */
@@ -1582,18 +2353,36 @@ export class ClaudeCliService {
   // ---------------------------------------------------------------------------
 
   /**
-   * The per-turn text. Mirrors LLMHelper.buildCodexCliPrompt — the system
-   * prompt is prepended rather than passed as --system-prompt, because argv is
-   * the warm-pool key. See CLAUDE_CLI_BASE_SYSTEM_PROMPT.
+   * The per-turn text for the ISOLATED path, where the system prompt is
+   * prepended to the user turn rather than passed as --system-prompt because
+   * argv is the warm-pool key. See CLAUDE_CLI_BASE_SYSTEM_PROMPT.
+   *
+   * The session paths do NOT use this: a prepended scaffolding is replayed on
+   * every later turn of a resumed conversation, so there it rides in argv
+   * instead (see composeSystemPrompt). Mirrors LLMHelper.buildCodexCliPrompt.
    */
   public static buildTurnText(prompt: string, instructions?: string): string {
     return [instructions, prompt].filter(Boolean).join('\n\n');
   }
 
-  /** The stdin frame for one user turn, in the CLI's stream-json input shape. */
-  private static async buildTurnMessage(options: ClaudeCliRunOptions): Promise<Record<string, unknown>> {
+  /**
+   * The stdin frame for one user turn, in the CLI's stream-json input shape.
+   *
+   * `scaffoldingInArgv` says the per-turn system prompt has already been put in
+   * --system-prompt, so the turn carries the question and its evidence and
+   * nothing else. See the comment at its computation in stream().
+   */
+  private static async buildTurnMessage(
+    options: ClaudeCliRunOptions,
+    { scaffoldingInArgv = false }: { scaffoldingInArgv?: boolean } = {},
+  ): Promise<Record<string, unknown>> {
     const content: Array<Record<string, unknown>> = [
-      { type: 'text', text: this.buildTurnText(options.prompt, options.instructions) },
+      {
+        type: 'text',
+        text: scaffoldingInArgv
+          ? options.prompt
+          : this.buildTurnText(options.prompt, options.instructions),
+      },
     ];
 
     if (options.imagePaths?.length) {

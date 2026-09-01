@@ -896,6 +896,10 @@ interface Meeting {
         answer?: string;
         items?: string[];
     }>;
+    /** Forked Claude Code session this meeting's answers were generated in.
+     *  Present only for meetings answered by a claude-cli provider with a prep
+     *  session configured — which is exactly when the resume row should show. */
+    claudeSessionId?: string;
 }
 
 interface MeetingDetailsProps {
@@ -1224,6 +1228,32 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                                 className="text-3xl font-bold text-text-primary tracking-tight -ml-2 px-2 py-1 rounded-md transition-colors"
                                 multiline={false}
                             />
+
+                            {/* Claude Code session. Shown ONLY when this meeting
+                                was answered through a claude-cli provider with a
+                                prep session — the column is NULL otherwise, so
+                                its presence is the condition.
+
+                                The point of surfacing it is not diagnostics: run
+                                `claude --resume <id>` and you are back inside
+                                this interview, every question that was asked and
+                                every answer that was given, able to interrogate
+                                it or use it as the prep seed for the next round.
+                                So the id is selectable AND copyable — the
+                                command is meant to be run. */}
+                            {meeting.claudeSessionId && (
+                                <div className="group mt-2 flex items-center gap-2 min-w-0">
+                                    <span className="text-xs text-text-tertiary font-medium shrink-0">
+                                        {t('Claude Code session')}
+                                    </span>
+                                    <code className="text-xs text-text-secondary font-mono truncate select-all min-w-0">
+                                        {meeting.claudeSessionId}
+                                    </code>
+                                    <div className="shrink-0">
+                                        <CopyButton text={meeting.claudeSessionId} />
+                                    </div>
+                                </div>
+                            )}
                         </div>
 
                         {/* Moved Actions: Follow-up & Share (REMOVED per user request) */}

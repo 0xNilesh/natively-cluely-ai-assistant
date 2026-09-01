@@ -9306,6 +9306,8 @@ export function initializeIpcHandlers(appState: AppState): void {
       sm.set('claudeCliTimeoutMs', normalized.timeoutMs);
       sm.set('claudeCliMaxWarmProcesses', normalized.maxWarmProcesses);
       sm.set('claudeCliSessionMode', normalized.sessionMode);
+      sm.set('claudeCliSessionId', normalized.prepSessionId);
+      sm.set('claudeCliEffort', normalized.effort);
       appState.processingHelper.getLLMHelper().setClaudeCliConfig(normalized);
       return { success: true, config: normalized };
     } catch (error: any) {
@@ -9337,6 +9339,49 @@ export function initializeIpcHandlers(appState: AppState): void {
         appState.processingHelper.getLLMHelper().setClaudeCliConfig(persisted);
       }
       return { success: true, resolvedPath, version: result.version, config: persisted };
+    } catch (error: any) {
+      return { success: false, error: error.message };
+    }
+  });
+
+  /**
+   * Effort alone, for the control that sits next to the model picker.
+   *
+   * A separate handler rather than a set-claude-cli-config round trip because
+   * this one is pressed MID-MEETING. Reading the whole config back, mutating
+   * one field and writing it again would race a Settings panel that is open at
+   * the same time, and would republish `path`/`model` values the user may be
+   * halfway through editing there. This touches exactly the one key it owns.
+   */
+  safeHandle('claude-cli:set-effort', (_, effort: any) => {
+    try {
+      const llm = appState.processingHelper.getLLMHelper();
+      const normalized = ClaudeCliService.normalizeConfig({ ...llm.getClaudeCliConfig(), effort });
+      const sm = SettingsManager.getInstance();
+      if (!sm.set('claudeCliEffort', normalized.effort)) {
+        // Same R-24 guard as the config setter: a refused write must not report
+        // success, or the control springs back on the next launch.
+        return { success: false, error: 'settings_store_degraded' };
+      }
+      llm.setClaudeCliConfig(normalized);
+      return { success: true, effort: normalized.effort };
+    } catch (error: any) {
+      return { success: false, error: error.message };
+    }
+  });
+
+  /**
+   * Does this session id resolve to a conversation? Filesystem only.
+   *
+   * Lets the Settings panel say "that session does not exist" the moment the
+   * user pastes an id, instead of at the first question of an interview.
+   */
+  safeHandle('claude-cli:check-session', (_, sessionId: any) => {
+    try {
+      const located = ClaudeCliService.locateSessionTranscript(String(sessionId || ''));
+      // `checked: false` means ~/.claude could not be read at all, which is not
+      // evidence of anything about this id. Report "unknown", never "missing".
+      return { success: true, checked: located.checked, found: !!located.path };
     } catch (error: any) {
       return { success: false, error: error.message };
     }

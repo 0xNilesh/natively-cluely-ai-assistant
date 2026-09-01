@@ -73,6 +73,23 @@ export interface AppSettings {
     // ClaudeCliSessionMode for the trade-offs, particularly what happens when
     // two turns overlap.
     claudeCliSessionMode?: 'isolated' | 'meeting';
+    // The PREP CONVERSATION every answer is grounded in: a `claude` session id
+    // the user built before the interview (paste the JD, paste the CV, argue
+    // about tone). At meeting start it is resumed with --fork-session and the
+    // forked id becomes the meeting's own conversation.
+    //
+    // BLANK IS THE DEFAULT AND MEANS EXACTLY TODAY'S BEHAVIOUR: no resume, no
+    // replay, --no-session-persistence retained, no added latency and nothing
+    // written to the user's ~/.claude. That opt-out is what makes the replay
+    // cost (~0.3-0.9s of TTFT) a choice rather than something imposed, so this
+    // key must never acquire a non-empty default.
+    claudeCliSessionId?: string;
+    // Per-turn deliberation, passed as `--effort`. ORTHOGONAL to the model:
+    // 'opus' at 'low' is valid and useful, and effort must never be implemented
+    // as a model downgrade. 'default' means "omit the flag", which is distinct
+    // from every level. Exposed next to the model picker rather than here,
+    // because it is a control you would plausibly move mid-meeting.
+    claudeCliEffort?: 'default' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
     // Hindsight long-term memory server (optional, user-provisioned sidecar — Cloud OR
     // local). baseUrl empty by default → feature off. Env (HINDSIGHT_BASE_URL) overrides
     // these for dev. apiKey only for Hindsight Cloud. autoStart/serverCommand reserved for

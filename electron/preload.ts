@@ -25,6 +25,10 @@ interface ClaudeCliConfigShape {
   timeoutMs: number;
   maxWarmProcesses: number;
   sessionMode: 'isolated' | 'meeting';
+  /** Prep conversation resumed + forked at meeting start. '' = today's behaviour. */
+  prepSessionId: string;
+  /** Per-turn `--effort`. 'default' omits the flag. Orthogonal to the model. */
+  effort: 'default' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 }
 
 interface ElectronAPI {
@@ -653,6 +657,9 @@ interface ElectronAPI {
   // spawn a binary, so `path` is load-bearing and `testClaudeCli` runs it.
   getClaudeCliConfig: () => Promise<ClaudeCliConfigShape>;
   setClaudeCliConfig: (config: Partial<ClaudeCliConfigShape>) => Promise<{ success: boolean; error?: string; config?: ClaudeCliConfigShape }>;
+  setClaudeCliEffort: (effort: ClaudeCliConfigShape['effort']) => Promise<{ success: boolean; error?: string; effort?: ClaudeCliConfigShape['effort'] }>;
+  checkClaudeCliSession: (sessionId: string) => Promise<{ success: boolean; error?: string; checked?: boolean; found?: boolean }>;
+  onClaudeCliPrepSessionError: (callback: (payload: { error: string }) => void) => () => void;
   testClaudeCli: (config?: Partial<ClaudeCliConfigShape>) => Promise<{
     success: boolean;
     error?: string;
@@ -2232,6 +2239,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Claude Code / `claude` CLI.
   getClaudeCliConfig: () => ipcRenderer.invoke('get-claude-cli-config'),
   setClaudeCliConfig: (config: Partial<ClaudeCliConfigShape>) => ipcRenderer.invoke('set-claude-cli-config', config),
+  setClaudeCliEffort: (effort: ClaudeCliConfigShape['effort']) => ipcRenderer.invoke('claude-cli:set-effort', effort),
+  checkClaudeCliSession: (sessionId: string) => ipcRenderer.invoke('claude-cli:check-session', sessionId),
+  // The prep session is unusable. Surfaced rather than logged because the
+  // failure it guards against is a SILENT one — answers that look fine and are
+  // grounded in nothing.
+  onClaudeCliPrepSessionError: (callback: (payload: { error: string }) => void) => {
+    const subscription = (_event: any, payload: { error: string }) => callback(payload);
+    ipcRenderer.on('claude-cli:prep-session-error', subscription);
+    return () => {
+      ipcRenderer.removeListener('claude-cli:prep-session-error', subscription);
+    };
+  },
   testClaudeCli: (config?: Partial<ClaudeCliConfigShape>) => ipcRenderer.invoke('test-claude-cli', config),
   detectClaudeCliPath: () => ipcRenderer.invoke('claude-cli:detect-path'),
   onCodexLoginComplete: (callback: (info: { email?: string }) => void) => {
