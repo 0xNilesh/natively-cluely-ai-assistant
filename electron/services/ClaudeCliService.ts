@@ -115,6 +115,37 @@
  * whole conversation comes back as a prompt-cache read. A blank prep id opts
  * out of even that.
  *
+ * ── Where the per-turn scaffolding rides ───────────────────────────────────
+ * Natively composes a large per-turn system prompt (`<identity>`,
+ * `<instruction_boundary>`, mode/action blocks, the closing `<final_check>` —
+ * ~4.2k tokens). It reaches this service as `ClaudeCliRunOptions.instructions`,
+ * and there are two places to put it:
+ *
+ *   isolated path   PREPENDED TO THE USER TURN, as before. argv is the
+ *                   warm-pool key, so a per-turn value there would miss the
+ *                   pool on every request and give back the ~870ms it exists
+ *                   to save. Nothing accumulates: the process is fresh, one
+ *                   turn is written, and it is thrown away.
+ *   session paths   IN --system-prompt. A resumed conversation replays every
+ *                   earlier USER turn on every later turn, so a scaffolding
+ *                   sent there is paid again on every turn for the rest of the
+ *                   meeting. --system-prompt is supplied per invocation and is
+ *                   NOT written to the transcript (verified: a real session
+ *                   file has three `system` records, all `turn_duration`, and
+ *                   zero copies of the persona), so the model sees identical
+ *                   content per call at flat cost.
+ *
+ * The measurement that forced this, from a real meeting
+ * (8558f32d-8a01-4f87-9a5d-71c2928f3c2f): the scaffolding appeared in two user
+ * turns at 16,804 and 17,630 characters — ~8.6k tokens of duplicated prompt
+ * after two questions, ~42k by turn 10, ~100k at the SESSION_MAX_TURNS cap.
+ *
+ * One cost, stated plainly: the stdin session's process is spawned at meeting
+ * start, before any turn exists, so its argv cannot yet carry the scaffolding.
+ * The first real turn rebinds it (ClaudeCliSessionManager.claim), which spends
+ * a cold boot — ~0.9s, once per meeting, against ~4.2k tokens saved on every
+ * turn after the first.
+ *
  * ── Effort ─────────────────────────────────────────────────────────────────
  * `--effort low|medium|high|xhigh|max` is ORTHOGONAL to `--model`: it changes
  * how much the model deliberates, not which model runs, so `opus` at `low` is
@@ -1153,6 +1184,9 @@ class ClaudeCliSessionManager {
     this.session = this.spawnSession();
   }
 
+  /** True once a meeting session has been opened, whether or not it is live. */
+  public get armed(): boolean { return this.spec !== null; }
+
   private spawnSession(): ClaudeCliSession | null {
     const spec = this.spec;
     if (!spec) return null;
@@ -1203,9 +1237,29 @@ class ClaudeCliSessionManager {
    * context would poison every later turn. It is a real limitation for a
    * genuine back-to-back pair, and it is the price of a serial transport.
    */
-  public claim(signature: string): ClaudeCliSession | null {
+  public claim(binPath: string, args: readonly string[]): ClaudeCliSession | null {
     const session = this.session;
     if (!session) return null;
+    const signature = ClaudeCliProcessPool.signature(binPath, args);
+
+    // REBIND BEFORE ANYTHING ELSE, and only while the session is still unused.
+    //
+    // The process is spawned at meeting start, before any turn exists — so its
+    // argv cannot yet carry the per-turn scaffolding that now lives in
+    // --system-prompt (see composeSystemPrompt). The first real turn is the
+    // first time that text is known, and a held process cannot be given new
+    // argv, so the session is respawned once against it. Nothing is lost: no
+    // turn has been served. After that the signature is fixed for the meeting,
+    // and a later turn whose scaffolding differs (a mode switch, a coding
+    // contract appearing) falls through to the isolated path exactly as a
+    // different --model already does.
+    if (session.completedTurns === 0 && !session.isBusy && session.signature !== signature && this.spec) {
+      session.dispose('rebinding to the first turn\'s system prompt');
+      this.spec = { ...this.spec, binPath, args };
+      this.session = this.spawnSession();
+      if (!this.session) return null;
+      return this.session.tryClaim(signature) ? this.session : null;
+    }
 
     // Recycle FIRST, and only for the reasons that actually make a session
     // unusable: the turn/age caps, or a dead process. Getting this wrong is
@@ -1444,6 +1498,30 @@ class ClaudeCliPrepSessionManager {
 }
 
 /**
+ * The full `--system-prompt` value for one invocation.
+ *
+ * The base persona ALWAYS leads, and `perTurn` — Natively's v2 scaffolding
+ * (`<identity>`, `<instruction_boundary>`, the mode/action blocks, the closing
+ * `<final_check>`) — follows it. That order is not arbitrary: it is exactly
+ * where the model saw those two relative to each other when the scaffolding
+ * rode in the user turn, so moving it here changes the CONTENT the model sees
+ * for a turn by nothing at all.
+ *
+ * WHY IT MOVES. `--system-prompt` is supplied per invocation and is NOT written
+ * to the session transcript — verified against a real session file, which
+ * contains three `system` records (all `turn_duration` lifecycle) and zero
+ * copies of the persona. The user turn IS written. So in a one-shot process the
+ * two locations cost the same, but in a RESUMED conversation the user turn is
+ * replayed on every later turn: a measured meeting carried the scaffolding
+ * twice, 16,804 + 17,630 characters (~8.6k tokens), and grows by another ~4.2k
+ * tokens per turn — ~100k by the SESSION_MAX_TURNS cap, all of it duplicate.
+ */
+function composeSystemPrompt(perTurn?: string): string {
+  const extra = (perTurn || '').trim();
+  return extra ? `${CLAUDE_CLI_BASE_SYSTEM_PROMPT}\n\n${extra}` : CLAUDE_CLI_BASE_SYSTEM_PROMPT;
+}
+
+/**
  * Prompt tokens a `result` frame says this turn actually read.
  *
  * Cache reads plus fresh input, because from the user's point of view the prep
@@ -1500,10 +1578,19 @@ export class ClaudeCliService {
    *                               without it — the one place a Natively turn is
    *                               allowed to reach ~/.claude, and only when the
    *                               user has configured a prep session.
+   *
+   * `systemPrompt` APPENDS Natively's per-turn scaffolding to the base persona
+   * in --system-prompt, instead of letting it ride in the user turn. Used on
+   * the session paths only; see composeSystemPrompt for why that matters and
+   * why the isolated path deliberately does not do it.
    */
   public static buildArgs(
     model: string,
-    options: { effort?: ClaudeCliEffort; resume?: { sessionId: string; fork: boolean } } = {},
+    options: {
+      effort?: ClaudeCliEffort;
+      resume?: { sessionId: string; fork: boolean };
+      systemPrompt?: string;
+    } = {},
   ): string[] {
     const args = [
       '-p',
@@ -1523,7 +1610,7 @@ export class ClaudeCliService {
       args.push('--no-session-persistence');
     }
 
-    args.push('--system-prompt', CLAUDE_CLI_BASE_SYSTEM_PROMPT, '--model', model);
+    args.push('--system-prompt', composeSystemPrompt(options.systemPrompt), '--model', model);
 
     // After --model, so the ORDER states the relationship: effort is a
     // separate axis applied on top of whatever model was chosen, never a
@@ -1771,22 +1858,47 @@ export class ClaudeCliService {
     // quietly producing a generic answer nobody can tell is ungrounded.
     if (!options.isolated && prep.failure) throw new Error(prep.failure);
 
-    // Turn FIRST, for the same reason the session claim is taken after it: this
-    // await can throw (every attached image failed to encode), and a plan taken
-    // before it would leave the prep session's in-flight slot held forever —
-    // every later turn of the meeting would then take the overlap path and lose
-    // the meeting's own history.
-    const turn = await this.buildTurnMessage(options);
-
     // Isolated callers (Auto Answer's judge above all — see
     // ClaudeCliRunOptions.isolated) never see a prep session and never claim
     // the stdin session. Resolved once, here, so both mechanisms are gated by
     // the same flag and neither can be exempted by accident later.
     const plan = options.isolated ? null : prep.planTurn();
+    const sessions = ClaudeCliSessionManager.getInstance();
+
+    // WHERE THE PER-TURN SCAFFOLDING RIDES. On a SESSION path it goes in argv,
+    // via --system-prompt; on the isolated path it stays prepended to the user
+    // turn as before. The difference is whether the turn is ever replayed:
+    //
+    //  - Session paths (a resumed prep/meeting conversation, or a stdin-held
+    //    process) send every earlier user turn again on every later turn. A
+    //    ~4.2k-token scaffolding in the turn is therefore paid once per turn
+    //    FOREVER — measured at 16,804 + 17,630 characters across two turns of a
+    //    real meeting, and growing. In --system-prompt it is supplied per call
+    //    and never written to the transcript, so the cost is flat.
+    //  - The isolated path spawns a fresh process, writes ONE turn, and throws
+    //    it away, so nothing accumulates and there is nothing to fix. Moving it
+    //    to argv there would be strictly worse: argv is the warm-pool key, and
+    //    a per-turn value would miss the pool on every request and hand back
+    //    the ~870ms it exists to save.
+    const scaffoldingInArgv = !options.isolated && (!!plan || sessions.armed);
+
     const args = this.buildArgs(options.model, {
       effort: options.effort,
       resume: plan ? { sessionId: plan.resumeSessionId, fork: plan.fork } : undefined,
+      systemPrompt: scaffoldingInArgv ? options.instructions : undefined,
     });
+
+    // The turn is built AFTER the plan because argv depends on the plan, but it
+    // can throw (every attached image failed to encode) — and a plan taken and
+    // never released would hold the prep session's in-flight slot forever,
+    // sending every later turn of the meeting down the overlap path.
+    let turn: Record<string, unknown>;
+    try {
+      turn = await this.buildTurnMessage(options, { scaffoldingInArgv });
+    } catch (error) {
+      if (plan) prep.release(plan, { sessionId: null, failed: true });
+      throw error;
+    }
 
     // A live meeting session takes this turn when it is free. claim() returns
     // null for every other case — no session, busy with an overlapping turn,
@@ -1800,9 +1912,7 @@ export class ClaudeCliService {
     // meeting start; this is the belt to that braces.
     const session = (options.isolated || plan)
       ? null
-      : ClaudeCliSessionManager.getInstance().claim(
-        ClaudeCliProcessPool.signature(resolved, args),
-      );
+      : sessions.claim(resolved, args);
     if (session) {
       yield* session.runTurn(turn, options.timeoutMs, options.signal);
       return;
@@ -2243,18 +2353,36 @@ export class ClaudeCliService {
   // ---------------------------------------------------------------------------
 
   /**
-   * The per-turn text. Mirrors LLMHelper.buildCodexCliPrompt — the system
-   * prompt is prepended rather than passed as --system-prompt, because argv is
-   * the warm-pool key. See CLAUDE_CLI_BASE_SYSTEM_PROMPT.
+   * The per-turn text for the ISOLATED path, where the system prompt is
+   * prepended to the user turn rather than passed as --system-prompt because
+   * argv is the warm-pool key. See CLAUDE_CLI_BASE_SYSTEM_PROMPT.
+   *
+   * The session paths do NOT use this: a prepended scaffolding is replayed on
+   * every later turn of a resumed conversation, so there it rides in argv
+   * instead (see composeSystemPrompt). Mirrors LLMHelper.buildCodexCliPrompt.
    */
   public static buildTurnText(prompt: string, instructions?: string): string {
     return [instructions, prompt].filter(Boolean).join('\n\n');
   }
 
-  /** The stdin frame for one user turn, in the CLI's stream-json input shape. */
-  private static async buildTurnMessage(options: ClaudeCliRunOptions): Promise<Record<string, unknown>> {
+  /**
+   * The stdin frame for one user turn, in the CLI's stream-json input shape.
+   *
+   * `scaffoldingInArgv` says the per-turn system prompt has already been put in
+   * --system-prompt, so the turn carries the question and its evidence and
+   * nothing else. See the comment at its computation in stream().
+   */
+  private static async buildTurnMessage(
+    options: ClaudeCliRunOptions,
+    { scaffoldingInArgv = false }: { scaffoldingInArgv?: boolean } = {},
+  ): Promise<Record<string, unknown>> {
     const content: Array<Record<string, unknown>> = [
-      { type: 'text', text: this.buildTurnText(options.prompt, options.instructions) },
+      {
+        type: 'text',
+        text: scaffoldingInArgv
+          ? options.prompt
+          : this.buildTurnText(options.prompt, options.instructions),
+      },
     ];
 
     if (options.imagePaths?.length) {
