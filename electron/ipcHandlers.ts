@@ -9305,6 +9305,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       sm.set('claudeCliFastModel', normalized.fastModel);
       sm.set('claudeCliTimeoutMs', normalized.timeoutMs);
       sm.set('claudeCliMaxWarmProcesses', normalized.maxWarmProcesses);
+      sm.set('claudeCliSessionMode', normalized.sessionMode);
       appState.processingHelper.getLLMHelper().setClaudeCliConfig(normalized);
       return { success: true, config: normalized };
     } catch (error: any) {

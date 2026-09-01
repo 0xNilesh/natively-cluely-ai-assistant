@@ -2099,6 +2099,7 @@ export class AppState {
         fastModel: settingsManager.get('claudeCliFastModel') || 'haiku',
         timeoutMs: settingsManager.get('claudeCliTimeoutMs') || 60_000,
         maxWarmProcesses: settingsManager.get('claudeCliMaxWarmProcesses'),
+        sessionMode: settingsManager.get('claudeCliSessionMode') || 'isolated',
       });
     }
 
@@ -6320,6 +6321,12 @@ export class AppState {
       if (llmHelper?.isUsingOllama?.()) {
         llmHelper.prewarmPromptCache().catch((_e: any): void => {});
       }
+      // Persistent Claude Code session, when the user has selected a claude-cli
+      // model AND opted into session mode. A no-op otherwise. beginSession also
+      // clears any session a crash or force-quit left behind — the same
+      // dispose-defensively-at-start pattern RAGManager.startLiveIndexing uses,
+      // and for the same reason: no teardown runs on those paths.
+      llmHelper?.beginClaudeCliMeetingSession?.(`meeting-${meetingGeneration}`);
     } catch { /* non-fatal — warmup must never block meeting start */ }
 
     // ★ ASYNC AUDIO INIT: Return INSTANTLY so the IPC response goes back
@@ -6564,6 +6571,16 @@ export class AppState {
     this._meetingGeneration++;
     this._isDraining = true;
     this.broadcastMeetingState();
+
+    // Kill the persistent Claude Code session here, in the SYNCHRONOUS section,
+    // rather than in the background teardown below. Two reasons: the process is
+    // useless the moment the meeting is over, and the teardown block also
+    // resets the selected model — after which the session would be bound to a
+    // model nobody has chosen. Idempotent, so the double-end guard above
+    // already having returned is not a problem.
+    try {
+      this.processingHelper.getLLMHelper().endClaudeCliMeetingSession('meeting ended');
+    } catch { /* teardown must never throw */ }
 
     // ─── ABORT + AWAIT IN-FLIGHT AUDIO INIT (before any capture teardown) ───
     // If startMeeting()'s async audio init is still mid-`setupSystemAudioPipeline()`
@@ -9130,11 +9147,14 @@ if (process.env.THINKING_MATRIX === '1') {
     appState.stopNativeOomTraceSampling();
     nativeOomTrace.stop('will-quit');
     stopAppManagedHindsight('will-quit');
-    // Prewarmed `claude` processes are idle children of this process, so a
-    // graceful quit must reap them explicitly — otherwise they survive as
-    // orphans until their own idle TTL fires, minutes later.
+    // Prewarmed `claude` processes and any live meeting session are idle
+    // children of this process, so a graceful quit must reap them explicitly —
+    // otherwise they survive as orphans until their own idle TTL fires, minutes
+    // later. Quitting mid-meeting never runs endMeeting(), so the session
+    // dispose here is the only teardown that path gets.
     try {
       const { ClaudeCliService } = require('./services/ClaudeCliService');
+      ClaudeCliService.endSession('app quit');
       ClaudeCliService.disposeWarmPool();
     } catch { /* never block a quit */ }
     checkpointDatabase('will-quit');

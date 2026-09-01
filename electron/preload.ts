@@ -24,6 +24,7 @@ interface ClaudeCliConfigShape {
   fastModel: string;
   timeoutMs: number;
   maxWarmProcesses: number;
+  sessionMode: 'isolated' | 'meeting';
 }
 
 interface ElectronAPI {
