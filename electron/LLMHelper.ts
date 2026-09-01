@@ -1359,16 +1359,59 @@ export class LLMHelper {
     try {
       ClaudeCliService.disposeWarmPool();
       if (this.claudeCliConfig.enabled) ClaudeCliService.prewarm(this.claudeCliConfig);
+      // Settings can be saved DURING a meeting, and the dispose above is
+      // unconditional. Without this the live session would be left bound to
+      // argv the user has just changed — or, if the user turned the provider
+      // off, left running with nothing to reap it.
+      ClaudeCliService.reapplyConfigToSession(this.claudeCliConfig);
     } catch (e: any) {
       // Prewarming is an optimisation; a failure here must never block the
       // config write. The next real request spawns cold and reports properly.
       console.warn('[LLMHelper] Claude CLI prewarm failed:', e?.message);
     }
-    console.log(`[LLMHelper] Claude CLI ${this.claudeCliConfig.enabled ? 'enabled' : 'disabled'} with model: ${this.claudeCliConfig.model}`);
+    console.log(`[LLMHelper] Claude CLI ${this.claudeCliConfig.enabled ? 'enabled' : 'disabled'} with model: ${this.claudeCliConfig.model} (session mode: ${this.claudeCliConfig.sessionMode})`);
   }
 
   public getClaudeCliConfig(): ClaudeCliConfig {
     return this.claudeCliConfig;
+  }
+
+  /**
+   * Open a persistent Claude Code session for this meeting, when the user has
+   * asked for one.
+   *
+   * Gated on the model being EXPLICITLY selected, not merely available — the
+   * same distinction every other claude-cli decision in this class draws. A
+   * user who has the CLI installed but is answering with Gemini must not get a
+   * `claude` process held open for the length of their meeting.
+   *
+   * The selected model is resolved HERE and handed to the service, because the
+   * app resets the model during meeting teardown (main.ts endMeetingTransition)
+   * — so the session has to capture what was picked at start, not look it up
+   * later.
+   *
+   * Never throws: a session is an optimisation over the isolated path, and a
+   * failure to open one must not stop a meeting from starting.
+   */
+  public beginClaudeCliMeetingSession(meetingId: string): void {
+    try {
+      if (this.claudeCliConfig.sessionMode !== 'meeting') return;
+      if (!this.isClaudeCliModel(this.currentModelId)) return;
+      if (!this.isClaudeCliAvailable()) return;
+      ClaudeCliService.beginSession(this.claudeCliConfig, meetingId, this.getSelectedClaudeCliModel(false));
+      console.log(`[LLMHelper] Claude Code meeting session opened for ${meetingId}`);
+    } catch (e: any) {
+      console.warn('[LLMHelper] Claude Code meeting session failed to open:', e?.message);
+    }
+  }
+
+  /** Close any Claude Code meeting session. Safe to call unconditionally. */
+  public endClaudeCliMeetingSession(reason = 'meeting ended'): void {
+    try {
+      ClaudeCliService.endSession(reason);
+    } catch (e: any) {
+      console.warn('[LLMHelper] Claude Code meeting session failed to close:', e?.message);
+    }
   }
 
   public getAiResponseLanguage(): string {
@@ -3610,6 +3653,11 @@ let isMultimodal = !!(imagePaths?.length);
     const permanentFailureKeyFor = (name: string): string => {
       if (name.startsWith('Gemini')) return 'gemini';
       if (name.startsWith('OpenAI')) return 'openai';
+      // BEFORE the 'Claude' arm: "Claude Code (sonnet)" starts with "Claude", and
+      // folding it into the Anthropic key would let one provider's permanent auth
+      // failure mark the other dead for the rest of the call. They are separate
+      // providers with separate credentials.
+      if (name.startsWith('Claude Code')) return 'claude-cli';
       if (name.startsWith('Claude')) return 'claude';
       if (name.startsWith('Groq')) return 'groq';
       if (name.startsWith('Codex')) return 'codex';
@@ -3619,6 +3667,29 @@ let isMultimodal = !!(imagePaths?.length);
     // `opts.preferFast` retained for API compatibility; ordering no longer
     // depends on it (the Gemini block always leads with flash-lite).
     void opts;
+
+    // Priority 0: Claude Code — ONLY when the user has EXPLICITLY selected it.
+    //
+    // The gate is `isClaudeCliModel(currentModelId)`, not `isClaudeCliAvailable()`.
+    // That distinction is the whole point: merely HAVING the CLI installed must
+    // not seat a process spawn ahead of flash-lite for a document ingest (the
+    // same latency argument that pushed Codex below the Gemini cascade at
+    // Priority 5). But an explicit model pick is a different statement — the
+    // user asked for this model, and every other surface in this class already
+    // honours it.
+    //
+    // Without this term the structured path ignored the selection entirely and
+    // led with OpenAI. That is not merely "the wrong model answered": Auto
+    // Answer's judge routes here, so when the OpenAI key was rate-limited the
+    // ladder burned all 3 rotations plus backoff before giving up, which is long
+    // enough for autoAnswerGate to report engine_busy_or_cooling and drop the
+    // answer entirely. The user had picked claude-cli and got nothing.
+    if (this.isClaudeCliModel(this.currentModelId) && this.isClaudeCliAvailable()) {
+      providers.push({
+        name: `Claude Code (${this.claudeCliConfig.model})`,
+        execute: () => this.generateWithClaudeCli(message),
+      });
+    }
 
     // Priority 1: OpenAI
     if (this.openaiClient) {

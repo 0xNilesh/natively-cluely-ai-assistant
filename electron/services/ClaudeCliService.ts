@@ -48,19 +48,34 @@
  * parked and hands one to each request.
  *
  * ── Concurrency ────────────────────────────────────────────────────────────
- * Every request gets its OWN process, warm or cold, and exactly one turn is
- * ever written to it before stdin closes. Nothing is shared, so two overlapping
- * calls (Auto Answer prefetching while its judge is still deciding) cannot see
- * each other's context and neither blocks on the other. This matches the Codex
- * HTTP path's semantics exactly — `store: false`, one self-contained user turn
- * per call — and is why a long-lived multi-turn session was rejected: a single
- * persistent `claude` process serialises turns and leaks turn N's context into
- * turn N+1, which is wrong for independent prefetches.
+ * In the default 'isolated' mode every request gets its OWN process, warm or
+ * cold, and exactly one turn is ever written to it before stdin closes. Nothing
+ * is shared, so two overlapping calls (Auto Answer prefetching while its judge
+ * is still deciding) cannot see each other's context and neither blocks on the
+ * other. This matches the Codex HTTP path's semantics exactly — `store: false`,
+ * one self-contained user turn per call.
+ *
+ * 'meeting' mode is the opt-in opposite: ONE process is held open for a
+ * meeting and every turn goes to it, so the model remembers the conversation.
+ * A session is strictly serial, so the overlap the isolated path handles for
+ * free has to be decided explicitly — it is, in
+ * ClaudeCliSessionManager.claim(), which hands an overlapping turn its own
+ * one-off process rather than queueing it. Read that comment before changing
+ * anything here; the queueing option is the one that looks obvious and is
+ * wrong for a live interview.
  *
  * ── Cancellation ───────────────────────────────────────────────────────────
- * Abort (barge-in), idle timeout, and early consumer `break` all run the same
- * teardown: SIGTERM to the child, SIGKILL after CHILD_KILL_GRACE_MS if it has
- * not exited. Nothing is left orphaned.
+ * In isolated mode, abort (barge-in), idle timeout, and early consumer `break`
+ * all run the same teardown: SIGTERM to the child, SIGKILL after
+ * CHILD_KILL_GRACE_MS if it has not exited. Nothing is left orphaned.
+ *
+ * In session mode the process must OUTLIVE a cancelled turn, so a barge-in
+ * detaches the consumer and the reader keeps draining to the turn's terminal
+ * frame in the background (see ClaudeCliSession.runTurn). The session itself is
+ * disposed on meeting end, on app quit, on a mid-meeting config change, and
+ * whenever a turn times out. A crashed main process cannot run any of those —
+ * the backstop there is the stdin pipe: it closes when this process dies, the
+ * CLI sees EOF, and it exits on its own.
  */
 
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'child_process';
@@ -91,6 +106,19 @@ const CHILD_KILL_GRACE_MS = 2_000;
 
 /** How long a prewarmed, unused process is kept before being reaped. */
 const WARM_IDLE_TTL_MS = 5 * 60_000;
+
+/**
+ * Turn and age caps for a persistent meeting session.
+ *
+ * Context accumulation is the POINT of session mode, but it is also its cost:
+ * every turn re-sends the whole conversation, so a session left running across
+ * a long meeting gets steadily slower and more expensive, and old questions
+ * start colouring new answers. At the cap the session is retired and a fresh
+ * one takes over — the user loses history, which is the lesser harm against an
+ * answer that arrives too late to be useful in a live interview.
+ */
+const SESSION_MAX_TURNS = 24;
+const SESSION_MAX_AGE_MS = 30 * 60_000;
 
 /** Cap on stderr retained per child, so a chatty binary can't grow unbounded. */
 const STDERR_CAP_BYTES = 8 * 1024;
@@ -130,6 +158,22 @@ export function isClaudeCliError(err: unknown): boolean {
     || message.includes(CLAUDE_CLI_NOT_SIGNED_IN_MESSAGE);
 }
 
+/**
+ * How turns map onto `claude` processes.
+ *
+ *  - 'isolated' (default) — one process per message, stdin closed after a
+ *    single turn. Nothing is shared, so overlapping requests cannot see each
+ *    other and no context leaks between questions.
+ *  - 'meeting' — ONE process is held open for the duration of a meeting and
+ *    every turn of that meeting is written to it, so the model remembers the
+ *    conversation. See ClaudeCliSession for what happens when two turns
+ *    overlap (they cannot share one serial session, so the loser runs
+ *    isolated) and for the turn/age caps that stop the prompt bloating.
+ */
+export type ClaudeCliSessionMode = 'isolated' | 'meeting';
+
+export const CLAUDE_CLI_SESSION_MODES: readonly ClaudeCliSessionMode[] = ['isolated', 'meeting'] as const;
+
 export interface ClaudeCliConfig {
   enabled: boolean;
   /** Binary path. 'claude' means "resolve on PATH, then fall back to
@@ -142,6 +186,8 @@ export interface ClaudeCliConfig {
   timeoutMs: number;
   /** How many prewarmed processes to keep parked. 0 disables prewarming. */
   maxWarmProcesses: number;
+  /** See ClaudeCliSessionMode. Default 'isolated' — the pre-session behaviour. */
+  sessionMode: ClaudeCliSessionMode;
 }
 
 export interface ClaudeCliRunOptions {
@@ -167,6 +213,9 @@ export const DEFAULT_CLAUDE_CLI_CONFIG: ClaudeCliConfig = {
   fastModel: 'haiku',
   timeoutMs: 60_000,
   maxWarmProcesses: 2,
+  // Default 'isolated': the mode with no cross-turn coupling. Persistent
+  // sessions are opt-in because they trade independence for continuity.
+  sessionMode: 'isolated',
 };
 
 export const CLAUDE_CLI_MODEL_ALIASES: readonly string[] = ['sonnet', 'opus', 'haiku', 'fable'] as const;
@@ -321,6 +370,63 @@ export function isClaudeTerminalFrame(frame: ClaudeStreamFrame): boolean {
 }
 
 /**
+ * Turns decoded frames into the text chunks a consumer should see.
+ *
+ * Extracted so the one-shot path and the persistent-session path cannot drift:
+ * the rules below are subtle enough that two copies would eventually disagree
+ * about when an answer gets duplicated or when an error gets swallowed.
+ *
+ * The rules, in the order they matter:
+ *   1. `text_delta` frames are the answer, streamed. The first one latches
+ *      `sawTextDelta`.
+ *   2. A whole `assistant` message is emitted ONLY if no delta ever arrived —
+ *      it repeats what the deltas already produced, so emitting both would
+ *      duplicate the entire answer. (Synthetic error envelopes are filtered
+ *      upstream by extractClaudeAssistantText.)
+ *   3. The terminal `result` frame also carries the whole answer. It is emitted
+ *      only when nothing else produced anything at all.
+ *   4. An `is_error` result records the error instead of producing text.
+ */
+export class ClaudeTurnReducer {
+  private sawTextDelta = false;
+  /** True once any chunk has been produced by this reducer. */
+  public producedAny = false;
+  public sawTerminalFrame = false;
+  public error: Error | null = null;
+
+  /** Chunks this frame contributes, in order. Usually zero or one. */
+  public accept(frame: ClaudeStreamFrame): string[] {
+    const out: string[] = [];
+
+    const delta = extractClaudeTextDelta(frame);
+    if (delta) {
+      this.sawTextDelta = true;
+      this.producedAny = true;
+      return [delta];
+    }
+
+    if (!this.sawTextDelta) {
+      const whole = extractClaudeAssistantText(frame);
+      if (whole) out.push(whole);
+    }
+
+    const err = extractClaudeStreamError(frame);
+    if (err && !this.error) this.error = new Error(`Claude Code CLI: ${err}`);
+
+    if (isClaudeTerminalFrame(frame)) {
+      this.sawTerminalFrame = true;
+      if (!this.error && !this.producedAny && out.length === 0
+        && typeof frame.result === 'string' && frame.result) {
+        out.push(frame.result);
+      }
+    }
+
+    if (out.length) this.producedAny = true;
+    return out;
+  }
+}
+
+/**
  * Map raw stderr / an exit code onto a user-facing message.
  *
  * Ordered most-specific first. The auth case matters most: without it a
@@ -383,7 +489,13 @@ class ClaudeCliProcessPool {
   }
 
   public static signature(binPath: string, args: readonly string[]): string {
-    return [binPath, ...args].join(' ');
+    // NUL, written as an escape rather than as a literal control byte. As a
+    // literal it made `file` and `grep` classify this whole module as binary,
+    // which silently drops it out of every grep-based code search.
+    // The separator itself must not be a space: `--system-prompt` carries a
+    // multi-word value, so a space-joined signature would let two different
+    // argv vectors collide onto one pool key.
+    return [binPath, ...args].join('\u0000');
   }
 
   /**
@@ -530,6 +642,429 @@ function appendCapped(current: string, addition: string): string {
 }
 
 // =============================================================================
+// Persistent meeting session
+// =============================================================================
+
+export interface ClaudeCliSessionStatus {
+  active: boolean;
+  meetingId: string | null;
+  /** Turns COMPLETED on this session. */
+  turns: number;
+  ageMs: number;
+  /** True while a turn is being written, read, or drained after a barge-in. */
+  busy: boolean;
+  model: string | null;
+}
+
+/** Per-turn state for the session reader. One at a time, by construction. */
+interface SessionTurnState {
+  reducer: ClaudeTurnReducer;
+  queue: string[];
+  /** Terminal frame seen, or the process died. */
+  done: boolean;
+  /** The consumer stopped listening (barge-in / early return). */
+  detached: boolean;
+  notify: (() => void) | null;
+}
+
+/**
+ * ONE `claude` process held open across a meeting, fed one turn at a time.
+ *
+ * WHY A LONG-LIVED STDIN PROCESS RATHER THAN `--resume`
+ *
+ * The CLI can also continue a conversation with `--resume <session-id>`, which
+ * would give a fresh process per turn. It was rejected on three counts:
+ *
+ *  1. `--resume` requires the session to be WRITTEN TO DISK, so
+ *     `--no-session-persistence` would have to be dropped and every Natively
+ *     turn would land in the user's own `~/.claude` history. That is a privacy
+ *     regression the isolated path deliberately does not have.
+ *  2. It pays the full ~1.4s cold boot on every turn, plus a replay cost that
+ *     grows with the conversation — the opposite of what the warm pool exists
+ *     to fix.
+ *  3. It buys no concurrency: two processes resuming the same session id both
+ *     append to it and fork the history, so overlapping turns are no more
+ *     serviceable than they are here.
+ *
+ * Holding stdin open keeps the process warm, keeps history in memory, and
+ * keeps `--no-session-persistence`.
+ *
+ * WHAT A SESSION CANNOT DO
+ *
+ * It is strictly SERIAL: the CLI reads turns off stdin in order and its output
+ * frames carry no request id, so two in-flight turns could not be told apart.
+ * Auto Answer prefetches a speculative answer while its judge is still
+ * deciding, so overlap is the normal case, not an edge case. The resolution is
+ * in ClaudeCliSessionManager.claim(): the second turn does not queue, it runs
+ * on its own one-off process. See there for the reasoning.
+ */
+class ClaudeCliSession {
+  private readonly parser = new ClaudeStreamJsonParser();
+  private readonly startedAt = Date.now();
+  private turnState: SessionTurnState | null = null;
+  private stderr = '';
+  private turnsDone = 0;
+  private busy = false;
+  private dead = false;
+  private disposed = false;
+
+  constructor(
+    private readonly child: ChildProcessWithoutNullStreams,
+    public readonly signature: string,
+    public readonly model: string,
+    public readonly meetingId: string,
+  ) {
+    // Listeners live for the whole session, not per turn: the CLI's stdout is
+    // one continuous NDJSON stream across every turn, so re-attaching per turn
+    // would drop frames that arrive between them.
+    this.child.stdout.on('data', (chunk: Buffer) => this.onStdout(chunk));
+    this.child.stderr.on('data', (chunk: Buffer) => { this.stderr = appendCapped(this.stderr, chunk.toString()); });
+    this.child.once('exit', () => this.onDeath());
+    this.child.once('error', () => this.onDeath());
+    // stdin stays OPEN — that is the whole mechanism. It also means the
+    // process dies on its own if this one does: the pipe closes, the CLI sees
+    // EOF, and it exits. That is what keeps a crashed main process from
+    // leaving an orphan, since no timer of ours could run to clean it up.
+    this.child.stdin.on('error', () => { /* death is handled by 'exit' */ });
+  }
+
+  private onStdout(chunk: Buffer): void {
+    const state = this.turnState;
+    for (const frame of this.parser.push(chunk.toString('utf8'))) {
+      // Frames arriving between turns are lifecycle noise (rate-limit events,
+      // status). With no turn to attribute them to, dropping is correct.
+      if (!state) continue;
+      for (const text of state.reducer.accept(frame)) state.queue.push(text);
+      if (state.reducer.sawTerminalFrame) state.done = true;
+    }
+    if (state) this.wake(state);
+  }
+
+  private onDeath(): void {
+    this.dead = true;
+    const state = this.turnState;
+    if (state) {
+      state.done = true;
+      this.wake(state);
+    }
+  }
+
+  private wake(state: SessionTurnState): void {
+    const n = state.notify;
+    state.notify = null;
+    n?.();
+  }
+
+  public get alive(): boolean {
+    return !this.dead && !this.disposed && this.child.exitCode === null && this.child.signalCode === null;
+  }
+
+  /** Caps exceeded, or the process is gone — the manager should recycle it. */
+  public get retired(): boolean {
+    if (!this.alive) return true;
+    if (this.turnsDone >= SESSION_MAX_TURNS) return true;
+    return Date.now() - this.startedAt >= SESSION_MAX_AGE_MS;
+  }
+
+  public get isBusy(): boolean { return this.busy; }
+
+  /** Turns this session has actually completed. */
+  public get completedTurns(): number { return this.turnsDone; }
+
+  public status(): ClaudeCliSessionStatus {
+    return {
+      active: this.alive,
+      meetingId: this.meetingId,
+      turns: this.turnsDone,
+      ageMs: Date.now() - this.startedAt,
+      busy: this.busy,
+      model: this.model,
+    };
+  }
+
+  /**
+   * Take the session for exactly one turn, or refuse.
+   *
+   * Refusal is never a queue. A live interview cannot afford one turn waiting
+   * on another; the caller runs a one-off process instead.
+   */
+  public tryClaim(signature: string): boolean {
+    if (!this.alive) return false;
+    if (this.busy) return false;
+    if (this.retired) return false;
+    // argv identity, so a fast-model turn never lands on a session bound to the
+    // main model (different --model means a different conversation).
+    if (this.signature !== signature) return false;
+    this.busy = true;
+    return true;
+  }
+
+  /** Release a claim that was taken but never run (write failed before start). */
+  public abandonClaim(): void {
+    this.turnState = null;
+    this.busy = false;
+  }
+
+  /**
+   * Run one turn on this session.
+   *
+   * Differs from the one-shot path in exactly two ways, both deliberate:
+   *  - the process is NOT killed when the turn ends, and
+   *  - a consumer that walks away (barge-in) does not end the turn. The reader
+   *    keeps draining to the terminal frame in the background so the session is
+   *    left in a usable state for the next question. Draining also means the
+   *    unshown answer stays in the model's context, which is the honest record
+   *    of what happened; the alternative — killing the session on every
+   *    barge-in — would throw away the whole meeting's history for one
+   *    cancelled answer.
+   */
+  public async *runTurn(
+    turn: Record<string, unknown>,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): AsyncGenerator<string, void, unknown> {
+    const state: SessionTurnState = {
+      reducer: new ClaudeTurnReducer(),
+      queue: [],
+      done: false,
+      detached: false,
+      notify: null,
+    };
+    this.turnState = state;
+
+    // Idle guard: reset on every chunk, so a slow-but-live answer is never cut.
+    // Unlike the one-shot path, firing it RETIRES the session — a process that
+    // has gone quiet mid-turn can no longer be trusted to be at a turn boundary.
+    let timedOut = false;
+    let timer: ReturnType<typeof setTimeout> = setTimeout(() => {
+      timedOut = true;
+      this.dispose('turn timed out');
+    }, timeoutMs);
+    const resetDeadline = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        timedOut = true;
+        this.dispose('turn timed out');
+      }, timeoutMs);
+    };
+
+    let aborted = false;
+    const onAbort = () => { aborted = true; this.wake(state); };
+    signal?.addEventListener('abort', onAbort, { once: true });
+
+    try {
+      this.child.stdin.write(`${JSON.stringify(turn)}\n`);
+    } catch (error: any) {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      this.dispose('stdin write failed');
+      throw new Error(`Claude Code CLI session write failed: ${error?.message || error}`);
+    }
+
+    let emittedAny = false;
+    try {
+      while (!state.done || state.queue.length > 0) {
+        while (state.queue.length > 0) {
+          if (aborted) break;
+          resetDeadline();
+          emittedAny = true;
+          yield state.queue.shift()!;
+        }
+        if (aborted || state.done) break;
+        await new Promise<void>(resolve => { state.notify = resolve; });
+      }
+    } finally {
+      signal?.removeEventListener('abort', onAbort);
+      if (state.done) {
+        clearTimeout(timer);
+        this.completeTurn(state);
+      } else {
+        // Consumer gone, turn still running. Keep reading so the session lands
+        // back on a turn boundary; `busy` stays true throughout, so an
+        // overlapping request falls through to a one-off process rather than
+        // interleaving with this drain.
+        state.detached = true;
+        void this.drainDetached(state, timer);
+      }
+    }
+
+    if (aborted) return;                 // barge-in: partials already shown stand
+    if (timedOut) {
+      if (emittedAny) return;
+      throw new Error(`Claude Code CLI session timed out after ${timeoutMs}ms with no output.`);
+    }
+    const failure = state.reducer.error;
+    if (failure) {
+      if (emittedAny) {
+        console.warn('[ClaudeCliService] session turn ended after partial output:', failure.message);
+        return;
+      }
+      throw failure;
+    }
+    if (!emittedAny) {
+      // The process died mid-turn, or answered with nothing at all.
+      const detail = this.stderr.trim()
+        ? describeClaudeCliFailure(this.child.exitCode, this.stderr, this.model)
+        : 'Claude Code CLI session returned an empty response.';
+      throw new Error(detail);
+    }
+  }
+
+  private completeTurn(state: SessionTurnState): void {
+    if (this.turnState !== state) return;
+    this.turnState = null;
+    this.turnsDone += 1;
+    this.busy = false;
+  }
+
+  /** Read a detached turn to its terminal frame, then free the session. */
+  private async drainDetached(state: SessionTurnState, timer: ReturnType<typeof setTimeout>): Promise<void> {
+    try {
+      while (!state.done) {
+        await new Promise<void>(resolve => { state.notify = resolve; });
+        state.queue.length = 0; // nobody is listening; do not grow unbounded
+      }
+    } finally {
+      clearTimeout(timer);
+      this.completeTurn(state);
+    }
+  }
+
+  public dispose(reason: string): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    const state = this.turnState;
+    if (state) {
+      state.done = true;
+      this.wake(state);
+    }
+    this.turnState = null;
+    this.busy = false;
+    try { this.child.stdin.end(); } catch { /* already gone */ }
+    killChild(this.child);
+    if (process.env.CLAUDE_CLI_DEBUG) {
+      console.log(`[ClaudeCliService] session disposed (${reason}) after ${this.turnsDone} turn(s)`);
+    }
+  }
+}
+
+/**
+ * Owns the at-most-one live session.
+ *
+ * At most one because a session is bound to a meeting and Natively runs one
+ * meeting at a time; a map keyed by meeting id would add bookkeeping for a
+ * case that cannot occur, and would make "dispose everything on quit" easier
+ * to get wrong.
+ */
+class ClaudeCliSessionManager {
+  private static instance: ClaudeCliSessionManager | null = null;
+  private session: ClaudeCliSession | null = null;
+  /** Enough to rebuild a session after the caps retire one. */
+  private spec: { binPath: string; args: readonly string[]; model: string; meetingId: string; maxWarm: number } | null = null;
+
+  public static getInstance(): ClaudeCliSessionManager {
+    if (!this.instance) this.instance = new ClaudeCliSessionManager();
+    return this.instance;
+  }
+
+  public begin(binPath: string, args: readonly string[], model: string, meetingId: string, maxWarm: number): void {
+    this.end('replaced');
+    this.spec = { binPath, args, model, meetingId, maxWarm };
+    this.session = this.spawnSession();
+  }
+
+  private spawnSession(): ClaudeCliSession | null {
+    const spec = this.spec;
+    if (!spec) return null;
+    try {
+      // Take a PREWARMED process when one is parked: a session that starts on a
+      // booted process answers its first turn ~0.9s faster, which matters most
+      // for the first question of a meeting.
+      const pool = ClaudeCliProcessPool.getInstance();
+      const acquired = pool.acquire(spec.binPath, spec.args);
+      try { pool.prewarm(spec.binPath, spec.args, spec.maxWarm); } catch { /* best effort */ }
+      return new ClaudeCliSession(
+        acquired.child,
+        ClaudeCliProcessPool.signature(spec.binPath, spec.args),
+        spec.model,
+        spec.meetingId,
+      );
+    } catch (e: any) {
+      // A session is an optimisation over the isolated path. Failing to start
+      // one must never fail the meeting; turns just run isolated.
+      console.warn('[ClaudeCliService] could not start meeting session:', e?.message);
+      return null;
+    }
+  }
+
+  /**
+   * The session to run this turn on, or null to run it isolated.
+   *
+   * THE OVERLAP DECISION. Auto Answer starts a speculative answer while the
+   * judge is still deciding, so a second turn routinely arrives while the first
+   * is in flight. Three options were considered:
+   *
+   *   queue it      — rejected outright. The whole point of the prefetch is to
+   *                   have the answer ready the moment the judge says yes;
+   *                   making it wait for the turn it was meant to overlap adds
+   *                   the exact latency the feature exists to remove, in the
+   *                   one situation (a live interview) where it is least
+   *                   affordable.
+   *   reject it     — rejected. The prefetch simply would not happen, so
+   *                   enabling session mode would silently disable a feature.
+   *   run it alone  — CHOSEN. The loser gets its own one-off process, i.e.
+   *                   exactly today's isolated behaviour. It is never slower
+   *                   than isolated mode and never blocks.
+   *
+   * What the loser gives up, stated plainly: it does not see the meeting's
+   * history, and its own text is not appended to the session, so the session
+   * has a gap. For a SPECULATIVE turn that is arguably right — a speculative
+   * answer is often discarded, and appending a discarded answer to the meeting
+   * context would poison every later turn. It is a real limitation for a
+   * genuine back-to-back pair, and it is the price of a serial transport.
+   */
+  public claim(signature: string): ClaudeCliSession | null {
+    const session = this.session;
+    if (!session) return null;
+
+    // Recycle FIRST, and only for the reasons that actually make a session
+    // unusable: the turn/age caps, or a dead process. Getting this wrong is
+    // easy and expensive — an earlier version recycled on any refusal, so a
+    // single fast-model turn (different --model, different signature) silently
+    // destroyed the meeting's whole history.
+    if (session.retired) {
+      const servedNothing = session.completedTurns === 0;
+      session.dispose('retired');
+      // A session that died without ever completing a turn is a broken
+      // configuration (bad binary path, a CLI that exits at once), not a
+      // used-up one. Respawning it would start a fresh doomed process on every
+      // single turn for the rest of the meeting. Stop, and let the isolated
+      // path surface the real error — its messages are the actionable ones.
+      this.session = servedNothing && !session.alive ? null : this.spawnSession();
+      if (!this.session) this.spec = null;
+      return null;
+    }
+
+    if (session.tryClaim(signature)) return session;
+
+    // Refused but healthy: either busy with an overlapping turn (see the
+    // decision above) or bound to a different model. Both run isolated and
+    // leave the session exactly as it is.
+    return null;
+  }
+
+  public end(reason: string): void {
+    this.session?.dispose(reason);
+    this.session = null;
+    this.spec = null;
+  }
+
+  public status(): ClaudeCliSessionStatus | null {
+    return this.session ? this.session.status() : null;
+  }
+}
+
+// =============================================================================
 // ClaudeCliService — public static surface
 // =============================================================================
 
@@ -589,6 +1124,9 @@ export class ClaudeCliService {
       maxWarmProcesses: Number.isFinite(maxWarm) && maxWarm >= 0
         ? Math.min(Math.floor(maxWarm), 8)
         : DEFAULT_CLAUDE_CLI_CONFIG.maxWarmProcesses,
+      sessionMode: (CLAUDE_CLI_SESSION_MODES as readonly string[]).includes(config.sessionMode as string)
+        ? config.sessionMode as ClaudeCliSessionMode
+        : DEFAULT_CLAUDE_CLI_CONFIG.sessionMode,
     };
   }
 
@@ -799,6 +1337,18 @@ export class ClaudeCliService {
 
     const turn = await this.buildTurnMessage(options);
 
+    // A live meeting session takes this turn when it is free. claim() returns
+    // null for every other case — no session, busy with an overlapping turn,
+    // caps exceeded, different model — and the one-off path below runs instead.
+    // Built the turn FIRST so the claim is never held across an await.
+    const session = ClaudeCliSessionManager.getInstance().claim(
+      ClaudeCliProcessPool.signature(resolved, args),
+    );
+    if (session) {
+      yield* session.runTurn(turn, options.timeoutMs, options.signal);
+      return;
+    }
+
     // Idle-timeout guard, mirroring CodexCliService.stream: the timer RESETS on
     // every yielded delta, so this is a kill for a genuinely stuck process, not
     // a wall-clock cap on the answer.
@@ -820,12 +1370,12 @@ export class ClaudeCliService {
     try { pool.prewarm(resolved, args, maxWarm); } catch { /* best effort */ }
 
     const parser = new ClaudeStreamJsonParser();
+    // Shared with the persistent-session path — see ClaudeTurnReducer for why
+    // the duplicate-suppression rules live in one place.
+    const reducer = new ClaudeTurnReducer();
     let stderr = acquired.stderr;
-    let sawTextDelta = false;
-    let sawTerminalFrame = false;
     let emittedAny = false;
     let spawnError: Error | null = null;
-    let streamError: Error | null = null;
     let exitCode: number | null = null;
     let exited = false;
 
@@ -837,29 +1387,7 @@ export class ClaudeCliService {
 
     const onStdout = (chunk: Buffer) => {
       for (const frame of parser.push(chunk.toString('utf8'))) {
-        const delta = extractClaudeTextDelta(frame);
-        if (delta) {
-          sawTextDelta = true;
-          queue.push(delta);
-          continue;
-        }
-        // Fallback for a stream with no partial messages. Gated on
-        // sawTextDelta because the `assistant` frame repeats what the deltas
-        // already produced — emitting both duplicates the whole answer.
-        if (!sawTextDelta) {
-          const whole = extractClaudeAssistantText(frame);
-          if (whole) queue.push(whole);
-        }
-        const err = extractClaudeStreamError(frame);
-        if (err && !streamError) streamError = new Error(`Claude Code CLI: ${err}`);
-        if (isClaudeTerminalFrame(frame)) {
-          sawTerminalFrame = true;
-          // The result frame carries the whole answer too. Emit it only when
-          // nothing else did — a turn that streamed normally must not repeat.
-          if (!streamError && queue.length === 0 && !emittedAny && typeof frame.result === 'string' && frame.result) {
-            queue.push(frame.result);
-          }
-        }
+        for (const text of reducer.accept(frame)) queue.push(text);
       }
       wake();
     };
@@ -874,26 +1402,11 @@ export class ClaudeCliService {
       exited = true;
       // Anything left in the buffer without a trailing newline.
       for (const frame of parser.flush()) {
-        const delta = extractClaudeTextDelta(frame);
-        if (delta) { sawTextDelta = true; queue.push(delta); continue; }
-        if (!sawTextDelta) {
-          const whole = extractClaudeAssistantText(frame);
-          if (whole) queue.push(whole);
-        }
-        const err = extractClaudeStreamError(frame);
-        if (err && !streamError) streamError = new Error(`Claude Code CLI: ${err}`);
-        if (isClaudeTerminalFrame(frame)) sawTerminalFrame = true;
+        for (const text of reducer.accept(frame)) queue.push(text);
       }
       wake();
     };
     const onAbort = () => { killChild(child); wake(); };
-
-    // Read the callback-assigned error through a call, not directly.
-    // TypeScript's control-flow analysis ignores assignments made inside nested
-    // functions, so a direct read of `streamError` after the loop narrows to
-    // `null` and `.message` does not compile. A function call yields the
-    // DECLARED union instead, which is the truth at runtime.
-    const takeStreamError = (): Error | null => streamError;
 
     child.stdout.on('data', onStdout);
     child.stderr.on('data', onStderr);
@@ -948,12 +1461,12 @@ export class ClaudeCliService {
       // would turn a deliberate barge-in into a visible error.
       return;
     }
-    if (deadlineController.signal.aborted && !sawTerminalFrame) {
+    if (deadlineController.signal.aborted && !reducer.sawTerminalFrame) {
       if (emittedAny) return;
       throw new Error(`Claude Code CLI timed out after ${options.timeoutMs}ms with no output.`);
     }
     if (spawnError) throw spawnError;
-    const streamFailure = takeStreamError();
+    const streamFailure = reducer.error;
     if (streamFailure) {
       // Same policy as the pre-rewrite Codex reader: once partial output has
       // reached the user, ending the stream beats appending an error to a
@@ -997,6 +1510,71 @@ export class ClaudeCliService {
   /** Parked process count. Diagnostics and tests only. */
   public static warmPoolSize(): number {
     return ClaudeCliProcessPool.getInstance().size();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Persistent meeting session
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Open the meeting session, if this config asks for one.
+   *
+   * A no-op for `sessionMode: 'isolated'`, for a disabled provider, and when the
+   * binary cannot be found — in every one of those cases turns keep running on
+   * one-off processes, which is the behaviour with no session at all.
+   *
+   * `model` is the model the session is BOUND to; it comes from the caller
+   * (LLMHelper resolves the selected `claude-cli:<model>` id) rather than from
+   * `config.model`, so an explicitly picked model is what the session speaks.
+   * The binding matters at meeting end too: the app resets the selected model
+   * during teardown, so nothing here may re-read it later.
+   */
+  public static beginSession(config: ClaudeCliConfig, meetingId: string, model?: string): void {
+    // Defensive, per the RAGManager F-411 pattern: a crash or force-quit never
+    // ran endSession(), so start is the reliable place to clear a stale one.
+    this.endSession('stale session cleared at meeting start');
+    if (config.sessionMode !== 'meeting') return;
+    if (!config.enabled) return;
+    if (!this.binaryLooksAvailable(config.path)) return;
+    const resolved = this.resolvePath(config.path);
+    const chosen = (model || config.model).trim() || config.model;
+    ClaudeCliSessionManager.getInstance().begin(
+      resolved,
+      this.buildArgs(chosen),
+      chosen,
+      meetingId,
+      config.maxWarmProcesses,
+    );
+  }
+
+  /** Close the meeting session and kill its process. Safe to call at any time. */
+  public static endSession(reason = 'meeting ended'): void {
+    ClaudeCliSessionManager.getInstance().end(reason);
+  }
+
+  /**
+   * Re-open the session against a changed config, keeping the same meeting.
+   *
+   * Settings can be saved mid-meeting, and LLMHelper.setClaudeCliConfig tears
+   * the warm pool down unconditionally when that happens. Without this the live
+   * session would either be killed silently (feature off for the rest of the
+   * meeting) or left bound to argv the user has just changed. Returns true when
+   * a session was carried over.
+   */
+  public static reapplyConfigToSession(config: ClaudeCliConfig): boolean {
+    const current = ClaudeCliSessionManager.getInstance().status();
+    if (!current?.meetingId) return false;
+    // History cannot survive an argv change — a different --model is a
+    // different conversation — so the replacement starts empty. That is
+    // strictly better than the alternatives: silently dropping the session, or
+    // continuing to speak to a model the user just deselected.
+    this.beginSession(config, current.meetingId, current.model ?? undefined);
+    return config.sessionMode === 'meeting' && config.enabled;
+  }
+
+  /** Live session state, or null. Diagnostics, tests, and the Settings panel. */
+  public static sessionStatus(): ClaudeCliSessionStatus | null {
+    return ClaudeCliSessionManager.getInstance().status();
   }
 
   // ---------------------------------------------------------------------------

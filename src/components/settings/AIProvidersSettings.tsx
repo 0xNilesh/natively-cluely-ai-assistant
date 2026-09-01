@@ -2128,7 +2128,7 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
     // --- Local (Claude Code CLI) ---
     // Defaults mirror DEFAULT_CLAUDE_CLI_CONFIG; the real values arrive from
     // getClaudeCliConfig() on mount.
-    const [claudeCliConfig, setClaudeCliConfig] = useState({ enabled: false, path: 'claude', model: 'sonnet', fastModel: 'haiku', timeoutMs: 60000, maxWarmProcesses: 2 });
+    const [claudeCliConfig, setClaudeCliConfig] = useState({ enabled: false, path: 'claude', model: 'sonnet', fastModel: 'haiku', timeoutMs: 60000, maxWarmProcesses: 2, sessionMode: 'isolated' as 'isolated' | 'meeting' });
     const [claudeCliStatus, setClaudeCliStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
     const [claudeCliError, setClaudeCliError] = useState('');
     const [claudeCliVersion, setClaudeCliVersion] = useState('');
@@ -3887,6 +3887,27 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
 
                     {claudeCliConfig.enabled && (
                         <>
+                            <label className="space-y-1 block min-w-0">
+                                <span className="aip-label">{t('Conversation Memory')}</span>
+                                <ModelSelect
+                                    value={claudeCliConfig.sessionMode}
+                                    options={[
+                                        { id: 'isolated', name: t('Isolated — each answer starts fresh') },
+                                        { id: 'meeting', name: t('Per meeting — remember the conversation') },
+                                    ]}
+                                    onChange={(sessionMode) => saveClaudeCliConfig({
+                                        ...claudeCliConfig,
+                                        sessionMode: sessionMode as 'isolated' | 'meeting',
+                                    })}
+                                    placeholder={t('Isolated')}
+                                />
+                                <p className="aip-meta aip-muted">
+                                    {claudeCliConfig.sessionMode === 'meeting'
+                                        ? t('One `claude` process is held open for the whole meeting, so answers build on earlier questions. Two answers generated at the same time cannot share it — the second one runs on its own process and will not see the history.')
+                                        : t('Every answer runs in its own process with no memory of earlier ones. Safest, and the fastest when several answers are generated at once.')}
+                                </p>
+                            </label>
+
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                                 <ClaudeCliModelField
                                     label={t("Model")}

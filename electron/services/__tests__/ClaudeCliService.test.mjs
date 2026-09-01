@@ -104,6 +104,9 @@ test('DEFAULT_CLAUDE_CLI_CONFIG has the expected shape', () => {
   assert.equal(DEFAULT_CLAUDE_CLI_CONFIG.fastModel, 'haiku');
   assert.equal(DEFAULT_CLAUDE_CLI_CONFIG.timeoutMs, 60_000);
   assert.equal(DEFAULT_CLAUDE_CLI_CONFIG.maxWarmProcesses, 2);
+  // Isolated by default: persistent sessions couple turns together, so they
+  // are opt-in rather than something a user gets without asking.
+  assert.equal(DEFAULT_CLAUDE_CLI_CONFIG.sessionMode, 'isolated');
 });
 
 test('normalizeConfig: empty input returns the defaults', () => {
@@ -119,6 +122,7 @@ test('normalizeConfig: round-trips a fully specified config unchanged', () => {
     fastModel: 'haiku',
     timeoutMs: 45_000,
     maxWarmProcesses: 3,
+    sessionMode: 'meeting',
   };
   assert.deepEqual(ClaudeCliService.normalizeConfig(input), input);
   // Idempotent: normalizing the normalized value is a fixed point, which is

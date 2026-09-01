@@ -67,6 +67,12 @@ export interface AppSettings {
     // cold boot. 0 disables prewarming. See ClaudeCliService's header for the
     // measurements behind the default.
     claudeCliMaxWarmProcesses?: number;
+    // How turns map onto processes. 'isolated' (default) is one process per
+    // message with no shared context; 'meeting' holds ONE process open for a
+    // whole meeting so the model remembers the conversation. See
+    // ClaudeCliSessionMode for the trade-offs, particularly what happens when
+    // two turns overlap.
+    claudeCliSessionMode?: 'isolated' | 'meeting';
     // Hindsight long-term memory server (optional, user-provisioned sidecar — Cloud OR
     // local). baseUrl empty by default → feature off. Env (HINDSIGHT_BASE_URL) overrides
     // these for dev. apiKey only for Hindsight Cloud. autoStart/serverCommand reserved for

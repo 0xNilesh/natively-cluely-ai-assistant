@@ -8,6 +8,7 @@ export interface ClaudeCliConfigShape {
   fastModel: string
   timeoutMs: number
   maxWarmProcesses: number
+  sessionMode: 'isolated' | 'meeting'
 }
 
 // Phase 3 — DynamicActionPayload mirrors electron/services/dynamic-actions/DynamicAction.ts.
