@@ -35,7 +35,7 @@
     "test:auto-answer": "npm run build:electron && node --test \"electron/intelligence/autoAnswer/__tests__/**/*.test.mjs\"",
     "test:auto-answer:judge": "npm run build:electron && node electron/intelligence/autoAnswer/__tests__/judgeEval.mjs",
     "test:intelligence": "npm run build:electron && node --test \"electron/intelligence/__tests__/**/*.test.mjs\" \"electron/context-intelligence/__tests__/**/*.test.mjs\"",
-    "test:lib": "node --experimental-strip-types --test \"src/lib/**/__tests__/**/*.test.mjs\"",
+    "test:lib": "node --experimental-strip-types --test \"src/lib/**/__tests__/**/*.test.mjs\" \"src/utils/__tests__/**/*.test.mjs\"",
     "test:scripts": "node --test \"scripts/__tests__/**/*.test.mjs\"",
     "test:ci": "npm run typecheck:electron && npm run build && npm test && npm run test:intelligence && npm run test:lib && npm run test:scripts",
     "test:modes": "npm run build:electron && node --test \"electron/services/__tests__/Mode*.test.mjs\" electron/services/__tests__/ProfileIntelligenceGate.test.mjs electron/services/__tests__/NativelyApiE2E.test.mjs",

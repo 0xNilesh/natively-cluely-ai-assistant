@@ -98,8 +98,38 @@ export const getCodexCliModelDisplayName = (id: string): string | null => {
 export const CLAUDE_CLI_MODEL = {
     id: 'claude-cli',
     name: 'Claude Code',
+    /** Compact prefix for narrow row labels — see claudeCliShortLabel. */
+    shortName: 'CC',
     desc: 'Local CLI transport',
 };
+
+/**
+ * Compact row label for one Claude Code alias: `CC-sonnet`, `CC-opus`, …
+ *
+ * Every surface that renders these rows is ~140px wide and clips with
+ * Tailwind's `truncate`: the model-selector popup window is literally 140px
+ * (ModelSelectorWindowHelper's BrowserWindow width) and the overlay's
+ * current-model chip is `w-[140px]`. After the row's own padding and the
+ * selected-row check icon there are ~78-100px of text box left, which at the
+ * row's 12px font is about a dozen characters — so the previous long form,
+ * `Claude Code: Sonnet`, rendered as `Claude Co…` for EVERY preset. Four rows,
+ * pixel-identical, impossible to choose between.
+ *
+ * The alias is used verbatim from the id (`sonnet`, `opus`, `haiku`, `fable`)
+ * rather than title-cased, because that is exactly the string the user passes
+ * to `claude --model` — so the row names the thing it selects.
+ */
+export const claudeCliShortLabel = (alias: string): string =>
+    `${CLAUDE_CLI_MODEL.shortName}-${alias}`;
+
+/**
+ * Label for the bare `claude-cli` id, which does NOT pin an alias — it means
+ * "whatever model the Claude Code card in Settings is configured with". Kept
+ * distinct from the pinned rows precisely because it used to render as
+ * `Claude Code (Sonnet)` right next to `Claude Code: Sonnet`, a near-duplicate
+ * that survived truncation as two identical `Claude Co…` rows.
+ */
+export const CLAUDE_CLI_DEFAULT_LABEL = claudeCliShortLabel('default');
 
 /**
  * Model ALIASES, not pinned ids. `claude --model sonnet` resolves to whatever
@@ -117,12 +147,32 @@ export const CLAUDE_CLI_MODEL_PRESETS = [
 export const claudeCliSelectorId = (modelId: string): string => `claude-cli:${modelId}`;
 
 export const getClaudeCliModelDisplayName = (id: string): string | null => {
-    if (id === CLAUDE_CLI_MODEL.id) return CLAUDE_CLI_MODEL.name;
+    if (id === CLAUDE_CLI_MODEL.id) return CLAUDE_CLI_DEFAULT_LABEL;
     if (!id.startsWith('claude-cli:')) return null;
 
-    const modelId = id.slice('claude-cli:'.length);
-    const preset = CLAUDE_CLI_MODEL_PRESETS.find(model => model.id === modelId);
-    return preset ? `${CLAUDE_CLI_MODEL.name}: ${preset.name}` : prettifyModelId(modelId);
+    // Unknown/custom aliases keep the prefix rather than falling back to
+    // prettifyModelId: a bare `Claude 3 5 Haiku Latest` row loses the one piece
+    // of information the picker actually needs — which TRANSPORT it goes through
+    // — and is the label most likely to truncate into nothing.
+    return claudeCliShortLabel(id.slice('claude-cli:'.length));
+};
+
+/**
+ * Full, unabbreviated form of a Claude Code row, for the `title` tooltip on the
+ * narrow surfaces the short labels are built for. `CC-` is deliberately terse,
+ * so the long name has to stay reachable on hover.
+ *
+ * `configuredModel` is only meaningful for the bare `claude-cli` id, where it
+ * names the alias Settings currently resolves it to.
+ */
+export const getClaudeCliModelTitle = (id: string, configuredModel?: string): string | null => {
+    if (id === CLAUDE_CLI_MODEL.id) {
+        return configuredModel
+            ? `${CLAUDE_CLI_MODEL.name} — default (${configuredModel})`
+            : `${CLAUDE_CLI_MODEL.name} — default`;
+    }
+    if (!id.startsWith('claude-cli:')) return null;
+    return `${CLAUDE_CLI_MODEL.name} — ${id.slice('claude-cli:'.length)}`;
 };
 
 export const prettifyModelId = (id: string): string => {

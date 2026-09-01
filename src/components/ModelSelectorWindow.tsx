@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { Check, Loader2 } from 'lucide-react';
-import { CLAUDE_CLI_MODEL, CLAUDE_CLI_MODEL_PRESETS, claudeCliSelectorId, CODEX_CLI_MODEL, CODEX_CLI_MODEL_PRESETS, codexCliSelectorId, getClaudeCliModelDisplayName, getCodexCliModelDisplayName, isModelAllowed, litellmModelLabel, STANDARD_CLOUD_MODELS, prettifyModelId } from '../utils/modelUtils';
+import { CLAUDE_CLI_MODEL, CLAUDE_CLI_MODEL_PRESETS, claudeCliSelectorId, CODEX_CLI_MODEL, CODEX_CLI_MODEL_PRESETS, codexCliSelectorId, getClaudeCliModelDisplayName, getClaudeCliModelTitle, getCodexCliModelDisplayName, isModelAllowed, litellmModelLabel, STANDARD_CLOUD_MODELS, prettifyModelId } from '../utils/modelUtils';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
 import { getMeetingInterfaceTheme, type MeetingInterfaceTheme } from '../lib/meetingInterfaceTheme';
 import {
@@ -17,6 +17,10 @@ interface ModelOption {
     name: string;
     type: 'cloud' | 'local' | 'custom' | 'ollama' | 'codex-cli' | 'claude-cli';
     provider?: string;
+    /** Long form for the row's hover tooltip, where `name` is deliberately
+     *  abbreviated to survive this window's 140px width (see
+     *  claudeCliShortLabel). Falls back to `name` when unset. */
+    title?: string;
 }
 
 
@@ -189,12 +193,28 @@ const ModelSelectorWindow = () => {
                     });
                 }
 
-                // Claude Code CLI
+                // Claude Code CLI. Labels come from the shared helper rather
+                // than being assembled here (as the Codex block above still
+                // does): they have to stay short enough for this 140px window,
+                // and the overlay chip + Settings dropdown render the same
+                // option set from the same helper so the surfaces cannot drift.
                 if (claudeCliConfig?.enabled) {
-                    models.push({ id: CLAUDE_CLI_MODEL.id, name: `${CLAUDE_CLI_MODEL.name} (${prettifyModelId(claudeCliConfig.model)})`, type: 'claude-cli', provider: 'claude-cli' });
+                    models.push({
+                        id: CLAUDE_CLI_MODEL.id,
+                        name: getClaudeCliModelDisplayName(CLAUDE_CLI_MODEL.id) || CLAUDE_CLI_MODEL.name,
+                        title: getClaudeCliModelTitle(CLAUDE_CLI_MODEL.id, claudeCliConfig.model) || undefined,
+                        type: 'claude-cli',
+                        provider: 'claude-cli',
+                    });
                     CLAUDE_CLI_MODEL_PRESETS.forEach(model => {
                         const id = claudeCliSelectorId(model.id);
-                        models.push({ id, name: getClaudeCliModelDisplayName(id) || model.name, type: 'claude-cli', provider: 'claude-cli' });
+                        models.push({
+                            id,
+                            name: getClaudeCliModelDisplayName(id) || model.name,
+                            title: getClaudeCliModelTitle(id) || undefined,
+                            type: 'claude-cli',
+                            provider: 'claude-cli',
+                        });
                     });
                 }
 
@@ -328,10 +348,16 @@ const ModelSelectorWindow = () => {
                             ) : (
                                 availableModels.map((model) => {
                                     const isSelected = currentModel === model.id;
+                                    // Every row truncates in this 140px window, so the full name
+                                    // has to stay reachable on hover — for the abbreviated CC-
+                                    // rows and equally for long LiteLLM ids, Ollama tags and
+                                    // custom-provider names.
+                                    const rowTitle = model.title || model.name;
                                     return (
                                         <button
                                             key={model.id}
                                             onClick={() => handleSelectFn(model.id)}
+                                            title={rowTitle}
                                             className={`
                                                 w-full text-left px-3 py-2 flex items-center justify-between group transition-colors duration-200 rounded-lg model-selector-row
                                                 ${isSelected

@@ -830,6 +830,13 @@ export class WindowHelper {
 
     if (process.platform === 'darwin') {
       this.overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+      // setVisibleOnAllWorkspaces transforms the app's process type between
+      // UIElement and Foreground on macOS — the same activation-policy flip as
+      // app.dock.hide()/show(), which reassertContentProtection() above already
+      // documents as making WindowServer re-evaluate each NSWindow and reset its
+      // sharingType. The setContentProtection(true) further up therefore has to
+      // be pushed AGAIN after it, or the overlay is born capturable.
+      this.overlayWindow.setContentProtection(true);
       this.overlayWindow.setHiddenInMissionControl(true);
       this.overlayWindow.setAlwaysOnTop(true, 'floating');
 
@@ -1513,6 +1520,9 @@ export class WindowHelper {
     this.popoverCatcher.setContentProtection(this.contentProtection);
     if (isMac) {
       this.popoverCatcher.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+      // Re-assert after the process-type transform setVisibleOnAllWorkspaces
+      // performs — see the overlay's copy of this comment in createOverlayWindow.
+      this.popoverCatcher.setContentProtection(this.contentProtection);
       this.popoverCatcher.setHiddenInMissionControl(true);
       // relativeLevel -1: below the other 'floating' Natively windows, above
       // normal app windows — clicks on Natively still hit Natively; clicks
@@ -1617,6 +1627,11 @@ export class WindowHelper {
       win.setContentProtection(true);
       if (process.platform === 'darwin') {
         win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+        // Re-assert after the process-type transform setVisibleOnAllWorkspaces
+        // performs — see the overlay's copy of this comment in
+        // createOverlayWindow. Without it the pill and toggle are born
+        // capturable despite the unconditional call one line above.
+        win.setContentProtection(true);
         win.setHiddenInMissionControl(true);
         win.setAlwaysOnTop(true, 'floating');
         win.once('ready-to-show', () => {
