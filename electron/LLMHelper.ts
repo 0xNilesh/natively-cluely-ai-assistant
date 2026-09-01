@@ -68,7 +68,7 @@ import { promisify } from 'util';
 import axios from 'axios';
 import { createProviderRateLimiters, RateLimiter } from './services/RateLimiter';
 import { CodexCliConfig, CodexCliService, DEFAULT_CODEX_CLI_CONFIG } from './services/CodexCliService';
-import { ClaudeCliConfig, ClaudeCliService, DEFAULT_CLAUDE_CLI_CONFIG } from './services/ClaudeCliService';
+import { CLAUDE_CLI_PREP_SESSION_MISSING_MESSAGE, ClaudeCliConfig, ClaudeCliService, DEFAULT_CLAUDE_CLI_CONFIG } from './services/ClaudeCliService';
 import { GROQ_PRIMARY_MODEL, groqFallbackFor, isGroqModelGone } from './llm/groqModels';
 const execAsync = promisify(exec);
 const NATIVELY_API_URL = (process.env.NATIVELY_API_URL || 'https://api.natively.software').replace(/\/+$/, '');
@@ -1369,7 +1369,12 @@ export class LLMHelper {
       // config write. The next real request spawns cold and reports properly.
       console.warn('[LLMHelper] Claude CLI prewarm failed:', e?.message);
     }
-    console.log(`[LLMHelper] Claude CLI ${this.claudeCliConfig.enabled ? 'enabled' : 'disabled'} with model: ${this.claudeCliConfig.model} (session mode: ${this.claudeCliConfig.sessionMode})`);
+    // Never log the prep session id itself — it is a pointer into the user's
+    // own conversation history, and logs travel further than settings do.
+    const continuity = this.claudeCliConfig.prepSessionId
+      ? 'prep session'
+      : `session mode: ${this.claudeCliConfig.sessionMode}`;
+    console.log(`[LLMHelper] Claude CLI ${this.claudeCliConfig.enabled ? 'enabled' : 'disabled'} with model: ${this.claudeCliConfig.model} (${continuity}, effort: ${this.claudeCliConfig.effort})`);
   }
 
   public getClaudeCliConfig(): ClaudeCliConfig {
@@ -1395,11 +1400,35 @@ export class LLMHelper {
    */
   public beginClaudeCliMeetingSession(meetingId: string): void {
     try {
-      if (this.claudeCliConfig.sessionMode !== 'meeting') return;
+      // Both mechanisms are gated on an EXPLICIT model pick, not mere
+      // availability. Arming a prep session for a user who is answering with
+      // Gemini would replay their whole CV on a provider that never runs.
       if (!this.isClaudeCliModel(this.currentModelId)) return;
       if (!this.isClaudeCliAvailable()) return;
+
+      // Prep session FIRST: it supersedes stdin session mode, and
+      // beginSession() below defers to a configured prep id. Ordering them the
+      // other way would open a stdin session that the next line then had to
+      // tear down.
+      const prepError = ClaudeCliService.beginPrepSession(this.claudeCliConfig, meetingId);
+      if (prepError) {
+        // Loud, not silent. The user configured a prep session precisely so
+        // answers would be grounded in it; every turn of this meeting will now
+        // refuse with this message, and they need to know why at the start
+        // rather than after three unanswered questions.
+        console.error('[LLMHelper] Claude Code prep session unusable:', prepError);
+        this.notifyClaudeCliPrepSessionError(prepError);
+      } else if (this.claudeCliConfig.prepSessionId) {
+        // The id is deliberately NOT logged — it is a pointer into the user's
+        // own conversation history, and logs travel further than settings do.
+        console.log(`[LLMHelper] Claude Code prep session armed for ${meetingId}`);
+      }
+
+      if (this.claudeCliConfig.sessionMode !== 'meeting') return;
       ClaudeCliService.beginSession(this.claudeCliConfig, meetingId, this.getSelectedClaudeCliModel(false));
-      console.log(`[LLMHelper] Claude Code meeting session opened for ${meetingId}`);
+      if (!this.claudeCliConfig.prepSessionId) {
+        console.log(`[LLMHelper] Claude Code meeting session opened for ${meetingId}`);
+      }
     } catch (e: any) {
       console.warn('[LLMHelper] Claude Code meeting session failed to open:', e?.message);
     }
@@ -1409,9 +1438,47 @@ export class LLMHelper {
   public endClaudeCliMeetingSession(reason = 'meeting ended'): void {
     try {
       ClaudeCliService.endSession(reason);
+      // Ended AFTER the stdin session, and unconditionally: the forked id has
+      // already been read out by the persistence path (getClaudeCliMeetingSessionId,
+      // called from the meeting save), so there is nothing left to lose here.
+      ClaudeCliService.endPrepSession(reason);
     } catch (e: any) {
       console.warn('[LLMHelper] Claude Code meeting session failed to close:', e?.message);
     }
+  }
+
+  /**
+   * The forked, per-meeting Claude Code session id, or null.
+   *
+   * Read at meeting save time and persisted on the row. It is what turns a
+   * finished interview back into a conversation: `claude --resume <id>` returns
+   * every question that was asked and every answer that was given.
+   */
+  public getClaudeCliMeetingSessionId(): string | null {
+    try {
+      return ClaudeCliService.meetingSessionId();
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Tell the user, in the overlay, that the prep session is unusable.
+   *
+   * Deliberately routed to a user-visible surface rather than a log line. The
+   * failure mode this exists to prevent is a silent one — answers that look
+   * fine and are not grounded in anything — so a message nobody reads would
+   * defeat the point. Never throws: the notification is the courtesy, the
+   * refused turn is the guarantee.
+   */
+  private notifyClaudeCliPrepSessionError(message: string): void {
+    try {
+      const { BrowserWindow } = require('electron');
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (win.isDestroyed()) continue;
+        win.webContents.send('claude-cli:prep-session-error', { error: message });
+      }
+    } catch { /* headless (tests, CLI benchmarks) — the thrown turn still reports */ }
   }
 
   public getAiResponseLanguage(): string {
@@ -1811,7 +1878,7 @@ export class LLMHelper {
     return this.claudeCliConfig.model;
   }
 
-  private async generateWithClaudeCli(userContent: string, systemPrompt?: string, fastMode = false, imagePaths?: string[], signal?: AbortSignal): Promise<string> {
+  private async generateWithClaudeCli(userContent: string, systemPrompt?: string, fastMode = false, imagePaths?: string[], signal?: AbortSignal, opts?: { isolated?: boolean }): Promise<string> {
     if (!this.isClaudeCliAvailable()) throw new Error('Claude Code CLI transport is disabled or the binary was not found.');
     // The `claude` binary is local, but it talks to api.anthropic.com — so this
     // is a CLOUD provider and needs the same local-only boundary every other
@@ -1821,18 +1888,25 @@ export class LLMHelper {
     if (this.isLocalOnlyMode) throw new Error("Cloud providers disabled in local-only mode");
     this.assertOutboundScopes('claude_cli', userContent, imagePaths);
     const model = this.getSelectedClaudeCliModel(fastMode);
-    return ClaudeCliService.run(this.claudeCliConfig.path, {
-      prompt: userContent,
-      instructions: systemPrompt,
-      model,
-      timeoutMs: this.claudeCliConfig.timeoutMs,
-      imagePaths,
-      maxWarmProcesses: this.claudeCliConfig.maxWarmProcesses,
-      signal,
-    });
+    try {
+      return await ClaudeCliService.run(this.claudeCliConfig.path, {
+        prompt: userContent,
+        instructions: systemPrompt,
+        model,
+        timeoutMs: this.claudeCliConfig.timeoutMs,
+        imagePaths,
+        maxWarmProcesses: this.claudeCliConfig.maxWarmProcesses,
+        effort: this.claudeCliConfig.effort,
+        isolated: opts?.isolated,
+        signal,
+      });
+    } catch (error: any) {
+      this.reportClaudeCliPrepSessionFailure(error);
+      throw error;
+    }
   }
 
-  private async *streamWithClaudeCli(userContent: string, systemPrompt?: string, fastMode = false, imagePaths?: string[], signal?: AbortSignal): AsyncGenerator<string, void, unknown> {
+  private async *streamWithClaudeCli(userContent: string, systemPrompt?: string, fastMode = false, imagePaths?: string[], signal?: AbortSignal, opts?: { isolated?: boolean }): AsyncGenerator<string, void, unknown> {
     if (!this.isClaudeCliAvailable()) throw new Error('Claude Code CLI transport is disabled or the binary was not found.');
     if (this.isLocalOnlyMode) throw new Error("Cloud providers disabled in local-only mode");
     // See generateWithClaudeCli. This is a generator, so the check runs on the
@@ -1840,15 +1914,40 @@ export class LLMHelper {
     // reaches ClaudeCliService.stream, which is the property that matters.
     this.assertOutboundScopes('claude_cli', userContent, imagePaths);
     const model = this.getSelectedClaudeCliModel(fastMode);
-    yield* ClaudeCliService.stream(this.claudeCliConfig.path, {
-      prompt: userContent,
-      instructions: systemPrompt,
-      model,
-      timeoutMs: this.claudeCliConfig.timeoutMs,
-      imagePaths,
-      maxWarmProcesses: this.claudeCliConfig.maxWarmProcesses,
-      signal,
-    });
+    try {
+      yield* ClaudeCliService.stream(this.claudeCliConfig.path, {
+        prompt: userContent,
+        instructions: systemPrompt,
+        model,
+        timeoutMs: this.claudeCliConfig.timeoutMs,
+        imagePaths,
+        maxWarmProcesses: this.claudeCliConfig.maxWarmProcesses,
+        effort: this.claudeCliConfig.effort,
+        isolated: opts?.isolated,
+        signal,
+      });
+    } catch (error: any) {
+      this.reportClaudeCliPrepSessionFailure(error);
+      throw error;
+    }
+  }
+
+  /**
+   * Surface a prep-session failure that surfaced at TURN time.
+   *
+   * beginClaudeCliMeetingSession already reports the id that never existed. This
+   * covers the other order of events — a session deleted, or `~/.claude`
+   * unreadable, between meeting start and the first question — where the
+   * filesystem pre-check passed and only `--resume` knows better. Without it
+   * the failure would reach the user as nothing at all: the streaming fallback
+   * chain catches provider errors and moves on to the next provider, so the
+   * answer would arrive from Gemini with no prep context and no explanation.
+   */
+  private reportClaudeCliPrepSessionFailure(error: unknown): void {
+    const message = (error as { message?: unknown } | null)?.message;
+    if (typeof message !== 'string') return;
+    if (!message.includes(CLAUDE_CLI_PREP_SESSION_MISSING_MESSAGE)) return;
+    this.notifyClaudeCliPrepSessionError(message);
   }
 
   public switchToCurl(provider: CurlProvider) {
@@ -3687,7 +3786,23 @@ let isMultimodal = !!(imagePaths?.length);
     if (this.isClaudeCliModel(this.currentModelId) && this.isClaudeCliAvailable()) {
       providers.push({
         name: `Claude Code (${this.claudeCliConfig.model})`,
-        execute: () => this.generateWithClaudeCli(message),
+        // ISOLATED, and this is the single most important flag on this path.
+        //
+        // Auto Answer's judge routes here: generateJudgeVerdict falls through
+        // to this ladder whenever Gemini is absent or fails, which is the
+        // NORMAL case on a subscription-only install — precisely the install
+        // this provider exists for. The judge is the one caller that genuinely
+        // overlaps a live answer, because it decides whether to answer while
+        // the speculative answer is already streaming. A session is strictly
+        // serial and its frames carry no request id, so letting the judge share
+        // one is exactly what would fork the meeting conversation
+        // unpredictably — and it would spend 20k tokens of prep context on a
+        // yes/no besides.
+        //
+        // Document extraction (resume/JD/company research), the other user of
+        // this ladder, wants isolation for the plainer reason that a CV parse
+        // has no business inheriting an interview's conversation.
+        execute: () => this.generateWithClaudeCli(message, undefined, false, undefined, undefined, { isolated: true }),
       });
     }
 

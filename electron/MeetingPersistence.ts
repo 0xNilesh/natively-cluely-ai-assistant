@@ -366,6 +366,17 @@ export class MeetingPersistence {
         const seconds = ((durationMs % 60000) / 1000).toFixed(0);
         const durationStr = `${minutes}:${Number(seconds) < 10 ? '0' : ''}${seconds}`;
 
+        // Read BEFORE the placeholder write and reused for the final save. The
+        // live prep session was already torn down by endMeeting's synchronous
+        // section by the time this runs, so this is the stash — see
+        // ClaudeCliPrepSessionManager.lastForkedSessionId. undefined for every
+        // meeting that did not use a claude-cli prep session, which is what
+        // keeps the column NULL and the detail-page row hidden.
+        let claudeSessionId: string | undefined;
+        try {
+            claudeSessionId = this.llmHelper.getClaudeCliMeetingSessionId?.() || undefined;
+        } catch { /* never block a save on a diagnostic id */ }
+
         const placeholder: Meeting = {
             id: meetingId,
             title: "Processing...",
@@ -376,7 +387,8 @@ export class MeetingPersistence {
             transcript: snapshot.transcript,
             usage: snapshot.usage,
             isProcessed: false,
-            summaryStatus: 'queued'
+            summaryStatus: 'queued',
+            claudeSessionId
         };
 
         try {

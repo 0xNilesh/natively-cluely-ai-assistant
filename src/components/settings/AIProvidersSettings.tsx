@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useT } from '../../i18n';
 import { Plus, Trash2, Edit2, AlertCircle, Save, ChevronDown, Check, RefreshCw, ExternalLink, Loader2, LogOut, Cloud, Server, Eye, Info, MessageSquare, Image, FileText, User, Boxes, ClipboardList, Laptop } from 'lucide-react';
-import { CLAUDE_CLI_MODEL, CLAUDE_CLI_MODEL_PRESETS, claudeCliSelectorId, CODEX_CLI_MODEL, CODEX_CLI_MODEL_PRESETS, codexCliSelectorId, getClaudeCliModelDisplayName, isModelAllowed, isOptInModelProvider, litellmModelLabel, STANDARD_CLOUD_MODELS, prettifyModelId } from '../../utils/modelUtils';
+import { CLAUDE_CLI_MODEL, CLAUDE_CLI_MODEL_PRESETS, type ClaudeCliEffort, claudeCliSelectorId, CODEX_CLI_MODEL, CODEX_CLI_MODEL_PRESETS, codexCliSelectorId, getClaudeCliModelDisplayName, isModelAllowed, isOptInModelProvider, litellmModelLabel, STANDARD_CLOUD_MODELS, prettifyModelId } from '../../utils/modelUtils';
 import { validateCurl } from '../../lib/curl-validator';
 import { ProviderCard } from './ProviderCard';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
@@ -2128,7 +2128,12 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
     // --- Local (Claude Code CLI) ---
     // Defaults mirror DEFAULT_CLAUDE_CLI_CONFIG; the real values arrive from
     // getClaudeCliConfig() on mount.
-    const [claudeCliConfig, setClaudeCliConfig] = useState({ enabled: false, path: 'claude', model: 'sonnet', fastModel: 'haiku', timeoutMs: 60000, maxWarmProcesses: 2, sessionMode: 'isolated' as 'isolated' | 'meeting' });
+    const [claudeCliConfig, setClaudeCliConfig] = useState({ enabled: false, path: 'claude', model: 'sonnet', fastModel: 'haiku', timeoutMs: 60000, maxWarmProcesses: 2, sessionMode: 'isolated' as 'isolated' | 'meeting', prepSessionId: '', effort: 'default' as ClaudeCliEffort });
+    // Whether the typed prep session id resolves to a conversation on disk.
+    // 'unknown' covers both "not checked yet" and "~/.claude was unreadable",
+    // which must never be shown as "missing" — a relocated HOME would then
+    // condemn a perfectly good id.
+    const [claudeCliSessionCheck, setClaudeCliSessionCheck] = useState<'unknown' | 'found' | 'missing'>('unknown');
     const [claudeCliStatus, setClaudeCliStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
     const [claudeCliError, setClaudeCliError] = useState('');
     const [claudeCliVersion, setClaudeCliVersion] = useState('');
@@ -2930,6 +2935,33 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
         const result = await window.electronAPI?.setClaudeCliConfig?.(normalized);
         if (result?.config) setClaudeCliConfig(result.config as typeof claudeCliConfig);
         return result;
+    };
+
+    /**
+     * Save the prep session id and immediately say whether it resolves.
+     *
+     * The check is a filesystem lookup under ~/.claude, never a `claude
+     * --resume` probe: this runs on every blur of the field and a probe would
+     * cost a full cold boot plus an API call each time. Advisory only — the
+     * authoritative refusal still happens at turn time — but it is the
+     * difference between finding out here and finding out mid-interview.
+     */
+    const saveAndCheckClaudeCliPrepSession = async () => {
+        const result = await saveClaudeCliConfig();
+        const id = (result?.config?.prepSessionId ?? claudeCliConfig.prepSessionId ?? '').trim();
+        if (!id) {
+            setClaudeCliSessionCheck('unknown');
+            return;
+        }
+        try {
+            const check = await window.electronAPI?.checkClaudeCliSession?.(id);
+            // `checked === false` means ~/.claude could not be read at all,
+            // which says nothing about this id. Stay on 'unknown'.
+            if (!check?.success || !check.checked) setClaudeCliSessionCheck('unknown');
+            else setClaudeCliSessionCheck(check.found ? 'found' : 'missing');
+        } catch {
+            setClaudeCliSessionCheck('unknown');
+        }
     };
 
     /** Filesystem-only probe. Never spawns the binary, so it is safe to run
@@ -3905,6 +3937,70 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
                                     {claudeCliConfig.sessionMode === 'meeting'
                                         ? t('One `claude` process is held open for the whole meeting, so answers build on earlier questions. Two answers generated at the same time cannot share it — the second one runs on its own process and will not see the history.')
                                         : t('Every answer runs in its own process with no memory of earlier ones. Safest, and the fastest when several answers are generated at once.')}
+                                </p>
+                            </label>
+
+                            {/* Prep session. The field the whole feature hangs
+                                off: blank is the default and means exactly the
+                                behaviour above, with no replay and no latency
+                                cost. */}
+                            <label className="space-y-1 block min-w-0">
+                                <span className="aip-label">{t('Prep Session ID')}</span>
+                                <input
+                                    type="text"
+                                    value={claudeCliConfig.prepSessionId}
+                                    onChange={e => {
+                                        setClaudeCliConfig(prev => ({ ...prev, prepSessionId: e.target.value }));
+                                        setClaudeCliSessionCheck('unknown');
+                                    }}
+                                    onBlur={() => { void saveAndCheckClaudeCliPrepSession(); }}
+                                    data-mono="true"
+                                    className="aip-input w-full min-w-0"
+                                    placeholder={t('Leave blank to answer without prep context')}
+                                    spellCheck={false}
+                                />
+                                <p className="aip-meta aip-muted">
+                                    {t('Talk to `claude` before the interview — paste the job description and your CV, and iterate on how you want answers framed. Then paste that session ID here (run `claude --resume` to find it) and every answer is generated with that conversation as context.')}
+                                </p>
+                                <p className="aip-meta aip-muted">
+                                    {t('Use a CLEAN conversation, not a working session: the whole thing is replayed on every turn, so file reads and tool calls become context you pay for and the model reads. Meeting turns are written to your ~/.claude history, which is what lets you reopen the interview afterwards from the meeting page.')}
+                                </p>
+                                {claudeCliConfig.prepSessionId && claudeCliSessionCheck === 'missing' && (
+                                    <p className="aip-meta" data-tone="error">
+                                        {t('No conversation found with that session ID. Answers will fail rather than silently run without your prep context.')}
+                                    </p>
+                                )}
+                                {claudeCliConfig.prepSessionId && claudeCliSessionCheck === 'found' && (
+                                    <p className="aip-meta aip-muted">
+                                        {t('Session found.')}
+                                    </p>
+                                )}
+                            </label>
+
+                            {/* Effort's PRIMARY control is the chip beside the
+                                model picker — this is the full-range mirror,
+                                because `medium`/`xhigh`/`max` do not fit a
+                                140px overlay row. Both write the same key. */}
+                            <label className="space-y-1 block min-w-0">
+                                <span className="aip-label">{t('Reasoning Effort')}</span>
+                                <ModelSelect
+                                    value={claudeCliConfig.effort}
+                                    options={[
+                                        { id: 'default', name: t('Default — no --effort flag') },
+                                        { id: 'low', name: t('Low') },
+                                        { id: 'medium', name: t('Medium') },
+                                        { id: 'high', name: t('High') },
+                                        { id: 'xhigh', name: t('Extra high') },
+                                        { id: 'max', name: t('Max') },
+                                    ]}
+                                    onChange={(effort) => saveClaudeCliConfig({
+                                        ...claudeCliConfig,
+                                        effort: effort as ClaudeCliEffort,
+                                    })}
+                                    placeholder={t('Default')}
+                                />
+                                <p className="aip-meta aip-muted">
+                                    {t('How much the model deliberates — independent of which model runs, so Opus at low effort is a valid combination. Also switchable mid-meeting from the chip next to the model picker. On a normal conversational question it changes little; on a hard design question, high roughly doubles the time to a full answer.')}
                                 </p>
                             </label>
 

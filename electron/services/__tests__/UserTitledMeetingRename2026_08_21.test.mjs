@@ -43,7 +43,11 @@ function makeDb() {
       source TEXT,
       is_processed INTEGER DEFAULT 1,
       summary_status TEXT DEFAULT 'completed',
-      user_titled INTEGER DEFAULT 0
+      user_titled INTEGER DEFAULT 0,
+      -- Added alongside user_titled by a later (unconditional) ALTER. Present
+      -- here so the mirrored SAVE_SQL below stays the production statement
+      -- verbatim; RC-7 itself is indifferent to it.
+      claude_session_id TEXT
     );
   `);
   return db;
@@ -52,9 +56,9 @@ function makeDb() {
 // The three production statements, verbatim from DatabaseManager.ts.
 const RENAME_SQL = 'UPDATE meetings SET title = ?, user_titled = 1 WHERE id = ?';
 const SUMMARY_TITLE_SQL = 'UPDATE meetings SET summary_json = ?, title = CASE WHEN COALESCE(user_titled, 0) = 1 THEN title ELSE ? END, summary_status = ? WHERE id = ?';
-const SAVE_SQL = `INSERT OR REPLACE INTO meetings (id, title, start_time, duration_ms, summary_json, created_at, calendar_event_id, source, is_processed, summary_status, user_titled)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-const READ_USER_TITLE_SQL = 'SELECT title, COALESCE(user_titled, 0) AS user_titled FROM meetings WHERE id = ?';
+const SAVE_SQL = `INSERT OR REPLACE INTO meetings (id, title, start_time, duration_ms, summary_json, created_at, calendar_event_id, source, is_processed, summary_status, user_titled, claude_session_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+const READ_USER_TITLE_SQL = 'SELECT title, COALESCE(user_titled, 0) AS user_titled, claude_session_id FROM meetings WHERE id = ?';
 
 // Mirror of the production saveMeeting title logic (pinned below).
 function saveMeeting(db, id, generatedTitle) {
@@ -65,6 +69,7 @@ function saveMeeting(db, id, generatedTitle) {
     userTitled && existing?.title ? existing.title : generatedTitle,
     1, 1000, '{}', '2026-08-21', null, 'manual', 1, 'completed',
     userTitled ? 1 : 0,
+    existing?.claude_session_id || null,
   );
 }
 
@@ -116,7 +121,12 @@ describe('RC-7: the compiled DatabaseManager carries the guards (drift pins)', (
     assert.match(compiled, /title = CASE WHEN COALESCE\(user_titled, 0\) = 1 THEN title ELSE \? END/);
   });
   test('saveMeeting pre-reads the flag and writes the user_titled column', () => {
-    assert.match(compiled, /SELECT title, COALESCE\(user_titled, 0\) AS user_titled FROM meetings WHERE id = \?/);
+    // The pre-read may select MORE columns than these two — meetings.claude_session_id
+    // rides along on the same row read, for the same INSERT OR REPLACE reason
+    // (see ClaudeSessionIdMigration.test.mjs). What must not drift is that the
+    // title and the user_titled flag are read back BEFORE the row is rewritten,
+    // so the trailing column list is left open rather than pinned exactly.
+    assert.match(compiled, /SELECT title, COALESCE\(user_titled, 0\) AS user_titled[^`']*FROM meetings WHERE id = \?/);
     assert.match(compiled, /is_processed, summary_status, user_titled/);
   });
   test('the user_titled ALTER is applied UNCONDITIONALLY, not version-gated (live incident 2026-08-23)', () => {

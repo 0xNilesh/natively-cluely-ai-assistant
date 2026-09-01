@@ -146,6 +146,39 @@ export const CLAUDE_CLI_MODEL_PRESETS = [
 
 export const claudeCliSelectorId = (modelId: string): string => `claude-cli:${modelId}`;
 
+/** True for any id that routes through the Claude Code CLI transport. */
+export const isClaudeCliModelId = (id: string): boolean =>
+    id === CLAUDE_CLI_MODEL.id || id.startsWith('claude-cli:');
+
+/** `--effort` levels, plus the 'default' sentinel meaning "omit the flag". */
+export type ClaudeCliEffort = 'default' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+/**
+ * The effort levels the overlay control cycles through.
+ *
+ * A SUBSET of what `--effort` accepts, and deliberately so. The control lives
+ * next to the model chip in a 140px row and is pressed mid-interview; six
+ * options there is a menu to read, not a switch to flick. `medium`/`xhigh`/`max`
+ * remain valid values — the Settings dropdown offers the full set and anything
+ * already stored round-trips — but the live control offers the three that
+ * actually change the answer: leave it alone, think less, think harder.
+ *
+ * Effort is ORTHOGONAL to the model. Nothing here may change `--model`.
+ */
+export const CLAUDE_CLI_EFFORT_QUICK_LEVELS: ClaudeCliEffort[] = ['default', 'low', 'high'];
+
+export const CLAUDE_CLI_EFFORT_LEVELS: ClaudeCliEffort[] = ['default', 'low', 'medium', 'high', 'xhigh', 'max'];
+
+/** Two-to-four character chip label. `Eff` is the neutral "flag not passed" state. */
+export const claudeCliEffortLabel = (effort: ClaudeCliEffort): string =>
+    effort === 'default' ? 'Eff' : effort;
+
+/** Hover text, since the chip itself has room for about four characters. */
+export const claudeCliEffortTitle = (effort: ClaudeCliEffort): string =>
+    effort === 'default'
+        ? 'Reasoning effort: default (no --effort flag). Click to cycle.'
+        : `Reasoning effort: ${effort}. Independent of the model. Click to cycle.`;
+
 export const getClaudeCliModelDisplayName = (id: string): string | null => {
     if (id === CLAUDE_CLI_MODEL.id) return CLAUDE_CLI_DEFAULT_LABEL;
     if (!id.startsWith('claude-cli:')) return null;

@@ -9,7 +9,14 @@ export interface ClaudeCliConfigShape {
   timeoutMs: number
   maxWarmProcesses: number
   sessionMode: 'isolated' | 'meeting'
+  /** Prep conversation resumed + forked at meeting start. '' = today's behaviour. */
+  prepSessionId: string
+  /** Per-turn `--effort`. 'default' omits the flag. Orthogonal to the model. */
+  effort: ClaudeCliEffortLevel
 }
+
+/** `--effort` levels, plus the 'default' sentinel meaning "omit the flag". */
+export type ClaudeCliEffortLevel = 'default' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 // Phase 3 — DynamicActionPayload mirrors electron/services/dynamic-actions/DynamicAction.ts.
 // Kept as a structural interface (not a class import) to preserve the strict main↔renderer
@@ -509,6 +516,9 @@ export interface ElectronAPI {
   // codex-cli's deprecated field) because this provider really spawns a binary.
   getClaudeCliConfig: () => Promise<ClaudeCliConfigShape>;
   setClaudeCliConfig: (config: Partial<ClaudeCliConfigShape>) => Promise<{ success: boolean; error?: string; config?: ClaudeCliConfigShape }>;
+  setClaudeCliEffort: (effort: ClaudeCliEffortLevel) => Promise<{ success: boolean; error?: string; effort?: ClaudeCliEffortLevel }>;
+  checkClaudeCliSession: (sessionId: string) => Promise<{ success: boolean; error?: string; checked?: boolean; found?: boolean }>;
+  onClaudeCliPrepSessionError: (callback: (payload: { error: string }) => void) => () => void;
   testClaudeCli: (config?: Partial<ClaudeCliConfigShape>) => Promise<{ success: boolean; error?: string; resolvedPath?: string; version?: string; config?: ClaudeCliConfigShape }>;
   detectClaudeCliPath: () => Promise<{ success: boolean; path?: string | null; candidates?: string[]; error?: string }>;
   onCodexLoginComplete: (callback: (info: { email?: string }) => void) => () => void;

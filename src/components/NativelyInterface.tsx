@@ -328,7 +328,7 @@ import {
 } from '../lib/overlayAppearance';
 import { NegotiationCoachingCard } from '../premium';
 import type { DynamicActionPayload } from '../types/electron';
-import { getClaudeCliModelDisplayName, getCodexCliModelDisplayName, litellmModelLabel } from '../utils/modelUtils';
+import { CLAUDE_CLI_EFFORT_QUICK_LEVELS, type ClaudeCliEffort, claudeCliEffortLabel, claudeCliEffortTitle, getClaudeCliModelDisplayName, getCodexCliModelDisplayName, isClaudeCliModelId, litellmModelLabel } from '../utils/modelUtils';
 import { getModifierSymbol, isMac, isWindows } from '../utils/platformUtils';
 import { DynamicActionBar } from './dynamic-actions/DynamicActionBar';
 import GlassEffectLayer from './ui/GlassEffectLayer';
@@ -1791,6 +1791,59 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // overlay is open). Falls back to `currentModel` itself if the IPC has not
   // resolved yet.
   const [currentModelDisplayName, setCurrentModelDisplayName] = useState<string>('gemini-3-flash-preview');
+
+  // Claude Code reasoning effort. Lives NEXT TO THE MODEL PICKER rather than in
+  // Settings because it is a control you would plausibly move mid-meeting —
+  // low for rapid back-and-forth, high when a question is genuinely hard. It is
+  // orthogonal to the model: `CC-opus` at `low` is valid, and nothing here
+  // touches the model selection.
+  const [claudeCliEffort, setClaudeCliEffort] = useState<ClaudeCliEffort>('default');
+  const showsClaudeCliEffort = isClaudeCliModelId(currentModel);
+
+  // Only load when a Claude Code model is actually selected: the IPC is cheap,
+  // but a user on Gemini has no use for the value and no control to show it in.
+  useEffect(() => {
+    if (!showsClaudeCliEffort) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const config = await window.electronAPI?.getClaudeCliConfig?.();
+        if (!cancelled && config?.effort) setClaudeCliEffort(config.effort as ClaudeCliEffort);
+      } catch { /* the control just stays on its last value */ }
+    })();
+    return () => { cancelled = true; };
+  }, [showsClaudeCliEffort]);
+
+  const cycleClaudeCliEffort = useCallback(async () => {
+    // Optimistic: the chip must respond instantly under a live interview's
+    // finger. A refused write (degraded settings store) reverts it below.
+    const levels = CLAUDE_CLI_EFFORT_QUICK_LEVELS;
+    const index = levels.indexOf(claudeCliEffort);
+    // An effort set from Settings that is not in the quick list (medium/xhigh/
+    // max) is not in `levels`; indexOf gives -1 and this lands on the first
+    // entry, which is the sane "back to a value this control can express".
+    const next = levels[(index + 1) % levels.length];
+    const previous = claudeCliEffort;
+    setClaudeCliEffort(next);
+    try {
+      const result = await window.electronAPI?.setClaudeCliEffort?.(next);
+      if (result && result.success === false) setClaudeCliEffort(previous);
+    } catch {
+      setClaudeCliEffort(previous);
+    }
+  }, [claudeCliEffort]);
+
+  // The prep session is unusable — a configuration failure the user must see,
+  // because every answer this meeting will otherwise just… not arrive.
+  useEffect(() => {
+    const unsubscribe = window.electronAPI?.onClaudeCliPrepSessionError?.((payload) => {
+      setMessages((prev) => [
+        ...prev,
+        { id: genMessageId(), role: 'system', text: `Error: ${payload.error}` },
+      ]);
+    });
+    return () => unsubscribe?.();
+  }, []);
 
   const refreshCurrentModel = useCallback(async () => {
     try {
@@ -9182,6 +9235,32 @@ Provide only the answer, nothing else.`;
                       </span>
                       <ChevronDown size={14} className="shrink-0 transition-transform" />
                     </button>
+
+                    {/* Reasoning effort — NEXT TO the model picker, not inside
+                        it and not in Settings. It is a per-turn control you
+                        would plausibly move between questions, and it is
+                        ORTHOGONAL to the model: this cycles --effort and never
+                        touches --model, so `CC-opus` at `low` is reachable and
+                        effort is never a model downgrade. Shown only when a
+                        Claude Code model is selected, since no other provider
+                        has the flag. */}
+                    {showsClaudeCliEffort && (
+                      <button
+                        data-claude-effort-toggle="true"
+                        onClick={cycleClaudeCliEffort}
+                        title={claudeCliEffortTitle(claudeCliEffort)}
+                        aria-label={claudeCliEffortTitle(claudeCliEffort)}
+                        className={`
+                                                px-2 py-1.5 border rounded-lg transition-colors
+                                                text-xs font-medium tabular-nums
+                                                interaction-base interaction-press
+                                                ${controlSurfaceClass}
+                                            `}
+                        style={appearance.controlStyle}
+                      >
+                        {claudeCliEffortLabel(claudeCliEffort)}
+                      </button>
+                    )}
 
                     <div className="w-px h-3 mx-1" style={appearance.dividerStyle} />
 

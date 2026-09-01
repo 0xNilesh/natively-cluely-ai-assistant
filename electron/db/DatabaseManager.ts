@@ -61,6 +61,9 @@ export interface Meeting {
     source?: 'manual' | 'calendar';
     isProcessed?: boolean;
     summaryStatus?: SummaryStatus;
+    /** Forked Claude Code session id. Set only when a claude-cli provider with
+     *  a configured prep session answered for this meeting. */
+    claudeSessionId?: string;
 }
 
 /**
@@ -1467,6 +1470,20 @@ export class DatabaseManager {
         // construction (the try/catch absorbs "duplicate column"), so it must
         // not depend on a version counter that concurrent branches can race.
         try { this.db.exec("ALTER TABLE meetings ADD COLUMN user_titled INTEGER DEFAULT 0"); } catch (e) { /* Column already exists */ }
+
+        // claude_session_id on meetings (fork-only, 2026-09-01). The forked
+        // Claude Code session a meeting's answers were generated in, so the
+        // meeting detail page can hand it back: `claude --resume <id>` reopens
+        // the interview conversation, every question and every answer.
+        // NULL for every meeting that did not use a claude-cli provider, which
+        // is also how the UI decides whether to show the row at all.
+        //
+        // UNCONDITIONAL AND NOT VERSION-GATED, for the reason spelled out above
+        // for user_titled: an additive nullable column is idempotent by
+        // construction (the try/catch absorbs "duplicate column"), and the live
+        // incident of 2026-08-23 was caused precisely by making one depend on a
+        // version counter that concurrent branches had already advanced past.
+        try { this.db.exec("ALTER TABLE meetings ADD COLUMN claude_session_id TEXT"); } catch (e) { /* Column already exists */ }
         if (version < 28) {
             this.db.pragma('user_version = 28');
         }
@@ -2877,15 +2894,15 @@ export class DatabaseManager {
         }
 
         const insertMeeting = this.db.prepare(`
-            INSERT OR REPLACE INTO meetings (id, title, start_time, duration_ms, summary_json, created_at, calendar_event_id, source, is_processed, summary_status, user_titled)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO meetings (id, title, start_time, duration_ms, summary_json, created_at, calendar_event_id, source, is_processed, summary_status, user_titled, claude_session_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
         // RC-7 (2026-08-21): INSERT OR REPLACE rewrites the whole row, so a
         // user rename made while the row still said "Processing…" (the
         // placeholder → final-save window can span a slow summary generation)
         // was clobbered by the final save's generated title AND lost its
         // user_titled stamp. Pre-read the flag and let the user's title win.
-        const readUserTitle = this.db.prepare(`SELECT title, COALESCE(user_titled, 0) AS user_titled FROM meetings WHERE id = ?`);
+        const readUserTitle = this.db.prepare(`SELECT title, COALESCE(user_titled, 0) AS user_titled, claude_session_id FROM meetings WHERE id = ?`);
 
         const insertTranscript = this.db.prepare(`
             INSERT INTO transcripts (meeting_id, speaker, content, timestamp_ms)
@@ -2915,7 +2932,7 @@ export class DatabaseManager {
 
         const runTransaction = this.db.transaction(() => {
             // 1. Insert Meeting (a user-renamed row keeps its title — RC-7)
-            const existing = readUserTitle.get(meeting.id) as { title: string; user_titled: number } | undefined;
+            const existing = readUserTitle.get(meeting.id) as { title: string; user_titled: number; claude_session_id: string | null } | undefined;
             const userTitled = existing?.user_titled === 1;
             insertMeeting.run(
                 meeting.id,
@@ -2928,7 +2945,13 @@ export class DatabaseManager {
                 meeting.source || 'manual',
                 meeting.isProcessed ? 1 : 0,
                 meeting.summaryStatus || (meeting.isProcessed ? 'completed' : 'queued'),
-                userTitled ? 1 : 0
+                userTitled ? 1 : 0,
+                // Same INSERT OR REPLACE hazard as the title (RC-7): this row is
+                // written twice — a placeholder at stopMeeting, then the final
+                // save — and the session id is only knowable while the meeting
+                // is still live. A later save that no longer carries it must not
+                // blank the value the first one captured.
+                meeting.claudeSessionId || existing?.claude_session_id || null
             );
 
             // 2. Insert Transcript
@@ -3229,6 +3252,7 @@ export class DatabaseManager {
             calendarEventId: meetingRow.calendar_event_id,
             source: meetingRow.source,
             summaryStatus: meetingRow.summary_status as SummaryStatus | undefined,
+            claudeSessionId: meetingRow.claude_session_id || undefined,
             transcript: transcript,
             usage: usage
         };
