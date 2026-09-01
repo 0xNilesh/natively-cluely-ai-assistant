@@ -104,6 +104,13 @@ class ZeroShotClassifier {
     private nonRecoverableLoadError: Error | null = null;
 
     private static readonly WORKER_TIMEOUT_MS = 30_000;
+    /**
+     * How long a load may wait for a free ONNX slot before giving up for this
+     * attempt. The classifier is Tier 2 of three — every caller has a documented
+     * fallback — so waiting behind a Whisper session for the length of a meeting
+     * buys nothing and, unbounded, hangs whoever awaited it.
+     */
+    private static readonly SLOT_WAIT_MS = 10_000;
 
     private constructor() {}
 
@@ -392,9 +399,29 @@ class ZeroShotClassifier {
             return;
         }
 
-        const releaseSlot = await acquireOnnxSlot('normal');
-
+        // The slot acquisition is INSIDE loadingPromise (2026-09-01). It used to
+        // be awaited before the promise was assigned, so N concurrent callers
+        // each queued their own acquisition against a gate that admits one —
+        // every caller after the first waited for a slot it would immediately
+        // discard. Coalescing here means one queued acquisition per load
+        // attempt, and the `if (this.loadingPromise)` branch above now actually
+        // covers the wait it was written for.
         this.loadingPromise = (async () => {
+            let releaseSlot: (() => void) | null = null;
+            try {
+                releaseSlot = await acquireOnnxSlot('normal', 1, ZeroShotClassifier.SLOT_WAIT_MS);
+            } catch (e) {
+                // Gate refusal, not a load error — same disposition as the
+                // memory floor above: no `loadFailed` latch, the next call
+                // retries. It is reported because the alternative was the bug
+                // this bound exists for: an unbounded wait here hung the caller
+                // FOREVER (a normal-priority acquisition is starved for as long
+                // as any high-priority waiter is queued), and a hang has no
+                // symptom of its own — the What-to-Answer request simply stopped
+                // mid-trace with no error and no answer.
+                console.warn('[IntentClassifier] zero-shot worker load skipped — ONNX gate unavailable, regex-only fallback:', e);
+                return;
+            }
             try {
                 await this.postToWorker({ type: 'init', ...this.workerConfig() });
                 this.loaded = true;

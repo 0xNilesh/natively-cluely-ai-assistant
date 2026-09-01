@@ -39,7 +39,10 @@ describe('F5/F6/F7: pre-stream kicks run on the RESOLVED question, after extract
   const extraction = engineSrc.indexOf('const extractedQuestion = extractLatestQuestion(');
   const resolutionDone = engineSrc.indexOf("trace.mark('latest_question_extracted'");
   const groundingAwait = engineSrc.indexOf('await withTimeout(orchestrator.processQuestion(');
-  const intentJoin = engineSrc.indexOf('const intentResult = await intentPromise');
+  // The join is bounded through withTimeout (2026-09-01) — it was a bare
+  // `await intentPromise` until a starved ONNX slot proved that an unbounded
+  // one freezes the whole request. See INTENT_BUDGET_MS in IntelligenceEngine.ts.
+  const intentJoin = engineSrc.indexOf('const intentJoin = await withTimeout(intentPromise');
 
   test('kicks are AFTER question extraction and follow-up resolution', () => {
     assert.ok(extraction > 0 && resolutionDone > extraction, 'sanity: extraction precedes resolution mark');

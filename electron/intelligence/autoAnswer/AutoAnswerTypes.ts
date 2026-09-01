@@ -180,6 +180,16 @@ export interface AutoAnswerTelemetryEvent {
     msFromDecisionToFirstToken?: number;
     queueDepth?: number;
     skipReason?: AutoAnswerSkipReason;
+    /**
+     * On `skipReason: 'engine_busy_or_cooling'`, WHICH condition the engine
+     * refused on — `answer_in_flight(what_to_say)`, `trigger_cooldown(420ms)`,
+     * `mode_other(recap)` or `mode_wedged(what_to_say)`. See
+     * intelligence/autoAnswerBusyReason.ts. The bare skip reason made a
+     * legitimate throttle indistinguishable from an engine that would never
+     * accept again, so a whole meeting of refusals read as normal pacing.
+     * Metadata only — never transcript text, and nothing branches on it.
+     */
+    engineBlocked?: string;
     state?: AutoAnswerState;
     action?: AutoAnswerPolicyAction;
     /** False when NO speech_edge has ever arrived this meeting — dual-channel gating is inert (stale native module?). */

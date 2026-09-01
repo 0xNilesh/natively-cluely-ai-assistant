@@ -24,6 +24,11 @@ import {
     checkAnswerRelevance, AnswerDiversityGuard,
     speculativeQuestionSimilarity, acceptRepairedAnswer
 } from './llm';
+import type { IntentResult } from './llm';
+import {
+    describeAutoAnswerBusy, formatAutoAnswerBusy,
+    type AutoAnswerBusyReason,
+} from './intelligence/autoAnswerBusyReason';
 import {
     validateDocumentGroundedAnswer,
     completenessRegenFabricates,
@@ -95,6 +100,40 @@ function withTimeout<T, F = T>(promise: Promise<T>, ms: number, fallback: F): Pr
             () => { if (!settled) { settled = true; clearTimeout(timer); resolve({ value: fallback, timedOut: false }); } },
         );
     });
+}
+
+/**
+ * Budget for joining `classifyIntent` on the live answer paths.
+ *
+ * NOT a nicety. Until 2026-09-01 both call sites were a bare
+ * `await classifyIntent(...)`, and that one unbounded await stalled EVERY
+ * What-to-Answer — manual and automatic — for the rest of the session:
+ *
+ *   classifyIntent Tier-2 → ZeroShotClassifier.classify → ensureLoaded →
+ *   `await acquireOnnxSlot('normal')`, which for a non-exclusive (weight <= cap)
+ *   acquisition has NO timeout by contract, and which `canAcquireNow` refuses
+ *   for as long as ANY high-priority waiter is queued. A high waiter that can
+ *   never be admitted (Whisper/Nemotron's exclusive weight-3 request against
+ *   the cap of 2) therefore starves every normal acquisition indefinitely.
+ *
+ * A `.catch()` cannot rescue that: the promise never settles, so it neither
+ * resolves nor rejects. Live evidence: the WTA trace stopped dead between
+ * `latest_question_extracted` and `answer_type_selected` with no
+ * answer-generation request ever issued — and because runWhatShouldISay sets
+ * `activeMode = 'what_to_say'` before its first await, a run that never returns
+ * also never restores it, so `canAutoAnswer()` stayed false for the rest of the
+ * meeting and Auto Answer never dispatched once. One hang, both symptoms.
+ *
+ * The classifier is an OPTIMISATION with a documented Tier-3 heuristic
+ * fallback, so the budget costs answer *shaping* accuracy on a slow turn and
+ * nothing else. 2.5 s is well past the measured 50-800 ms tail quoted at the
+ * kick site.
+ */
+const INTENT_BUDGET_MS = 2500;
+
+/** The classifier's own Tier-3 default, used for both a rejection and a timeout. */
+function intentFallbackResult(): IntentResult {
+    return { intent: 'general', confidence: 0.4, answerShape: 'Concise, direct answer to the question.' };
 }
 
 // Refinement intent detection (refined to avoid false positives)
@@ -246,6 +285,8 @@ export class IntelligenceEngine extends EventEmitter {
      * of each other. 800 ms does that without the user feeling it.
      */
     private readonly automaticTriggerCooldown: number = 800;
+    /** Last blocking condition logged by canAutoAnswer, so the 500 ms retry poll logs on change only. */
+    private lastAutoAnswerBlockLogged: string | null = null;
     /**
      * Generation id of the answer run started by an AUTOMATIC trigger
      * (SuggestionTrigger.automatic), or null. Lets the dual-channel gate
@@ -756,9 +797,44 @@ export class IntelligenceEngine extends EventEmitter {
      * and are allowed to supersede.
      */
     canAutoAnswer(): boolean {
-        if (this.activeMode !== 'idle' && this.activeMode !== 'assist') return false;
-        if (Date.now() - this.lastTriggerTime < this.automaticTriggerCooldown) return false;
-        return true;
+        const reason = this.autoAnswerBlockReason();
+        if (!reason) {
+            this.lastAutoAnswerBlockLogged = null;
+            return true;
+        }
+        // The dispatch polls this every RETRY_MS while parked, so log on CHANGE
+        // rather than on every call — one line per distinct blocking condition,
+        // which is all it takes to tell a legitimate 800 ms throttle from an
+        // engine that will never accept again.
+        if (reason.code !== this.lastAutoAnswerBlockLogged) {
+            this.lastAutoAnswerBlockLogged = reason.code;
+            console.log(`[IntelligenceEngine] canAutoAnswer refused: ${formatAutoAnswerBusy(reason)}`, {
+                mode: reason.mode,
+                answerInFlight: reason.answerInFlight,
+                cooldownRemainingMs: reason.cooldownRemainingMs,
+            });
+        }
+        return false;
+    }
+
+    /**
+     * WHY `canAutoAnswer()` refuses, or null when it accepts.
+     *
+     * `engine_busy_or_cooling` was a single opaque reason covering a legitimate
+     * 800 ms throttle, a live manual answer, and a permanently wedged busy flag.
+     * They are the same string in the log and in the telemetry, which is the
+     * single reason the dispatch bug survived as long as it did. This names the
+     * condition; `SimpleAutoAnswer` puts the same description on the
+     * `auto_answer_ignored` event so the record and the console agree.
+     */
+    autoAnswerBlockReason(): AutoAnswerBusyReason | null {
+        return describeAutoAnswerBusy({
+            activeMode: this.activeMode,
+            answerInFlight: this.whatToAnswerCancellationToken !== null,
+            now: Date.now(),
+            lastTriggerTime: this.lastTriggerTime,
+            automaticTriggerCooldown: this.automaticTriggerCooldown,
+        });
     }
 
     /**
@@ -861,7 +937,19 @@ export class IntelligenceEngine extends EventEmitter {
             try { this.llmHelper.setGroqFastTextMode(true); } catch { /* routing hint only */ }
         }
         try {
-            await this.runWhatShouldISay(trigger.lastQuestion, trigger.confidence ?? undefined);
+            // `skipCooldown` for an AUTOMATIC trigger: this call has already
+            // passed `canAutoAnswer()`, which applies the automatic path's own
+            // 800 ms `automaticTriggerCooldown`. Without the bypass it then met
+            // `shouldThrottleTrigger`'s 3 s manual `triggerCooldown` as well —
+            // and the speculative prefetch stamps `lastTriggerTime` when it
+            // completes, so the dispatch the gate had just approved was thrown
+            // away inside runWhatShouldISay before it set a mode, emitted an
+            // event or logged a line. The judge's verdict simply evaporated.
+            // The manual path is untouched (it already passes skipCooldown);
+            // an unmarked trigger (the __e2e__:ask harness) keeps the 3 s gate.
+            await this.runWhatShouldISay(trigger.lastQuestion, trigger.confidence ?? undefined, undefined, {
+                skipCooldown: trigger.automatic === true,
+            });
         } finally {
             this.nextRunIsAutomatic = false;
             if (fastAuto && !previousFastMode) {
@@ -983,11 +1071,23 @@ export class IntelligenceEngine extends EventEmitter {
             timestamp: item.timestamp,
         })), 12);
         const lastInterviewerTurn = this.session.getLastInterviewerTurn();
-        const intentResult = await classifyIntent(
-            lastInterviewerTurn,
-            preparedTranscript,
-            this.session.getAssistantResponseHistory().length
+        // Bounded — see INTENT_BUDGET_MS. This is the AUTOMATIC dispatch's copy
+        // of the same await, and it sits before `handleSuggestionTriggerInner`
+        // has emitted anything at all: a hang here loses the answer with no
+        // planner decision, no 'suggestion_skipped' and no telemetry of any kind.
+        const intentJoin = await withTimeout(
+            classifyIntent(
+                lastInterviewerTurn,
+                preparedTranscript,
+                this.session.getAssistantResponseHistory().length
+            ),
+            INTENT_BUDGET_MS,
+            intentFallbackResult(),
         );
+        if (intentJoin.timedOut) {
+            console.warn(`[IntelligenceEngine] Intent classification exceeded ${INTENT_BUDGET_MS}ms on the automatic path — planning with the general fallback`);
+        }
+        const intentResult = intentJoin.value;
         const detectedCodingQuestion = this.session.getDetectedCodingQuestion();
 
         return planNextAssistantAction({
@@ -1087,6 +1187,11 @@ export class IntelligenceEngine extends EventEmitter {
 
         } catch (error) {
             if ((error as Error).name === 'AbortError') {
+                // Same class of leak as the What-to-Answer one below: an abort
+                // left 'assist' latched. Benign for canAutoAnswer (it treats
+                // 'assist' as free) but it blocks runAssistMode's own re-entry
+                // guard and misreports getActiveMode() to the renderer.
+                this.setMode('idle');
                 return null;
             }
             this.emit('error', error as Error, 'assist');
@@ -1781,9 +1886,7 @@ export class IntelligenceEngine extends EventEmitter {
                 question || extractedQuestion.latestQuestion || lastInterviewerTurn,
                 preparedTranscript,
                 this.session.getAssistantResponseHistory().length
-            ).catch((): { intent: 'general'; confidence: number; answerShape: string } => (
-                { intent: 'general', confidence: 0.4, answerShape: 'Concise, direct answer to the question.' }
-            ));
+            ).catch(intentFallbackResult);
             // Retrieval-query provenance (HDFC leak, 2026-08-18): the prefetch
             // query must be USER-originated — question, then non-assistant
             // transcript lines, then captured screen text. The old blob
@@ -2421,12 +2524,22 @@ export class IntelligenceEngine extends EventEmitter {
             // Join the parallel intent classification (kicked above). The
             // grounding await it overlapped with has settled by now, so this is
             // usually instant; worst case is the classifier's own tail.
-            const intentResult = await intentPromise;
+            // BOUNDED (see INTENT_BUDGET_MS). This was the stall: the last
+            // unconditional await before 'answer_type_selected', with no budget
+            // and no way for the kick site's `.catch()` to help, so a starved
+            // ONNX slot froze the whole request here — permanently, silently,
+            // and with the engine's busy flag left set.
+            const intentJoin = await withTimeout(intentPromise, INTENT_BUDGET_MS, intentFallbackResult());
+            const intentResult = intentJoin.value;
+            if (intentJoin.timedOut) {
+                trace.mark('degraded_context', { reason: 'intent_timeout', budgetMs: INTENT_BUDGET_MS });
+                console.warn(`[IntelligenceEngine] Intent classification exceeded ${INTENT_BUDGET_MS}ms — answering with the general fallback shape`);
+            }
             if (isWtaSuperseded()) {
                 recordWtaCancellation();
                 return null;
             }
-            trace.mark('intent_classified', { intent: intentResult.intent, confidence: intentResult.confidence });
+            trace.mark('intent_classified', { intent: intentResult.intent, confidence: intentResult.confidence, timedOut: intentJoin.timedOut });
 
             // Canonical turn seam (observe-only for this first migration): freeze the
             // answer plan, persisted source decision, and derived TurnPlan together.
@@ -5337,9 +5450,44 @@ export class IntelligenceEngine extends EventEmitter {
             if (this.whatToAnswerCancellationToken === whatToAnswerCancellationToken) {
                 this.whatToAnswerCancellationToken = null;
             }
+            // Release the engine's BUSY FLAG on every exit path (answer, abort,
+            // supersession, error, timeout) — see releaseWhatToSayMode.
+            this.releaseWhatToSayMode();
             // Resume background drains on EVERY exit path (answer, abort, error).
             releaseFg();
         }
+    }
+
+    /**
+     * Restore `activeMode` after a What-to-Answer request leaves, whichever way
+     * it left.
+     *
+     * `activeMode` is the engine's busy flag: `canAutoAnswer()` refuses while it
+     * is 'what_to_say', and `SimpleAutoAnswer`'s parked dispatch is woken by the
+     * `mode_changed('idle')` event this emits. It was set at the top of
+     * `runWhatShouldISay` and restored only by the ~15 scattered
+     * `setMode('idle')` calls on the paths that produce an answer. Every
+     * ABANDONMENT path missed it: the six `isWtaSuperseded()` early returns, the
+     * `catch`'s superseded branch, the speculative empty-context return, and the
+     * `streamAborted` branch whose restore is conditional on still owning the
+     * slot. One abandoned run therefore wedged Auto Answer for the rest of the
+     * meeting — the flag said "busy" with nothing running, and because no
+     * `mode_changed('idle')` ever fired, the wake-up was gone too, so every
+     * later verdict parked for RETRY_TTL_MS and reported
+     * `engine_busy_or_cooling`. Reproduced directly against a real engine: a
+     * speculative run superseded mid-flight returns null, releases the
+     * cancellation slot, and leaves `canAutoAnswer()` false forever.
+     *
+     * Ownership rule, identical to the one the cancellation slot uses: a
+     * superseded run must NOT clear the flag out from under the newer run that
+     * replaced it. So restore only when nobody holds the slot — which, by the
+     * time this runs, means no What-to-Answer request is in flight at all and
+     * nothing else will ever clear it.
+     */
+    private releaseWhatToSayMode(): void {
+        if (this.whatToAnswerCancellationToken !== null) return;   // a newer request owns the engine
+        if (this.activeMode !== 'what_to_say') return;             // already released, or another mode owns it
+        this.setMode('idle');
     }
 
     /**
@@ -6357,7 +6505,11 @@ export class IntelligenceEngine extends EventEmitter {
      * Reset engine state (cancels any in-flight operations)
      */
     reset(): void {
-        this.activeMode = 'idle';
+        // setMode, not a bare assignment: SimpleAutoAnswer's parked dispatch is
+        // woken by the `mode_changed('idle')` EVENT, so a silent field write
+        // left a candidate parked behind an engine that had already gone idle.
+        this.setMode('idle');
+        this.lastAutoAnswerBlockLogged = null;
         this.currentGenerationId++; // Increment to break all active LLM streams
         if (this.whatToAnswerCancellationToken) {
             this.whatToAnswerCancellationToken.abort('engine_reset');

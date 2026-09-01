@@ -209,6 +209,15 @@ export interface SimpleAutoAnswerHost {
     isMeetingActive(): boolean;
     meetingGeneration(): number;
     engineAccepting(): boolean;
+    /**
+     * WHICH condition `engineAccepting()` refused on, for the telemetry and the
+     * skip log. `engine_busy_or_cooling` covered a legitimate 800 ms throttle, a
+     * live manual answer and a permanently wedged busy flag with one identical
+     * string — so a session that never dispatched once read exactly like healthy
+     * pacing, which is why the dispatch bug survived as long as it did.
+     * Optional: a host that does not supply it simply records no detail.
+     */
+    engineBlockReason?(): string | null;
     answerStreamActive?(): boolean;
     /** Hot window for judge context (finalized turns, both speakers). */
     recentTurns(): TranscriptTurn[];
@@ -659,11 +668,31 @@ export class SimpleAutoAnswerEngine {
         const deadline = this.clock.now() + RETRY_TTL_MS;
         const seqAtDeliver = this.judgeSeq;
         const attempt = () => {
-            if (!this.host.isMeetingActive() || this.judgeSeq !== seqAtDeliver) { this.parkedAttempt = null; return; }
+            if (!this.host.isMeetingActive() || this.judgeSeq !== seqAtDeliver) {
+                // A verdict that reached dispatch and was then dropped used to
+                // leave NO record at all — the only silent exit in the whole
+                // pipeline, and the one that eats a positive verdict during
+                // continuous speech. Name it.
+                if (this.parkedAttempt === attempt) {
+                    this.emit({
+                        name: 'auto_answer_ignored', questionId: id,
+                        skipReason: this.host.isMeetingActive() ? 'stale_generation' : 'meeting_inactive',
+                    });
+                }
+                this.parkedAttempt = null;
+                return;
+            }
             if (!this.host.engineAccepting()) {
                 if (this.clock.now() >= deadline) {
                     this.parkedAttempt = null;
-                    this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'engine_busy_or_cooling' });
+                    this.emit({
+                        name: 'auto_answer_ignored', questionId: id, skipReason: 'engine_busy_or_cooling',
+                        // WHICH condition, not just "busy". `answer_in_flight` is a
+                        // real stream and legitimate; `trigger_cooldown` is pacing;
+                        // `mode_wedged` means the engine's busy flag is stuck with
+                        // nothing running and no dispatch will ever succeed again.
+                        engineBlocked: this.host.engineBlockReason?.() ?? undefined,
+                    });
                     return;
                 }
                 this.parkedAttempt = attempt;
@@ -778,6 +807,10 @@ export class SimpleAutoAnswerEngine {
         try {
             this.host.telemetry?.({ ...event, meetingGeneration: this.host.meetingGeneration() } as AutoAnswerTelemetryEvent);
         } catch { /* telemetry must never break the pipeline */ }
-        if (event.name === 'auto_answer_ignored') this.host.log?.(`[AutoAnswer:simple] skipped: ${event.skipReason}${event.questionId ? ` (${event.questionId})` : ''}`);
+        if (event.name === 'auto_answer_ignored') {
+            this.host.log?.(`[AutoAnswer:simple] skipped: ${event.skipReason}`
+                + (event.engineBlocked ? ` [${event.engineBlocked}]` : '')
+                + (event.questionId ? ` (${event.questionId})` : ''));
+        }
     }
 }

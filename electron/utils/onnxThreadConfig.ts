@@ -252,13 +252,43 @@ function removeFromQueue(queue: Array<() => void>, resolver: () => void): void {
  * a bit more patience — the promise REJECTS in that case instead of hanging
  * forever. A `weight <= cap` acquisition still never rejects and blocks
  * however long ordinary contention requires, exactly as before.
+ *
+ * `maxWaitMs` (optional) puts the SAME bound on a non-exclusive acquisition,
+ * for callers on a latency-critical path who would rather degrade than wait.
+ * It exists because an unbounded normal-priority wait is not only slow, it can
+ * be permanent: `canAcquireNow` refuses every normal request for as long as ANY
+ * high-priority waiter is queued, so a high waiter that can never be admitted
+ * (Nemotron's exclusive weight-3 request against the default cap of 2, queued
+ * behind a live Whisper session) starves normal acquisitions for the lifetime
+ * of the holder. The intent classifier sat behind exactly that, and because
+ * `runWhatShouldISay` awaited it with no budget of its own, every What-to-Answer
+ * in the session hung — see INTENT_BUDGET_MS in IntelligenceEngine.ts. Omitted,
+ * behaviour is unchanged for every existing caller.
  */
-export async function acquireOnnxSlot(priority: OnnxSlotPriority = 'normal', weight: number = 1): Promise<() => void> {
+export async function acquireOnnxSlot(
+    priority: OnnxSlotPriority = 'normal',
+    weight: number = 1,
+    maxWaitMs?: number,
+): Promise<() => void> {
     const cap = readMaxConcurrent();
     const exclusive = weight > cap;
     const queue = priority === 'high' ? _sem.waitersHigh : _sem.waitersNormal;
-    const timeoutMs = readExclusiveTimeoutMs();
-    const deadline = exclusive ? Date.now() + timeoutMs : null;
+    const exclusiveTimeoutMs = readExclusiveTimeoutMs();
+    // Whichever bound applies first. An exclusive request keeps its own bound
+    // even when the caller supplied a longer one.
+    const timeoutMs = exclusive
+        ? Math.min(exclusiveTimeoutMs, maxWaitMs ?? exclusiveTimeoutMs)
+        : maxWaitMs;
+    const deadline = timeoutMs === undefined ? null : Date.now() + timeoutMs;
+    const timedOut = () => new Error(
+        `ONNX slot acquisition timed out after ${timeoutMs}ms — ` +
+        (exclusive
+            ? `weight ${weight} exceeds the concurrency cap (${cap}), and another exclusive-mode ` +
+              `session is already holding the gate for its full lifetime. This model cannot run ` +
+              `concurrently with the session currently holding the ONNX gate.`
+            : `the gate is saturated (cap ${cap}, ${_sem.inFlightNormal + _sem.inFlightHigh} in flight, ` +
+              `${_sem.waitersHigh.length} high-priority waiter(s) queued ahead of normal priority).`)
+    );
 
     while (!canAcquireNow(priority, weight)) {
         let resolveWaiter!: () => void;
@@ -275,27 +305,20 @@ export async function acquireOnnxSlot(priority: OnnxSlotPriority = 'normal', wei
         const remaining = deadline - Date.now();
         if (remaining <= 0) {
             removeFromQueue(queue, resolveWaiter);
-            throw new Error(
-                `ONNX slot acquisition timed out after ${timeoutMs}ms — ` +
-                `weight ${weight} exceeds the concurrency cap (${cap}), and another exclusive-mode ` +
-                `session is already holding the gate for its full lifetime. This model cannot run ` +
-                `concurrently with the session currently holding the ONNX gate.`
-            );
+            throw timedOut();
         }
 
         const TIMEOUT = Symbol('onnx-slot-acquire-timeout');
         const outcome = await Promise.race([
             waiterP.then(() => 'resolved' as const),
+            // NOT unref'd: the deadline must keep the loop alive until it either
+            // fires or is beaten, or a waiter that is legitimately queued reads
+            // as an abandoned promise (and `node --test` reports exactly that).
             new Promise<typeof TIMEOUT>((resolve) => setTimeout(() => resolve(TIMEOUT), remaining)),
         ]);
         if (outcome === TIMEOUT) {
             removeFromQueue(queue, resolveWaiter);
-            throw new Error(
-                `ONNX slot acquisition timed out after ${timeoutMs}ms — ` +
-                `weight ${weight} exceeds the concurrency cap (${cap}), and another exclusive-mode ` +
-                `session is already holding the gate for its full lifetime. This model cannot run ` +
-                `concurrently with the session currently holding the ONNX gate.`
-            );
+            throw timedOut();
         }
         // Resolved normally within the deadline — loop re-checks canAcquireNow.
     }

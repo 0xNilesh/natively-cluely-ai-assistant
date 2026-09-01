@@ -28,13 +28,19 @@ const { WhatToAnswerLLM } = await import(pathToFileURL(path.join(distRoot, 'llm/
 const { planAnswer } = await import(pathToFileURL(path.join(distRoot, 'llm/AnswerPlanner.js')).href);
 
 describe('W5: pipeline shape (source pins)', () => {
-    test('classifyIntent is kicked as a promise, awaited only at planAnswer time', () => {
+    test('classifyIntent is kicked as a promise, joined only at planAnswer time — and the join is BOUNDED', () => {
         assert.match(engineSrc, /const intentPromise = classifyIntent\(/);
-        assert.match(engineSrc, /const intentResult = await intentPromise/);
+        // The join runs through withTimeout (2026-09-01). It used to be a bare
+        // `await intentPromise`, and that one unbounded await froze every
+        // What-to-Answer in the session whenever the classifier's ONNX slot was
+        // starved — a `.catch()` cannot rescue a promise that never settles.
+        // See INTENT_BUDGET_MS in IntelligenceEngine.ts. So the pin is now the
+        // BOUND as well as the ordering.
+        assert.match(engineSrc, /const intentJoin = await withTimeout\(intentPromise, INTENT_BUDGET_MS,/);
         // The grounding await sits BETWEEN kick and join — that's the overlap.
         const kick = engineSrc.indexOf('const intentPromise = classifyIntent(');
         const ground = engineSrc.indexOf('await withTimeout(orchestrator.processQuestion(');
-        const join = engineSrc.indexOf('const intentResult = await intentPromise');
+        const join = engineSrc.indexOf('const intentJoin = await withTimeout(intentPromise');
         assert.ok(kick > 0 && ground > kick && join > ground,
             `expected kick(${kick}) < grounding(${ground}) < join(${join})`);
     });
