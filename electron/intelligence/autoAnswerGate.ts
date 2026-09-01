@@ -27,6 +27,14 @@ export interface AutoAnswerGateInput {
     lastAnsweredQuestion: string | null;
     /** IntelligenceEngine.canAutoAnswer() — mode + cooldown. */
     engineAccepting: boolean;
+    /**
+     * `IntelligenceEngine.autoAnswerBlockReason()` formatted — WHICH condition
+     * `engineAccepting: false` came from. Diagnostic only: the gate's decision
+     * does not depend on it, but a refusal that cannot say why is exactly how
+     * a permanently wedged engine passed for normal pacing for weeks. See
+     * autoAnswerBusyReason.ts.
+     */
+    engineBlockReason?: string | null;
 }
 
 export type AutoAnswerSkipReason =
@@ -39,7 +47,7 @@ export type AutoAnswerSkipReason =
 
 export type AutoAnswerGateDecision =
     | { dispatch: true; question: string }
-    | { dispatch: false; reason: AutoAnswerSkipReason };
+    | { dispatch: false; reason: AutoAnswerSkipReason; detail?: string };
 
 /**
  * Pure. Order matters only for which reason is reported; every guard is
@@ -62,7 +70,14 @@ export function evaluateAutoAnswerGate(input: AutoAnswerGateInput): AutoAnswerGa
         return { dispatch: false, reason: 'already_answered' };
     }
 
-    if (!input.engineAccepting) return { dispatch: false, reason: 'engine_busy_or_cooling' };
+    if (!input.engineAccepting) {
+        // `detail` names the blocking condition when the caller supplied one.
+        // Omitted entirely when it did not, so an existing caller's decision is
+        // deep-equal to what it was before.
+        return input.engineBlockReason
+            ? { dispatch: false, reason: 'engine_busy_or_cooling', detail: input.engineBlockReason }
+            : { dispatch: false, reason: 'engine_busy_or_cooling' };
+    }
 
     return { dispatch: true, question };
 }

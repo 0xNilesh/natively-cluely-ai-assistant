@@ -14,6 +14,7 @@ import type { TurnIdentity } from './llm/turnIdentity';
 import { IntelligenceEngine } from './IntelligenceEngine';
 import { MeetingPersistence } from './MeetingPersistence';
 import { ScreenContext } from './services/screen/ScreenContextService';
+import { formatAutoAnswerBusy } from './intelligence/autoAnswerBusyReason';
 
 // Re-export types for backward compatibility
 export type { TranscriptSegment, SuggestionTrigger, ContextItem } from './SessionTracker';
@@ -192,6 +193,16 @@ export class IntelligenceManager extends EventEmitter {
     /** Mode + cooldown gate for the Auto Answer trigger. See IntelligenceEngine.canAutoAnswer. */
     canAutoAnswer(): boolean {
         return this.engine.canAutoAnswer();
+    }
+
+    /**
+     * WHICH condition made canAutoAnswer() refuse, as a short token for the
+     * `auto_answer_ignored` telemetry, or null when it accepts. Carries no
+     * transcript text. See IntelligenceEngine.autoAnswerBlockReason.
+     */
+    autoAnswerBlockReason(): string | null {
+        const reason = this.engine.autoAnswerBlockReason();
+        return reason ? formatAutoAnswerBusy(reason) : null;
     }
 
     /** Barge-in: abort the streaming AUTOMATIC answer only. See IntelligenceEngine.cancelAutomaticAnswer. */

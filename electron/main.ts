@@ -3234,6 +3234,10 @@ export class AppState {
     isMeetingActive: () => this.isMeetingActive,
     meetingGeneration: () => this._meetingGeneration,
     engineAccepting: () => this.intelligenceManager.canAutoAnswer(),
+    // Which condition the refusal came from, so `engine_busy_or_cooling` in the
+    // record can be told apart from a legitimate throttle. See
+    // intelligence/autoAnswerBusyReason.ts.
+    engineBlockReason: () => this.intelligenceManager.autoAnswerBlockReason(),
     answerStreamActive: () => this.intelligenceManager.isAnswerStreaming(),
     // 180 s — the SAME window the answer itself is written from
     // (IntelligenceEngine's getContext(180)). At 60 s the judge could not see
