@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useT } from '../../i18n';
 import { Plus, Trash2, Edit2, AlertCircle, Save, ChevronDown, Check, RefreshCw, ExternalLink, Loader2, LogOut, Cloud, Server, Eye, Info, MessageSquare, Image, FileText, User, Boxes, ClipboardList, Laptop } from 'lucide-react';
-import { CLAUDE_CLI_MODEL, CLAUDE_CLI_MODEL_PRESETS, claudeCliSelectorId, CODEX_CLI_MODEL, CODEX_CLI_MODEL_PRESETS, codexCliSelectorId, isModelAllowed, isOptInModelProvider, litellmModelLabel, STANDARD_CLOUD_MODELS, prettifyModelId } from '../../utils/modelUtils';
+import { CLAUDE_CLI_MODEL, CLAUDE_CLI_MODEL_PRESETS, claudeCliSelectorId, CODEX_CLI_MODEL, CODEX_CLI_MODEL_PRESETS, codexCliSelectorId, getClaudeCliModelDisplayName, isModelAllowed, isOptInModelProvider, litellmModelLabel, STANDARD_CLOUD_MODELS, prettifyModelId } from '../../utils/modelUtils';
 import { validateCurl } from '../../lib/curl-validator';
 import { ProviderCard } from './ProviderCard';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
@@ -2451,11 +2451,15 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
             });
         }
         if (claudeCliConfig.enabled && isProviderEnabled('claude-cli')) {
-            opts.push({ id: CLAUDE_CLI_MODEL.id, name: `${CLAUDE_CLI_MODEL.name} (${prettifyModelId(claudeCliConfig.model)})` });
+            // Same helper the meeting picker uses. This dropdown lists the
+            // IDENTICAL option set as ModelSelectorWindow, so assembling the
+            // labels separately here just guaranteed the two would disagree —
+            // exactly the drift isProviderEnabled's comment warns about.
+            opts.push({ id: CLAUDE_CLI_MODEL.id, name: getClaudeCliModelDisplayName(CLAUDE_CLI_MODEL.id) || CLAUDE_CLI_MODEL.name });
             CLAUDE_CLI_MODEL_PRESETS.forEach(model => {
                 const id = claudeCliSelectorId(model.id);
                 if (!opts.find(o => o.id === id)) {
-                    opts.push({ id, name: `${CLAUDE_CLI_MODEL.name}: ${model.name}` });
+                    opts.push({ id, name: getClaudeCliModelDisplayName(id) || model.name });
                 }
             });
         }

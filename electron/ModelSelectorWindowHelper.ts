@@ -14,10 +14,28 @@ type WindowActivationOptions = {
     activate?: boolean
 }
 
+// Delay before the post-show re-assert of setContentProtection(). Matched to
+// the 60ms the Windows opacity shield already waits for DWM in this file and in
+// WindowHelper — long enough for WindowServer/DWM to have digested the show and
+// any collection-behavior change, short enough that no realistic capture can
+// land in the gap (a screenshot's own shutter latency is an order of magnitude
+// larger). The pre-show apply is still the primary defence; this only catches
+// the case where the OS re-evaluated the window after it.
+const CONTENT_PROTECTION_REASSERT_MS = 60;
+
 export class ModelSelectorWindowHelper {
     private window: BrowserWindow | null = null
     private contentProtection: boolean = false
     private opacityTimeout: NodeJS.Timeout | null = null;
+    // Deferred re-assert of the sharingType flag. macOS applies several of the
+    // window operations in showWindow() (collection-behavior changes, parenting,
+    // the show itself) by handing them to WindowServer, which re-evaluates the
+    // NSWindow on a LATER turn of the run loop — after the synchronous block
+    // that called setContentProtection(). Pushing the flag a second time once
+    // that settles is the same defence CropperWindowHelper's opacity shield
+    // applies on Windows and AppState._enforceDockState applies after a
+    // dock/activation-policy flip.
+    private reassertTimeout: NodeJS.Timeout | null = null;
 
     constructor() { }
 
@@ -61,8 +79,38 @@ export class ModelSelectorWindowHelper {
         }
 
         if (process.platform === "darwin") {
-            // Align with parent window behavior
-            this.window.setVisibleOnAllWorkspaces(isOverlay, { visibleOnFullScreen: isOverlay });
+            // Align with parent window behavior.
+            //
+            // skipTransformProcessType is LOAD-BEARING FOR STEALTH, not a
+            // micro-optimisation. Without it Electron's macOS implementation
+            // calls TransformProcessType() between UIElementApplication and
+            // ForegroundApplication on EVERY call ("this will hide the window
+            // and dock for a short time every time it is called" — Electron's
+            // own docs for this option). That is the exact same
+            // activation-policy flip as app.dock.hide()/show(), which
+            // WindowHelper.reassertContentProtection() already documents as
+            // making WindowServer re-evaluate each NSWindow and silently reset
+            // its sharingType — dropping the NSWindowSharingNone that
+            // setContentProtection(true) installed. Since this helper is the
+            // only one that calls setVisibleOnAllWorkspaces on every SHOW
+            // rather than once at creation, the picker was the one window that
+            // reliably lost its capture exclusion and showed up in screenshots
+            // while undetectable mode was on.
+            //
+            // Second, independent leak it closes: opening the picker from the
+            // LAUNCHER passes visibleOnFullScreen=false, i.e.
+            // kProcessTransformToForegroundApplication — which puts the app
+            // back in the Dock even though undetectable mode had hidden it.
+            //
+            // The app's activation policy belongs to AppState's
+            // undetectable/dock logic; a dropdown must never move it. Skipping
+            // the transform still applies both collection-behavior bits
+            // (CanJoinAllSpaces / FullScreenAuxiliary), which is the part that
+            // actually governs over-fullscreen floating.
+            this.window.setVisibleOnAllWorkspaces(isOverlay, {
+                visibleOnFullScreen: isOverlay,
+                skipTransformProcessType: true,
+            });
             // Only set alwaysOnTop if the value is actually changing — calling it unnecessarily
             // triggers NSApp activation on macOS, stealing focus from other apps.
             const currentAlwaysOnTop = this.window.isAlwaysOnTop();
@@ -91,7 +139,11 @@ export class ModelSelectorWindowHelper {
         }
         this.windowHelper?.notifyOverlayPopover?.('model', this.overlayAnchor !== null);
 
-        if (process.platform === 'win32' && this.contentProtection) {
+        // Recomputed AFTER the overlayAnchor assignment above, so an
+        // overlay-anchored open is already known to be protected chrome.
+        const protect = this.resolveContentProtection();
+
+        if (process.platform === 'win32' && protect) {
             this.window.setOpacity(0);
             if (activate) this.window.show(); else this.window.showInactive();
             this.window.setContentProtection(true);
@@ -104,10 +156,15 @@ export class ModelSelectorWindowHelper {
                 }
             }, 60);
         } else {
-            this.window.setContentProtection(this.contentProtection);
+            this.applyContentProtection();
             if (activate) this.window.show(); else this.window.showInactive();
             if (activate) this.window.focus();
         }
+
+        // The window is on screen now. Push the flag once more after the
+        // compositor has settled — see reassertTimeout for why a single
+        // synchronous call before show() is not enough on macOS.
+        this.scheduleContentProtectionReassert();
     }
 
     public hideWindow(): void {
@@ -202,13 +259,23 @@ export class ModelSelectorWindowHelper {
         attachNoActivate(this.window)
 
         if (process.platform === "darwin") {
-            // Initial defaults - will be updated in showWindow
+            // Initial defaults - will be updated in showWindow.
+            // Same skipTransformProcessType reasoning as showWindow: this runs
+            // during startup preload, when the launcher window already exists,
+            // so a process-type transform here would reset ITS sharingType too.
+            this.window.setVisibleOnAllWorkspaces(true, {
+                visibleOnFullScreen: true,
+                skipTransformProcessType: true,
+            })
             this.window.setHiddenInMissionControl(true)
         }
 
-        // Apply content protection for Undetectable Mode
-        console.log(`[ModelSelectorWindowHelper] Creating window with Content Protection: ${this.contentProtection}`);
-        this.window.setContentProtection(this.contentProtection)
+        // Apply content protection for Undetectable Mode. Ordered AFTER the
+        // collection-behavior call above, matching SettingsWindowHelper — the
+        // flag must be the LAST capture-relevant thing applied, never something
+        // a later window-attribute change can invalidate.
+        console.log(`[ModelSelectorWindowHelper] Creating window with Content Protection: ${this.resolveContentProtection()}`);
+        this.applyContentProtection()
 
         // Load with query param for routing
         const url = isDev
@@ -244,6 +311,13 @@ export class ModelSelectorWindowHelper {
                     console.error('[ModelSelectorWindowHelper] applyStealthToWindow failed:', e);
                 }
             }
+            // Re-assert now that the window is actually realized. The flag set
+            // in createWindow() lands on a window the compositor has not seen
+            // yet — the ordering hazard CropperWindowHelper.applyOpacityShield
+            // documents ("if setContentProtection(true) is applied before the
+            // window is fully 'ready' ... may ignore the flag"). This covers
+            // the PRELOADED window, which never reaches showWindow() below.
+            this.applyContentProtection();
             if (showWhenReady) {
                 this.showWindow(
                     this.window?.getBounds().x || 0,
@@ -273,6 +347,11 @@ export class ModelSelectorWindowHelper {
         // to reach this window's React tree, which the tap would otherwise
         // intercept at OS level.
         this.window.on('show', () => {
+            // Belt-and-braces for show/hide cycles that do NOT come through
+            // showWindow() (a parent-driven re-show, a restore after the
+            // screenshot path hid us). Cheap, idempotent, and the alternative
+            // is a visible dropdown with no capture exclusion.
+            this.scheduleContentProtectionReassert();
             if (process.platform !== 'darwin') return;
             try {
                 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -316,12 +395,15 @@ export class ModelSelectorWindowHelper {
         // Dedupe: see WindowHelper.setContentProtection rationale — repeated
         // identical calls are common (toggle IPC fans out across helpers) and
         // produce DWM affinity churn on Windows.
+        //
+        // The guard deliberately does NOT short-circuit when the window is
+        // absent: the picker is created lazily (preloadWindow / first open), so
+        // a toggle that arrives before creation must still land on the field
+        // for createWindow() to pick up.
         if (this.contentProtection === enable && this.window && !this.window.isDestroyed()) return;
         console.log(`[ModelSelectorWindowHelper] Setting content protection to: ${enable}`);
         this.contentProtection = enable;
-        if (this.window && !this.window.isDestroyed()) {
-            this.window.setContentProtection(enable);
-        }
+        this.applyContentProtection();
     }
 
     // Force-reapply the current content-protection state, bypassing the dedupe
@@ -329,17 +411,52 @@ export class ModelSelectorWindowHelper {
     // activation policy, which can reset the window's sharingType even though
     // our in-memory flag is unchanged.
     public reassertContentProtection(): void {
-        if (this.window && !this.window.isDestroyed()) {
-            this.window.setContentProtection(this.contentProtection);
-        }
+        this.applyContentProtection();
     }
 
     public syncActivationPolicy(): void {
         if (process.platform !== 'win32') return;
         if (!this.window || this.window.isDestroyed()) return;
-        this.window.setContentProtection(this.contentProtection);
+        this.applyContentProtection();
         if (this.window.isVisible()) {
             this.window.setOpacity(1);
         }
+    }
+
+    /**
+     * The sharingType this window must have RIGHT NOW.
+     *
+     * `contentProtection` mirrors undetectable mode, but the picker is a
+     * dropdown of whichever shell opened it. While it hangs off the MEETING
+     * OVERLAY it IS overlay chrome — a ghost surface that must never appear in
+     * a capture regardless of undetectable/dock mode, exactly like the overlay
+     * body, pill and toggle (see WindowHelper.applyContentProtection for that
+     * rule and why coupling it to undetectable mode was wrong there too).
+     * Leaving the dropdown capturable while the overlay it visibly belongs to
+     * is not is the same leak in a smaller window.
+     *
+     * Launcher-anchored, it follows the undetectable toggle like the launcher.
+     */
+    private resolveContentProtection(): boolean {
+        return this.contentProtection || this.overlayAnchor !== null;
+    }
+
+    /** Push the resolved state to the OS. Safe to call with no window. */
+    private applyContentProtection(): void {
+        if (!this.window || this.window.isDestroyed()) return;
+        this.window.setContentProtection(this.resolveContentProtection());
+    }
+
+    /**
+     * Re-apply the flag once the current batch of window operations has been
+     * digested by WindowServer/DWM. See the reassertTimeout field comment.
+     * Idempotent and self-cancelling, so callers can fire it freely.
+     */
+    private scheduleContentProtectionReassert(): void {
+        if (this.reassertTimeout) clearTimeout(this.reassertTimeout);
+        this.reassertTimeout = setTimeout(() => {
+            this.reassertTimeout = null;
+            this.applyContentProtection();
+        }, CONTENT_PROTECTION_REASSERT_MS);
     }
 }
